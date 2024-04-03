@@ -20,7 +20,7 @@ from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
-@pytest.mark.xfail
+@pytest.mark.repeat(50)
 def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
@@ -190,7 +190,7 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv, test_ou
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+@pytest.mark.repeat(50)
 def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 15
@@ -233,7 +233,7 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: 
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+@pytest.mark.repeat(50)
 def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 5
@@ -282,7 +282,7 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+@pytest.mark.repeat(50)
 def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = small
