@@ -1648,7 +1648,14 @@ impl TenantManager {
                     fail::fail_point!("shard-split-lsn-wait", |_| Err(anyhow::anyhow!(
                         "failpoint"
                     )));
-                    if let Err(e) = timeline.wait_lsn(*target_lsn, ctx).await {
+                    if let Err(e) = timeline
+                        .wait_lsn(
+                            *target_lsn,
+                            crate::tenant::timeline::WaitLsnWaiter::Tenant,
+                            ctx,
+                        )
+                        .await
+                    {
                         // Failure here might mean shutdown, in any case this part is an optimization
                         // and we shouldn't hold up the split operation.
                         tracing::warn!(

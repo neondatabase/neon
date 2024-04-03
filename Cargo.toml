@@ -4,6 +4,7 @@ members = [
     "compute_tools",
     "control_plane",
     "control_plane/attachment_service",
+    "control_plane/storcon_cli",
     "pageserver",
     "pageserver/compaction",
     "pageserver/ctl",

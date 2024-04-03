@@ -226,10 +226,6 @@ def test_forward_compatibility(
     )
 
     try:
-        # TODO: remove this once the previous pageserrver version understands
-        # the 'get_vectored_impl' config
-        neon_env_builder.pageserver_get_vectored_impl = None
-
         neon_env_builder.num_safekeepers = 3
         neon_local_binpath = neon_env_builder.neon_binpath
         env = neon_env_builder.from_repo_dir(
@@ -238,15 +234,11 @@ def test_forward_compatibility(
             pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
 
-        # TODO: remove this workaround after release-5090 is no longer the most recent release.
-        # There was a bug in that code that generates a warning in the storage controller log.
-        env.storage_controller.allowed_errors.append(".*no tenant_shard_id specified.*")
-
         # Use current neon_local even though we're using old binaries for
         # everything else: our test code is written for latest CLI args.
         env.neon_local_binpath = neon_local_binpath
 
-        neon_env_builder.start(register_pageservers=True)
+        neon_env_builder.start()
 
         check_neon_works(
             env,

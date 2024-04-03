@@ -9,7 +9,6 @@ of the pageserver are:
 - Updates to remote_consistent_lsn may only be made visible after validating generation
 """
 
-
 import enum
 import re
 import time
@@ -53,6 +52,7 @@ TENANT_CONF = {
     "compaction_period": "0s",
     # create image layers eagerly, so that GC can remove some layers
     "image_creation_threshold": "1",
+    "image_layer_creation_check_threshold": "0",
 }
 
 

@@ -10,6 +10,7 @@ use proxy::auth;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
+use proxy::config::remote_storage_from_toml;
 use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
@@ -191,6 +192,19 @@ struct ProxyCliArgs {
 
     #[clap(flatten)]
     parquet_upload: ParquetUploadArgs,
+
+    /// interval for backup metric collection
+    #[clap(long, default_value = "10m", value_parser = humantime::parse_duration)]
+    metric_backup_collection_interval: std::time::Duration,
+    /// remote storage configuration for backup metric collection
+    /// Encoded as toml (same format as pageservers), eg
+    /// `{bucket_name='the-bucket',bucket_region='us-east-1',prefix_in_bucket='proxy',endpoint='http://minio:9000'}`
+    #[clap(long, default_value = "{}")]
+    metric_backup_collection_remote_storage: String,
+    /// chunk size for backup metric collection
+    /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
+    #[clap(long, default_value = "4194304")]
+    metric_backup_collection_chunk_size: usize,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -372,12 +386,17 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token));
+    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
     maintenance_tasks.spawn(http::health_server::task_main(http_listener));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
+        // TODO: Add gc regardles of the metric collection being enabled.
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
+        client_tasks.spawn(usage_metrics::task_backup(
+            &metrics_config.backup_metric_collection_config,
+            cancellation_token,
+        ));
     }
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
@@ -434,6 +453,13 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     if args.allow_self_signed_compute {
         warn!("allowing self-signed compute certificates");
     }
+    let backup_metric_collection_config = config::MetricBackupCollectionConfig {
+        interval: args.metric_backup_collection_interval,
+        remote_storage_config: remote_storage_from_toml(
+            &args.metric_backup_collection_remote_storage,
+        )?,
+        chunk_size: args.metric_backup_collection_chunk_size,
+    };
 
     let metric_collection = match (
         &args.metric_collection_endpoint,
@@ -442,6 +468,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         (Some(endpoint), Some(interval)) => Some(config::MetricCollectionConfig {
             endpoint: endpoint.parse()?,
             interval: humantime::parse_duration(interval)?,
+            backup_metric_collection_config,
         }),
         (None, None) => None,
         _ => bail!(

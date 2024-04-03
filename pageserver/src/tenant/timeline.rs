@@ -118,11 +118,11 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::remote_timeline_client::RemoteTimelineClient;
+use super::config::TenantConf;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
-use super::{config::TenantConf, storage_layer::ReadableLayerDesc};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
+use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -308,6 +308,8 @@ pub struct Timeline {
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
+
+    last_image_layer_creation_check_at: AtomicLsn,
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
@@ -608,6 +610,12 @@ impl From<GetReadyAncestorError> for PageReconstructError {
 pub enum GetVectoredImpl {
     Sequential,
     Vectored,
+}
+
+pub(crate) enum WaitLsnWaiter<'a> {
+    Timeline(&'a Timeline),
+    Tenant,
+    PageService,
 }
 
 /// Argument to [`Timeline::shutdown`].
@@ -1071,6 +1079,7 @@ impl Timeline {
     pub(crate) async fn wait_lsn(
         &self,
         lsn: Lsn,
+        who_is_waiting: WaitLsnWaiter<'_>,
         ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
         if self.cancel.is_cancelled() {
@@ -1084,10 +1093,18 @@ impl Timeline {
                 TaskKind::WalReceiverManager
                 | TaskKind::WalReceiverConnectionHandler
                 | TaskKind::WalReceiverConnectionPoller => {
-                    // This should never be called from the WAL receiver, because that could lead
-                    // to a deadlock.
-                    if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
-                        panic!("walingest task is calling wait_lsn {lsn} but current is only {current}, would deadlock");
+                    let is_myself = match who_is_waiting {
+                        WaitLsnWaiter::Timeline(waiter) => Weak::ptr_eq(&waiter.myself, &self.myself),
+                        WaitLsnWaiter::Tenant | WaitLsnWaiter::PageService => unreachable!("tenant or page_service context are not expected to have task kind {:?}", ctx.task_kind()),
+                    };
+                    if is_myself {
+                        if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
+                            // walingest is the only one that can advance last_record_lsn; it should make sure to never reach here
+                            panic!("this timeline's walingest task is calling wait_lsn({lsn}) but we only have last_record_lsn={current}; would deadlock");
+                        }
+                    } else {
+                        // if another  timeline's  is waiting for us, there's no deadlock risk because
+                        // our walreceiver task can make progress independent of theirs
                     }
                 }
                 _ => {}
@@ -1314,10 +1331,11 @@ impl Timeline {
         // cancellation but no "wait until gone", because it uses the Timeline::gate.
         // So, only after the self.gate.close() below will we know for sure that
         // no walreceiver tasks are left.
-        // For `freeze_and_flush=true`, this means that we might still be ingesting
+        // For `try_freeze_and_flush=true`, this means that we might still be ingesting
         // data during the call to `self.freeze_and_flush()` below.
-        // That's not ideal, but, we don't have the concept of a ChildGuard, which
-        // is what we'd need to properly model early shutdown of walreceiver.
+        // That's not ideal, but, we don't have the concept of a ChildGuard,
+        // which is what we'd need to properly model early shutdown of the walreceiver
+        // task sub-tree before the other Timeline task sub-trees.
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
@@ -1655,6 +1673,15 @@ impl Timeline {
             .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
     }
 
+    fn get_image_layer_creation_check_threshold(&self) -> u8 {
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        tenant_conf.image_layer_creation_check_threshold.unwrap_or(
+            self.conf
+                .default_tenant_conf
+                .image_layer_creation_check_threshold,
+        )
+    }
+
     pub(super) fn tenant_conf_updated(&self) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
@@ -1792,6 +1819,7 @@ impl Timeline {
                 },
                 partitioning: tokio::sync::Mutex::new((KeyPartitioning::new(), Lsn(0))),
                 repartition_threshold: 0,
+                last_image_layer_creation_check_at: AtomicLsn::new(0),
 
                 last_received_wal: Mutex::new(None),
                 rel_size_cache: RwLock::new(HashMap::new()),
@@ -1820,6 +1848,7 @@ impl Timeline {
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
+
             result
                 .metrics
                 .last_record_gauge
@@ -2911,16 +2940,6 @@ impl Timeline {
 
         let mut completed_keyspace = KeySpace::default();
 
-        // Hold the layer map whilst visiting the timeline to prevent
-        // compaction, eviction and flushes from rendering the layers unreadable.
-        //
-        // TODO: Do we actually need to do this? In theory holding on
-        // to [`tenant::storage_layer::Layer`] should be enough. However,
-        // [`Timeline::get`] also holds the lock during IO, so more investigation
-        // is needed.
-        let guard = timeline.layers.read().await;
-        let layers = guard.layer_map();
-
         loop {
             if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
@@ -2930,6 +2949,9 @@ impl Timeline {
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
 
+            let guard = timeline.layers.read().await;
+            let layers = guard.layer_map();
+
             let in_memory_layer = layers.find_in_memory_layer(|l| {
                 let start_lsn = l.get_lsn_range().start;
                 cont_lsn > start_lsn
@@ -2937,12 +2959,11 @@ impl Timeline {
 
             match in_memory_layer {
                 Some(l) => {
+                    let lsn_range = l.get_lsn_range().start..cont_lsn;
                     fringe.update(
-                        ReadableLayerDesc::InMemory {
-                            handle: l,
-                            lsn_ceil: cont_lsn,
-                        },
+                        ReadableLayer::InMemoryLayer(l),
                         unmapped_keyspace.clone(),
+                        lsn_range,
                     );
                 }
                 None => {
@@ -2954,30 +2975,43 @@ impl Timeline {
                             .into_iter()
                             .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
                                 (
-                                    ReadableLayerDesc::Persistent {
-                                        desc: (*layer).clone(),
-                                        lsn_range: lsn_floor..cont_lsn,
-                                    },
+                                    ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
                                     keyspace_accum.to_keyspace(),
+                                    lsn_floor..cont_lsn,
                                 )
                             })
-                            .for_each(|(layer, keyspace)| fringe.update(layer, keyspace));
+                            .for_each(|(layer, keyspace, lsn_range)| {
+                                fringe.update(layer, keyspace, lsn_range)
+                            });
                     }
                 }
             }
 
-            if let Some((layer_to_read, keyspace_to_read)) = fringe.next_layer() {
+            // It's safe to drop the layer map lock after planning the next round of reads.
+            // The fringe keeps readable handles for the layers which are safe to read even
+            // if layers were compacted or flushed.
+            //
+            // The more interesting consideration is: "Why is the read algorithm still correct
+            // if the layer map changes while it is operating?". Doing a vectored read on a
+            // timeline boils down to pushing an imaginary lsn boundary downwards for each range
+            // covered by the read. The layer map tells us how to move the lsn downwards for a
+            // range at *a particular point in time*. It is fine for the answer to be different
+            // at two different time points.
+            drop(guard);
+
+            if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
+                let next_cont_lsn = lsn_range.start;
                 layer_to_read
                     .get_values_reconstruct_data(
-                        &guard,
                         keyspace_to_read.clone(),
+                        lsn_range,
                         reconstruct_state,
                         ctx,
                     )
                     .await?;
 
                 unmapped_keyspace = keyspace_to_read;
-                cont_lsn = layer_to_read.get_lsn_floor();
+                cont_lsn = next_cont_lsn;
             } else {
                 break;
             }
@@ -3055,7 +3089,7 @@ impl Timeline {
             }
         }
         ancestor
-            .wait_lsn(self.ancestor_lsn, ctx)
+            .wait_lsn(self.ancestor_lsn, WaitLsnWaiter::Timeline(self), ctx)
             .await
             .map_err(|e| match e {
                 e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),
@@ -3515,6 +3549,24 @@ impl Timeline {
 
     // Is it time to create a new image layer for the given partition?
     async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
+        let last = self.last_image_layer_creation_check_at.load();
+        if lsn != Lsn(0) {
+            let distance = lsn
+                .checked_sub(last)
+                .expect("Attempt to compact with LSN going backwards");
+
+            let min_distance = self.get_image_layer_creation_check_threshold() as u64
+                * self.get_checkpoint_distance();
+
+            // Skip the expensive delta layer counting below if we've not ingested
+            // sufficient WAL since the last check.
+            if distance.0 < min_distance {
+                return false;
+            }
+        }
+
+        self.last_image_layer_creation_check_at.store(lsn);
+
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read().await;

@@ -111,6 +111,7 @@ static PageServer page_servers[MAX_SHARDS];
 
 static bool pageserver_flush(shardno_t shard_no);
 static void pageserver_disconnect(shardno_t shard_no);
+static void pageserver_disconnect_shard(shardno_t shard_no);
 
 static bool
 PagestoreShmemIsValid(void)
@@ -487,9 +488,31 @@ retry:
 	return ret;
 }
 
-
+/*
+ * Reset prefetch and drop connection to the shard.
+ * It also drops connection to all other shards involved in prefetch.
+ */
 static void
 pageserver_disconnect(shardno_t shard_no)
+{
+	if (page_servers[shard_no].conn)
+	{
+		/*
+		 * If the connection to any pageserver is lost, we throw away the
+		 * whole prefetch queue, even for other pageservers. It should not
+		 * cause big problems, because connection loss is supposed to be a
+		 * rare event.
+		 */
+		prefetch_on_ps_disconnect();
+	}
+	pageserver_disconnect_shard(shard_no);
+}
+
+/*
+ * Disconnect from specified shard
+ */
+static void
+pageserver_disconnect_shard(shardno_t shard_no)
 {
 	/*
 	 * If anything goes wrong while we were sending a request, it's not clear
@@ -503,14 +526,6 @@ pageserver_disconnect(shardno_t shard_no)
 		neon_shard_log(shard_no, LOG, "dropping connection to page server due to error");
 		PQfinish(page_servers[shard_no].conn);
 		page_servers[shard_no].conn = NULL;
-
-		/*
-		 * If the connection to any pageserver is lost, we throw away the
-		 * whole prefetch queue, even for other pageservers. It should not
-		 * cause big problems, because connection loss is supposed to be a
-		 * rare event.
-		 */
-		prefetch_on_ps_disconnect();
 	}
 	if (page_servers[shard_no].wes != NULL)
 	{
@@ -676,7 +691,8 @@ page_server_api api =
 {
 	.send = pageserver_send,
 	.flush = pageserver_flush,
-	.receive = pageserver_receive
+	.receive = pageserver_receive,
+	.disconnect = pageserver_disconnect_shard
 };
 
 static bool
