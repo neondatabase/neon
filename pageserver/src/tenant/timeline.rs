@@ -1318,6 +1318,36 @@ impl Timeline {
         self.launch_eviction_task(parent, background_jobs_can_start);
     }
 
+    /// After this function returns, there are no timeline-scoped tasks are left running.
+    ///
+    /// The preferred pattern for is:
+    /// - in any spawned tasks, keep Timeline::guard open + Timeline::cancel / child token
+    /// - if early shutdown (not just cancellation) of a sub-tree of tasks is required,
+    ///   go the extra mile and keep track of JoinHandles
+    /// - Keep track of JoinHandles using a passed-down `Arc<Mutex<Option<JoinSet>>>` or similar,
+    ///   instead of spawning directly on a runtime. It is a more composable / testable pattern.
+    ///
+    /// For legacy reasons, we still have multiple tasks spawned using
+    /// `task_mgr::spawn(X, Some(tenant_id), Some(timeline_id))`.
+    /// We refer to these as "timeline-scoped task_mgr tasks".
+    /// Some of these tasks are already sensitive to Timeline::cancel while others are
+    /// not sensitive to Timeline::cancel and instead respect [`task_mgr::shutdown_token`]
+    /// or [`task_mgr::shutdown_watcher`].
+    /// We want to gradually convert the code base away from these.
+    ///
+    /// Here is an inventory of timeline-scoped task_mgr tasks that are still sensitive to
+    /// `task_mgr::shutdown_{token,watcher}` (there are also tenant-scoped and global-scoped
+    /// ones that aren't mentioned here):
+    /// - [`TaskKind::TimelineDeletionWorker`]
+    ///    - NB: also used for tenant deletion
+    /// - [`TaskKind::RemoteUploadTask`]`
+    /// - [`TaskKind::InitialLogicalSizeCalculation`]
+    /// - [`TaskKind::DownloadAllRemoteLayers`] (can we get rid of it?)
+    // Inventory of timeline-scoped task_mgr tasks that use spawn but aren't sensitive:
+    /// - [`TaskKind::Eviction`]
+    /// - [`TaskKind::LayerFlushTask`]
+    /// - [`TaskKind::OndemandLogicalSizeCalculation`]
+    /// - [`TaskKind::GarbageCollector`] (immediate_gc is timeline-scoped)
     pub(crate) async fn shutdown(&self, mode: ShutdownMode) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -1374,7 +1404,7 @@ impl Timeline {
             }
         }
 
-        // All tasks except remote_client are sensitve to Timeline::cancel.
+        // Signal any subscribers to our cancellation token to drop out
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
@@ -1393,18 +1423,15 @@ impl Timeline {
             .await;
         }
 
-        // Finally wait until any gate-holders are complete
-        self.gate.close().await;
-
-        // TODO: re-try this
-        // NB: we cannot assert that this is a no-op because actually, tasks outlive
-        // `Self::gate`-guards if they acquire the guard within the task.
-        // Then again, all tasks should really be sensitive to Self::cancel, not the
-        // task_mgr::shutdown_token() / task_mgr::shutdown_watcher().
-        // => TODO: eliminate the shutdown functionality of task_mgr and turn this here
-        // into a mere "wait until tasks are gone", not "signal cancel and wait until tasks are gone".
+        // TODO: work toward making this a no-op. See this funciton's doc comment for more context.
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
+
+        // Finally wait until any gate-holders are complete.
+        //
+        // TODO: once above shutdown_tasks is a no-op, we can close the gate before calling shutdown_tasks
+        // and use a TBD variant of shutdown_tasks that asserts that there were no tasks left.
+        self.gate.close().await;
 
         self.metrics.shutdown();
     }
