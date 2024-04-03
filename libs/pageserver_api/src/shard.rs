@@ -499,7 +499,11 @@ impl ShardIdentity {
     /// Return true if the key should be discarded if found in this shard's
     /// data store, e.g. during compaction after a split
     pub fn is_key_disposable(&self, key: &Key) -> bool {
-        if key_is_shard0(key) {
+        if self.count < ShardCount(2) {
+            // Fast path: unsharded tenant doesn't dispose of anything
+            return false;
+        }
+        if key_is_shard0(key) && key.field1 != 0x01 {
             // Q: Why can't we dispose of shard0 content if we're not shard 0?
             // A1: because the WAL ingestion logic currently ingests some shard 0
             //     content on all shards, even though it's only read on shard 0.  If we

@@ -336,6 +336,7 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
+        assert!(self.tenant_shard_id.is_zero());
         let n_blocks = self
             .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
             .await?;
@@ -358,6 +359,7 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
+        assert!(self.tenant_shard_id.is_zero());
         let key = slru_block_to_key(kind, segno, blknum);
         self.get(key, lsn, ctx).await
     }
@@ -370,6 +372,7 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
+        assert!(self.tenant_shard_id.is_zero());
         let key = slru_segment_size_to_key(kind, segno);
         let mut buf = version.get(self, key, ctx).await?;
         Ok(buf.get_u32_le())
@@ -383,6 +386,7 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
+        assert!(self.tenant_shard_id.is_zero());
         // fetch directory listing
         let key = slru_dir_to_key(kind);
         let buf = version.get(self, key, ctx).await?;
@@ -773,26 +777,28 @@ impl Timeline {
         }
 
         // Iterate SLRUs next
-        for kind in [
-            SlruKind::Clog,
-            SlruKind::MultiXactMembers,
-            SlruKind::MultiXactOffsets,
-        ] {
-            let slrudir_key = slru_dir_to_key(kind);
-            result.add_key(slrudir_key);
-            let buf = self.get(slrudir_key, lsn, ctx).await?;
-            let dir = SlruSegmentDirectory::des(&buf)?;
-            let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
-            segments.sort_unstable();
-            for segno in segments {
-                let segsize_key = slru_segment_size_to_key(kind, segno);
-                let mut buf = self.get(segsize_key, lsn, ctx).await?;
-                let segsize = buf.get_u32_le();
+        if self.tenant_shard_id.is_zero() {
+            for kind in [
+                SlruKind::Clog,
+                SlruKind::MultiXactMembers,
+                SlruKind::MultiXactOffsets,
+            ] {
+                let slrudir_key = slru_dir_to_key(kind);
+                result.add_key(slrudir_key);
+                let buf = self.get(slrudir_key, lsn, ctx).await?;
+                let dir = SlruSegmentDirectory::des(&buf)?;
+                let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
+                segments.sort_unstable();
+                for segno in segments {
+                    let segsize_key = slru_segment_size_to_key(kind, segno);
+                    let mut buf = self.get(segsize_key, lsn, ctx).await?;
+                    let segsize = buf.get_u32_le();
 
-                result.add_range(
-                    slru_block_to_key(kind, segno, 0)..slru_block_to_key(kind, segno, segsize),
-                );
-                result.add_key(segsize_key);
+                    result.add_range(
+                        slru_block_to_key(kind, segno, 0)..slru_block_to_key(kind, segno, segsize),
+                    );
+                    result.add_key(segsize_key);
+                }
             }
         }
 
@@ -978,6 +984,9 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         rec: NeonWalRecord,
     ) -> anyhow::Result<()> {
+        if !self.tline.tenant_shard_id.is_zero() {
+            return Ok(());
+        }
         self.put(
             slru_block_to_key(kind, segno, blknum),
             Value::WalRecord(rec),
@@ -1004,6 +1013,9 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> anyhow::Result<()> {
+        if !self.tline.tenant_shard_id.is_zero() {
+            return Ok(());
+        }
         self.put(slru_block_to_key(kind, segno, blknum), Value::Image(img));
         Ok(())
     }
