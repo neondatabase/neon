@@ -1,9 +1,13 @@
+use anyhow::bail;
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
 use s3_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
-use s3_scrubber::scan_metadata::scan_metadata;
+use s3_scrubber::scan_pageserver_metadata::scan_metadata;
 use s3_scrubber::tenant_snapshot::SnapshotDownloader;
-use s3_scrubber::{init_logging, BucketConfig, ConsoleConfig, NodeKind, TraversingDepth};
+use s3_scrubber::{
+    init_logging, scan_safekeeper_metadata::scan_safekeeper_metadata, BucketConfig, ConsoleConfig,
+    NodeKind, TraversingDepth,
+};
 
 use clap::{Parser, Subcommand};
 use utils::id::TenantId;
@@ -35,11 +39,20 @@ enum Command {
         #[arg(short, long, default_value_t = PurgeMode::DeletedOnly)]
         mode: PurgeMode,
     },
+    #[command(verbatim_doc_comment)]
     ScanMetadata {
+        #[arg(short, long)]
+        node_kind: NodeKind,
         #[arg(short, long, default_value_t = false)]
         json: bool,
         #[arg(long = "tenant-id", num_args = 0..)]
         tenant_ids: Vec<TenantShardId>,
+        #[arg(long, default_value = None)]
+        /// For safekeeper node_kind only, points to db with debug dump
+        dump_db_connstr: Option<String>,
+        /// For safekeeper node_kind only, table in the db with debug dump
+        #[arg(long, default_value = None)]
+        dump_db_table: Option<String>,
     },
     TenantSnapshot {
         #[arg(long = "tenant-id")]
@@ -72,33 +85,75 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     match cli.command {
-        Command::ScanMetadata { json, tenant_ids } => {
-            match scan_metadata(bucket_config.clone(), tenant_ids).await {
-                Err(e) => {
-                    tracing::error!("Failed: {e}");
-                    Err(e)
+        Command::ScanMetadata {
+            json,
+            tenant_ids,
+            node_kind,
+            dump_db_connstr,
+            dump_db_table,
+        } => {
+            if let NodeKind::Safekeeper = node_kind {
+                let dump_db_connstr =
+                    dump_db_connstr.ok_or(anyhow::anyhow!("dump_db_connstr not specified"))?;
+                let dump_db_table =
+                    dump_db_table.ok_or(anyhow::anyhow!("dump_db_table not specified"))?;
+
+                let summary = scan_safekeeper_metadata(
+                    bucket_config.clone(),
+                    tenant_ids.iter().map(|tshid| tshid.tenant_id).collect(),
+                    dump_db_connstr,
+                    dump_db_table,
+                )
+                .await?;
+                if json {
+                    println!("{}", serde_json::to_string(&summary).unwrap())
+                } else {
+                    println!("{}", summary.summary_string());
                 }
-                Ok(summary) => {
-                    if json {
-                        println!("{}", serde_json::to_string(&summary).unwrap())
-                    } else {
-                        println!("{}", summary.summary_string());
+                if summary.is_fatal() {
+                    bail!("Fatal scrub errors detected");
+                }
+                if summary.is_empty() {
+                    // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
+                    // scrubber they were likely expecting to scan something, and if we see no timelines
+                    // at all then it's likely due to some configuration issues like a bad prefix
+                    bail!(
+                        "No timelines found in bucket {} prefix {}",
+                        bucket_config.bucket,
+                        bucket_config
+                            .prefix_in_bucket
+                            .unwrap_or("<none>".to_string())
+                    );
+                }
+                Ok(())
+            } else {
+                match scan_metadata(bucket_config.clone(), tenant_ids).await {
+                    Err(e) => {
+                        tracing::error!("Failed: {e}");
+                        Err(e)
                     }
-                    if summary.is_fatal() {
-                        Err(anyhow::anyhow!("Fatal scrub errors detected"))
-                    } else if summary.is_empty() {
-                        // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
-                        // scrubber they were likely expecting to scan something, and if we see no timelines
-                        // at all then it's likely due to some configuration issues like a bad prefix
-                        Err(anyhow::anyhow!(
-                            "No timelines found in bucket {} prefix {}",
-                            bucket_config.bucket,
-                            bucket_config
-                                .prefix_in_bucket
-                                .unwrap_or("<none>".to_string())
-                        ))
-                    } else {
-                        Ok(())
+                    Ok(summary) => {
+                        if json {
+                            println!("{}", serde_json::to_string(&summary).unwrap())
+                        } else {
+                            println!("{}", summary.summary_string());
+                        }
+                        if summary.is_fatal() {
+                            Err(anyhow::anyhow!("Fatal scrub errors detected"))
+                        } else if summary.is_empty() {
+                            // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
+                            // scrubber they were likely expecting to scan something, and if we see no timelines
+                            // at all then it's likely due to some configuration issues like a bad prefix
+                            Err(anyhow::anyhow!(
+                                "No timelines found in bucket {} prefix {}",
+                                bucket_config.bucket,
+                                bucket_config
+                                    .prefix_in_bucket
+                                    .unwrap_or("<none>".to_string())
+                            ))
+                        } else {
+                            Ok(())
+                        }
                     }
                 }
             }
