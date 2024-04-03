@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
 /// in [`attachment_service::http`]
@@ -210,20 +208,6 @@ pub enum NodeSchedulingPolicy {
     Filling,
     Pause,
     Draining,
-}
-
-impl FromStr for NodeSchedulingPolicy {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "active" => Ok(Self::Active),
-            "filling" => Ok(Self::Filling),
-            "pause" => Ok(Self::Pause),
-            "draining" => Ok(Self::Draining),
-            _ => Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
-        }
-    }
 }
 
 impl From<NodeSchedulingPolicy> for String {
