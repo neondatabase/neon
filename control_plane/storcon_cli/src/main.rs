@@ -15,7 +15,7 @@ use pageserver_api::{
 };
 use pageserver_client::mgmt_api::{self, ResponseErrorMessageExt};
 use reqwest::Url;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 use utils::id::{NodeId, TenantId};
 
 use pageserver_api::controller_api::{
@@ -86,38 +86,6 @@ enum Command {
         #[arg(long)]
         config: String,
     },
-    ServiceRegister {
-        #[arg(long)]
-        http_host: String,
-        #[arg(long)]
-        http_port: u16,
-        #[arg(long)]
-        region_id: String,
-        #[arg(long)]
-        availability_zone_id: String,
-        #[arg(long)]
-        version: u64,
-        // {
-        //   "version": 1,
-        //   "host": "${HOST}",
-        //   "port": 6400,
-        //   "region_id": "{{ console_region_id }}",
-        //   "instance_id": "${INSTANCE_ID}",
-        //   "http_host": "${HOST}",
-        //   "http_port": 9898,
-        //   "active": false,
-        //   "availability_zone_id": "${AZ_ID}",
-        //   "disk_size": ${DISK_SIZE},
-        //   "instance_type": "${INSTANCE_TYPE}",
-        //   "register_reason" : "New pageserver"
-        // }
-    },
-    TenantOnboard {
-        #[arg(long)]
-        tenant_id: TenantId,
-        #[arg(long)]
-        target_pageserver_id: NodeId,
-    },
     TenantScatter {
         #[arg(long)]
         tenant_id: TenantId,
@@ -126,42 +94,6 @@ enum Command {
         #[arg(long)]
         tenant_id: TenantId,
     },
-}
-
-/// Request format for control plane POST /management/api/v2/pageservers
-///
-/// This is how physical pageservers register, but in this context it is how we
-/// register the storage controller with the control plane, as a "virtual pageserver"
-#[derive(Serialize, Deserialize, Debug)]
-struct ServiceRegisterRequest {
-    version: u64,
-    host: String,
-    port: u16,
-    /// This is the **Neon** region ID, which looks something like `aws-eu-west-1`
-    region_id: String,
-    /// This expects an EC2 instance ID, for bare metal pageservers.  But it can be any unique identifier.
-    instance_id: String,
-    http_host: String,
-    http_port: u16,
-    /// This is an EC2 AZ name (the ZoneName, not actually the AZ ID).  e.g. eu-west-1b
-    availability_zone_id: String,
-    disk_size: u64,
-    /// EC2 instance type.  If it doesn't make sense, leave it blank.
-    instance_type: String,
-    /// Freeform memo describing the request
-    register_reason: String,
-    // Set to true to indicate that this 'pageserver' is really a storage controller
-    // FIXME: have to omit this because control plane won't allow setting it for existing pageserver
-    is_storage_controller: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ServiceRegisterResponse {
-    // This is a partial representation of the management API's swagger `Pageserver` type.  Unused
-    // fields are ignored.
-    id: u64,
-    node_id: u64,
-    instance_id: String,
 }
 
 #[derive(Parser)]
@@ -368,80 +300,6 @@ async fn main() -> anyhow::Result<()> {
                     Some(req),
                 )
                 .await?;
-        }
-        Command::ServiceRegister {
-            http_host,
-            http_port,
-            region_id,
-            availability_zone_id,
-            version,
-        } => {
-            let instance_id = http_host.clone();
-            let req = ServiceRegisterRequest {
-                instance_id: instance_id.clone(),
-                // We do not expose postgres protocol, but provide a valid-looking host/port for it
-                host: http_host.clone(),
-                port: 6400,
-                http_host: http_host.clone(),
-                http_port,
-                version,
-                region_id,
-                availability_zone_id,
-                disk_size: 0,
-                instance_type: "".to_string(),
-                register_reason: "Storage Controller Virtual Pageserver".to_string(),
-                is_storage_controller: true,
-            };
-
-            let response = storcon_client
-                .dispatch::<ServiceRegisterRequest, ServiceRegisterResponse>(
-                    Method::POST,
-                    "management/api/v2/pageservers".to_string(),
-                    Some(req),
-                )
-                .await?;
-            eprintln!(
-                "Registered {} as id={} node_id={}",
-                http_host, response.id, response.node_id
-            );
-        }
-        Command::TenantOnboard {
-            tenant_id,
-            target_pageserver_id,
-        } => {
-            #[derive(Serialize, Deserialize)]
-            struct PageserverTenantMigrateRequest {
-                tenant_id: String,
-                target_pageserver_id: NodeId,
-                skip_check_availability: bool,
-            }
-
-            #[derive(Serialize, Deserialize)]
-            struct Operation {
-                id: String,
-                action: String,
-                // Incomplete version of `Operation` in management-v2.yaml
-            }
-
-            #[derive(Serialize, Deserialize)]
-            struct OperationResponse {
-                operations: Vec<Operation>,
-            }
-
-            let req = PageserverTenantMigrateRequest {
-                tenant_id: tenant_id.to_string(),
-                target_pageserver_id,
-                skip_check_availability: true,
-            };
-
-            let response = storcon_client
-                .dispatch::<PageserverTenantMigrateRequest, OperationResponse>(
-                    Method::POST,
-                    "management/api/v2/pageservers/migrate_tenant".to_string(),
-                    Some(req),
-                )
-                .await?;
-            println!("{}", serde_json::to_string(&response).unwrap());
         }
         Command::TenantShardSplit {
             tenant_id,
