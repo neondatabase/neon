@@ -57,7 +57,6 @@ enum MaybeEnabledStorage {
     Disabled,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledStorage {
     async fn setup() -> Self {
         ensure_logging_ready();
@@ -86,7 +85,6 @@ struct AzureWithTestBlobs {
     remote_blobs: HashSet<RemotePath>,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();
@@ -148,7 +146,6 @@ struct AzureWithSimpleTestBlobs {
     remote_blobs: HashSet<RemotePath>,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();
