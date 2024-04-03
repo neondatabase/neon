@@ -117,12 +117,15 @@ pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static HTTP_CONTENT_LENGTH: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+pub static HTTP_CONTENT_LENGTH: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "proxy_http_conn_content_length_bytes",
-        "Time it took for proxy to establish a connection to the compute endpoint",
-        // largest bucket = 3^16 * 0.05ms = 2.15s
-        exponential_buckets(8.0, 2.0, 20).unwrap()
+        "Number of bytes the HTTP response content consumes",
+        // request/response
+        &["direction"],
+        // smallest bucket = 16 bytes
+        // largest bucket = 4^12 * 16 bytes = 256MB
+        exponential_buckets(16.0, 4.0, 12).unwrap()
     )
     .unwrap()
 });

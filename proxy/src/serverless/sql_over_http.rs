@@ -516,7 +516,9 @@ async fn handle_inner(
         None => MAX_REQUEST_SIZE + 1,
     };
     info!(request_content_length, "request size in bytes");
-    HTTP_CONTENT_LENGTH.observe(request_content_length as f64);
+    HTTP_CONTENT_LENGTH
+        .with_label_values(&["request"])
+        .observe(request_content_length as f64);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
@@ -601,6 +603,9 @@ async fn handle_inner(
     // count the egress bytes - we miss the TLS and header overhead but oh well...
     // moving this later in the stack is going to be a lot of effort and ehhhh
     metrics.record_egress(len as u64);
+    HTTP_CONTENT_LENGTH
+        .with_label_values(&["response"])
+        .observe(len as f64);
 
     Ok(response)
 }
