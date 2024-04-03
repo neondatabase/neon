@@ -42,6 +42,7 @@ use crate::error::ReportableError;
 use crate::error::UserFacingError;
 use crate::metrics::HTTP_CONTENT_LENGTH;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
+use crate::proxy::run_until_cancelled;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
 use crate::usage_metrics::MetricCounterRecorder;
@@ -49,6 +50,7 @@ use crate::DbName;
 use crate::RoleName;
 
 use super::backend::PoolingBackend;
+use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
@@ -220,14 +222,7 @@ pub async fn handle(
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    let cancel2 = cancel.clone();
-    let handle = tokio::spawn(async move {
-        time::sleep(config.http_config.request_timeout).await;
-        cancel2.cancel();
-    });
-
     let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
-    handle.abort();
 
     let mut response = match result {
         Ok(r) => {
@@ -238,10 +233,7 @@ pub async fn handle(
             let error_kind = e.get_error_kind();
             ctx.set_error_kind(error_kind);
 
-            let message = format!(
-                "Query cancelled, runtime exceeded. SQL queries over HTTP must not exceed {} seconds of runtime. Please consider using our websocket based connections",
-                config.http_config.request_timeout.as_secs_f64()
-            );
+            let message = "Query cancelled, connection was terminated";
 
             tracing::info!(
                 kind=error_kind.to_metric_label(),
@@ -435,6 +427,63 @@ impl ReportableError for SqlOverHttpCancel {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HttpHeaders {
+    raw_output: bool,
+    default_array_mode: bool,
+    txn_isolation_level: Option<IsolationLevel>,
+    txn_read_only: bool,
+    txn_deferrable: bool,
+}
+
+impl HttpHeaders {
+    fn try_parse(headers: &hyper::http::HeaderMap) -> Result<Self, SqlOverHttpError> {
+        // Determine the output options. Default behaviour is 'false'. Anything that is not
+        // strictly 'true' assumed to be false.
+        let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
+        let default_array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
+
+        // isolation level, read only and deferrable
+        let txn_isolation_level = match headers.get(&TXN_ISOLATION_LEVEL) {
+            Some(x) => Some(
+                map_header_to_isolation_level(x).ok_or(SqlOverHttpError::InvalidIsolationLevel)?,
+            ),
+            None => None,
+        };
+
+        let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
+        let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
+
+        Ok(Self {
+            raw_output,
+            default_array_mode,
+            txn_isolation_level,
+            txn_read_only,
+            txn_deferrable,
+        })
+    }
+}
+
+fn map_header_to_isolation_level(level: &HeaderValue) -> Option<IsolationLevel> {
+    match level.as_bytes() {
+        b"Serializable" => Some(IsolationLevel::Serializable),
+        b"ReadUncommitted" => Some(IsolationLevel::ReadUncommitted),
+        b"ReadCommitted" => Some(IsolationLevel::ReadCommitted),
+        b"RepeatableRead" => Some(IsolationLevel::RepeatableRead),
+        _ => None,
+    }
+}
+
+fn map_isolation_level_to_headers(level: IsolationLevel) -> Option<HeaderValue> {
+    match level {
+        IsolationLevel::ReadUncommitted => Some(HeaderValue::from_static("ReadUncommitted")),
+        IsolationLevel::ReadCommitted => Some(HeaderValue::from_static("ReadCommitted")),
+        IsolationLevel::RepeatableRead => Some(HeaderValue::from_static("RepeatableRead")),
+        IsolationLevel::Serializable => Some(HeaderValue::from_static("Serializable")),
+        _ => None,
+    }
+}
+
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
@@ -451,43 +500,26 @@ async fn handle_inner(
     // Determine the destination and connection params
     //
     let headers = request.headers();
+
     // TLS config should be there.
     let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
     info!(user = conn_info.user_info.user.as_str(), "credentials");
-
-    // Determine the output options. Default behaviour is 'false'. Anything that is not
-    // strictly 'true' assumed to be false.
-    let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
-    let default_array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
     let allow_pool = !config.http_config.pool_options.opt_in
         || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
-    // isolation level, read only and deferrable
-
-    let txn_isolation_level_raw = headers.get(&TXN_ISOLATION_LEVEL).cloned();
-    let txn_isolation_level = match txn_isolation_level_raw {
-        Some(ref x) => Some(match x.as_bytes() {
-            b"Serializable" => IsolationLevel::Serializable,
-            b"ReadUncommitted" => IsolationLevel::ReadUncommitted,
-            b"ReadCommitted" => IsolationLevel::ReadCommitted,
-            b"RepeatableRead" => IsolationLevel::RepeatableRead,
-            _ => return Err(SqlOverHttpError::InvalidIsolationLevel),
-        }),
-        None => None,
-    };
-
-    let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
-    let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
+    let parsed_headers = HttpHeaders::try_parse(headers)?;
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
         None => MAX_REQUEST_SIZE + 1,
     };
     info!(request_content_length, "request size in bytes");
-    HTTP_CONTENT_LENGTH.observe(request_content_length as f64);
+    HTTP_CONTENT_LENGTH
+        .with_label_values(&["request"])
+        .observe(request_content_length as f64);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
@@ -515,20 +547,18 @@ async fn handle_inner(
     }
     .map_err(SqlOverHttpError::from);
 
-    // Run both operations in parallel
-    let (payload, mut client) = match select(
+    let (payload, mut client) = match run_until_cancelled(
+        // Run both operations in parallel
         try_join(
             pin!(fetch_and_process_request),
             pin!(authenticate_and_connect),
         ),
-        pin!(cancel.cancelled()),
+        &cancel,
     )
     .await
     {
-        Either::Left((result, _cancelled)) => result?,
-        Either::Right((_cancelled, _)) => {
-            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Connect))
-        }
+        Some(result) => result?,
+        None => return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Connect)),
     };
 
     let mut response = Response::builder()
@@ -538,95 +568,143 @@ async fn handle_inner(
     //
     // Now execute the query and return the result
     //
-    let mut size = 0;
     let result = match payload {
-        Payload::Single(stmt) => {
-            let mut size = 0;
-            let (inner, mut discard) = client.inner();
-            let cancel_token = inner.cancel_token();
-            let query = pin!(query_to_json(
-                &*inner,
-                stmt,
-                &mut size,
-                raw_output,
-                default_array_mode
-            ));
-            let cancelled = pin!(cancel.cancelled());
-            let res = select(query, cancelled).await;
-            match res {
-                Either::Left((Ok((status, results)), _cancelled)) => {
-                    discard.check_idle(status);
-                    results
-                }
-                Either::Left((Err(e), _cancelled)) => {
-                    discard.discard();
-                    return Err(e);
-                }
-                Either::Right((_cancelled, query)) => {
-                    if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                        tracing::error!(?err, "could not cancel query");
-                    }
-                    match time::timeout(time::Duration::from_millis(100), query).await {
-                        Ok(Ok((status, results))) => {
-                            discard.check_idle(status);
-                            results
-                        }
-                        Ok(Err(error)) => {
-                            let db_error = match &error {
-                                SqlOverHttpError::ConnectCompute(
-                                    HttpConnError::ConnectionError(e),
-                                )
-                                | SqlOverHttpError::Postgres(e) => e.as_db_error(),
-                                _ => None,
-                            };
-
-                            // if errored for some other reason, it might not be safe to return
-                            if !db_error.is_some_and(|e| *e.code() == SqlState::QUERY_CANCELED) {
-                                discard.discard();
-                            }
-
-                            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
-                        }
-                        Err(_timeout) => {
-                            discard.discard();
-                            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
-                        }
-                    }
-                }
-            }
-        }
+        Payload::Single(stmt) => stmt.process(cancel, &mut client, parsed_headers).await?,
         Payload::Batch(statements) => {
-            info!("starting transaction");
-            let (inner, mut discard) = client.inner();
-            let cancel_token = inner.cancel_token();
-            let mut builder = inner.build_transaction();
-            if let Some(isolation_level) = txn_isolation_level {
-                builder = builder.isolation_level(isolation_level);
+            if parsed_headers.txn_read_only {
+                response = response.header(TXN_READ_ONLY.clone(), &HEADER_VALUE_TRUE);
             }
-            if txn_read_only {
-                builder = builder.read_only(true);
+            if parsed_headers.txn_deferrable {
+                response = response.header(TXN_DEFERRABLE.clone(), &HEADER_VALUE_TRUE);
             }
-            if txn_deferrable {
-                builder = builder.deferrable(true);
-            }
-
-            let transaction = builder.start().await.map_err(|e| {
-                // if we cannot start a transaction, we should return immediately
-                // and not return to the pool. connection is clearly broken
-                discard.discard();
-                e
-            })?;
-
-            let results = match query_batch(
-                cancel.child_token(),
-                &transaction,
-                statements,
-                &mut size,
-                raw_output,
-                default_array_mode,
-            )
-            .await
+            if let Some(txn_isolation_level) = parsed_headers
+                .txn_isolation_level
+                .and_then(map_isolation_level_to_headers)
             {
+                response = response.header(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
+            }
+
+            statements
+                .process(cancel, &mut client, parsed_headers)
+                .await?
+        }
+    };
+
+    let metrics = client.metrics();
+
+    // how could this possibly fail
+    let body = serde_json::to_string(&result).expect("json serialization should not fail");
+    let len = body.len();
+    let response = response
+        .body(Body::from(body))
+        // only fails if invalid status code or invalid header/values are given.
+        // these are not user configurable so it cannot fail dynamically
+        .expect("building response payload should not fail");
+
+    // count the egress bytes - we miss the TLS and header overhead but oh well...
+    // moving this later in the stack is going to be a lot of effort and ehhhh
+    metrics.record_egress(len as u64);
+    HTTP_CONTENT_LENGTH
+        .with_label_values(&["response"])
+        .observe(len as f64);
+
+    Ok(response)
+}
+
+impl QueryData {
+    async fn process(
+        self,
+        cancel: CancellationToken,
+        client: &mut Client<tokio_postgres::Client>,
+        parsed_headers: HttpHeaders,
+    ) -> Result<Value, SqlOverHttpError> {
+        let (inner, mut discard) = client.inner();
+        let cancel_token = inner.cancel_token();
+
+        let res = match select(
+            pin!(query_to_json(&*inner, self, &mut 0, parsed_headers)),
+            pin!(cancel.cancelled()),
+        )
+        .await
+        {
+            // The query successfully completed.
+            Either::Left((Ok((status, results)), __not_yet_cancelled)) => {
+                discard.check_idle(status);
+                Ok(results)
+            }
+            // The query failed with an error
+            Either::Left((Err(e), __not_yet_cancelled)) => {
+                discard.discard();
+                return Err(e);
+            }
+            // The query was cancelled.
+            Either::Right((_cancelled, query)) => {
+                if let Err(err) = cancel_token.cancel_query(NoTls).await {
+                    tracing::error!(?err, "could not cancel query");
+                }
+                // wait for the query cancellation
+                match time::timeout(time::Duration::from_millis(100), query).await {
+                    // query successed before it was cancelled.
+                    Ok(Ok((status, results))) => {
+                        discard.check_idle(status);
+                        Ok(results)
+                    }
+                    // query failed or was cancelled.
+                    Ok(Err(error)) => {
+                        let db_error = match &error {
+                            SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
+                            | SqlOverHttpError::Postgres(e) => e.as_db_error(),
+                            _ => None,
+                        };
+
+                        // if errored for some other reason, it might not be safe to return
+                        if !db_error.is_some_and(|e| *e.code() == SqlState::QUERY_CANCELED) {
+                            discard.discard();
+                        }
+
+                        Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres))
+                    }
+                    Err(_timeout) => {
+                        discard.discard();
+                        Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres))
+                    }
+                }
+            }
+        };
+        res
+    }
+}
+
+impl BatchQueryData {
+    async fn process(
+        self,
+        cancel: CancellationToken,
+        client: &mut Client<tokio_postgres::Client>,
+        parsed_headers: HttpHeaders,
+    ) -> Result<Value, SqlOverHttpError> {
+        info!("starting transaction");
+        let (inner, mut discard) = client.inner();
+        let cancel_token = inner.cancel_token();
+        let mut builder = inner.build_transaction();
+        if let Some(isolation_level) = parsed_headers.txn_isolation_level {
+            builder = builder.isolation_level(isolation_level);
+        }
+        if parsed_headers.txn_read_only {
+            builder = builder.read_only(true);
+        }
+        if parsed_headers.txn_deferrable {
+            builder = builder.deferrable(true);
+        }
+
+        let transaction = builder.start().await.map_err(|e| {
+            // if we cannot start a transaction, we should return immediately
+            // and not return to the pool. connection is clearly broken
+            discard.discard();
+            e
+        })?;
+
+        let results =
+            match query_batch(cancel.child_token(), &transaction, self, parsed_headers).await {
                 Ok(results) => {
                     info!("commit");
                     let status = transaction.commit().await.map_err(|e| {
@@ -660,44 +738,15 @@ async fn handle_inner(
                 }
             };
 
-            if txn_read_only {
-                response = response.header(TXN_READ_ONLY.clone(), &HEADER_VALUE_TRUE);
-            }
-            if txn_deferrable {
-                response = response.header(TXN_DEFERRABLE.clone(), &HEADER_VALUE_TRUE);
-            }
-            if let Some(txn_isolation_level) = txn_isolation_level_raw {
-                response = response.header(TXN_ISOLATION_LEVEL.clone(), txn_isolation_level);
-            }
-            json!({ "results": results })
-        }
-    };
-
-    let metrics = client.metrics();
-
-    // how could this possibly fail
-    let body = serde_json::to_string(&result).expect("json serialization should not fail");
-    let len = body.len();
-    let response = response
-        .body(Body::from(body))
-        // only fails if invalid status code or invalid header/values are given.
-        // these are not user configurable so it cannot fail dynamically
-        .expect("building response payload should not fail");
-
-    // count the egress bytes - we miss the TLS and header overhead but oh well...
-    // moving this later in the stack is going to be a lot of effort and ehhhh
-    metrics.record_egress(len as u64);
-
-    Ok(response)
+        Ok(json!({ "results": results }))
+    }
 }
 
 async fn query_batch(
     cancel: CancellationToken,
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
-    total_size: &mut usize,
-    raw_output: bool,
-    array_mode: bool,
+    parsed_headers: HttpHeaders,
 ) -> Result<Vec<Value>, SqlOverHttpError> {
     let mut results = Vec::with_capacity(queries.queries.len());
     let mut current_size = 0;
@@ -706,8 +755,7 @@ async fn query_batch(
             transaction,
             stmt,
             &mut current_size,
-            raw_output,
-            array_mode
+            parsed_headers,
         ));
         let cancelled = pin!(cancel.cancelled());
         let res = select(query, cancelled).await;
@@ -724,7 +772,6 @@ async fn query_batch(
             }
         }
     }
-    *total_size += current_size;
     Ok(results)
 }
 
@@ -732,8 +779,7 @@ async fn query_to_json<T: GenericClient>(
     client: &T,
     data: QueryData,
     current_size: &mut usize,
-    raw_output: bool,
-    default_array_mode: bool,
+    parsed_headers: HttpHeaders,
 ) -> Result<(ReadyForQueryStatus, Value), SqlOverHttpError> {
     info!("executing query");
     let query_params = data.params;
@@ -793,12 +839,12 @@ async fn query_to_json<T: GenericClient>(
         columns.push(client.get_type(c.type_oid()).await?);
     }
 
-    let array_mode = data.array_mode.unwrap_or(default_array_mode);
+    let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
 
     // convert rows to JSON
     let rows = rows
         .iter()
-        .map(|row| pg_text_row_to_json(row, &columns, raw_output, array_mode))
+        .map(|row| pg_text_row_to_json(row, &columns, parsed_headers.raw_output, array_mode))
         .collect::<Result<Vec<_>, _>>()?;
 
     // resulting JSON format is based on the format of node-postgres result
