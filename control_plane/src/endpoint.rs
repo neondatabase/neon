@@ -504,7 +504,7 @@ impl Endpoint {
     /// Map safekeepers ids to the actual connection strings.
     fn build_safekeepers_connstrs(&self, sk_ids: Vec<NodeId>) -> Result<Vec<String>> {
         let mut safekeeper_connstrings = Vec::new();
-        if self.mode == ComputeMode::Primary {
+        if matches!(self.mode, ComputeMode::Primary | ComputeMode::Upgrade) {
             for sk_id in sk_ids {
                 let sk = self
                     .env

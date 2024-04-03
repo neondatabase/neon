@@ -4,7 +4,7 @@ use compute_api::{
 };
 use futures::Stream;
 use postgres::{Client, NoTls};
-use std::{path::Path, process::Stdio, result::Result, sync::Arc};
+use std::{process::Stdio, result::Result, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,

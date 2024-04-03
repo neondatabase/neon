@@ -838,7 +838,7 @@ wal_log_file(PG_FUNCTION_ARGS)
  * Entry point for `postgres --wal-log`.
  */
 PGDLLEXPORT void
-WalLogMain(int argc, char *argv[])
+WalLog(int argc, char *argv[])
 {
 	int			rc;
 	int			fd;

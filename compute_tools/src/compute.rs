@@ -943,7 +943,7 @@ impl ComputeNode {
         )?;
 
         // Step 7: Write the tarball into the Postgres WAL
-        info!("Writing initdb.tar.zst to WAL");
+        info!("Writing {} to WAL", initdb_tar_path.as_str());
 
         let postgres_bin = self.get_my_pg_binary("postgres");
         let mut wal_log_cmd = Command::new(&postgres_bin);
@@ -959,7 +959,7 @@ impl ComputeNode {
         match child.wait() {
             Ok(s) => {
                 if !s.success() {
-                    return Err(anyhow::anyhow!("Could not wal log upgrade tarball"));
+                    return Err(anyhow::anyhow!("Could not WAL log upgrade tarball"));
                 }
             }
             Err(e) => return Err(e.into()),

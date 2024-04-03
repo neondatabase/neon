@@ -167,7 +167,16 @@ pub const RM_RELMAP_ID: u8 = 7;
 pub const RM_STANDBY_ID: u8 = 8;
 pub const RM_HEAP2_ID: u8 = 9;
 pub const RM_HEAP_ID: u8 = 10;
+pub const RM_BTREE_ID: u8 = 11;
+pub const RM_HASH_ID: u8 = 12;
+pub const RM_GIN_ID: u8 = 13;
+pub const RM_GIST_ID: u8 = 14;
+pub const RM_SEQ_ID: u8 = 15;
+pub const RM_SPGIST_ID: u8 = 16;
+pub const RM_BRIN_ID: u8 = 17;
+pub const RM_COMMIT_TS_ID: u8 = 18;
 pub const RM_REPLORIGIN_ID: u8 = 19;
+pub const RM_GENERIC_ID: u8 = 20;
 pub const RM_LOGICALMSG_ID: u8 = 21;
 
 // from neon_rmgr.h

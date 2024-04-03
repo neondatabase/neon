@@ -580,15 +580,15 @@ where
          * because safekeepers parse WAL headers and the format
          * may change between versions.
          */
-        if msg.pg_version / 10000 != self.state.server.pg_version / 10000
-            && self.state.server.pg_version != UNKNOWN_SERVER_VERSION
-        {
-            bail!(
-                "incompatible server version {}, expected {}",
-                msg.pg_version,
-                self.state.server.pg_version
-            );
-        }
+        // if msg.pg_version / 10000 != self.state.server.pg_version / 10000
+        //     && self.state.server.pg_version != UNKNOWN_SERVER_VERSION
+        // {
+        //     bail!(
+        //         "incompatible server version {}, expected {}",
+        //         msg.pg_version,
+        //         self.state.server.pg_version
+        //     );
+        // }
 
         if msg.tenant_id != self.state.tenant_id {
             bail!(

@@ -44,7 +44,6 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Arg, ArgAction};
-use compute_api::spec::ComputeMode;
 use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
@@ -52,7 +51,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
-use compute_api::spec::ComputeSpec;
+use compute_api::spec::{ComputeMode, ComputeSpec};
 
 use compute_tools::compute::{
     forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
@@ -77,7 +76,7 @@ async fn main() -> Result<()> {
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
 
-    let (pg_handle, start_pg_result) = {
+    let (http_handle, (pg_handle, start_pg_result)) = {
         // Enter startup tracing context
         let _startup_context_guard = startup_context_from_env();
 
@@ -85,12 +84,60 @@ async fn main() -> Result<()> {
 
         let cli_spec = try_spec_from_cli(&clap_args, &cli_args)?;
 
-        let wait_spec_result = wait_spec(build_tag, cli_args, cli_spec)?;
+        let compute = Arc::new(ComputeNode {
+            connstr: Url::parse(cli_args.connstr).context("cannot parse connstr as a URL")?,
+            pgdata: cli_args.pgdata.to_string(),
+            pgroot: cli_args.pgroot.to_string(),
+            pgversion: cli_args.pgversion.to_string(),
+            http_port: cli_args.http_port,
+            live_config_allowed: cli_spec.live_config_allowed,
+            state: Mutex::new({
+                let mut state = ComputeState::new();
 
-        start_postgres(&clap_args, wait_spec_result).await?
+                if let Some(spec) = cli_spec.spec {
+                    let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
+                    info!("new pspec.spec: {:?}", pspec.spec);
+                    state.pspec = Some(pspec);
+                }
+
+                state
+            }),
+            state_changed: Condvar::new(),
+            ext_remote_storage: cli_args.ext_remote_storage.map(|s| s.to_string()),
+            ext_download_progress: RwLock::new(HashMap::new()),
+            build_tag: build_tag.clone(),
+        });
+
+        // If this is a pooled VM, prewarm before starting HTTP server and becoming
+        // available for binding. Prewarming helps Postgres start quicker later,
+        // because QEMU will already have its memory allocated from the host, and
+        // the necessary binaries will already be cached.
+        if compute.state.lock().unwrap().pspec.is_none() {
+            compute.prewarm_postgres()?;
+        }
+
+        // Launch http service first, so that we can serve control-plane requests
+        // while configuration is still in progress.
+        let http_handle = launch_http_server(cli_args.http_port, &compute)
+            .expect("cannot launch http endpoint thread");
+
+        wait_spec(&compute)?;
+
+        (
+            http_handle,
+            start_postgres(
+                compute,
+                #[cfg(target_os = "linux")]
+                &clap_args,
+                cli_args.resize_swap_on_bind,
+            )
+            .await?,
+        )
 
         // Startup is finished, exit the startup tracing span
     };
+
+    let _ = http_handle.join();
 
     // PostgreSQL is now running, if startup was successful. Wait until it exits.
     let wait_pg_result = wait_postgres(pg_handle)?;
@@ -291,63 +338,8 @@ struct CliSpecParams {
     live_config_allowed: bool,
 }
 
-fn wait_spec(
-    build_tag: String,
-    ProcessCliResult {
-        connstr,
-        pgroot,
-        pgversion,
-        pgdata,
-        ext_remote_storage,
-        resize_swap_on_bind,
-        http_port,
-        ..
-    }: ProcessCliResult,
-    CliSpecParams {
-        spec,
-        live_config_allowed,
-    }: CliSpecParams,
-) -> Result<WaitSpecResult> {
-    let mut new_state = ComputeState::new();
-    let spec_set;
-
-    if let Some(spec) = spec {
-        let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
-        info!("new pspec.spec: {:?}", pspec.spec);
-        new_state.pspec = Some(pspec);
-        spec_set = true;
-    } else {
-        spec_set = false;
-    }
-    let compute_node = ComputeNode {
-        connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
-        pgdata: pgdata.to_string(),
-        pgroot: pgroot.to_string(),
-        pgversion: pgversion.to_string(),
-        http_port,
-        live_config_allowed,
-        state: Mutex::new(new_state),
-        state_changed: Condvar::new(),
-        ext_remote_storage: ext_remote_storage.map(|s| s.to_string()),
-        ext_download_progress: RwLock::new(HashMap::new()),
-        build_tag,
-    };
-    let compute = Arc::new(compute_node);
-
-    // If this is a pooled VM, prewarm before starting HTTP server and becoming
-    // available for binding. Prewarming helps Postgres start quicker later,
-    // because QEMU will already have its memory allocated from the host, and
-    // the necessary binaries will already be cached.
-    if !spec_set {
-        compute.prewarm_postgres()?;
-    }
-
-    // Launch http service first, so that we can serve control-plane requests
-    // while configuration is still in progress.
-    let http_handle =
-        launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
-
-    if !spec_set {
+fn wait_spec(compute: &Arc<ComputeNode>) -> Result<()> {
+    if compute.state.lock().unwrap().pspec.is_none() {
         // No spec provided, hang waiting for it.
         info!("no compute spec provided, waiting");
 
@@ -377,24 +369,13 @@ fn wait_spec(
 
     launch_lsn_lease_bg_task_for_static(&compute);
 
-    Ok(WaitSpecResult {
-        compute,
-        resize_swap_on_bind,
-    })
-}
-
-struct WaitSpecResult {
-    compute: Arc<ComputeNode>,
-    resize_swap_on_bind: bool,
+    Ok(())
 }
 
 async fn start_postgres(
-    // need to allow unused because `matches` is only used if target_os = "linux"
-    #[allow(unused_variables)] matches: &clap::ArgMatches,
-    WaitSpecResult {
-        compute,
-        resize_swap_on_bind,
-    }: WaitSpecResult,
+    compute: Arc<ComputeNode>,
+    #[cfg(target_os = "linux")] matches: &clap::ArgMatches,
+    resize_swap_on_bind: bool,
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
@@ -445,25 +426,32 @@ async fn start_postgres(
         }
     }
 
-    // Start Postgres
+    compute.prepare_compute().await?;
+
     let mut pg = None;
     if !prestartup_failed {
-        pg = match compute.start_compute() {
-            Ok(pg) => Some(pg),
-            Err(err) => {
-                error!("could not start the compute node: {:#}", err);
-                let mut state = compute.state.lock().unwrap();
-                state.error = Some(format!("{:?}", err));
-                state.status = ComputeStatus::Failed;
-                // Notify others that Postgres failed to start. In case of configuring the
-                // empty compute, it's likely that API handler is still waiting for compute
-                // state change. With this we will notify it that compute is in Failed state,
-                // so control plane will know about it earlier and record proper error instead
-                // of timeout.
-                compute.state_changed.notify_all();
-                drop(state); // unlock
-                delay_exit = true;
-                None
+        match compute.get_mode() {
+            ComputeMode::Upgrade => {}
+            _ => {
+                // Start Postgres
+                pg = match compute.start_compute() {
+                    Ok(pg) => Some(pg),
+                    Err(err) => {
+                        error!("could not start the compute node: {:#}", err);
+                        let mut state = compute.state.lock().unwrap();
+                        state.error = Some(format!("{:?}", err));
+                        state.status = ComputeStatus::Failed;
+                        // Notify others that Postgres failed to start. In case of configuring the
+                        // empty compute, it's likely that API handler is still waiting for compute
+                        // state change. With this we will notify it that compute is in Failed state,
+                        // so control plane will know about it earlier and record proper error instead
+                        // of timeout.
+                        compute.state_changed.notify_all();
+                        drop(state); // unlock
+                        delay_exit = true;
+                        None
+                    }
+                }
             }
         };
     } else {

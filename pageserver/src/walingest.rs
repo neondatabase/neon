@@ -473,7 +473,6 @@ impl<'t> WalIngest<'t> {
             | pg_constants::RM_SPGIST_ID
             | pg_constants::RM_BRIN_ID
             | pg_constants::RM_COMMIT_TS_ID
-            | pg_constants::RM_REPLORIGIN_ID
             | pg_constants::RM_GENERIC_ID => {
                 // No special handling currently for these resource managers
             }
