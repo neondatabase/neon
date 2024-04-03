@@ -1,6 +1,9 @@
 use self::no_leak_child::NoLeakChild;
 use crate::{
-    config::PageServerConf, metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER}, walrecord::NeonWalRecord, walredo::process::{no_leak_child, protocol}
+    config::PageServerConf,
+    metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER},
+    walrecord::NeonWalRecord,
+    walredo::process::{no_leak_child, protocol},
 };
 use anyhow::Context;
 use bytes::Bytes;

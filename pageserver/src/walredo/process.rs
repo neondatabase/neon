@@ -9,7 +9,6 @@ use utils::lsn::Lsn;
 
 use crate::{config::PageServerConf, walrecord::NeonWalRecord};
 
-mod live_reconfig;
 mod no_leak_child;
 /// The IPC protocol that pageserver and walredo process speak over their shared pipe.
 mod protocol;
@@ -19,9 +18,20 @@ mod process_impl {
     pub(super) mod process_std;
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
 #[repr(u8)]
-pub(crate) enum Kind {
+pub enum Kind {
     Sync,
     Async,
 }
@@ -38,7 +48,12 @@ impl TryFrom<u8> for Kind {
     }
 }
 
-static PROCESS_KIND: AtomicU8 = AtomicU8::new(Kind::Async as u8);
+impl Kind {
+    pub const DEFAULT: Kind = Kind::Sync;
+    pub const DEFAULT_TOML: &'static str = "sync";
+}
+
+static PROCESS_KIND: AtomicU8 = AtomicU8::new(Kind::DEFAULT as u8);
 
 pub(crate) fn set_kind(kind: Kind) {
     PROCESS_KIND.store(kind as u8, std::sync::atomic::Ordering::Relaxed);
@@ -108,5 +123,26 @@ impl Process {
             Process::Sync(p) => p.id(),
             Process::Async(p) => p.id(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ensure_defaults_are_eq() {
+        #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+        struct Doc {
+            val: Kind,
+        }
+        let de = Doc { val: Kind::DEFAULT };
+        let default_toml = Kind::DEFAULT_TOML;
+        let ser = format!(
+            r#"
+        val = '{default_toml}'
+        "#
+        );
+        assert_eq!(de, toml_edit::de::from_str(&ser).unwrap(),);
     }
 }
