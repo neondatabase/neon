@@ -19,4 +19,5 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 utils.workspace = true
+workspace_hack.workspace = true
 
