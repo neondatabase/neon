@@ -3186,10 +3186,10 @@ impl Tenant {
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
             // Upload the created data dir to S3
-            if self.tenant_shard_id().is_zero() {
-                self.upload_initdb(&timelines_path, &pgdata_path, &timeline_id)
-                    .await?;
-            }
+            // if self.tenant_shard_id().is_zero() {
+            //     self.upload_initdb(&timelines_path, &pgdata_path, &timeline_id)
+            //         .await?;
+            // }
         }
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
