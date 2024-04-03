@@ -1396,17 +1396,15 @@ impl Timeline {
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
 
-        // We're not fully confident that everything is sensitive to Self::cancel yet.
+        // TODO: re-try this
+        // NB: we cannot assert that this is a no-op because actually, tasks outlive
+        // `Self::gate`-guards if they acquire the guard within the task.
+        // Then again, all tasks should really be sensitive to Self::cancel, not the
+        // task_mgr::shutdown_token() / task_mgr::shutdown_watcher().
+        // => TODO: eliminate the shutdown functionality of task_mgr and turn this here
+        // into a mere "wait until tasks are gone", not "signal cancel and wait until tasks are gone".
         tracing::debug!("Waiting for tasks...");
-        let report =
-            task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id))
-                .await;
-        if report.planned > 0 {
-            tracing::warn!(
-                ?report,
-                "shut down stray task_mgr timeline-scoped tasks, this should not happen"
-            );
-        }
+        task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
         self.metrics.shutdown();
     }
