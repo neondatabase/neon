@@ -8,7 +8,7 @@ use pageserver_api::{
         TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
-        LocationConfig, ShardParameters, TenantConfig, TenantCreateRequest,
+        ShardParameters, TenantConfig, TenantConfigRequest, TenantCreateRequest,
         TenantShardSplitRequest, TenantShardSplitResponse,
     },
     shard::{ShardStripeSize, TenantShardId},
@@ -351,20 +351,10 @@ async fn main() -> anyhow::Result<()> {
             let tenant_conf = serde_json::from_str(&config)?;
 
             vps_client
-                .location_config(
-                    TenantShardId::unsharded(tenant_id),
-                    LocationConfig {
-                        mode: pageserver_api::models::LocationConfigMode::AttachedSingle,
-                        generation: None,
-                        secondary_conf: None,
-                        shard_number: 0,
-                        shard_count: 0,
-                        shard_stripe_size: 0,
-                        tenant_conf,
-                    },
-                    None,
-                    false,
-                )
+                .tenant_config(&TenantConfigRequest {
+                    tenant_id,
+                    config: tenant_conf,
+                })
                 .await?;
         }
         Command::TenantScatter { tenant_id } => {

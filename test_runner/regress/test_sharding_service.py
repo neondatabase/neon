@@ -1,3 +1,4 @@
+import json
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -1202,3 +1203,18 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
         ["tenant-policy", "--tenant-id", str(env.initial_tenant), "--placement", "secondary"]
     )
     assert "Secondary" in storcon_cli(["tenants"])[3]
+
+    # Modify a tenant's config
+    storcon_cli(
+        [
+            "tenant-config",
+            "--tenant-id",
+            str(env.initial_tenant),
+            "--config",
+            json.dumps({"pitr_interval": "1m"}),
+        ]
+    )
+
+    # Quiesce any background reconciliation before doing consistency check
+    env.storage_controller.reconcile_until_idle(timeout_secs=10)
+    env.storage_controller.consistency_check()
