@@ -1192,7 +1192,39 @@ impl Timeline {
         };
 
         let Some(open_layer) = &layers_guard.layer_map().open_layer else {
-            // No open layer, no work to do.
+            // If there is no open layer, we have no layer freezing to do.  However, we might need to generate
+            // some updates to disk_consistent_lsn and remote_consistent_lsn, in case we ingested some WAL regions
+            // that didn't result in writes to this shard.
+
+            // Must not hold the layers lock while waiting for a flush.
+            drop(layers_guard);
+
+            let last_record_lsn = self.get_last_record_lsn();
+            let disk_consistent_lsn = self.get_disk_consistent_lsn();
+            if last_record_lsn > disk_consistent_lsn {
+                // We have no open layer, but disk_consistent_lsn is behind the last record: this indicates
+                // we are a sharded tenant and have skipped some WAL
+                let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
+                if last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
+                    // This should be somewhat rare, so we log it at INFO level.
+                    //
+                    // We checked for checkpoint timeout so that a shard without any
+                    // data ingested (yet) doesn't write a remote index as soon as it
+                    // sees its LSN advance: we only do this if we've been layer-less
+                    // for some time.
+                    tracing::info!(
+                        "Advancing disk_consistent_lsn past WAL ingest gap {} -> {}",
+                        disk_consistent_lsn,
+                        last_record_lsn
+                    );
+
+                    // The flush loop will update remote consistent LSN as well as disk consistent LSN.
+                    self.flush_frozen_layers_and_wait(last_record_lsn)
+                        .await
+                        .ok();
+                }
+            }
+
             return;
         };
 
