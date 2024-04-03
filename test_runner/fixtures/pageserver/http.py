@@ -341,8 +341,21 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/ignore")
         self.verbose_error(res)
 
-    def tenant_status(self, tenant_id: Union[TenantId, TenantShardId]) -> Dict[Any, Any]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
+    def tenant_status(
+        self, tenant_id: Union[TenantId, TenantShardId], activate: bool = False
+    ) -> Dict[Any, Any]:
+        """
+        :activate: hint the server not to accelerate activation of this tenant in response
+        to this query.  False by default for tests, because they generally want to observed the
+        system rather than interfering with it.  This is true  by default on the server side,
+        because in the field if the control plane is GET'ing a tenant it's a sign that it wants
+        to do something with it.
+        """
+        params = {}
+        if not activate:
+            params["activate"] = "false"
+
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}", params=params)
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
