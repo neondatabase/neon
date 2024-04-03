@@ -72,10 +72,11 @@ pub async fn import_timeline_from_postgres_datadir(
             let absolute_path = entry.path();
             let relative_path = absolute_path.strip_prefix(pgdata_path)?;
 
-            let mut file = tokio::fs::File::open(absolute_path).await?;
+            let file = tokio::fs::File::open(absolute_path).await?;
+            let mut bufread = tokio::io::BufReader::with_capacity(128 * 1024, file);
             let len = metadata.len() as usize;
             if let Some(control_file) =
-                import_file(&mut modification, relative_path, &mut file, len, ctx).await?
+                import_file(&mut modification, relative_path, &mut bufread, len, ctx).await?
             {
                 pg_control = Some(control_file);
             }
@@ -288,15 +289,14 @@ async fn import_wal(
         }
 
         // Slurp the WAL file
-        let mut file = std::fs::File::open(&path)?;
+        let mut file = tokio::fs::File::open(&path).await?;
 
         if offset > 0 {
-            use std::io::Seek;
-            file.seek(std::io::SeekFrom::Start(offset as u64))?;
+            use tokio::io::AsyncSeekExt;
+            file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
         }
 
-        use std::io::Read;
-        let nread = file.read_to_end(&mut buf)?;
+        let nread = file.read_to_end(&mut buf).await?;
         if nread != WAL_SEGMENT_SIZE - offset {
             // Maybe allow this for .partial files?
             error!("read only {} bytes from WAL file", nread);

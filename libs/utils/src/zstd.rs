@@ -22,11 +22,15 @@ pub async fn create_zst_tarball(path: &Utf8Path, tarball: &Utf8Path) -> Result<(
     let file = OpenOptions::new()
         .create(true)
         .truncate(true)
-        .read(true)
         .write(true)
         .open(&tarball)
         .await
         .with_context(|| format!("tempfile creation {tarball}"))?;
+
+    let buffered_file = tokio::io::BufWriter::with_capacity(
+        128 * 1024, /* TODO use BUFFER_SIZE, same with other constant */
+        file,
+    );
 
     let mut paths = Vec::new();
     for entry in WalkDir::new(path) {
@@ -42,7 +46,7 @@ pub async fn create_zst_tarball(path: &Utf8Path, tarball: &Utf8Path) -> Result<(
     // Do a sort to get a more consistent listing
     paths.sort_unstable();
     let zstd = ZstdEncoder::with_quality_and_params(
-        file,
+        buffered_file,
         Level::Default,
         &[CParameter::enable_long_distance_matching(true)],
     );
@@ -60,7 +64,9 @@ pub async fn create_zst_tarball(path: &Utf8Path, tarball: &Utf8Path) -> Result<(
     }
     let mut zstd = builder.into_inner().await?;
     zstd.shutdown().await?;
-    let mut compressed = zstd.into_inner();
+    let mut compressed_buffered: tokio::io::BufWriter<File> = zstd.into_inner();
+    compressed_buffered.flush().await?;
+    let mut compressed = compressed_buffered.into_inner();
     let compressed_len = compressed.metadata().await?.len();
     compressed.seek(SeekFrom::Start(0)).await?;
     Ok((compressed, compressed_len))
