@@ -185,7 +185,7 @@ pub fn init(
     .into()
     {
         let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
-            .trace_style(tracing_chrome::TraceStyle::Async)
+            .trace_style(tracing_chrome::TraceStyle::Threaded)
             .build();
         layers.add_layer(layer.with_filter(rust_log_env_filter()));
         Some(guard)
