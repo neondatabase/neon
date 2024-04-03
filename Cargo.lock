@@ -3522,7 +3522,6 @@ dependencies = [
  "arc-swap",
  "async-compression",
  "async-stream",
- "async-trait",
  "byteorder",
  "bytes",
  "camino",
@@ -3655,7 +3654,6 @@ dependencies = [
  "anyhow",
  "async-compression",
  "async-stream",
- "async-trait",
  "byteorder",
  "bytes",
  "chrono",
@@ -3991,7 +3989,6 @@ name = "postgres_backend"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "bytes",
  "futures",
  "once_cell",

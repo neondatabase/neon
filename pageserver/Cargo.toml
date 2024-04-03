@@ -15,7 +15,6 @@ anyhow.workspace = true
 arc-swap.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
-async-trait.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
 camino.workspace = true
