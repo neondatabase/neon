@@ -94,4 +94,5 @@ select = [
     "I", # isort
     "W", # pycodestyle
     "B", # bugbear
+    "UP032", # f-string
 ]

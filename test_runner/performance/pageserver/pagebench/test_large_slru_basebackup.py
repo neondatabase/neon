@@ -125,19 +125,19 @@ async def run_update_loop_worker(ep: Endpoint, n_txns: int, idx: int):
     await conn.execute(f"ALTER TABLE {table} SET (autovacuum_enabled = false)")
     await conn.execute(f"INSERT INTO {table} VALUES (1, 0)")
     await conn.execute(
+        f"""
+        CREATE PROCEDURE updating{table}() as
+        $$
+            DECLARE
+            i integer;
+            BEGIN
+            FOR i IN 1..{n_txns} LOOP
+                UPDATE {table} SET x = x + 1 WHERE pk=1;
+                COMMIT;
+            END LOOP;
+            END
+        $$ LANGUAGE plpgsql
         """
-         CREATE PROCEDURE updating{0}() as
-         $$
-             DECLARE
-             i integer;
-             BEGIN
-             FOR i IN 1..{1} LOOP
-                 UPDATE {0} SET x = x + 1 WHERE pk=1;
-                 COMMIT;
-             END LOOP;
-             END
-         $$ LANGUAGE plpgsql
-         """.format(table, n_txns)
     )
     await conn.execute("SET statement_timeout=0")
     await conn.execute(f"call updating{table}()")

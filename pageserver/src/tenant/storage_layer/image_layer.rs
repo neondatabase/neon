@@ -44,6 +44,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
+use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
@@ -540,7 +541,25 @@ impl ImageLayerInner {
 
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
         for read in reads.into_iter() {
-            let buf = BytesMut::with_capacity(max_vectored_read_bytes);
+            let buf_size = read.size();
+
+            if buf_size > max_vectored_read_bytes {
+                // If the read is oversized, it should only contain one key.
+                let offenders = read
+                    .blobs_at
+                    .as_slice()
+                    .iter()
+                    .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                    .join(", ");
+                tracing::warn!(
+                    "Oversized vectored read ({} > {}) for keys {}",
+                    buf_size,
+                    max_vectored_read_bytes,
+                    offenders
+                );
+            }
+
+            let buf = BytesMut::with_capacity(buf_size);
             let res = vectored_blob_reader.read_blobs(&read, buf).await;
 
             match res {

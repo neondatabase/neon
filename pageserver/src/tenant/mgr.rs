@@ -44,6 +44,7 @@ use crate::tenant::config::{
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
+use crate::tenant::timeline::ShutdownMode;
 use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TEMP_FILE_SUFFIX};
 
@@ -783,11 +784,9 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                             shutdown_state.insert(tenant_shard_id, TenantSlot::Attached(t.clone()));
                             join_set.spawn(
                                 async move {
-                                    let freeze_and_flush = true;
-
                                     let res = {
                                         let (_guard, shutdown_progress) = completion::channel();
-                                        t.shutdown(shutdown_progress, freeze_and_flush).await
+                                        t.shutdown(shutdown_progress, ShutdownMode::FreezeAndFlush).await
                                     };
 
                                     if let Err(other_progress) = res {
@@ -1107,7 +1106,7 @@ impl TenantManager {
                 };
 
                 info!("Shutting down attached tenant");
-                match tenant.shutdown(progress, false).await {
+                match tenant.shutdown(progress, ShutdownMode::Hard).await {
                     Ok(()) => {}
                     Err(barrier) => {
                         info!("Shutdown already in progress, waiting for it to complete");
@@ -1223,7 +1222,7 @@ impl TenantManager {
                     TenantSlot::Attached(tenant) => {
                         let (_guard, progress) = utils::completion::channel();
                         info!("Shutting down just-spawned tenant, because tenant manager is shut down");
-                        match tenant.shutdown(progress, false).await {
+                        match tenant.shutdown(progress, ShutdownMode::Hard).await {
                             Ok(()) => {
                                 info!("Finished shutting down just-spawned tenant");
                             }
@@ -1273,7 +1272,7 @@ impl TenantManager {
         };
 
         let (_guard, progress) = utils::completion::channel();
-        match tenant.shutdown(progress, false).await {
+        match tenant.shutdown(progress, ShutdownMode::Hard).await {
             Ok(()) => {
                 slot_guard.drop_old_value()?;
             }
@@ -1649,7 +1648,14 @@ impl TenantManager {
                     fail::fail_point!("shard-split-lsn-wait", |_| Err(anyhow::anyhow!(
                         "failpoint"
                     )));
-                    if let Err(e) = timeline.wait_lsn(*target_lsn, ctx).await {
+                    if let Err(e) = timeline
+                        .wait_lsn(
+                            *target_lsn,
+                            crate::tenant::timeline::WaitLsnWaiter::Tenant,
+                            ctx,
+                        )
+                        .await
+                    {
                         // Failure here might mean shutdown, in any case this part is an optimization
                         // and we shouldn't hold up the split operation.
                         tracing::warn!(
@@ -1670,7 +1676,7 @@ impl TenantManager {
 
         // Phase 5: Shut down the parent shard, and erase it from disk
         let (_guard, progress) = completion::channel();
-        match parent.shutdown(progress, false).await {
+        match parent.shutdown(progress, ShutdownMode::Hard).await {
             Ok(()) => {}
             Err(other) => {
                 other.wait().await;
@@ -2657,11 +2663,11 @@ where
     let attached_tenant = match slot_guard.get_old_value() {
         Some(TenantSlot::Attached(tenant)) => {
             // whenever we remove a tenant from memory, we don't want to flush and wait for upload
-            let freeze_and_flush = false;
+            let shutdown_mode = ShutdownMode::Hard;
 
             // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
             // that we can continue safely to cleanup.
-            match tenant.shutdown(progress, freeze_and_flush).await {
+            match tenant.shutdown(progress, shutdown_mode).await {
                 Ok(()) => {}
                 Err(_other) => {
                     // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to

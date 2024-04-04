@@ -389,6 +389,10 @@ impl PageServerNode {
                 .remove("image_creation_threshold")
                 .map(|x| x.parse::<usize>())
                 .transpose()?,
+            image_layer_creation_check_threshold: settings
+                .remove("image_layer_creation_check_threshold")
+                .map(|x| x.parse::<u8>())
+                .transpose()?,
             pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
             walreceiver_connect_timeout: settings
                 .remove("walreceiver_connect_timeout")
@@ -501,6 +505,12 @@ impl PageServerNode {
                     .map(|x| x.parse::<usize>())
                     .transpose()
                     .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
+                image_layer_creation_check_threshold: settings
+                    .remove("image_layer_creation_check_threshold")
+                    .map(|x| x.parse::<u8>())
+                    .transpose()
+                    .context("Failed to parse 'image_creation_check_threshold' as integer")?,
+
                 pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
                 walreceiver_connect_timeout: settings
                     .remove("walreceiver_connect_timeout")

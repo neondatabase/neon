@@ -9,6 +9,7 @@ pub mod uninit;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use camino::Utf8Path;
 use enumset::EnumSet;
@@ -118,11 +119,11 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::remote_timeline_client::RemoteTimelineClient;
+use super::config::TenantConf;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
-use super::{config::TenantConf, storage_layer::ReadableLayerDesc};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
+use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -183,7 +184,7 @@ pub(crate) struct AuxFilesState {
 
 pub struct Timeline {
     conf: &'static PageServerConf,
-    tenant_conf: Arc<RwLock<AttachedTenantConf>>,
+    tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
 
     myself: Weak<Self>,
 
@@ -308,6 +309,8 @@ pub struct Timeline {
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
+
+    last_image_layer_creation_check_at: AtomicLsn,
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
@@ -608,6 +611,25 @@ impl From<GetReadyAncestorError> for PageReconstructError {
 pub enum GetVectoredImpl {
     Sequential,
     Vectored,
+}
+
+pub(crate) enum WaitLsnWaiter<'a> {
+    Timeline(&'a Timeline),
+    Tenant,
+    PageService,
+}
+
+/// Argument to [`Timeline::shutdown`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ShutdownMode {
+    /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then
+    /// also to remote storage.  This method can easily take multiple seconds for a busy timeline.
+    ///
+    /// While we are flushing, we continue to accept read I/O for LSNs ingested before
+    /// the call to [`Timeline::shutdown`].
+    FreezeAndFlush,
+    /// Shut down immediately, without waiting for any open layers to flush.
+    Hard,
 }
 
 /// Public interface functions
@@ -1058,7 +1080,8 @@ impl Timeline {
     pub(crate) async fn wait_lsn(
         &self,
         lsn: Lsn,
-        _ctx: &RequestContext, /* Prepare for use by cancellation */
+        who_is_waiting: WaitLsnWaiter<'_>,
+        ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
         if self.cancel.is_cancelled() {
             return Err(WaitLsnError::Shutdown);
@@ -1066,20 +1089,28 @@ impl Timeline {
             return Err(WaitLsnError::BadState);
         }
 
-        // This should never be called from the WAL receiver, because that could lead
-        // to a deadlock.
-        debug_assert!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverManager),
-            "wait_lsn cannot be called in WAL receiver"
-        );
-        debug_assert!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionHandler),
-            "wait_lsn cannot be called in WAL receiver"
-        );
-        debug_assert!(
-            task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionPoller),
-            "wait_lsn cannot be called in WAL receiver"
-        );
+        if cfg!(debug_assertions) {
+            match ctx.task_kind() {
+                TaskKind::WalReceiverManager
+                | TaskKind::WalReceiverConnectionHandler
+                | TaskKind::WalReceiverConnectionPoller => {
+                    let is_myself = match who_is_waiting {
+                        WaitLsnWaiter::Timeline(waiter) => Weak::ptr_eq(&waiter.myself, &self.myself),
+                        WaitLsnWaiter::Tenant | WaitLsnWaiter::PageService => unreachable!("tenant or page_service context are not expected to have task kind {:?}", ctx.task_kind()),
+                    };
+                    if is_myself {
+                        if let Err(current) = self.last_record_lsn.would_wait_for(lsn) {
+                            // walingest is the only one that can advance last_record_lsn; it should make sure to never reach here
+                            panic!("this timeline's walingest task is calling wait_lsn({lsn}) but we only have last_record_lsn={current}; would deadlock");
+                        }
+                    } else {
+                        // if another  timeline's  is waiting for us, there's no deadlock risk because
+                        // our walreceiver task can make progress independent of theirs
+                    }
+                }
+                _ => {}
+            }
+        }
 
         let _timer = crate::metrics::WAIT_LSN_TIME.start_timer();
 
@@ -1288,83 +1319,119 @@ impl Timeline {
         self.launch_eviction_task(parent, background_jobs_can_start);
     }
 
-    /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then
-    /// also to remote storage.  This method can easily take multiple seconds for a busy timeline.
+    /// After this function returns, there are no timeline-scoped tasks are left running.
     ///
-    /// While we are flushing, we continue to accept read I/O.
-    pub(crate) async fn flush_and_shutdown(&self) {
+    /// The preferred pattern for is:
+    /// - in any spawned tasks, keep Timeline::guard open + Timeline::cancel / child token
+    /// - if early shutdown (not just cancellation) of a sub-tree of tasks is required,
+    ///   go the extra mile and keep track of JoinHandles
+    /// - Keep track of JoinHandles using a passed-down `Arc<Mutex<Option<JoinSet>>>` or similar,
+    ///   instead of spawning directly on a runtime. It is a more composable / testable pattern.
+    ///
+    /// For legacy reasons, we still have multiple tasks spawned using
+    /// `task_mgr::spawn(X, Some(tenant_id), Some(timeline_id))`.
+    /// We refer to these as "timeline-scoped task_mgr tasks".
+    /// Some of these tasks are already sensitive to Timeline::cancel while others are
+    /// not sensitive to Timeline::cancel and instead respect [`task_mgr::shutdown_token`]
+    /// or [`task_mgr::shutdown_watcher`].
+    /// We want to gradually convert the code base away from these.
+    ///
+    /// Here is an inventory of timeline-scoped task_mgr tasks that are still sensitive to
+    /// `task_mgr::shutdown_{token,watcher}` (there are also tenant-scoped and global-scoped
+    /// ones that aren't mentioned here):
+    /// - [`TaskKind::TimelineDeletionWorker`]
+    ///    - NB: also used for tenant deletion
+    /// - [`TaskKind::RemoteUploadTask`]`
+    /// - [`TaskKind::InitialLogicalSizeCalculation`]
+    /// - [`TaskKind::DownloadAllRemoteLayers`] (can we get rid of it?)
+    // Inventory of timeline-scoped task_mgr tasks that use spawn but aren't sensitive:
+    /// - [`TaskKind::Eviction`]
+    /// - [`TaskKind::LayerFlushTask`]
+    /// - [`TaskKind::OndemandLogicalSizeCalculation`]
+    /// - [`TaskKind::GarbageCollector`] (immediate_gc is timeline-scoped)
+    pub(crate) async fn shutdown(&self, mode: ShutdownMode) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        // Stop ingesting data, so that we are not still writing to an InMemoryLayer while
-        // trying to flush
-        tracing::debug!("Waiting for WalReceiverManager...");
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_shard_id),
-            Some(self.timeline_id),
-        )
-        .await;
+        let try_freeze_and_flush = match mode {
+            ShutdownMode::FreezeAndFlush => true,
+            ShutdownMode::Hard => false,
+        };
 
-        // Since we have shut down WAL ingest, we should not let anyone start waiting for the LSN to advance
+        // Regardless of whether we're going to try_freeze_and_flush
+        // or not, stop ingesting any more data. Walreceiver only provides
+        // cancellation but no "wait until gone", because it uses the Timeline::gate.
+        // So, only after the self.gate.close() below will we know for sure that
+        // no walreceiver tasks are left.
+        // For `try_freeze_and_flush=true`, this means that we might still be ingesting
+        // data during the call to `self.freeze_and_flush()` below.
+        // That's not ideal, but, we don't have the concept of a ChildGuard,
+        // which is what we'd need to properly model early shutdown of the walreceiver
+        // task sub-tree before the other Timeline task sub-trees.
+        let walreceiver = self.walreceiver.lock().unwrap().take();
+        tracing::debug!(
+            is_some = walreceiver.is_some(),
+            "Waiting for WalReceiverManager..."
+        );
+        if let Some(walreceiver) = walreceiver {
+            walreceiver.cancel();
+        }
+        // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
 
-        // now all writers to InMemory layer are gone, do the final flush if requested
-        match self.freeze_and_flush().await {
-            Ok(_) => {
-                // drain the upload queue
-                if let Some(client) = self.remote_client.as_ref() {
-                    // if we did not wait for completion here, it might be our shutdown process
-                    // didn't wait for remote uploads to complete at all, as new tasks can forever
-                    // be spawned.
-                    //
-                    // what is problematic is the shutting down of RemoteTimelineClient, because
-                    // obviously it does not make sense to stop while we wait for it, but what
-                    // about corner cases like s3 suddenly hanging up?
-                    client.shutdown().await;
+        if try_freeze_and_flush {
+            // we shut down walreceiver above, so, we won't add anything more
+            // to the InMemoryLayer; freeze it and wait for all frozen layers
+            // to reach the disk & upload queue, then shut the upload queue and
+            // wait for it to drain.
+            match self.freeze_and_flush().await {
+                Ok(_) => {
+                    // drain the upload queue
+                    if let Some(client) = self.remote_client.as_ref() {
+                        // if we did not wait for completion here, it might be our shutdown process
+                        // didn't wait for remote uploads to complete at all, as new tasks can forever
+                        // be spawned.
+                        //
+                        // what is problematic is the shutting down of RemoteTimelineClient, because
+                        // obviously it does not make sense to stop while we wait for it, but what
+                        // about corner cases like s3 suddenly hanging up?
+                        client.shutdown().await;
+                    }
+                }
+                Err(e) => {
+                    // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
+                    // we have some extra WAL replay to do next time the timeline starts.
+                    warn!("failed to freeze and flush: {e:#}");
                 }
             }
-            Err(e) => {
-                // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
-                // we have some extra WAL replay to do next time the timeline starts.
-                warn!("failed to freeze and flush: {e:#}");
-            }
         }
-
-        self.shutdown().await;
-    }
-
-    /// Shut down immediately, without waiting for any open layers to flush to disk.  This is a subset of
-    /// the graceful [`Timeline::flush_and_shutdown`] function.
-    pub(crate) async fn shutdown(&self) {
-        debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Signal any subscribers to our cancellation token to drop out
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
-        // Page request handlers might be waiting for LSN to advance: they do not respect Timeline::cancel
-        // while doing so.
-        self.last_record_lsn.shutdown();
-
-        // Shut down the layer flush task before the remote client, as one depends on the other
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::LayerFlushTask),
-            Some(self.tenant_shard_id),
-            Some(self.timeline_id),
-        )
-        .await;
-
-        // Shut down remote timeline client: this gracefully moves its metadata into its Stopping state in
-        // case our caller wants to use that for a deletion
+        // Transition the remote_client into a state where it's only useful for timeline deletion.
+        // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         if let Some(remote_client) = self.remote_client.as_ref() {
             remote_client.stop();
+            // As documented in remote_client.stop()'s doc comment, it's our responsibility
+            // to shut down the upload queue tasks.
+            // TODO: fix that, task management should be encapsulated inside remote_client.
+            task_mgr::shutdown_tasks(
+                Some(TaskKind::RemoteUploadTask),
+                Some(self.tenant_shard_id),
+                Some(self.timeline_id),
+            )
+            .await;
         }
 
+        // TODO: work toward making this a no-op. See this funciton's doc comment for more context.
         tracing::debug!("Waiting for tasks...");
-
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
-        // Finally wait until any gate-holders are complete
+        // Finally wait until any gate-holders are complete.
+        //
+        // TODO: once above shutdown_tasks is a no-op, we can close the gate before calling shutdown_tasks
+        // and use a TBD variant of shutdown_tasks that asserts that there were no tasks left.
         self.gate.close().await;
 
         self.metrics.shutdown();
@@ -1568,57 +1635,65 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 // Private functions
 impl Timeline {
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .lazy_slru_download
             .unwrap_or(self.conf.default_tenant_conf.lazy_slru_download)
     }
 
     fn get_checkpoint_distance(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .checkpoint_distance
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
     fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .checkpoint_timeout
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
     fn get_compaction_target_size(&self) -> u64 {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .compaction_target_size
             .unwrap_or(self.conf.default_tenant_conf.compaction_target_size)
     }
 
     fn get_compaction_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .compaction_threshold
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
     fn get_image_creation_threshold(&self) -> usize {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
     fn get_compaction_algorithm(&self) -> CompactionAlgorithm {
-        let tenant_conf = &self.tenant_conf.read().unwrap().tenant_conf;
+        let tenant_conf = &self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .compaction_algorithm
             .unwrap_or(self.conf.default_tenant_conf.compaction_algorithm)
     }
 
     fn get_eviction_policy(&self) -> EvictionPolicy {
-        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf.clone();
+        let tenant_conf = self.tenant_conf.load();
         tenant_conf
+            .tenant_conf
             .eviction_policy
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
     }
@@ -1632,14 +1707,26 @@ impl Timeline {
             .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
     }
 
-    pub(super) fn tenant_conf_updated(&self) {
+    fn get_image_layer_creation_check_threshold(&self) -> u8 {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .image_layer_creation_check_threshold
+            .unwrap_or(
+                self.conf
+                    .default_tenant_conf
+                    .image_layer_creation_check_threshold,
+            )
+    }
+
+    pub(super) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
 
         // The threshold is embedded in the metric. So, we need to update it.
         {
             let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
-                &self.tenant_conf.read().unwrap().tenant_conf,
+                new_conf,
                 &self.conf.default_tenant_conf,
             );
 
@@ -1666,7 +1753,7 @@ impl Timeline {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         conf: &'static PageServerConf,
-        tenant_conf: Arc<RwLock<AttachedTenantConf>>,
+        tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
         metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
@@ -1685,14 +1772,13 @@ impl Timeline {
         let (layer_flush_start_tx, _) = tokio::sync::watch::channel(0);
         let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
 
-        let tenant_conf_guard = tenant_conf.read().unwrap();
-
-        let evictions_low_residence_duration_metric_threshold =
+        let evictions_low_residence_duration_metric_threshold = {
+            let loaded_tenant_conf = tenant_conf.load();
             Self::get_evictions_low_residence_duration_metric_threshold(
-                &tenant_conf_guard.tenant_conf,
+                &loaded_tenant_conf.tenant_conf,
                 &conf.default_tenant_conf,
-            );
-        drop(tenant_conf_guard);
+            )
+        };
 
         Arc::new_cyclic(|myself| {
             let mut result = Timeline {
@@ -1769,6 +1855,7 @@ impl Timeline {
                 },
                 partitioning: tokio::sync::Mutex::new((KeyPartitioning::new(), Lsn(0))),
                 repartition_threshold: 0,
+                last_image_layer_creation_check_at: AtomicLsn::new(0),
 
                 last_received_wal: Mutex::new(None),
                 rel_size_cache: RwLock::new(HashMap::new()),
@@ -1797,6 +1884,7 @@ impl Timeline {
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
+
             result
                 .metrics
                 .last_record_gauge
@@ -1873,20 +1961,19 @@ impl Timeline {
             self.timeline_id, self.tenant_shard_id
         );
 
-        let tenant_conf_guard = self.tenant_conf.read().unwrap();
-        let wal_connect_timeout = tenant_conf_guard
+        let tenant_conf = self.tenant_conf.load();
+        let wal_connect_timeout = tenant_conf
             .tenant_conf
             .walreceiver_connect_timeout
             .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout);
-        let lagging_wal_timeout = tenant_conf_guard
+        let lagging_wal_timeout = tenant_conf
             .tenant_conf
             .lagging_wal_timeout
             .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout);
-        let max_lsn_wal_lag = tenant_conf_guard
+        let max_lsn_wal_lag = tenant_conf
             .tenant_conf
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
-        drop(tenant_conf_guard);
 
         let mut guard = self.walreceiver.lock().unwrap();
         assert!(
@@ -2434,10 +2521,6 @@ impl Timeline {
                 debug!("cancelling logical size calculation for timeline shutdown");
                 calculation.await
             }
-            _ = task_mgr::shutdown_watcher() => {
-                debug!("cancelling logical size calculation for task shutdown");
-                calculation.await
-            }
         }
     }
 
@@ -2892,16 +2975,6 @@ impl Timeline {
 
         let mut completed_keyspace = KeySpace::default();
 
-        // Hold the layer map whilst visiting the timeline to prevent
-        // compaction, eviction and flushes from rendering the layers unreadable.
-        //
-        // TODO: Do we actually need to do this? In theory holding on
-        // to [`tenant::storage_layer::Layer`] should be enough. However,
-        // [`Timeline::get`] also holds the lock during IO, so more investigation
-        // is needed.
-        let guard = timeline.layers.read().await;
-        let layers = guard.layer_map();
-
         loop {
             if cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
@@ -2911,6 +2984,9 @@ impl Timeline {
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
 
+            let guard = timeline.layers.read().await;
+            let layers = guard.layer_map();
+
             let in_memory_layer = layers.find_in_memory_layer(|l| {
                 let start_lsn = l.get_lsn_range().start;
                 cont_lsn > start_lsn
@@ -2918,12 +2994,11 @@ impl Timeline {
 
             match in_memory_layer {
                 Some(l) => {
+                    let lsn_range = l.get_lsn_range().start..cont_lsn;
                     fringe.update(
-                        ReadableLayerDesc::InMemory {
-                            handle: l,
-                            lsn_ceil: cont_lsn,
-                        },
+                        ReadableLayer::InMemoryLayer(l),
                         unmapped_keyspace.clone(),
+                        lsn_range,
                     );
                 }
                 None => {
@@ -2935,30 +3010,43 @@ impl Timeline {
                             .into_iter()
                             .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
                                 (
-                                    ReadableLayerDesc::Persistent {
-                                        desc: (*layer).clone(),
-                                        lsn_range: lsn_floor..cont_lsn,
-                                    },
+                                    ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
                                     keyspace_accum.to_keyspace(),
+                                    lsn_floor..cont_lsn,
                                 )
                             })
-                            .for_each(|(layer, keyspace)| fringe.update(layer, keyspace));
+                            .for_each(|(layer, keyspace, lsn_range)| {
+                                fringe.update(layer, keyspace, lsn_range)
+                            });
                     }
                 }
             }
 
-            if let Some((layer_to_read, keyspace_to_read)) = fringe.next_layer() {
+            // It's safe to drop the layer map lock after planning the next round of reads.
+            // The fringe keeps readable handles for the layers which are safe to read even
+            // if layers were compacted or flushed.
+            //
+            // The more interesting consideration is: "Why is the read algorithm still correct
+            // if the layer map changes while it is operating?". Doing a vectored read on a
+            // timeline boils down to pushing an imaginary lsn boundary downwards for each range
+            // covered by the read. The layer map tells us how to move the lsn downwards for a
+            // range at *a particular point in time*. It is fine for the answer to be different
+            // at two different time points.
+            drop(guard);
+
+            if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
+                let next_cont_lsn = lsn_range.start;
                 layer_to_read
                     .get_values_reconstruct_data(
-                        &guard,
                         keyspace_to_read.clone(),
+                        lsn_range,
                         reconstruct_state,
                         ctx,
                     )
                     .await?;
 
                 unmapped_keyspace = keyspace_to_read;
-                cont_lsn = layer_to_read.get_lsn_floor();
+                cont_lsn = next_cont_lsn;
             } else {
                 break;
             }
@@ -3036,7 +3124,7 @@ impl Timeline {
             }
         }
         ancestor
-            .wait_lsn(self.ancestor_lsn, ctx)
+            .wait_lsn(self.ancestor_lsn, WaitLsnWaiter::Timeline(self), ctx)
             .await
             .map_err(|e| match e {
                 e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),
@@ -3116,16 +3204,11 @@ impl Timeline {
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
-                    info!("shutting down layer flush task");
-                    break;
-                },
-                _ = task_mgr::shutdown_watcher() => {
-                    info!("shutting down layer flush task");
+                    info!("shutting down layer flush task due to Timeline::cancel");
                     break;
                 },
                 _ = layer_flush_start_rx.changed() => {}
             }
-
             trace!("waking up");
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {
@@ -3501,6 +3584,24 @@ impl Timeline {
 
     // Is it time to create a new image layer for the given partition?
     async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
+        let last = self.last_image_layer_creation_check_at.load();
+        if lsn != Lsn(0) {
+            let distance = lsn
+                .checked_sub(last)
+                .expect("Attempt to compact with LSN going backwards");
+
+            let min_distance = self.get_image_layer_creation_check_threshold() as u64
+                * self.get_checkpoint_distance();
+
+            // Skip the expensive delta layer counting below if we've not ingested
+            // sufficient WAL since the last check.
+            if distance.0 < min_distance {
+                return false;
+            }
+        }
+
+        self.last_image_layer_creation_check_at.store(lsn);
+
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read().await;
@@ -3839,6 +3940,24 @@ impl Timeline {
 
         drop_wlock(guard);
 
+        Ok(())
+    }
+
+    /// Schedules the uploads of the given image layers
+    fn upload_new_image_layers(
+        self: &Arc<Self>,
+        new_images: impl IntoIterator<Item = ResidentLayer>,
+    ) -> anyhow::Result<()> {
+        let Some(remote_client) = &self.remote_client else {
+            return Ok(());
+        };
+        for layer in new_images {
+            remote_client.schedule_layer_file_upload(layer)?;
+        }
+        // should any new image layer been created, not uploading index_part will
+        // result in a mismatch between remote_physical_size and layermap calculated
+        // size, which will fail some tests, but should not be an issue otherwise.
+        remote_client.schedule_index_upload_for_file_changes()?;
         Ok(())
     }
 
