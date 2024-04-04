@@ -1,6 +1,6 @@
 use crate::{
-    auth,
-    rate_limiter::{AuthRateLimiter, RateBucketInfo},
+    auth::{self, backend::AuthRateLimiter},
+    rate_limiter::RateBucketInfo,
     serverless::GlobalConnPoolOptions,
 };
 use anyhow::{bail, ensure, Context, Ok};

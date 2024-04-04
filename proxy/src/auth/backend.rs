@@ -2,8 +2,15 @@ mod classic;
 mod hacks;
 mod link;
 
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use ipnet::Ipv6Net;
 pub use link::LinkAuthError;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
+use tracing::{info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::validate_password_and_exchange;
@@ -16,6 +23,7 @@ use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
+use crate::rate_limiter::{BucketRateLimiter, RateBucketInfo};
 use crate::stream::Stream;
 use crate::{
     auth::{self, ComputeUserInfoMaybeEndpoint},
@@ -28,9 +36,6 @@ use crate::{
     stream, url,
 };
 use crate::{scram, EndpointCacheKey, EndpointId, Normalize, RoleName};
-use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, warn};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -176,6 +181,43 @@ impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
     }
 }
 
+#[derive(PartialEq, PartialOrd, Hash, Eq, Ord, Debug, Copy, Clone)]
+pub struct MaskedIp(IpAddr);
+
+impl From<IpAddr> for MaskedIp {
+    fn from(value: IpAddr) -> Self {
+        match value {
+            // no masking
+            IpAddr::V4(v4) => Self(IpAddr::V4(v4)),
+            // mask to /64
+            IpAddr::V6(v6) => Self(IpAddr::V6(
+                Ipv6Net::new(v6, 64)
+                    .expect("64 is a valid prefix length")
+                    .trunc()
+                    .addr(),
+            )),
+        }
+    }
+}
+
+// This can't be just per IP because that would limit some PaaS that share IP addresses
+pub type AuthRateLimiter = BucketRateLimiter<(EndpointIdInt, MaskedIp)>;
+
+impl RateBucketInfo {
+    /// All of these are per endpoint-maskedip pair.
+    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
+    ///
+    /// First bucket: 1000mcpus total per endpoint-ip pair
+    /// * 4096000 requests per second with 1 hash rounds.
+    /// * 1000 requests per second with 4096 hash rounds.
+    /// * 6.8 requests per second with 600000 hash rounds.
+    pub const DEFAULT_AUTH_SET: [Self; 3] = [
+        Self::new(1000 * 4096, Duration::from_secs(1)),
+        Self::new(600 * 4096, Duration::from_secs(60)),
+        Self::new(300 * 4096, Duration::from_secs(600)),
+    ];
+}
+
 impl AuthenticationConfig {
     pub fn check_rate_limit(
         &self,
@@ -203,7 +245,7 @@ impl AuthenticationConfig {
 
         let limit_not_exceeded = self
             .rate_limiter
-            .check((endpoint_int, ctx.peer_addr), password_weight);
+            .check((endpoint_int, ctx.peer_addr.into()), password_weight);
 
         if !limit_not_exceeded {
             warn!(
@@ -495,12 +537,12 @@ mod tests {
         },
         context::RequestMonitoring,
         proxy::NeonOptions,
-        rate_limiter::{AuthRateLimiter, RateBucketInfo},
+        rate_limiter::RateBucketInfo,
         scram::ServerSecret,
         stream::{PqStream, Stream},
     };
 
-    use super::auth_quirks;
+    use super::{auth_quirks, AuthRateLimiter};
 
     struct Auth {
         ips: Vec<IpPattern>,
