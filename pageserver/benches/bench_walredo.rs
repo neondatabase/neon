@@ -30,22 +30,22 @@
 //! 2024-04-04 on i3en.3xlarge
 //!
 //! ```text
-//! short/1                 time:   [25.587 µs 25.726 µs 25.877 µs]
-//! short/2                 time:   [31.173 µs 31.354 µs 31.559 µs]
-//! short/4                 time:   [44.822 µs 45.128 µs 45.461 µs]
-//! short/8                 time:   [82.673 µs 83.307 µs 84.003 µs]
-//! short/16                time:   [187.79 µs 189.00 µs 190.27 µs]
-//! short/32                time:   [387.00 µs 388.68 µs 390.46 µs]
-//! short/64                time:   [767.13 µs 770.66 µs 774.44 µs]
-//! short/128               time:   [1.5013 ms 1.5074 ms 1.5135 ms]
-//! medium/1                time:   [105.68 µs 106.08 µs 106.57 µs]
-//! medium/2                time:   [152.34 µs 152.84 µs 153.47 µs]
-//! medium/4                time:   [324.52 µs 325.81 µs 327.49 µs]
-//! medium/8                time:   [643.80 µs 646.64 µs 649.88 µs]
-//! medium/16               time:   [1.2579 ms 1.2630 ms 1.2686 ms]
-//! medium/32               time:   [2.4159 ms 2.4286 ms 2.4414 ms]
-//! medium/64               time:   [4.6483 ms 4.6821 ms 4.7140 ms]
-//! medium/128              time:   [8.7167 ms 8.8319 ms 8.9400 ms]
+//! short/1                 time:   [25.925 µs 26.060 µs 26.209 µs]
+//! short/2                 time:   [31.277 µs 31.483 µs 31.722 µs]
+//! short/4                 time:   [45.496 µs 45.831 µs 46.182 µs]
+//! short/8                 time:   [84.298 µs 84.920 µs 85.566 µs]
+//! short/16                time:   [185.04 µs 186.41 µs 187.88 µs]
+//! short/32                time:   [385.01 µs 386.77 µs 388.70 µs]
+//! short/64                time:   [770.24 µs 773.04 µs 776.04 µs]
+//! short/128               time:   [1.5017 ms 1.5064 ms 1.5113 ms]
+//! medium/1                time:   [106.65 µs 107.20 µs 107.85 µs]
+//! medium/2                time:   [153.28 µs 154.24 µs 155.56 µs]
+//! medium/4                time:   [325.67 µs 327.01 µs 328.71 µs]
+//! medium/8                time:   [646.82 µs 650.17 µs 653.91 µs]
+//! medium/16               time:   [1.2645 ms 1.2701 ms 1.2762 ms]
+//! medium/32               time:   [2.4409 ms 2.4550 ms 2.4692 ms]
+//! medium/64               time:   [4.6814 ms 4.7114 ms 4.7408 ms]
+//! medium/128              time:   [8.7790 ms 8.9037 ms 9.0282 ms]
 //! ```
 
 use bytes::{Buf, Bytes};

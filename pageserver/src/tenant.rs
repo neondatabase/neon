@@ -350,9 +350,9 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
-    pub(crate) async fn maybe_quiesce(&self, idle_timeout: Duration) {
+    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         match self {
-            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout).await,
+            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
             #[cfg(test)]
             Self::Test(_) => {
                 // Not applicable to test redo manager
