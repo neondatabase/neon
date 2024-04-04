@@ -1263,8 +1263,12 @@ impl DeltaLayerInner {
                     // is it an image or will_init walrecord?
                     // FIXME: this could be handled by threading the BlobRef to the
                     // VectoredReadBuilder
-                    let will_init =
-                        data[3] == 0 || (data[3] == 1 && data.len() > 8 && data[8] == 1);
+                    let will_init = crate::repository::ValueBytes::will_init(data)
+                        .inspect_err(|_e| {
+                            #[cfg(feature = "testing")]
+                            tracing::error!(data=?utils::Hex(data), err=?_e, "failed to parse will_init out of serialized value");
+                        })
+                        .unwrap_or(false);
 
                     per_blob_copy.clear();
                     per_blob_copy.extend_from_slice(data);

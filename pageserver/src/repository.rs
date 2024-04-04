@@ -34,6 +34,43 @@ impl Value {
 }
 
 #[cfg(test)]
+#[derive(Debug, PartialEq)]
+pub(crate) enum InvalidInput {
+    TooShortValue,
+    TooShortPostgresRecord,
+}
+
+/// We could have a ValueRef where everything is `serde(borrow)`. Before implementing that, lets
+/// use this type for querying if a slice looks some particular way.
+#[cfg(test)]
+pub(crate) struct ValueBytes;
+
+#[cfg(test)]
+impl ValueBytes {
+    pub(crate) fn will_init(raw: &[u8]) -> Result<bool, InvalidInput> {
+        if raw.len() < 12 {
+            return Err(InvalidInput::TooShortValue);
+        }
+
+        if raw[3] == 0 {
+            // Value::Image always initializes
+            return Ok(true);
+        }
+
+        if raw[3] != 1 {
+            // Only Value::WalRecord(NeonWalRecord::Postgres { .. }) might init
+            return Ok(false);
+        }
+
+        if raw.len() < 17 {
+            return Err(InvalidInput::TooShortPostgresRecord);
+        }
+
+        Ok(raw[8] == 1)
+    }
+}
+
+#[cfg(test)]
 mod test {
     use super::*;
 
@@ -70,6 +107,8 @@ mod test {
         ];
 
         roundtrip!(image, expected);
+
+        assert!(ValueBytes::will_init(&expected).unwrap());
     }
 
     #[test]
@@ -93,6 +132,68 @@ mod test {
         ];
 
         roundtrip!(rec, expected);
+
+        assert!(ValueBytes::will_init(&expected).unwrap());
+    }
+
+    #[test]
+    fn bytes_inspection_too_short_image() {
+        let rec = Value::Image(Bytes::from_static(b""));
+
+        #[rustfmt::skip]
+        let expected = [
+            // top level discriminator of 4 bytes
+            0x00, 0x00, 0x00, 0x00,
+            // 8 byte length
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        roundtrip!(rec, expected);
+
+        assert!(ValueBytes::will_init(&expected).unwrap());
+        assert_eq!(expected.len(), 12);
+        for len in 0..12 {
+            assert_eq!(
+                ValueBytes::will_init(&expected[..len]).unwrap_err(),
+                InvalidInput::TooShortValue
+            );
+        }
+    }
+
+    #[test]
+    fn bytes_inspection_too_short_postgres_record() {
+        let rec = NeonWalRecord::Postgres {
+            will_init: false,
+            rec: Bytes::from_static(b""),
+        };
+        let rec = Value::WalRecord(rec);
+
+        #[rustfmt::skip]
+        let expected = [
+            // flattened discriminator of total 8 bytes
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            // will_init
+            0x00,
+            // 8 byte length
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        roundtrip!(rec, expected);
+
+        assert!(!ValueBytes::will_init(&expected).unwrap());
+        assert_eq!(expected.len(), 17);
+        for len in 12..17 {
+            assert_eq!(
+                ValueBytes::will_init(&expected[..len]).unwrap_err(),
+                InvalidInput::TooShortPostgresRecord
+            )
+        }
+        for len in 0..12 {
+            assert_eq!(
+                ValueBytes::will_init(&expected[..len]).unwrap_err(),
+                InvalidInput::TooShortValue
+            )
+        }
     }
 }
 
