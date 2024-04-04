@@ -139,7 +139,7 @@ impl PostgresRedoManager {
         }
     }
 
-    pub(crate) async fn status(&self) -> Option<WalRedoManagerStatus> {
+    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
         Some(WalRedoManagerStatus {
             last_redo_at: {
                 let at = *self.last_redo_at.lock().unwrap();

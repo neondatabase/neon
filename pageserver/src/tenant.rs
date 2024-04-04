@@ -384,9 +384,9 @@ impl WalRedoManager {
         }
     }
 
-    pub(crate) async fn status(&self) -> Option<WalRedoManagerStatus> {
+    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
         match self {
-            WalRedoManager::Prod(m) => m.status().await,
+            WalRedoManager::Prod(m) => m.status(),
             #[cfg(test)]
             WalRedoManager::Test(_) => None,
         }
@@ -1683,12 +1683,8 @@ impl Tenant {
         self.generation
     }
 
-    pub(crate) async fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
-        if let Some(mgr) = self.walredo_mgr.as_ref() {
-            mgr.status().await
-        } else {
-            None
-        }
+    pub(crate) fn wal_redo_manager_status(&self) -> Option<WalRedoManagerStatus> {
+        self.walredo_mgr.as_ref().and_then(|mgr| mgr.status())
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
