@@ -10,9 +10,11 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    S3Scrubber,
     StorageControllerApiException,
     tenant_get_shards,
 )
+from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty
 from fixtures.remote_storage import s3_storage
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
@@ -105,6 +107,38 @@ def test_sharding_smoke(
             for tl in pageserver.http_client().timeline_list(shard["shard_id"])
         )
         assert timelines == {env.initial_timeline, timeline_b}
+
+    env.storage_controller.consistency_check()
+
+    # Validate that deleting a sharded tenant removes all files in the prefix
+
+    # Before deleting, stop the client and check we have some objects to delete
+    workload.stop()
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
+
+    # Check the scrubber isn't confused by sharded content, then disable
+    # it during teardown because we'll have deleted by then
+    S3Scrubber(neon_env_builder).scan_metadata()
+    neon_env_builder.scrub_on_exit = False
+
+    env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
 
     env.storage_controller.consistency_check()
 
