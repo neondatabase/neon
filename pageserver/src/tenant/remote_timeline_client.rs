@@ -262,6 +262,10 @@ pub(crate) const INITDB_PRESERVED_PATH: &str = "initdb-preserved.tar.zst";
 /// Default buffer size when interfacing with [`tokio::fs::File`].
 pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 
+/// Doing non-essential flushes of deletion queue is subject to this timeout, after
+/// which we warn and skip.
+const DELETION_QUEUE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted(IndexPart),
@@ -1053,7 +1057,7 @@ impl RemoteTimelineClient {
 
     async fn flush_deletion_queue(&self) -> Result<(), DeletionQueueError> {
         match tokio::time::timeout(
-            Duration::from_secs(10),
+            DELETION_QUEUE_FLUSH_TIMEOUT,
             self.deletion_queue_client.flush_immediate(),
         )
         .await
