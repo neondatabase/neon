@@ -1764,7 +1764,7 @@ impl Service {
     /// Part of [`Self::tenant_location_config`]: dissect an incoming location config request,
     /// and transform it into either a tenant creation of a series of shard updates.
     ///
-    /// If the incoming request makes no changes, an [`TenantCreateOrUpdate::Update`] result will
+    /// If the incoming request makes no changes, a [`TenantCreateOrUpdate::Update`] result will
     /// still be returned.
     fn tenant_location_config_prepare(
         &self,
