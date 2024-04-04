@@ -278,31 +278,34 @@ impl PostgresRedoManager {
                     n_attempts,
                     e,
                 );
-                // Avoid concurrent callers hitting the same issue.
-                // We can't prevent it from happening because we want to enable parallelism.
-                {
-                    match self.redo_process.get() {
-                        None => (),
-                        Some(guard) => {
-                            if Arc::ptr_eq(&proc, &*guard) {
-                                // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
-                                guard.take_and_deinit();
-                            }
-                        }
-                    }
-                }
+                // Avoid concurrent callers hitting the same issue by taking `proc` out of the rotation.
+                // Note that there may be other tasks concurrent with us that also hold `proc`.
+                // We have to deal with that here.
+                // Also read the doc comment on field `self.redo_process`.
+                //
                 // NB: there may still be other concurrent threads using `proc`.
                 // The last one will send SIGKILL when the underlying Arc reaches refcount 0.
-                // NB: it's important to drop(proc) after drop(guard). Otherwise we'd keep
-                // holding the lock while waiting for the process to exit.
-                // NB: the drop impl blocks the current threads with a wait() system call for
-                // the child process. We dropped the `guard` above so that other threads aren't
-                // affected. But, it's good that the current thread _does_ block to wait.
-                // If we instead deferred the waiting into the background / to tokio, it could
-                // happen that if walredo always fails immediately, we spawn processes faster
+                //
+                // NB: the drop impl blocks the dropping thread with a wait() system call for
+                // the child process. In some ways the blocking is actually good: if we
+                // deferred the waiting into the background / to tokio if we used `tokio::process`,
+                // it could happen that if walredo always fails immediately, we spawn processes faster
                 // than we can SIGKILL & `wait` for them to exit. By doing it the way we do here,
                 // we limit this risk of run-away to at most $num_runtimes * $num_executor_threads.
                 // This probably needs revisiting at some later point.
+                match self.redo_process.get() {
+                    None => (),
+                    Some(guard) => {
+                        if Arc::ptr_eq(&proc, &*guard) {
+                            // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
+                            guard.take_and_deinit();
+                        } else {
+                            // Another task already spawned another redo process (further up in this method)
+                            // and put it into `redo_process`. Do nothing, our view of the world is behind.
+                        }
+                    }
+                }
+                // The last task that does this `drop()` of `proc` will do a blocking `wait()` syscall.
                 drop(proc);
             } else if n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
