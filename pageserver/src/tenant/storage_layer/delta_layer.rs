@@ -1834,15 +1834,14 @@ mod test {
             .next()
             .unwrap();
 
-        let key = Key::from_i128(12);
-
         {
             let mut writer = timeline.writer().await;
 
             let data = [
-                (0x20, Value::Image(Bytes::from_static(b"foobar"))),
+                (0x20, 12, Value::Image(Bytes::from_static(b"foobar"))),
                 (
                     0x30,
+                    12,
                     Value::WalRecord(NeonWalRecord::Postgres {
                         will_init: false,
                         rec: Bytes::from_static(b"1"),
@@ -1850,6 +1849,7 @@ mod test {
                 ),
                 (
                     0x40,
+                    12,
                     Value::WalRecord(NeonWalRecord::Postgres {
                         will_init: true,
                         rec: Bytes::from_static(b"2"),
@@ -1859,6 +1859,7 @@ mod test {
                 // this
                 (
                     0x50,
+                    12,
                     Value::WalRecord(NeonWalRecord::Postgres {
                         will_init: true,
                         rec: {
@@ -1875,16 +1876,23 @@ mod test {
                 // builder created on the last round with this:
                 (
                     0x60,
+                    12,
                     Value::WalRecord(NeonWalRecord::Postgres {
                         will_init: true,
                         rec: Bytes::from_static(b"3"),
                     }),
                 ),
+                (
+                    0x60,
+                    9,
+                    Value::Image(Bytes::from_static(b"something for a different key")),
+                ),
             ];
 
             let mut last_lsn = None;
 
-            for (lsn, value) in data {
+            for (lsn, key, value) in data {
+                let key = Key::from_i128(key);
                 writer.put(key, Lsn(lsn), &value, ctx).await.unwrap();
                 last_lsn = Some(lsn);
             }
