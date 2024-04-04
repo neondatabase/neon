@@ -28,7 +28,7 @@ use utils::pid_file;
 use metrics::set_build_info_metric;
 use safekeeper::defaults::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
-    DEFAULT_PG_LISTEN_ADDR,
+    DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
 use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
@@ -170,6 +170,13 @@ struct Args {
     /// still needed for existing replication connection.
     #[arg(long)]
     walsenders_keep_horizon: bool,
+    /// Enable partial backup. If disabled, safekeeper will not upload partial
+    /// segments to remote storage.
+    #[arg(long)]
+    partial_backup_enabled: bool,
+    /// Controls how long backup will wait until uploading the partial segment.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_PARTIAL_BACKUP_TIMEOUT, verbatim_doc_comment)]
+    partial_backup_timeout: Duration,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -300,6 +307,8 @@ async fn main() -> anyhow::Result<()> {
         http_auth,
         current_thread_runtime: args.current_thread_runtime,
         walsenders_keep_horizon: args.walsenders_keep_horizon,
+        partial_backup_enabled: args.partial_backup_enabled,
+        partial_backup_timeout: args.partial_backup_timeout,
     };
 
     // initialize sentry if SENTRY_DSN is provided
@@ -364,6 +373,8 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     metrics::register_internal(Box::new(timeline_collector))?;
 
     let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
+
+    wal_backup::init_remote_storage(&conf);
 
     // Keep handles to main tasks to die if any of them disappears.
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =
