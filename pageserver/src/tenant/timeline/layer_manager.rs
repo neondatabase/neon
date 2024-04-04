@@ -12,10 +12,12 @@ use crate::{
     config::PageServerConf,
     metrics::TimelineMetrics,
     tenant::{
-        layer_map::{BatchedUpdates, LayerMap}, storage_layer::{
+        layer_map::{BatchedUpdates, LayerMap},
+        storage_layer::{
             AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
             ResidentLayer,
-        }, AttachedTenantConf
+        },
+        AttachedTenantConf,
     },
 };
 
@@ -23,7 +25,7 @@ use crate::{
 pub(crate) struct LayerManager {
     layer_map: LayerMap,
     layer_fmgr: LayerFileManager<Layer>,
-    tenant_conf: Arc<ArcSwap<AttachedTenantConf>>
+    tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
 }
 
 impl LayerManager {
@@ -31,7 +33,7 @@ impl LayerManager {
         Self {
             layer_map: LayerMap::default(),
             layer_fmgr: LayerFileManager::default(),
-            tenant_conf
+            tenant_conf,
         }
     }
 
@@ -112,8 +114,14 @@ impl LayerManager {
                 lsn
             );
 
-            let new_layer =
-                InMemoryLayer::create(conf, Arc::clone(&self.tenant_conf), timeline_id, tenant_shard_id, start_lsn).await?;
+            let new_layer = InMemoryLayer::create(
+                conf,
+                Arc::clone(&self.tenant_conf),
+                timeline_id,
+                tenant_shard_id,
+                start_lsn,
+            )
+            .await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());

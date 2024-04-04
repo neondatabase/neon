@@ -459,6 +459,7 @@ impl InMemoryLayer {
         Ok(InMemoryLayer {
             file_id: key,
             conf,
+            tenant_conf,
             timeline_id,
             tenant_shard_id,
             start_lsn,
