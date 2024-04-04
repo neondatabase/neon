@@ -1192,7 +1192,10 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     assert len(tenant_lines) == 5
     assert str(env.initial_tenant) in tenant_lines[3]
 
-    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy.*")
+    # Setting scheduling policies intentionally result in warnings, they're for rare use.
+    env.storage_controller.allowed_errors.extend(
+        [".*Skipping reconcile for policy.*", ".*Scheduling is disabled by policy.*"]
+    )
 
     # Describe a tenant
     tenant_lines = storcon_cli(["tenant-describe", "--tenant-id", str(env.initial_tenant)])
