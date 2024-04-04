@@ -724,12 +724,17 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
         StorageControllerApiException,
         match="Forbidden: JWT authentication error",
     ):
-        svc.request("POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.ADMIN))
+        svc.request(
+            "POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.SAFEKEEPER_DATA)
+        )
 
     # Token with correct scope
     svc.request(
         "POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.PAGE_SERVER_API)
     )
+
+    # Token with admin scope should also be permitted
+    svc.request("POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.ADMIN))
 
     # No token
     with pytest.raises(
