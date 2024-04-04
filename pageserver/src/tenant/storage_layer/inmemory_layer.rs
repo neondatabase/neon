@@ -11,9 +11,10 @@ use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::ValueReconstructResult;
 use crate::tenant::timeline::GetVectoredError;
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::{AttachedTenantConf, PageReconstructError, Timeline};
 use crate::{page_cache, walrecord};
 use anyhow::{anyhow, ensure, Result};
+use arc_swap::ArcSwap;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
@@ -40,6 +41,7 @@ use super::{
 pub(crate) struct InMemoryLayerFileId(page_cache::FileId);
 
 pub struct InMemoryLayer {
+    tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
     conf: &'static PageServerConf,
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
@@ -444,6 +446,7 @@ impl InMemoryLayer {
     /// Create a new, empty, in-memory layer
     pub async fn create(
         conf: &'static PageServerConf,
+        tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,

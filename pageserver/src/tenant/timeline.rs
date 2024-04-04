@@ -1790,7 +1790,7 @@ impl Timeline {
                 generation,
                 shard_identity,
                 pg_version,
-                layers: Default::default(),
+                layers: LayerManager::new(Arc::clone(&tenant_conf)),
 
                 walredo_mgr,
                 walreceiver: Mutex::new(None),

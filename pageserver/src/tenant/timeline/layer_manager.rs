@@ -1,4 +1,5 @@
 use anyhow::{bail, ensure, Context, Result};
+use arc_swap::ArcSwap;
 use pageserver_api::shard::TenantShardId;
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
@@ -11,22 +12,29 @@ use crate::{
     config::PageServerConf,
     metrics::TimelineMetrics,
     tenant::{
-        layer_map::{BatchedUpdates, LayerMap},
-        storage_layer::{
+        layer_map::{BatchedUpdates, LayerMap}, storage_layer::{
             AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
             ResidentLayer,
-        },
+        }, AttachedTenantConf
     },
 };
 
 /// Provides semantic APIs to manipulate the layer map.
-#[derive(Default)]
 pub(crate) struct LayerManager {
     layer_map: LayerMap,
     layer_fmgr: LayerFileManager<Layer>,
+    tenant_conf: Arc<ArcSwap<AttachedTenantConf>>
 }
 
 impl LayerManager {
+    pub(crate) fn new(tenant_conf: Arc<ArcSwap<AttachedTenantConf>>) -> Self {
+        Self {
+            layer_map: LayerMap::default(),
+            layer_fmgr: LayerFileManager::default(),
+            tenant_conf
+        }
+    }
+
     pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Layer {
         self.layer_fmgr.get_from_desc(desc)
     }
@@ -105,7 +113,7 @@ impl LayerManager {
             );
 
             let new_layer =
-                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn).await?;
+                InMemoryLayer::create(conf, Arc::clone(&self.tenant_conf), timeline_id, tenant_shard_id, start_lsn).await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
