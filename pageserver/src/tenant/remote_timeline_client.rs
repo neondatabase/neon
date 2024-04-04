@@ -200,6 +200,7 @@ use utils::backoff::{
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use std::ops::DerefMut;
@@ -207,7 +208,7 @@ use tracing::{debug, error, info, instrument, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
-use crate::deletion_queue::DeletionQueueClient;
+use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::metrics::{
     MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
     RemoteTimelineClientMetricsCallTrackSize, REMOTE_ONDEMAND_DOWNLOADED_BYTES,
@@ -260,6 +261,10 @@ pub(crate) const INITDB_PRESERVED_PATH: &str = "initdb-preserved.tar.zst";
 
 /// Default buffer size when interfacing with [`tokio::fs::File`].
 pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
+
+/// Doing non-essential flushes of deletion queue is subject to this timeout, after
+/// which we warn and skip.
+const DELETION_QUEUE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
@@ -1050,6 +1055,26 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    async fn flush_deletion_queue(&self) -> Result<(), DeletionQueueError> {
+        match tokio::time::timeout(
+            DELETION_QUEUE_FLUSH_TIMEOUT,
+            self.deletion_queue_client.flush_immediate(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_timeout) => {
+                // Flushing remote deletions is not mandatory: we flush here to make the system easier to test, and
+                // to ensure that _usually_ objects are really gone after a DELETE is acked.  However, in case of deletion
+                // queue issues (https://github.com/neondatabase/neon/issues/6440), we don't want to wait indefinitely here.
+                tracing::warn!(
+                    "Timed out waiting for deletion queue flush, acking deletion anyway"
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// Prerequisites: UploadQueue should be in stopped state and deleted_at should be successfuly set.
     /// The function deletes layer files one by one, then lists the prefix to see if we leaked something
     /// deletes leaked files if any and proceeds with deletion of index file at the end.
@@ -1099,7 +1124,7 @@ impl RemoteTimelineClient {
 
         // Execute all pending deletions, so that when we proceed to do a list_prefixes below, we aren't
         // taking the burden of listing all the layers that we already know we should delete.
-        self.deletion_queue_client.flush_immediate().await?;
+        self.flush_deletion_queue().await?;
 
         let cancel = shutdown_token();
 
@@ -1173,7 +1198,7 @@ impl RemoteTimelineClient {
 
         // Timeline deletion is rare and we have probably emitted a reasonably number of objects: wait
         // for a flush to a persistent deletion list so that we may be sure deletion will occur.
-        self.deletion_queue_client.flush_immediate().await?;
+        self.flush_deletion_queue().await?;
 
         fail::fail_point!("timeline-delete-after-index-delete", |_| {
             Err(anyhow::anyhow!(
