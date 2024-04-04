@@ -641,13 +641,12 @@ prefetch_on_ps_disconnect(void)
 static inline void
 prefetch_set_unused(uint64 ring_index)
 {
-	PrefetchRequest *slot = GetPrfSlot(ring_index);
+	PrefetchRequest *slot;
 
 	if (ring_index < MyPState->ring_last)
 		return;					/* Should already be unused */
 
-	Assert(MyPState->ring_unused > ring_index);
-
+	slot = GetPrfSlot(ring_index);
 	if (slot->status == PRFS_UNUSED)
 		return;
 
@@ -806,7 +805,8 @@ Retry:
 			{
 				if (*force_lsn > slot->effective_request_lsn)
 				{
-					prefetch_wait_for(ring_index);
+					if (!prefetch_wait_for(ring_index))
+						goto Retry;
 					prefetch_set_unused(ring_index);
 					entry = NULL;
 				}
@@ -821,7 +821,8 @@ Retry:
 			{
 				if (*force_lsn != slot->effective_request_lsn)
 				{
-					prefetch_wait_for(ring_index);
+					if (!prefetch_wait_for(ring_index))
+						goto Retry;
 					prefetch_set_unused(ring_index);
 					entry = NULL;
 				}
@@ -887,7 +888,8 @@ Retry:
 			{
 				case PRFS_REQUESTED:
 					Assert(MyPState->ring_receive == cleanup_index);
-					prefetch_wait_for(cleanup_index);
+					if (!prefetch_wait_for(cleanup_index))
+						goto Retry;
 					prefetch_set_unused(cleanup_index);
 					break;
 				case PRFS_RECEIVED:
@@ -2140,6 +2142,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	/*
 	 * Try to find prefetched page in the list of received pages.
 	 */
+  Retry:
 	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
 
 	if (entry != NULL)
@@ -2161,7 +2164,8 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			 */
 			if (slot->status == PRFS_REQUESTED)
 			{
-				prefetch_wait_for(slot->my_ring_index);
+				if (!prefetch_wait_for(slot->my_ring_index))
+					goto Retry;
 			}
 			/* drop caches */
 			prefetch_set_unused(slot->my_ring_index);
