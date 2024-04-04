@@ -69,6 +69,15 @@ def test_sharding_smoke(
         log.info(f"sizes = {sizes}")
         return sizes
 
+    # The imported initdb for timeline creation should
+    # not be fully imported on every shard.  We use a 1MB strripe size so expect
+    # pretty good distribution: no one shard should have more than half the data
+    sizes = get_sizes()
+    physical_initdb_total = sum(sizes.values())
+    expect_initdb_size = 20 * 1024 * 1024
+    assert physical_initdb_total > expect_initdb_size
+    assert all(s < expect_initdb_size // 2 for s in sizes.values())
+
     # Test that timeline creation works on a sharded tenant
     timeline_b = env.neon_cli.create_branch("branch_b", tenant_id=tenant_id)
 
