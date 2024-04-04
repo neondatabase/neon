@@ -9,6 +9,9 @@ mod index_part;
 mod layer_map_analyzer;
 mod layers;
 
+use std::str::FromStr;
+
+use anyhow::anyhow;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
 use index_part::IndexPartCmd;
@@ -21,6 +24,9 @@ use pageserver::{
     virtual_file,
 };
 use postgres_ffi::ControlFileData;
+use remote_storage::{RemotePath, RemoteStorageConfig};
+use tokio::fs::read_to_string;
+use tokio_util::sync::CancellationToken;
 use utils::{lsn::Lsn, project_git_version};
 
 project_git_version!(GIT_VERSION);
@@ -43,6 +49,7 @@ enum Commands {
     #[command(subcommand)]
     IndexPart(IndexPartCmd),
     PrintLayerFile(PrintLayerFileCmd),
+    TimeTravelRemotePrefix(TimeTravelRemotePrefixCmd),
     DrawTimeline {},
     AnalyzeLayerMap(AnalyzeLayerMapCmd),
     #[command(subcommand)]
@@ -66,6 +73,15 @@ struct MetadataCmd {
 struct PrintLayerFileCmd {
     /// Pageserver data path
     path: Utf8PathBuf,
+}
+
+#[derive(Parser)]
+struct TimeTravelRemotePrefixCmd {
+    config_toml_path: Utf8PathBuf,
+    // remote prefix to time travel recover
+    prefix: String,
+    travel_to: String,
+    done_if_after: String,
 }
 
 #[derive(Parser)]
@@ -104,6 +120,31 @@ async fn main() -> anyhow::Result<()> {
                 );
                 print_layerfile(&cmd.path).await?;
             }
+        }
+        Commands::TimeTravelRemotePrefix(cmd) => {
+            let timestamp = humantime::parse_rfc3339(&cmd.travel_to)
+                .map_err(|_e| anyhow::anyhow!("Invalid time for travel_to: '{}'", cmd.travel_to))?;
+
+            let done_if_after = humantime::parse_rfc3339(&cmd.done_if_after).map_err(|_e| {
+                anyhow::anyhow!("Invalid time for done_if_after: '{}'", cmd.done_if_after)
+            })?;
+
+            let toml = read_to_string(&cmd.config_toml_path).await.map_err(|e| {
+                anyhow!(
+                    "Couldn't read remote storage config toml path at {}: {e:?}",
+                    cmd.config_toml_path
+                )
+            })?;
+
+            let prefix = RemotePath::from_string(&cmd.prefix)?;
+            let toml_item = toml_edit::Item::from_str(&toml)?;
+            let config = RemoteStorageConfig::from_toml(&toml_item)?.expect("incomplete config");
+            let storage = remote_storage::GenericRemoteStorage::from_config(&config);
+            let cancel = CancellationToken::new();
+            storage
+                .unwrap()
+                .time_travel_recover(Some(&prefix), timestamp, done_if_after, &cancel)
+                .await?;
         }
     };
     Ok(())
