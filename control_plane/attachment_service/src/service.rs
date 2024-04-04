@@ -1763,6 +1763,9 @@ impl Service {
 
     /// Part of [`Self::tenant_location_config`]: dissect an incoming location config request,
     /// and transform it into either a tenant creation of a series of shard updates.
+    ///
+    /// If the incoming request makes no changes, an [`TenantCreateOrUpdate::Update`] result will
+    /// still be returned.
     fn tenant_location_config_prepare(
         &self,
         tenant_id: TenantId,
@@ -1810,17 +1813,12 @@ impl Service {
                 _ => None,
             };
 
-            if shard.policy != placement_policy
-                || shard.config != req.config.tenant_conf
-                || set_generation.is_some()
-            {
-                updates.push(ShardUpdate {
-                    tenant_shard_id: *shard_id,
-                    placement_policy: placement_policy.clone(),
-                    tenant_config: req.config.tenant_conf.clone(),
-                    generation: set_generation,
-                });
-            }
+            updates.push(ShardUpdate {
+                tenant_shard_id: *shard_id,
+                placement_policy: placement_policy.clone(),
+                tenant_config: req.config.tenant_conf.clone(),
+                generation: set_generation,
+            });
         }
 
         if create {
@@ -1849,6 +1847,7 @@ impl Service {
                 },
             )
         } else {
+            assert!(!updates.is_empty());
             TenantCreateOrUpdate::Update(updates)
         }
     }
