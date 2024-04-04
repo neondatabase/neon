@@ -1,4 +1,5 @@
 use anyhow::Context;
+use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
 
@@ -95,7 +96,7 @@ async fn main_impl(
             let timeline = *timeline;
             let info = mgmt_api_client
                 .timeline_info(
-                    timeline.tenant_id,
+                    TenantShardId::unsharded(timeline.tenant_id),
                     timeline.timeline_id,
                     ForceAwaitLogicalSize::No,
                 )
