@@ -48,6 +48,10 @@ inputs:
     description: 'benchmark durations JSON'
     required: false
     default: '{}'
+  session_timeout:
+    description: 'Session timeout for the test suite'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -107,6 +111,7 @@ runs:
         ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
         RERUN_FLAKY: ${{ inputs.rerun_flaky }}
         PG_VERSION: ${{ inputs.pg_version }}
+        SESSION_TIMEOUT: ${{ inputs.session_timeout }}
       shell: bash -euxo pipefail {0}
       run: |
         # PLATFORM will be embedded in the perf test report
@@ -166,6 +171,10 @@ runs:
           echo '${{ inputs.benchmark_durations || '{}' }}' > $TEST_OUTPUT/benchmark_durations.json
 
           EXTRA_PARAMS="--durations-path $TEST_OUTPUT/benchmark_durations.json $EXTRA_PARAMS"
+        fi
+
+        if [ -n "${SESSION_TIMEOUT}" ]; then
+          EXTRA_PARAMS="--session-timeout ${SESSION_TIMEOUT} ${EXTRA_PARAMS}"
         fi
 
         if [[ "${{ inputs.build_type }}" == "debug" ]]; then

@@ -461,7 +461,8 @@ jobs:
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
-        timeout-minutes: 60
+        # Hard timeout to prevent hanging tests, we also have set softer pytest timeout (set via `session_timeout`) which is shorter
+        timeout-minutes: 90
         with:
           build_type: ${{ matrix.build_type }}
           test_selection: regress
@@ -471,6 +472,7 @@ jobs:
           real_s3_region: eu-central-1
           rerun_flaky: true
           pg_version: ${{ matrix.pg_version }}
+          session_timeout: '60'
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
