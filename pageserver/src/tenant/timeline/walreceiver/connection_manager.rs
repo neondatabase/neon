@@ -717,8 +717,9 @@ impl ConnectionManagerState {
 
         if old_entry.is_none() {
             info!(
-                "New SK node was added{}: {new_safekeeper_id}",
-                if is_discovery { " (discovery)" } else { "" },
+                ?is_discovery,
+                %new_safekeeper_id,
+                "New SK node was added",
             );
             WALRECEIVER_CANDIDATES_ADDED.inc();
         }
