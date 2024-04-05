@@ -2,8 +2,8 @@
 # see https://diesel.rs/guides/configuring-diesel-cli
 
 [print_schema]
-file = "control_plane/attachment_service/src/schema.rs"
+file = "storage_controller/src/schema.rs"
 custom_type_derives = ["diesel::query_builder::QueryId"]
 
 [migrations_directory]
-dir = "control_plane/attachment_service/migrations"
+dir = "storage_controller/migrations"

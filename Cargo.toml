@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "compute_tools",
     "control_plane",
-    "control_plane/attachment_service",
     "control_plane/storcon_cli",
     "pageserver",
     "pageserver/compaction",
@@ -13,6 +12,7 @@ members = [
     "proxy",
     "safekeeper",
     "storage_broker",
+    "storage_controller",
     "s3_scrubber",
     "workspace_hack",
     "trace",

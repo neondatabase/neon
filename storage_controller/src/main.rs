@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context};
-use attachment_service::http::make_router;
-use attachment_service::metrics::preinitialize_metrics;
-use attachment_service::persistence::Persistence;
-use attachment_service::service::{Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT};
+use storage_controller::http::make_router;
+use storage_controller::metrics::preinitialize_metrics;
+use storage_controller::persistence::Persistence;
+use storage_controller::service::{Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use diesel::Connection;
@@ -50,7 +50,7 @@ struct Cli {
     #[arg(short, long)]
     path: Option<Utf8PathBuf>,
 
-    /// URL to connect to postgres, like postgresql://localhost:1234/attachment_service
+    /// URL to connect to postgres, like postgresql://localhost:1234/storage_controller
     #[arg(long)]
     database_url: Option<String>,
 
