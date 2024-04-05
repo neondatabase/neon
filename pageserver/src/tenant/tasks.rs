@@ -18,7 +18,7 @@ use utils::{backoff, completion};
 
 static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
     once_cell::sync::Lazy::new(|| {
-        let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
+        let total_threads = task_mgr::TOKIO_WORKER_THREADS.get();
         let permits = usize::max(
             1,
             // while a lot of the work is done on spawn_blocking, we still do
@@ -72,6 +72,7 @@ pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
         loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation
     );
 
+    // TODO: assert that we run on BACKGROUND_RUNTIME; requires tokio_unstable Handle::id();
     match CONCURRENT_BACKGROUND_TASKS.acquire().await {
         Ok(permit) => permit,
         Err(_closed) => unreachable!("we never close the semaphore"),
