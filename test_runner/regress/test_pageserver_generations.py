@@ -111,7 +111,6 @@ def generate_uploads_and_deletions(
             last_flush_lsn_upload(
                 env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
             )
-            ps_http.timeline_checkpoint(tenant_id, timeline_id)
 
         # Compaction should generate some GC-elegible layers
         for i in range(0, 2):
