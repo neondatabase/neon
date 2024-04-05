@@ -66,9 +66,9 @@ use crate::{
     persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
     reconciler::attached_location_conf,
     scheduler::Scheduler,
-    tenant_state::{
+    tenant_shard::{
         IntentState, ObservedState, ObservedStateLocation, ReconcileResult, ReconcileWaitError,
-        ReconcilerWaiter, TenantState,
+        ReconcilerWaiter, TenantShard,
     },
 };
 
@@ -92,7 +92,7 @@ pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
 
 // Top level state available to all HTTP handlers
 struct ServiceState {
-    tenants: BTreeMap<TenantShardId, TenantState>,
+    tenants: BTreeMap<TenantShardId, TenantShard>,
 
     nodes: Arc<HashMap<NodeId, Node>>,
 
@@ -102,7 +102,7 @@ struct ServiceState {
 impl ServiceState {
     fn new(
         nodes: HashMap<NodeId, Node>,
-        tenants: BTreeMap<TenantShardId, TenantState>,
+        tenants: BTreeMap<TenantShardId, TenantShard>,
         scheduler: Scheduler,
     ) -> Self {
         Self {
@@ -116,7 +116,7 @@ impl ServiceState {
         &mut self,
     ) -> (
         &mut Arc<HashMap<NodeId, Node>>,
-        &mut BTreeMap<TenantShardId, TenantState>,
+        &mut BTreeMap<TenantShardId, TenantShard>,
         &mut Scheduler,
     ) {
         (&mut self.nodes, &mut self.tenants, &mut self.scheduler)
@@ -743,7 +743,7 @@ impl Service {
 
     /// Apply the contents of a [`ReconcileResult`] to our in-memory state: if the reconciliation
     /// was successful, this will update the observed state of the tenant such that subsequent
-    /// calls to [`TenantState::maybe_reconcile`] will do nothing.
+    /// calls to [`TenantShard::maybe_reconcile`] will do nothing.
     #[instrument(skip_all, fields(
         tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
         sequence=%result.sequence
@@ -761,10 +761,10 @@ impl Service {
         tenant.generation = std::cmp::max(tenant.generation, result.generation);
 
         // If the reconciler signals that it failed to notify compute, set this state on
-        // the shard so that a future [`TenantState::maybe_reconcile`] will try again.
+        // the shard so that a future [`TenantShard::maybe_reconcile`] will try again.
         tenant.pending_compute_notification = result.pending_compute_notification;
 
-        // Let the TenantState know it is idle.
+        // Let the TenantShard know it is idle.
         tenant.reconcile_complete(result.sequence);
 
         match result.result {
@@ -979,7 +979,7 @@ impl Service {
             if let Some(generation_pageserver) = tsp.generation_pageserver {
                 intent.set_attached(&mut scheduler, Some(NodeId(generation_pageserver as u64)));
             }
-            let new_tenant = TenantState::from_persistent(tsp, intent)?;
+            let new_tenant = TenantShard::from_persistent(tsp, intent)?;
 
             tenants.insert(tenant_shard_id, new_tenant);
         }
@@ -1126,7 +1126,7 @@ impl Service {
                     let mut locked = self.inner.write().unwrap();
                     locked.tenants.insert(
                         attach_req.tenant_shard_id,
-                        TenantState::new(
+                        TenantShard::new(
                             attach_req.tenant_shard_id,
                             ShardIdentity::unsharded(),
                             PlacementPolicy::Attached(0),
@@ -1688,7 +1688,7 @@ impl Service {
                         continue;
                     }
                     Entry::Vacant(entry) => {
-                        let state = entry.insert(TenantState::new(
+                        let state = entry.insert(TenantShard::new(
                             tenant_shard_id,
                             ShardIdentity::from_params(
                                 tenant_shard_id.shard_number,
@@ -2738,7 +2738,7 @@ impl Service {
     /// Returns None if the input iterator of shards does not include a shard with number=0
     fn tenant_describe_impl<'a>(
         &self,
-        shards: impl Iterator<Item = &'a TenantState>,
+        shards: impl Iterator<Item = &'a TenantShard>,
     ) -> Option<TenantDescribeResponse> {
         let mut shard_zero = None;
         let mut describe_shards = Vec::new();
@@ -3038,7 +3038,7 @@ impl Service {
                         },
                     );
 
-                    let mut child_state = TenantState::new(child, child_shard, policy.clone());
+                    let mut child_state = TenantShard::new(child, child_shard, policy.clone());
                     child_state.intent = IntentState::single(scheduler, Some(pageserver));
                     child_state.observed = ObservedState {
                         locations: child_observed,
@@ -3046,7 +3046,7 @@ impl Service {
                     child_state.generation = Some(generation);
                     child_state.config = config.clone();
 
-                    // The child's TenantState::splitting is intentionally left at the default value of Idle,
+                    // The child's TenantShard::splitting is intentionally left at the default value of Idle,
                     // as at this point in the split process we have succeeded and this part is infallible:
                     // we will never need to do any special recovery from this state.
 
@@ -3595,8 +3595,8 @@ impl Service {
         Ok(())
     }
 
-    /// For debug/support: a full JSON dump of TenantStates.  Returns a response so that
-    /// we don't have to make TenantState clonable in the return path.
+    /// For debug/support: a full JSON dump of TenantShards.  Returns a response so that
+    /// we don't have to make TenantShard clonable in the return path.
     pub(crate) fn tenants_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
         let serialized = {
             let locked = self.inner.read().unwrap();
@@ -3700,7 +3700,7 @@ impl Service {
     }
 
     /// For debug/support: a JSON dump of the [`Scheduler`].  Returns a response so that
-    /// we don't have to make TenantState clonable in the return path.
+    /// we don't have to make TenantShard clonable in the return path.
     pub(crate) fn scheduler_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
         let serialized = {
             let locked = self.inner.read().unwrap();
@@ -3943,7 +3943,7 @@ impl Service {
                             Err(e) => {
                                 // It is possible that some tenants will become unschedulable when too many pageservers
                                 // go offline: in this case there isn't much we can do other than make the issue observable.
-                                // TODO: give TenantState a scheduling error attribute to be queried later.
+                                // TODO: give TenantShard a scheduling error attribute to be queried later.
                                 tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", node_id);
                             }
                             Ok(()) => {
@@ -4053,11 +4053,11 @@ impl Service {
         Ok(())
     }
 
-    /// Convenience wrapper around [`TenantState::maybe_reconcile`] that provides
+    /// Convenience wrapper around [`TenantShard::maybe_reconcile`] that provides
     /// all the references to parts of Self that are needed
     fn maybe_reconcile_shard(
         &self,
-        shard: &mut TenantState,
+        shard: &mut TenantShard,
         nodes: &Arc<HashMap<NodeId, Node>>,
     ) -> Option<ReconcilerWaiter> {
         shard.maybe_reconcile(
@@ -4123,7 +4123,7 @@ impl Service {
 
         let mut reconciles_spawned = 0;
 
-        let mut tenant_shards: Vec<&TenantState> = Vec::new();
+        let mut tenant_shards: Vec<&TenantShard> = Vec::new();
 
         // Limit on how many shards' optmizations each call to this function will execute.  Combined
         // with the frequency of background calls, this acts as an implicit rate limit that runs a small
@@ -4254,7 +4254,7 @@ impl Service {
 
     pub async fn shutdown(&self) {
         // Note that this already stops processing any results from reconciles: so
-        // we do not expect that our [`TenantState`] objects will reach a neat
+        // we do not expect that our [`TenantShard`] objects will reach a neat
         // final state.
         self.cancel.cancel();
 

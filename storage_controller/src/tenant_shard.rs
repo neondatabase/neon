@@ -50,7 +50,7 @@ where
 /// This struct implement Serialize for debugging purposes, but is _not_ persisted
 /// itself: see [`crate::persistence`] for the subset of tenant shard state that is persisted.
 #[derive(Serialize)]
-pub(crate) struct TenantState {
+pub(crate) struct TenantShard {
     pub(crate) tenant_shard_id: TenantShardId,
 
     pub(crate) shard: ShardIdentity,
@@ -354,7 +354,7 @@ pub(crate) struct ReconcilerHandle {
 }
 
 /// When a reconcile task completes, it sends this result object
-/// to be applied to the primary TenantState.
+/// to be applied to the primary TenantShard.
 pub(crate) struct ReconcileResult {
     pub(crate) sequence: Sequence,
     /// On errors, `observed` should be treated as an incompleted description
@@ -367,7 +367,7 @@ pub(crate) struct ReconcileResult {
     pub(crate) generation: Option<Generation>,
     pub(crate) observed: ObservedState,
 
-    /// Set [`TenantState::pending_compute_notification`] from this flag
+    /// Set [`TenantShard::pending_compute_notification`] from this flag
     pub(crate) pending_compute_notification: bool,
 }
 
@@ -379,7 +379,7 @@ impl ObservedState {
     }
 }
 
-impl TenantState {
+impl TenantShard {
     pub(crate) fn new(
         tenant_shard_id: TenantShardId,
         shard: ShardIdentity,
@@ -1143,7 +1143,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantState {
+    fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantShard {
         let tenant_id = TenantId::generate();
         let shard_number = ShardNumber(0);
         let shard_count = ShardCount::new(1);
@@ -1153,7 +1153,7 @@ pub(crate) mod tests {
             shard_number,
             shard_count,
         };
-        TenantState::new(
+        TenantShard::new(
             tenant_shard_id,
             ShardIdentity::new(
                 shard_number,
@@ -1165,7 +1165,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn make_test_tenant(policy: PlacementPolicy, shard_count: ShardCount) -> Vec<TenantState> {
+    fn make_test_tenant(policy: PlacementPolicy, shard_count: ShardCount) -> Vec<TenantShard> {
         let tenant_id = TenantId::generate();
 
         (0..shard_count.count())
@@ -1177,7 +1177,7 @@ pub(crate) mod tests {
                     shard_number,
                     shard_count,
                 };
-                TenantState::new(
+                TenantShard::new(
                     tenant_shard_id,
                     ShardIdentity::new(
                         shard_number,
@@ -1429,7 +1429,7 @@ pub(crate) mod tests {
     fn optimize_til_idle(
         nodes: &HashMap<NodeId, Node>,
         scheduler: &mut Scheduler,
-        shards: &mut [TenantState],
+        shards: &mut [TenantShard],
     ) {
         let mut loop_n = 0;
         loop {
