@@ -1,15 +1,9 @@
-use std::{
-    io::BufWriter,
-    str::FromStr,
-    sync::{Arc, Mutex},
-};
+use std::str::FromStr;
 
 use anyhow::Context;
 use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, EnumVariantNames};
-
-use super::env_config;
 
 #[derive(EnumString, EnumVariantNames, Eq, PartialEq, Debug, Clone, Copy)]
 #[strum(serialize_all = "snake_case")]

@@ -64,7 +64,7 @@ pub async fn collect_metrics(
     let worker_ctx =
         ctx.detached_child(TaskKind::CalculateSyntheticSize, DownloadBehavior::Download);
     task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
+        *BACKGROUND_RUNTIME,
         TaskKind::CalculateSyntheticSize,
         None,
         None,

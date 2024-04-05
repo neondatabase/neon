@@ -383,7 +383,7 @@ impl DeleteTimelineFlow {
         let timeline_id = timeline.timeline_id;
 
         task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
+            *task_mgr::BACKGROUND_RUNTIME,
             TaskKind::TimelineDeletionWorker,
             Some(tenant_shard_id),
             Some(timeline_id),

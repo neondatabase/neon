@@ -317,7 +317,7 @@ pub fn spawn_tasks(
         tokio::sync::mpsc::channel::<CommandRequest<UploadCommand>>(16);
 
     task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
+        *BACKGROUND_RUNTIME,
         TaskKind::SecondaryDownloads,
         None,
         None,
@@ -338,7 +338,7 @@ pub fn spawn_tasks(
     );
 
     task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
+        *BACKGROUND_RUNTIME,
         TaskKind::SecondaryUploads,
         None,
         None,

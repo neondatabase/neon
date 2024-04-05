@@ -39,7 +39,6 @@ use std::sync::{Arc, Mutex};
 
 use futures::FutureExt;
 use pageserver_api::shard::TenantShardId;
-use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +47,7 @@ use tracing::{debug, error, info, warn};
 
 use once_cell::sync::Lazy;
 
+use utils::env_config;
 use utils::id::TimelineId;
 
 //
@@ -98,42 +98,49 @@ use utils::id::TimelineId;
 // other operations, if the upload tasks e.g. get blocked on locks. It shouldn't
 // happen, but still.
 //
-pub static COMPUTE_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("compute request worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create compute request runtime")
+
+static USE_SINGLE_RUNTIME: Lazy<bool> = Lazy::new(|| {
+    env_config::var("NEON_PAGESERVER_USE_SINGLE_RUNTIME", || {
+        env_config::Bool::new(false)
+    })
+    .into()
 });
 
-pub static MGMT_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+static SINGLE_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
-        .thread_name("mgmt request worker")
+        .thread_name("pageserver worker")
         .enable_all()
         .build()
-        .expect("Failed to create mgmt request runtime")
+        .expect("failed to create single runtime")
 });
 
-pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("walreceiver worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create walreceiver runtime")
-});
+macro_rules! single_runtime_or_multi_thread_enable_all {
+    ($varname:ident, $name:literal) => {
+        pub static $varname: Lazy<&'static tokio::runtime::Handle> = Lazy::new(|| {
+            if *USE_SINGLE_RUNTIME {
+                SINGLE_RUNTIME.handle()
+            } else {
+                static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .thread_name($name)
+                        .enable_all()
+                        .build()
+                        .expect(std::concat!("Failed to create runtime ", $name))
+                });
+                RUNTIME.handle()
+            }
+        });
+    };
+}
 
-pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("background op worker")
-        // if you change the number of worker threads please change the constant below
-        .enable_all()
-        .build()
-        .expect("Failed to create background op runtime")
-});
-
+single_runtime_or_multi_thread_enable_all!(COMPUTE_REQUEST_RUNTIME, "compute request worker");
+single_runtime_or_multi_thread_enable_all!(MGMT_REQUEST_RUNTIME, "mgmt request worker");
+single_runtime_or_multi_thread_enable_all!(WALRECEIVER_RUNTIME, "walreceiver worker");
+// if you change the number of worker threads please change the constant below
+single_runtime_or_multi_thread_enable_all!(BACKGROUND_RUNTIME, "background op worker");
 pub(crate) static BACKGROUND_RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| {
     // force init and thus panics
-    let _ = BACKGROUND_RUNTIME.handle();
+    let _ = *BACKGROUND_RUNTIME;
     // replicates tokio-1.28.1::loom::sys::num_cpus which is not available publicly
     // tokio would had already panicked for parsing errors or NotUnicode
     //

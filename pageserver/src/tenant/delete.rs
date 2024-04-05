@@ -485,7 +485,7 @@ impl DeleteTenantFlow {
         let tenant_shard_id = tenant.tenant_shard_id;
 
         task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
+            *task_mgr::BACKGROUND_RUNTIME,
             TaskKind::TimelineDeletionWorker,
             Some(tenant_shard_id),
             None,
