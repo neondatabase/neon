@@ -8,6 +8,7 @@ use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use camino::Utf8Path;
 use futures::StreamExt;
+use pageserver_api::key::rel_block_to_key;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
 use tracing::*;
@@ -170,7 +171,10 @@ async fn import_rel(
         let r = reader.read_exact(&mut buf).await;
         match r {
             Ok(_) => {
-                modification.put_rel_page_image(rel, blknum, Bytes::copy_from_slice(&buf))?;
+                let key = rel_block_to_key(rel, blknum);
+                if modification.tline.get_shard_identity().is_key_local(&key) {
+                    modification.put_rel_page_image(rel, blknum, Bytes::copy_from_slice(&buf))?;
+                }
             }
 
             // TODO: UnexpectedEof is expected

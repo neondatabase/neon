@@ -4,7 +4,7 @@ use crate::{
     console::messages::MetricsAuxInfo,
     metrics::NUM_BYTES_PROXIED_COUNTER,
     stream::Stream,
-    usage_metrics::{Ids, USAGE_METRICS},
+    usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS},
 };
 use metrics::IntCounterPairGuard;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -19,8 +19,8 @@ pub async fn proxy_pass(
     aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let usage = USAGE_METRICS.register(Ids {
-        endpoint_id: aux.endpoint_id.clone(),
-        branch_id: aux.branch_id.clone(),
+        endpoint_id: aux.endpoint_id,
+        branch_id: aux.branch_id,
     });
 
     let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
@@ -55,17 +55,17 @@ pub async fn proxy_pass(
     Ok(())
 }
 
-pub struct ProxyPassthrough<S> {
+pub struct ProxyPassthrough<P, S> {
     pub client: Stream<S>,
     pub compute: PostgresConnection,
     pub aux: MetricsAuxInfo,
 
     pub req: IntCounterPairGuard,
     pub conn: IntCounterPairGuard,
-    pub cancel: cancellation::Session,
+    pub cancel: cancellation::Session<P>,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
+impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
     pub async fn proxy_pass(self) -> anyhow::Result<()> {
         let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
         self.compute.cancel_closure.try_cancel_query().await?;

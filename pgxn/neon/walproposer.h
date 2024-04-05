@@ -287,6 +287,7 @@ typedef struct WalproposerShmemState
 	slock_t		mutex;
 	term_t		mineLastElectedTerm;
 	pg_atomic_uint64 backpressureThrottlingTime;
+	pg_atomic_uint64 currentClusterSize;
 
 	/* last feedback from each shard */
 	PageserverFeedback shard_ps_feedback[MAX_SHARDS];

@@ -9,7 +9,6 @@ use crate::{
     config::ProxyConfig,
     console::{
         errors::{GetAuthInfoError, WakeComputeError},
-        messages::ColdStartInfo,
         CachedNodeInfo,
     },
     context::RequestMonitoring,
@@ -42,7 +41,12 @@ impl PoolingBackend {
         };
 
         let secret = match cached_secret.value.clone() {
-            Some(secret) => secret,
+            Some(secret) => self.config.authentication_config.check_rate_limit(
+                ctx,
+                secret,
+                &user_info.endpoint,
+                true,
+            )?,
             None => {
                 // If we don't have an authentication secret, for the http flow we can just return an error.
                 info!("authentication info not found");
@@ -52,7 +56,10 @@ impl PoolingBackend {
         let auth_outcome =
             crate::auth::validate_password_and_exchange(&conn_info.password, secret).await?;
         let res = match auth_outcome {
-            crate::sasl::Outcome::Success(key) => Ok(key),
+            crate::sasl::Outcome::Success(key) => {
+                info!("user successfully authenticated");
+                Ok(key)
+            }
             crate::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
                 Err(AuthError::auth_failed(&*conn_info.user_info.user))
@@ -84,8 +91,6 @@ impl PoolingBackend {
         };
 
         if let Some(client) = maybe_client {
-            info!("cold_start_info=warm");
-            ctx.set_cold_start_info(ColdStartInfo::Warm);
             return Ok(client);
         }
         let conn_id = uuid::Uuid::new_v4();

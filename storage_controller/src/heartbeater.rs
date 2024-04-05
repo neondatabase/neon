@@ -139,7 +139,7 @@ impl HeartbeaterTask {
                         .with_client_retries(
                             |client| async move { client.get_utilization().await },
                             &jwt_token,
-                            2,
+                            3,
                             3,
                             Duration::from_secs(1),
                             &cancel,

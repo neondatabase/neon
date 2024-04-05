@@ -180,6 +180,7 @@ typedef struct
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
 	NeonResponse *(*receive) (shardno_t shard_no);
 	bool		(*flush) (shardno_t shard_no);
+	void        (*disconnect) (shardno_t shard_no);
 } page_server_api;
 
 extern void prefetch_on_ps_disconnect(void);

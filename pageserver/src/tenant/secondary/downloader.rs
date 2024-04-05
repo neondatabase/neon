@@ -11,11 +11,11 @@ use crate::{
     disk_usage_eviction_task::{
         finite_f32, DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer,
     },
-    is_temporary,
     metrics::SECONDARY_MODE,
     tenant::{
         config::SecondaryLocationConfig,
         debug_assert_current_span_has_tenant_and_timeline_id,
+        ephemeral_file::is_ephemeral_file,
         remote_timeline_client::{
             index::LayerFileMetadata, is_temp_download_file, FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
@@ -786,6 +786,35 @@ impl<'a> TenantDownloader<'a> {
             // Existing on-disk layers: just update their access time.
             if let Some(on_disk) = timeline_state.on_disk_layers.get(&layer.name) {
                 tracing::debug!("Layer {} is already on disk", layer.name);
+
+                if cfg!(debug_assertions) {
+                    // Debug for https://github.com/neondatabase/neon/issues/6966: check that the files we think
+                    // are already present on disk are really there.
+                    let local_path = self
+                        .conf
+                        .timeline_path(tenant_shard_id, &timeline.timeline_id)
+                        .join(layer.name.file_name());
+                    match tokio::fs::metadata(&local_path).await {
+                        Ok(meta) => {
+                            tracing::debug!(
+                                "Layer {} present at {}, size {}",
+                                layer.name,
+                                local_path,
+                                meta.len(),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Layer {} not found at {} ({})",
+                                layer.name,
+                                local_path,
+                                e
+                            );
+                            debug_assert!(false);
+                        }
+                    }
+                }
+
                 if on_disk.metadata != LayerFileMetadata::from(&layer.metadata)
                     || on_disk.access_time != layer.access_time
                 {
@@ -964,7 +993,7 @@ async fn init_timeline_state(
             continue;
         } else if crate::is_temporary(&file_path)
             || is_temp_download_file(&file_path)
-            || is_temporary(&file_path)
+            || is_ephemeral_file(file_name)
         {
             // Temporary files are frequently left behind from restarting during downloads
             tracing::info!("Cleaning up temporary file {file_path}");

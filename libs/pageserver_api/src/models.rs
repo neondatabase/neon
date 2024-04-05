@@ -302,6 +302,7 @@ pub struct TenantConfig {
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
+    pub image_layer_creation_check_threshold: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -63,6 +63,7 @@ impl UnwrittenLockFile {
 pub fn create_exclusive(lock_file_path: &Utf8Path) -> anyhow::Result<UnwrittenLockFile> {
     let lock_file = fs::OpenOptions::new()
         .create(true) // O_CREAT
+        .truncate(true)
         .write(true)
         .open(lock_file_path)
         .context("open lock file")?;

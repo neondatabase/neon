@@ -81,9 +81,18 @@ class Workload:
 
         return self._endpoint
 
-    def __del__(self):
+    def stop(self):
         if self._endpoint is not None:
             self._endpoint.stop()
+            self._endpoint = None
+
+    def __del__(self):
+        self.stop()
+
+    def stop(self):
+        if self._endpoint is not None:
+            self._endpoint.stop()
+            self._endpoint = None
 
     def init(self, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)

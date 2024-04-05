@@ -9,6 +9,7 @@ use camino::Utf8PathBuf;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
+use pageserver_api::controller_api::ShardSchedulingPolicy;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
 use pageserver_api::models::TenantConfig;
 use pageserver_api::shard::ShardConfigError;
@@ -107,6 +108,12 @@ pub(crate) enum AbortShardSplitStatus {
 
 pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
 
+/// Some methods can operate on either a whole tenant or a single shard
+pub(crate) enum TenantFilter {
+    Tenant(TenantId),
+    Shard(TenantShardId),
+}
+
 impl Persistence {
     // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
     // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
@@ -140,7 +147,7 @@ impl Persistence {
     /// Wraps `with_conn` in order to collect latency and error metrics
     async fn with_measured_conn<F, R>(&self, op: DatabaseOperation, func: F) -> DatabaseResult<R>
     where
-        F: Fn(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
+        F: FnOnce(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
         R: Send + 'static,
     {
         let latency = &METRICS_REGISTRY
@@ -168,7 +175,7 @@ impl Persistence {
     /// Call the provided function in a tokio blocking thread, with a Diesel database connection.
     async fn with_conn<F, R>(&self, func: F) -> DatabaseResult<R>
     where
-        F: Fn(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
+        F: FnOnce(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
         R: Send + 'static,
     {
         let mut conn = self.connection_pool.get()?;
@@ -274,6 +281,11 @@ impl Persistence {
             if shard.placement_policy == "\"Single\"" {
                 // Backward compat for test data after PR https://github.com/neondatabase/neon/pull/7165
                 shard.placement_policy = "{\"Attached\":0}".to_string();
+            }
+
+            if shard.scheduling_policy.is_empty() {
+                shard.scheduling_policy =
+                    serde_json::to_string(&ShardSchedulingPolicy::default()).unwrap();
             }
         }
 
@@ -465,59 +477,45 @@ impl Persistence {
     /// that we only do the first time a tenant is set to an attached policy via /location_config.
     pub(crate) async fn update_tenant_shard(
         &self,
-        tenant_shard_id: TenantShardId,
-        input_placement_policy: PlacementPolicy,
-        input_config: TenantConfig,
+        tenant: TenantFilter,
+        input_placement_policy: Option<PlacementPolicy>,
+        input_config: Option<TenantConfig>,
         input_generation: Option<Generation>,
+        input_scheduling_policy: Option<ShardSchedulingPolicy>,
     ) -> DatabaseResult<()> {
         use crate::schema::tenant_shards::dsl::*;
 
         self.with_measured_conn(DatabaseOperation::UpdateTenantShard, move |conn| {
-            let query = diesel::update(tenant_shards)
-                .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
-                .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
-                .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32));
+            let query = match tenant {
+                TenantFilter::Shard(tenant_shard_id) => diesel::update(tenant_shards)
+                    .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
+                    .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
+                    .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
+                    .into_boxed(),
+                TenantFilter::Tenant(input_tenant_id) => diesel::update(tenant_shards)
+                    .filter(tenant_id.eq(input_tenant_id.to_string()))
+                    .into_boxed(),
+            };
 
-            if let Some(input_generation) = input_generation {
-                // Update includes generation column
-                query
-                    .set((
-                        generation.eq(Some(input_generation.into().unwrap() as i32)),
-                        placement_policy
-                            .eq(serde_json::to_string(&input_placement_policy).unwrap()),
-                        config.eq(serde_json::to_string(&input_config).unwrap()),
-                    ))
-                    .execute(conn)?;
-            } else {
-                // Update does not include generation column
-                query
-                    .set((
-                        placement_policy
-                            .eq(serde_json::to_string(&input_placement_policy).unwrap()),
-                        config.eq(serde_json::to_string(&input_config).unwrap()),
-                    ))
-                    .execute(conn)?;
+            #[derive(AsChangeset)]
+            #[diesel(table_name = crate::schema::tenant_shards)]
+            struct ShardUpdate {
+                generation: Option<i32>,
+                placement_policy: Option<String>,
+                config: Option<String>,
+                scheduling_policy: Option<String>,
             }
 
-            Ok(())
-        })
-        .await?;
+            let update = ShardUpdate {
+                generation: input_generation.map(|g| g.into().unwrap() as i32),
+                placement_policy: input_placement_policy
+                    .map(|p| serde_json::to_string(&p).unwrap()),
+                config: input_config.map(|c| serde_json::to_string(&c).unwrap()),
+                scheduling_policy: input_scheduling_policy
+                    .map(|p| serde_json::to_string(&p).unwrap()),
+            };
 
-        Ok(())
-    }
-
-    pub(crate) async fn update_tenant_config(
-        &self,
-        input_tenant_id: TenantId,
-        input_config: TenantConfig,
-    ) -> DatabaseResult<()> {
-        use crate::schema::tenant_shards::dsl::*;
-
-        self.with_measured_conn(DatabaseOperation::UpdateTenantConfig, move |conn| {
-            diesel::update(tenant_shards)
-                .filter(tenant_id.eq(input_tenant_id.to_string()))
-                .set((config.eq(serde_json::to_string(&input_config).unwrap()),))
-                .execute(conn)?;
+            query.set(update).execute(conn)?;
 
             Ok(())
         })
@@ -698,7 +696,7 @@ impl Persistence {
     }
 }
 
-/// Parts of [`crate::tenant_state::TenantState`] that are stored durably
+/// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
 #[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq)]
 #[diesel(table_name = crate::schema::tenant_shards)]
 pub(crate) struct TenantShardPersistence {
@@ -728,6 +726,8 @@ pub(crate) struct TenantShardPersistence {
     pub(crate) splitting: SplitState,
     #[serde(default)]
     pub(crate) config: String,
+    #[serde(default)]
+    pub(crate) scheduling_policy: String,
 }
 
 impl TenantShardPersistence {

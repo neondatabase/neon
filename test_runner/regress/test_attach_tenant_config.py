@@ -189,6 +189,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         },
         "trace_read_requests": True,
         "walreceiver_connect_timeout": "13m",
+        "image_layer_creation_check_threshold": 1,
     }
 
     ps_http = env.pageserver.http_client()

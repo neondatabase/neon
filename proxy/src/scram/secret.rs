@@ -1,5 +1,7 @@
 //! Tools for SCRAM server secret management.
 
+use subtle::{Choice, ConstantTimeEq};
+
 use super::base64_decode_array;
 use super::key::ScramKey;
 
@@ -40,16 +42,21 @@ impl ServerSecret {
         Some(secret)
     }
 
+    pub fn is_password_invalid(&self, client_key: &ScramKey) -> Choice {
+        // constant time to not leak partial key match
+        client_key.sha256().ct_ne(&self.stored_key) | Choice::from(self.doomed as u8)
+    }
+
     /// To avoid revealing information to an attacker, we use a
     /// mocked server secret even if the user doesn't exist.
     /// See `auth-scram.c : mock_scram_secret` for details.
-    pub fn mock(user: &str, nonce: [u8; 32]) -> Self {
-        // Refer to `auth-scram.c : scram_mock_salt`.
-        let mocked_salt = super::sha256([user.as_bytes(), &nonce]);
-
+    pub fn mock(nonce: [u8; 32]) -> Self {
         Self {
-            iterations: 4096,
-            salt_base64: base64::encode(mocked_salt),
+            // this doesn't reveal much information as we're going to use
+            // iteration count 1 for our generated passwords going forward.
+            // PG16 users can set iteration count=1 already today.
+            iterations: 1,
+            salt_base64: base64::encode(nonce),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),
             doomed: true,

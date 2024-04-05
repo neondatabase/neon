@@ -21,11 +21,12 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 use tracing::instrument::Instrumented;
 
+use crate::cancellation::CancellationHandlerMain;
+use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp, WithConnectionGuard};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
-use crate::{cancellation::CancellationHandler, config::ProxyConfig};
 use hyper::{
     server::conn::{AddrIncoming, AddrStream},
     Body, Method, Request, Response,
@@ -47,7 +48,7 @@ pub async fn task_main(
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    cancellation_handler: Arc<CancellationHandler>,
+    cancellation_handler: Arc<CancellationHandlerMain>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
@@ -237,7 +238,7 @@ async fn request_handler(
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
-    cancellation_handler: Arc<CancellationHandler>,
+    cancellation_handler: Arc<CancellationHandlerMain>,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
