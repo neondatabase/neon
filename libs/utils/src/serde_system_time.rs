@@ -1,4 +1,4 @@
-//! A `serde::{Deserialize,Serialize}` type for SystemTime.
+//! A `serde::{Deserialize,Serialize}` type for SystemTime with RFC3339 format and millisecond precision.
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
