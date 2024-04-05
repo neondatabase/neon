@@ -335,11 +335,11 @@ impl Service {
 
             for (tenant_shard_id, shard_observations) in observed {
                 for (node_id, observed_loc) in shard_observations {
-                    let Some(tenant_state) = tenants.get_mut(&tenant_shard_id) else {
+                    let Some(tenant_shard) = tenants.get_mut(&tenant_shard_id) else {
                         cleanup.push((tenant_shard_id, node_id));
                         continue;
                     };
-                    tenant_state
+                    tenant_shard
                         .observed
                         .locations
                         .insert(node_id, ObservedStateLocation { conf: observed_loc });
@@ -348,14 +348,14 @@ impl Service {
 
             // Populate each tenant's intent state
             let mut schedule_context = ScheduleContext::default();
-            for (tenant_shard_id, tenant_state) in tenants.iter_mut() {
+            for (tenant_shard_id, tenant_shard) in tenants.iter_mut() {
                 if tenant_shard_id.shard_number == ShardNumber(0) {
                     // Reset scheduling context each time we advance to the next Tenant
                     schedule_context = ScheduleContext::default();
                 }
 
-                tenant_state.intent_from_observed(scheduler);
-                if let Err(e) = tenant_state.schedule(scheduler, &mut schedule_context) {
+                tenant_shard.intent_from_observed(scheduler);
+                if let Err(e) = tenant_shard.schedule(scheduler, &mut schedule_context) {
                     // Non-fatal error: we are unable to properly schedule the tenant, perhaps because
                     // not enough pageservers are available.  The tenant may well still be available
                     // to clients.
@@ -364,11 +364,11 @@ impl Service {
                     // If we're both intending and observed to be attached at a particular node, we will
                     // emit a compute notification for this. In the case where our observed state does not
                     // yet match our intent, we will eventually reconcile, and that will emit a compute notification.
-                    if let Some(attached_at) = tenant_state.stably_attached() {
+                    if let Some(attached_at) = tenant_shard.stably_attached() {
                         compute_notifications.push((
                             *tenant_shard_id,
                             attached_at,
-                            tenant_state.shard.stripe_size,
+                            tenant_shard.shard.stripe_size,
                         ));
                     }
                 }
@@ -1178,32 +1178,32 @@ impl Service {
         let mut locked = self.inner.write().unwrap();
         let (_nodes, tenants, scheduler) = locked.parts_mut();
 
-        let tenant_state = tenants
+        let tenant_shard = tenants
             .get_mut(&attach_req.tenant_shard_id)
             .expect("Checked for existence above");
 
         if let Some(new_generation) = new_generation {
-            tenant_state.generation = Some(new_generation);
-            tenant_state.policy = PlacementPolicy::Attached(0);
+            tenant_shard.generation = Some(new_generation);
+            tenant_shard.policy = PlacementPolicy::Attached(0);
         } else {
             // This is a detach notification.  We must update placement policy to avoid re-attaching
             // during background scheduling/reconciliation, or during storage controller restart.
             assert!(attach_req.node_id.is_none());
-            tenant_state.policy = PlacementPolicy::Detached;
+            tenant_shard.policy = PlacementPolicy::Detached;
         }
 
         if let Some(attaching_pageserver) = attach_req.node_id.as_ref() {
             tracing::info!(
                 tenant_id = %attach_req.tenant_shard_id,
                 ps_id = %attaching_pageserver,
-                generation = ?tenant_state.generation,
+                generation = ?tenant_shard.generation,
                 "issuing",
             );
-        } else if let Some(ps_id) = tenant_state.intent.get_attached() {
+        } else if let Some(ps_id) = tenant_shard.intent.get_attached() {
             tracing::info!(
                 tenant_id = %attach_req.tenant_shard_id,
                 %ps_id,
-                generation = ?tenant_state.generation,
+                generation = ?tenant_shard.generation,
                 "dropping",
             );
         } else {
@@ -1211,14 +1211,14 @@ impl Service {
             tenant_id = %attach_req.tenant_shard_id,
             "no-op: tenant already has no pageserver");
         }
-        tenant_state
+        tenant_shard
             .intent
             .set_attached(scheduler, attach_req.node_id);
 
         tracing::info!(
             "attach_hook: tenant {} set generation {:?}, pageserver {}",
             attach_req.tenant_shard_id,
-            tenant_state.generation,
+            tenant_shard.generation,
             // TODO: this is an odd number of 0xf's
             attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
         );
@@ -1230,36 +1230,36 @@ impl Service {
         #[cfg(feature = "testing")]
         {
             if let Some(node_id) = attach_req.node_id {
-                tenant_state.observed.locations = HashMap::from([(
+                tenant_shard.observed.locations = HashMap::from([(
                     node_id,
                     ObservedStateLocation {
                         conf: Some(attached_location_conf(
-                            tenant_state.generation.unwrap(),
-                            &tenant_state.shard,
-                            &tenant_state.config,
+                            tenant_shard.generation.unwrap(),
+                            &tenant_shard.shard,
+                            &tenant_shard.config,
                             false,
                         )),
                     },
                 )]);
             } else {
-                tenant_state.observed.locations.clear();
+                tenant_shard.observed.locations.clear();
             }
         }
 
         Ok(AttachHookResponse {
             gen: attach_req
                 .node_id
-                .map(|_| tenant_state.generation.expect("Test hook, not used on tenants that are mid-onboarding with a NULL generation").into().unwrap()),
+                .map(|_| tenant_shard.generation.expect("Test hook, not used on tenants that are mid-onboarding with a NULL generation").into().unwrap()),
         })
     }
 
     pub(crate) fn inspect(&self, inspect_req: InspectRequest) -> InspectResponse {
         let locked = self.inner.read().unwrap();
 
-        let tenant_state = locked.tenants.get(&inspect_req.tenant_shard_id);
+        let tenant_shard = locked.tenants.get(&inspect_req.tenant_shard_id);
 
         InspectResponse {
-            attachment: tenant_state.and_then(|s| {
+            attachment: tenant_shard.and_then(|s| {
                 s.intent
                     .get_attached()
                     .map(|ps| (s.generation.expect("Test hook, not used on tenants that are mid-onboarding with a NULL generation").into().unwrap(), ps))
@@ -1321,11 +1321,11 @@ impl Service {
             let mut locked = self.inner.write().unwrap();
 
             for (tenant_shard_id, observed_loc) in configs.tenant_shards {
-                let Some(tenant_state) = locked.tenants.get_mut(&tenant_shard_id) else {
+                let Some(tenant_shard) = locked.tenants.get_mut(&tenant_shard_id) else {
                     cleanup.push(tenant_shard_id);
                     continue;
                 };
-                tenant_state
+                tenant_shard
                     .observed
                     .locations
                     .insert(node.get_id(), ObservedStateLocation { conf: observed_loc });
@@ -1496,13 +1496,13 @@ impl Service {
         };
 
         for req_tenant in validate_req.tenants {
-            if let Some(tenant_state) = locked.tenants.get(&req_tenant.id) {
-                let valid = tenant_state.generation == Some(Generation::new(req_tenant.gen));
+            if let Some(tenant_shard) = locked.tenants.get(&req_tenant.id) {
+                let valid = tenant_shard.generation == Some(Generation::new(req_tenant.gen));
                 tracing::info!(
                     "handle_validate: {}(gen {}): valid={valid} (latest {:?})",
                     req_tenant.id,
                     req_tenant.gen,
-                    tenant_state.generation
+                    tenant_shard.generation
                 );
                 response.tenants.push(ValidateResponseTenant {
                     id: req_tenant.id,
@@ -3917,8 +3917,8 @@ impl Service {
                 tracing::info!("Node {} transition to offline", node_id);
                 let mut tenants_affected: usize = 0;
 
-                for (tenant_shard_id, tenant_state) in tenants {
-                    if let Some(observed_loc) = tenant_state.observed.locations.get_mut(&node_id) {
+                for (tenant_shard_id, tenant_shard) in tenants {
+                    if let Some(observed_loc) = tenant_shard.observed.locations.get_mut(&node_id) {
                         // When a node goes offline, we set its observed configuration to None, indicating unknown: we will
                         // not assume our knowledge of the node's configuration is accurate until it comes back online
                         observed_loc.conf = None;
@@ -3931,15 +3931,15 @@ impl Service {
                         continue;
                     }
 
-                    if tenant_state.intent.demote_attached(node_id) {
-                        tenant_state.sequence = tenant_state.sequence.next();
+                    if tenant_shard.intent.demote_attached(node_id) {
+                        tenant_shard.sequence = tenant_shard.sequence.next();
 
                         // TODO: populate a ScheduleContext including all shards in the same tenant_id (only matters
                         // for tenants without secondary locations: if they have a secondary location, then this
                         // schedule() call is just promoting an existing secondary)
                         let mut schedule_context = ScheduleContext::default();
 
-                        match tenant_state.schedule(scheduler, &mut schedule_context) {
+                        match tenant_shard.schedule(scheduler, &mut schedule_context) {
                             Err(e) => {
                                 // It is possible that some tenants will become unschedulable when too many pageservers
                                 // go offline: in this case there isn't much we can do other than make the issue observable.
@@ -3948,7 +3948,7 @@ impl Service {
                             }
                             Ok(()) => {
                                 if self
-                                    .maybe_reconcile_shard(tenant_state, &new_nodes)
+                                    .maybe_reconcile_shard(tenant_shard, &new_nodes)
                                     .is_some()
                                 {
                                     tenants_affected += 1;
@@ -3967,10 +3967,10 @@ impl Service {
                 tracing::info!("Node {} transition to active", node_id);
                 // When a node comes back online, we must reconcile any tenant that has a None observed
                 // location on the node.
-                for tenant_state in locked.tenants.values_mut() {
-                    if let Some(observed_loc) = tenant_state.observed.locations.get_mut(&node_id) {
+                for tenant_shard in locked.tenants.values_mut() {
+                    if let Some(observed_loc) = tenant_shard.observed.locations.get_mut(&node_id) {
                         if observed_loc.conf.is_none() {
-                            self.maybe_reconcile_shard(tenant_state, &new_nodes);
+                            self.maybe_reconcile_shard(tenant_shard, &new_nodes);
                         }
                     }
                 }
