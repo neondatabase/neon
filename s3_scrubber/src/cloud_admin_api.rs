@@ -137,7 +137,7 @@ pub struct ProjectData {
     pub region_id: String,
     pub platform_id: String,
     pub user_id: String,
-    pub pageserver_id: u64,
+    pub pageserver_id: Option<u64>,
     #[serde(deserialize_with = "from_nullable_id")]
     pub tenant: TenantId,
     pub safekeepers: Vec<SafekeeperData>,

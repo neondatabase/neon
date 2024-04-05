@@ -343,7 +343,7 @@ fn init_remote(
         }),
         NodeKind::Safekeeper => RootTarget::Safekeeper(S3Target {
             bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or("wal".to_string()),
+            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or("wal/".to_string()),
             delimiter,
         }),
     };

@@ -114,7 +114,7 @@ pub async fn stream_tenant_timelines<'a>(
     let timelines_target = target.timelines_root(&tenant);
 
     loop {
-        tracing::info!("Listing in {}", tenant);
+        tracing::debug!("Listing in {}", tenant);
         let fetch_response =
             list_objects_with_retries(s3_client, &timelines_target, continuation_token.clone())
                 .await;
@@ -151,7 +151,7 @@ pub async fn stream_tenant_timelines<'a>(
         }
     }
 
-    tracing::info!("Yielding for {}", tenant);
+    tracing::debug!("Yielding for {}", tenant);
     Ok(stream! {
         for i in timeline_ids {
             let id = i?;
