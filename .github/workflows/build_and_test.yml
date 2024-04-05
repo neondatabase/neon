@@ -472,7 +472,7 @@ jobs:
           real_s3_region: eu-central-1
           rerun_flaky: true
           pg_version: ${{ matrix.pg_version }}
-          session_timeout: '60'
+          session_timeout: '3600'
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
