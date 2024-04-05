@@ -49,7 +49,7 @@ use tracing::{debug, error, info, warn};
 
 use once_cell::sync::Lazy;
 
-use utils::env_config;
+use utils::env;
 use utils::id::TimelineId;
 
 //
@@ -146,7 +146,7 @@ impl FromStr for TokioRuntimeMode {
 
 static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
     let thread_name = "pageserver worker";
-    let Some(mode) = env_config::var("NEON_PAGESERVER_USE_ONE_RUNTIME") else {
+    let Some(mode) = env::var("NEON_PAGESERVER_USE_ONE_RUNTIME") else {
         // If the env var is not set, leave this static as None.
         // The single_
         return None;
@@ -199,7 +199,6 @@ macro_rules! pageserver_runtime {
 pageserver_runtime!(COMPUTE_REQUEST_RUNTIME, "compute request worker");
 pageserver_runtime!(MGMT_REQUEST_RUNTIME, "mgmt request worker");
 pageserver_runtime!(WALRECEIVER_RUNTIME, "walreceiver worker");
-// if you change the number of worker threads please change the constant below
 pageserver_runtime!(BACKGROUND_RUNTIME, "background op worker");
 
 #[derive(Debug, Clone, Copy)]
