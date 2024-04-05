@@ -2100,6 +2100,7 @@ pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
 use futures::Future;
 use pin_project_lite::pin_project;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -2667,6 +2668,26 @@ pub(crate) mod disk_usage_based_eviction {
     }
 
     pub(crate) static METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
+}
+
+static TOKIO_EXECUTOR_THREAD_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_tokio_executor_thread_configured_count",
+        "Total number of configued tokio executor threads in the process.
+         The `setup` label denotes whether we're running with multiple runtimes or a single runtime.",
+        &["setup"],
+    )
+    .unwrap()
+});
+
+pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SERIALIZE.lock().unwrap();
+    TOKIO_EXECUTOR_THREAD_COUNT.reset();
+    TOKIO_EXECUTOR_THREAD_COUNT
+        .get_metric_with_label_values(&[setup])
+        .unwrap()
+        .set(u64::try_from(num_threads.get()).unwrap());
 }
 
 pub fn preinitialize_metrics() {

@@ -52,6 +52,8 @@ use once_cell::sync::Lazy;
 use utils::env;
 use utils::id::TimelineId;
 
+use crate::metrics::set_tokio_runtime_setup;
+
 //
 // There are four runtimes:
 //
@@ -148,16 +150,25 @@ static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
     let thread_name = "pageserver worker";
     let Some(mode) = env::var("NEON_PAGESERVER_USE_ONE_RUNTIME") else {
         // If the env var is not set, leave this static as None.
-        // The single_
+        set_tokio_runtime_setup(
+            "multiple-runtimes",
+            NUM_MULTIPLE_RUNTIMES
+                .checked_mul(*TOKIO_WORKER_THREADS)
+                .unwrap(),
+        );
         return None;
     };
     Some(match mode {
-        TokioRuntimeMode::SingleThreaded => tokio::runtime::Builder::new_current_thread()
-            .thread_name(thread_name)
-            .enable_all()
-            .build()
-            .expect("failed to create single runtime"),
+        TokioRuntimeMode::SingleThreaded => {
+            set_tokio_runtime_setup("one-runtime-single-threaded", NonZeroUsize::new(1).unwrap());
+            tokio::runtime::Builder::new_current_thread()
+                .thread_name(thread_name)
+                .enable_all()
+                .build()
+                .expect("failed to create single runtime")
+        }
         TokioRuntimeMode::MultiThreaded { num_workers } => {
+            set_tokio_runtime_setup("one-runtime-multi-threaded", num_workers);
             tokio::runtime::Builder::new_multi_thread()
                 .thread_name(thread_name)
                 .enable_all()
@@ -200,6 +211,9 @@ pageserver_runtime!(COMPUTE_REQUEST_RUNTIME, "compute request worker");
 pageserver_runtime!(MGMT_REQUEST_RUNTIME, "mgmt request worker");
 pageserver_runtime!(WALRECEIVER_RUNTIME, "walreceiver worker");
 pageserver_runtime!(BACKGROUND_RUNTIME, "background op worker");
+// Bump this number when adding a new pageserver_runtime!
+// SAFETY: it's obviously correct
+const NUM_MULTIPLE_RUNTIMES: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4) };
 
 #[derive(Debug, Clone, Copy)]
 pub struct PageserverTaskId(u64);
