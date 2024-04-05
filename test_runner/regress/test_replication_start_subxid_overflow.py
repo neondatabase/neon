@@ -23,7 +23,8 @@ def test_replication_start_subxid_overflow(neon_simple_env: NeonEnv):
                                   raise exception 'caught something';
                           end;
                        end loop;
-                   end; $$ language plpgsql""")
+                   end; $$ language plpgsql"""
+                )
                 p_cur.execute("select create_subxacts(100000)")
                 xid = p_cur.fetchall()[0][0]
                 log.info(f"Master transaction {xid}")
