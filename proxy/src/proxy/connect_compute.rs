@@ -87,7 +87,6 @@ impl ConnectMechanism for TcpMechanism<'_> {
 }
 
 /// Try to connect to the compute node, retrying if necessary.
-/// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
 pub async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
     ctx: &mut RequestMonitoring,
@@ -132,7 +131,6 @@ where
     } else {
         // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
         info!("compute node's state has likely changed; requesting a wake-up");
-        ctx.latency_timer.cache_miss();
         let old_node_info = invalidate_cache(node_info);
         let mut node_info = wake_compute(&mut num_retries, ctx, user_info).await?;
         node_info.reuse_settings(old_node_info);
