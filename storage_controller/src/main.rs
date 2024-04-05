@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Context};
-use storage_controller::http::make_router;
-use storage_controller::metrics::preinitialize_metrics;
-use storage_controller::persistence::Persistence;
-use storage_controller::service::{Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use std::sync::Arc;
+use storage_controller::http::make_router;
+use storage_controller::metrics::preinitialize_metrics;
+use storage_controller::persistence::Persistence;
+use storage_controller::service::{Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT};
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
