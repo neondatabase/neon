@@ -121,7 +121,10 @@ pub async fn find_garbage(
 const S3_CONCURRENCY: usize = 32;
 
 // How many concurrent API requests to make to the console API.
-const CONSOLE_CONCURRENCY: usize = 128;
+//
+// Be careful increasing this; roughly we shouldn't have more than ~100 rps. It
+// would be better to implement real rsp limiter.
+const CONSOLE_CONCURRENCY: usize = 16;
 
 struct ConsoleCache {
     /// Set of tenants found in the control plane API
