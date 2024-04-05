@@ -696,7 +696,7 @@ impl Persistence {
     }
 }
 
-/// Parts of [`crate::tenant_state::TenantState`] that are stored durably
+/// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
 #[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq)]
 #[diesel(table_name = crate::schema::tenant_shards)]
 pub(crate) struct TenantShardPersistence {
