@@ -21,8 +21,8 @@ where
 pub struct Bool(bool);
 
 impl Bool {
-    pub const fn new_const<const V: bool>() -> Self {
-        Bool(V)
+    pub const fn new(v: bool) -> Self {
+        Bool(v)
     }
 }
 
@@ -41,8 +41,8 @@ impl FromStr for Bool {
     }
 }
 
-impl Into<bool> for Bool {
-    fn into(self) -> bool {
-        self.0
+impl From<Bool> for bool {
+    fn from(val: Bool) -> Self {
+        val.0
     }
 }
