@@ -303,7 +303,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     origin_ps.http_client().tenant_create(tenant_id, generation=generation)
 
     # As if doing a live migration, first configure origin into stale mode
-    origin_ps.http_client().tenant_location_conf(
+    r = origin_ps.http_client().tenant_location_conf(
         tenant_id,
         {
             "mode": "AttachedStale",
@@ -312,6 +312,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
             "generation": generation,
         },
     )
+    assert len(r["shards"]) == 1
 
     if warm_up:
         origin_ps.http_client().tenant_heatmap_upload(tenant_id)
@@ -332,7 +333,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
 
     # Call into storage controller to onboard the tenant
     generation += 1
-    virtual_ps_http.tenant_location_conf(
+    r = virtual_ps_http.tenant_location_conf(
         tenant_id,
         {
             "mode": "AttachedMulti",
@@ -341,6 +342,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
             "generation": generation,
         },
     )
+    assert len(r["shards"]) == 1
 
     # As if doing a live migration, detach the original pageserver
     origin_ps.http_client().tenant_location_conf(
@@ -357,7 +359,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     # set it to AttachedSingle: this is a no-op, but we test it because the
     # cloud control plane may call this for symmetry with live migration to
     # an individual pageserver
-    virtual_ps_http.tenant_location_conf(
+    r = virtual_ps_http.tenant_location_conf(
         tenant_id,
         {
             "mode": "AttachedSingle",
@@ -366,6 +368,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
             "generation": generation,
         },
     )
+    assert len(r["shards"]) == 1
 
     # We should see the tenant is now attached to the pageserver managed
     # by the sharding service
@@ -396,7 +399,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     # The generation has moved on since we onboarded
     assert generation != dest_tenant_before_conf_change["generation"]
 
-    virtual_ps_http.tenant_location_conf(
+    r = virtual_ps_http.tenant_location_conf(
         tenant_id,
         {
             "mode": "AttachedSingle",
@@ -406,6 +409,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
             "generation": generation,
         },
     )
+    assert len(r["shards"]) == 1
     dest_tenant_after_conf_change = dest_ps.http_client().tenant_status(tenant_id)
     assert (
         dest_tenant_after_conf_change["generation"] == dest_tenant_before_conf_change["generation"]
@@ -724,12 +728,17 @@ def test_storage_controller_auth(neon_env_builder: NeonEnvBuilder):
         StorageControllerApiException,
         match="Forbidden: JWT authentication error",
     ):
-        svc.request("POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.ADMIN))
+        svc.request(
+            "POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.SAFEKEEPER_DATA)
+        )
 
     # Token with correct scope
     svc.request(
         "POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.PAGE_SERVER_API)
     )
+
+    # Token with admin scope should also be permitted
+    svc.request("POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.ADMIN))
 
     # No token
     with pytest.raises(
@@ -1187,7 +1196,10 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     assert len(tenant_lines) == 5
     assert str(env.initial_tenant) in tenant_lines[3]
 
-    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy.*")
+    # Setting scheduling policies intentionally result in warnings, they're for rare use.
+    env.storage_controller.allowed_errors.extend(
+        [".*Skipping reconcile for policy.*", ".*Scheduling is disabled by policy.*"]
+    )
 
     # Describe a tenant
     tenant_lines = storcon_cli(["tenant-describe", "--tenant-id", str(env.initial_tenant)])

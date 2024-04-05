@@ -461,7 +461,7 @@ async fn upload_events_chunk(
         || async {
             let stream = futures::stream::once(futures::future::ready(Ok(compressed_data.clone())));
             storage
-                .upload(stream, data.len(), remote_path, None, cancel)
+                .upload(stream, compressed_data.len(), remote_path, None, cancel)
                 .await
         },
         TimeoutOrCancel::caused_by_cancel,

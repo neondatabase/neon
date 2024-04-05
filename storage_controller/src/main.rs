@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
 
+use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
@@ -157,6 +158,8 @@ fn main() -> anyhow::Result<()> {
         default_panic(info);
         std::process::exit(1);
     }));
+
+    let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     tokio::runtime::Builder::new_current_thread()
         // We use spawn_blocking for database operations, so require approximately
