@@ -269,7 +269,7 @@ impl super::Api for Api {
         let mut node = self.do_wake_compute(ctx, user_info).await?;
         ctx.set_project(node.aux.clone());
         let cold_start_info = node.aux.cold_start_info;
-        info!(?cold_start_info, "woken up a compute node");
+        info!("woken up a compute node");
 
         // store the cached node as 'warm'
         node.aux.cold_start_info = ColdStartInfo::WarmCached;

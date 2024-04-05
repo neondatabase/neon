@@ -102,8 +102,7 @@ pub(super) async fn authenticate(
 
     ctx.set_user(db_info.user.into());
     ctx.set_project(db_info.aux.clone());
-    let cold_start_info = db_info.aux.cold_start_info;
-    info!(?cold_start_info, "woken up a compute node");
+    info!("woken up a compute node");
 
     // Backwards compatibility. pg_sni_proxy uses "--" in domain names
     // while direct connections do not. Once we migrate to pg_sni_proxy
