@@ -593,13 +593,13 @@ impl RemoteTimelineClient {
         upload_queue: &mut UploadQueueInitialized,
         metadata: TimelineMetadata,
     ) {
+        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
+
         info!(
-            "scheduling metadata upload with {} files ({} changed)",
+            "scheduling metadata upload up to consistent LSN {disk_consistent_lsn} with {} files ({} changed)",
             upload_queue.latest_files.len(),
             upload_queue.latest_files_changes_since_metadata_upload_scheduled,
         );
-
-        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
 
         let index_part = IndexPart::new(
             upload_queue.latest_files.clone(),

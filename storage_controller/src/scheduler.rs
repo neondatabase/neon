@@ -1,4 +1,4 @@
-use crate::{node::Node, tenant_state::TenantState};
+use crate::{node::Node, tenant_shard::TenantShard};
 use pageserver_api::controller_api::UtilizationScore;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ pub enum MaySchedule {
 
 #[derive(Serialize)]
 struct SchedulerNode {
-    /// How many shards are currently scheduled on this node, via their [`crate::tenant_state::IntentState`].
+    /// How many shards are currently scheduled on this node, via their [`crate::tenant_shard::IntentState`].
     shard_count: usize,
 
     /// Whether this node is currently elegible to have new shards scheduled (this is derived
@@ -84,7 +84,7 @@ impl std::ops::Add for AffinityScore {
     }
 }
 
-// For carrying state between multiple calls to [`TenantState::schedule`], e.g. when calling
+// For carrying state between multiple calls to [`TenantShard::schedule`], e.g. when calling
 // it for many shards in the same tenant.
 #[derive(Debug, Default)]
 pub(crate) struct ScheduleContext {
@@ -147,7 +147,7 @@ impl Scheduler {
     pub(crate) fn consistency_check<'a>(
         &self,
         nodes: impl Iterator<Item = &'a Node>,
-        shards: impl Iterator<Item = &'a TenantState>,
+        shards: impl Iterator<Item = &'a TenantShard>,
     ) -> anyhow::Result<()> {
         let mut expect_nodes: HashMap<NodeId, SchedulerNode> = HashMap::new();
         for node in nodes {
@@ -398,7 +398,7 @@ pub(crate) mod test_utils {
 mod tests {
     use super::*;
 
-    use crate::tenant_state::IntentState;
+    use crate::tenant_shard::IntentState;
     #[test]
     fn scheduler_basic() -> anyhow::Result<()> {
         let nodes = test_utils::make_test_nodes(2);
