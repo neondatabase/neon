@@ -147,7 +147,7 @@ impl FromStr for TokioRuntimeMode {
 }
 
 static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
-    let thread_name = "tokio-executor";
+    let thread_name = "pageserver-tokio";
     let Some(mode) = env::var("NEON_PAGESERVER_USE_ONE_RUNTIME") else {
         // If the env var is not set, leave this static as None.
         set_tokio_runtime_setup(
