@@ -42,11 +42,11 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-def test_sharding_service_smoke(
+def test_storage_controller_smoke(
     neon_env_builder: NeonEnvBuilder,
 ):
     """
-    Test the basic lifecycle of a sharding service:
+    Test the basic lifecycle of a storage controller:
     - Restarting
     - Restarting a pageserver
     - Creating and deleting tenants and timelines
@@ -204,7 +204,7 @@ def test_node_status_after_restart(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_passthrough(
+def test_storage_controller_passthrough(
     neon_env_builder: NeonEnvBuilder,
 ):
     """
@@ -231,7 +231,7 @@ def test_sharding_service_passthrough(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_restart(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     tenant_a = env.initial_tenant
     tenant_b = TenantId.generate()
@@ -266,7 +266,7 @@ def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
 
 
 @pytest.mark.parametrize("warm_up", [True, False])
-def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
+def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
     """
     We onboard tenants to the sharding service by treating it as a 'virtual pageserver'
     which provides the /location_config API.  This is similar to creating a tenant,
@@ -416,7 +416,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_compute_hook(
+def test_storage_controller_compute_hook(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
     httpserver_listen_address,
@@ -529,7 +529,7 @@ def test_sharding_service_compute_hook(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     """
     Verify that occasional-use debug APIs work as expected.  This is a lightweight test
     that just hits the endpoints to check that they don't bitrot.
@@ -590,7 +590,7 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_s3_time_travel_recovery(
+def test_storage_controller_s3_time_travel_recovery(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
 ):
@@ -700,7 +700,7 @@ def test_sharding_service_s3_time_travel_recovery(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_auth(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
     svc = env.storage_controller
@@ -764,7 +764,7 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
         )
 
 
-def test_sharding_service_tenant_conf(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_tenant_conf(neon_env_builder: NeonEnvBuilder):
     """
     Validate the pageserver-compatible API endpoints for setting and getting tenant conf, without
     supplying the whole LocationConf.
@@ -867,7 +867,7 @@ def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
         PageserverFailpoint(pageserver_id=1, failpoint="get-utilization-http-handler"),
     ],
 )
-def test_sharding_service_heartbeats(
+def test_storage_controller_heartbeats(
     neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, failure: Failure
 ):
     neon_env_builder.num_pageservers = 2
@@ -977,7 +977,7 @@ def test_sharding_service_heartbeats(
     wait_until(10, 1, storage_controller_consistent)
 
 
-def test_sharding_service_re_attach(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):
     """
     Exercise the behavior of the /re-attach endpoint on pageserver startup when
     pageservers have a mixture of attached and secondary locations
