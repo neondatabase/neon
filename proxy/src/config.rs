@@ -1,6 +1,11 @@
-use crate::{auth, rate_limiter::RateBucketInfo, serverless::GlobalConnPoolOptions};
+use crate::{
+    auth,
+    rate_limiter::{AuthRateLimiter, RateBucketInfo},
+    serverless::GlobalConnPoolOptions,
+};
 use anyhow::{bail, ensure, Context, Ok};
 use itertools::Itertools;
+use remote_storage::RemoteStorageConfig;
 use rustls::{
     crypto::ring::sign,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -35,6 +40,7 @@ pub struct ProxyConfig {
 pub struct MetricCollectionConfig {
     pub endpoint: reqwest::Url,
     pub interval: Duration,
+    pub backup_metric_collection_config: MetricBackupCollectionConfig,
 }
 
 pub struct TlsConfig {
@@ -50,6 +56,8 @@ pub struct HttpConfig {
 
 pub struct AuthenticationConfig {
     pub scram_protocol_timeout: tokio::time::Duration,
+    pub rate_limiter_enabled: bool,
+    pub rate_limiter: AuthRateLimiter,
 }
 
 impl TlsConfig {
@@ -373,6 +381,20 @@ impl FromStr for EndpointCacheConfig {
         let error = || format!("failed to parse endpoint cache options '{options}'");
         Self::parse(options).with_context(error)
     }
+}
+#[derive(Debug)]
+pub struct MetricBackupCollectionConfig {
+    pub interval: Duration,
+    pub remote_storage_config: OptRemoteStorageConfig,
+    pub chunk_size: usize,
+}
+
+/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
+/// runtime type errors from the value parser we use.
+pub type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
+
+pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
+    RemoteStorageConfig::from_toml(&s.parse()?)
 }
 
 /// Helper for cmdline cache options parsing.

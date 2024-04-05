@@ -1,6 +1,8 @@
 use std::{
+    borrow::Cow,
     collections::hash_map::RandomState,
-    hash::BuildHasher,
+    hash::{BuildHasher, Hash},
+    net::IpAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -15,7 +17,7 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Duration, Instant};
 use tracing::info;
 
-use crate::{EndpointId, Normalize};
+use crate::{intern::EndpointIdInt, EndpointId, Normalize};
 
 use super::{
     limit_algorithm::{LimitAlgorithm, Sample},
@@ -48,12 +50,12 @@ impl GlobalRateLimiter {
         let should_allow_request = self
             .data
             .iter_mut()
-            .zip(&self.info)
-            .all(|(bucket, info)| bucket.should_allow_request(info, now));
+            .zip(self.info)
+            .all(|(bucket, info)| bucket.should_allow_request(info, now, 1));
 
         if should_allow_request {
             // only increment the bucket counts if the request will actually be accepted
-            self.data.iter_mut().for_each(RateBucket::inc);
+            self.data.iter_mut().for_each(|b| b.inc(1));
         }
 
         should_allow_request
@@ -71,9 +73,14 @@ impl GlobalRateLimiter {
 // saw SNI, before doing TLS handshake. User-side error messages in that case
 // does not look very nice (`SSL SYSCALL error: Undefined error: 0`), so for now
 // I went with a more expensive way that yields user-friendlier error messages.
-pub struct EndpointRateLimiter<Rand = StdRng, Hasher = RandomState> {
-    map: DashMap<EndpointId, Vec<RateBucket>, Hasher>,
-    info: &'static [RateBucketInfo],
+pub type EndpointRateLimiter = BucketRateLimiter<EndpointId, StdRng, RandomState>;
+
+// This can't be just per IP because that would limit some PaaS that share IP addresses
+pub type AuthRateLimiter = BucketRateLimiter<(EndpointIdInt, IpAddr), StdRng, RandomState>;
+
+pub struct BucketRateLimiter<Key, Rand = StdRng, Hasher = RandomState> {
+    map: DashMap<Key, Vec<RateBucket>, Hasher>,
+    info: Cow<'static, [RateBucketInfo]>,
     access_count: AtomicUsize,
     rand: Mutex<Rand>,
 }
@@ -85,9 +92,9 @@ struct RateBucket {
 }
 
 impl RateBucket {
-    fn should_allow_request(&mut self, info: &RateBucketInfo, now: Instant) -> bool {
+    fn should_allow_request(&mut self, info: &RateBucketInfo, now: Instant, n: u32) -> bool {
         if now - self.start < info.interval {
-            self.count < info.max_rpi
+            self.count + n <= info.max_rpi
         } else {
             // bucket expired, reset
             self.count = 0;
@@ -97,8 +104,8 @@ impl RateBucket {
         }
     }
 
-    fn inc(&mut self) {
-        self.count += 1;
+    fn inc(&mut self, n: u32) {
+        self.count += n;
     }
 }
 
@@ -111,7 +118,7 @@ pub struct RateBucketInfo {
 
 impl std::fmt::Display for RateBucketInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let rps = self.max_rpi * 1000 / self.interval.as_millis() as u32;
+        let rps = (self.max_rpi as u64) * 1000 / self.interval.as_millis() as u64;
         write!(f, "{rps}@{}", humantime::format_duration(self.interval))
     }
 }
@@ -136,10 +143,23 @@ impl std::str::FromStr for RateBucketInfo {
 }
 
 impl RateBucketInfo {
-    pub const DEFAULT_SET: [Self; 3] = [
+    pub const DEFAULT_ENDPOINT_SET: [Self; 3] = [
         Self::new(300, Duration::from_secs(1)),
         Self::new(200, Duration::from_secs(60)),
         Self::new(100, Duration::from_secs(600)),
+    ];
+
+    /// All of these are per endpoint-ip pair.
+    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
+    ///
+    /// First bucket: 300mcpus total per endpoint-ip pair
+    /// * 1228800 requests per second with 1 hash rounds. (endpoint rate limiter will catch this first)
+    /// * 300 requests per second with 4096 hash rounds.
+    /// * 2 requests per second with 600000 hash rounds.
+    pub const DEFAULT_AUTH_SET: [Self; 3] = [
+        Self::new(300 * 4096, Duration::from_secs(1)),
+        Self::new(200 * 4096, Duration::from_secs(60)),
+        Self::new(100 * 4096, Duration::from_secs(600)),
     ];
 
     pub fn validate(info: &mut [Self]) -> anyhow::Result<()> {
@@ -150,7 +170,7 @@ impl RateBucketInfo {
             .find(|(a, b)| a.max_rpi > b.max_rpi);
         if let Some((a, b)) = invalid {
             bail!(
-                "invalid endpoint RPS limits. {b} allows fewer requests per bucket than {a} ({} vs {})",
+                "invalid bucket RPS limits. {b} allows fewer requests per bucket than {a} ({} vs {})",
                 b.max_rpi,
                 a.max_rpi,
             );
@@ -162,19 +182,24 @@ impl RateBucketInfo {
     pub const fn new(max_rps: u32, interval: Duration) -> Self {
         Self {
             interval,
-            max_rpi: max_rps * interval.as_millis() as u32 / 1000,
+            max_rpi: ((max_rps as u64) * (interval.as_millis() as u64) / 1000) as u32,
         }
     }
 }
 
-impl EndpointRateLimiter {
-    pub fn new(info: &'static [RateBucketInfo]) -> Self {
+impl<K: Hash + Eq> BucketRateLimiter<K> {
+    pub fn new(info: impl Into<Cow<'static, [RateBucketInfo]>>) -> Self {
         Self::new_with_rand_and_hasher(info, StdRng::from_entropy(), RandomState::new())
     }
 }
 
-impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
-    fn new_with_rand_and_hasher(info: &'static [RateBucketInfo], rand: R, hasher: S) -> Self {
+impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
+    fn new_with_rand_and_hasher(
+        info: impl Into<Cow<'static, [RateBucketInfo]>>,
+        rand: R,
+        hasher: S,
+    ) -> Self {
+        let info = info.into();
         info!(buckets = ?info, "endpoint rate limiter");
         Self {
             info,
@@ -185,8 +210,8 @@ impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
-    pub fn check(&self, endpoint: EndpointId) -> bool {
-        let endpoint = endpoint.normalize();
+    pub fn check(&self, key: K, n: u32) -> bool {
+        // TODO(anna): normalize the key
         // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
@@ -196,7 +221,7 @@ impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
         }
 
         let now = Instant::now();
-        let mut entry = self.map.entry(endpoint).or_insert_with(|| {
+        let mut entry = self.map.entry(key).or_insert_with(|| {
             vec![
                 RateBucket {
                     start: now,
@@ -208,12 +233,12 @@ impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
 
         let should_allow_request = entry
             .iter_mut()
-            .zip(self.info)
-            .all(|(bucket, info)| bucket.should_allow_request(info, now));
+            .zip(&*self.info)
+            .all(|(bucket, info)| bucket.should_allow_request(info, now, n));
 
         if should_allow_request {
             // only increment the bucket counts if the request will actually be accepted
-            entry.iter_mut().for_each(RateBucket::inc);
+            entry.iter_mut().for_each(|b| b.inc(n));
         }
 
         should_allow_request
@@ -224,7 +249,7 @@ impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
     /// But that way deletion does not aquire mutex on each entry access.
     pub fn do_gc(&self) {
         info!(
-            "cleaning up endpoint rate limiter, current size = {}",
+            "cleaning up bucket rate limiter, current size = {}",
             self.map.len()
         );
         let n = self.map.shards().len();
@@ -535,7 +560,7 @@ mod tests {
     use rustc_hash::FxHasher;
     use tokio::time;
 
-    use super::{EndpointRateLimiter, Limiter, Outcome};
+    use super::{BucketRateLimiter, EndpointRateLimiter, Limiter, Outcome};
     use crate::{
         rate_limiter::{RateBucketInfo, RateLimitAlgorithm},
         EndpointId,
@@ -673,12 +698,12 @@ mod tests {
 
     #[test]
     fn default_rate_buckets() {
-        let mut defaults = RateBucketInfo::DEFAULT_SET;
+        let mut defaults = RateBucketInfo::DEFAULT_ENDPOINT_SET;
         RateBucketInfo::validate(&mut defaults[..]).unwrap();
     }
 
     #[test]
-    #[should_panic = "invalid endpoint RPS limits. 10@10s allows fewer requests per bucket than 300@1s (100 vs 300)"]
+    #[should_panic = "invalid bucket RPS limits. 10@10s allows fewer requests per bucket than 300@1s (100 vs 300)"]
     fn rate_buckets_validate() {
         let mut rates: Vec<RateBucketInfo> = ["300@1s", "10@10s"]
             .into_iter()
@@ -694,42 +719,42 @@ mod tests {
             .map(|s| s.parse().unwrap())
             .collect();
         RateBucketInfo::validate(&mut rates).unwrap();
-        let limiter = EndpointRateLimiter::new(Vec::leak(rates));
+        let limiter = EndpointRateLimiter::new(rates);
 
         let endpoint = EndpointId::from("ep-my-endpoint-1234");
 
         time::pause();
 
         for _ in 0..100 {
-            assert!(limiter.check(endpoint.clone()));
+            assert!(limiter.check(endpoint.clone(), 1));
         }
         // more connections fail
-        assert!(!limiter.check(endpoint.clone()));
+        assert!(!limiter.check(endpoint.clone(), 1));
 
         // fail even after 500ms as it's in the same bucket
         time::advance(time::Duration::from_millis(500)).await;
-        assert!(!limiter.check(endpoint.clone()));
+        assert!(!limiter.check(endpoint.clone(), 1));
 
         // after a full 1s, 100 requests are allowed again
         time::advance(time::Duration::from_millis(500)).await;
         for _ in 1..6 {
-            for _ in 0..100 {
-                assert!(limiter.check(endpoint.clone()));
+            for _ in 0..50 {
+                assert!(limiter.check(endpoint.clone(), 2));
             }
             time::advance(time::Duration::from_millis(1000)).await;
         }
 
         // more connections after 600 will exceed the 20rps@30s limit
-        assert!(!limiter.check(endpoint.clone()));
+        assert!(!limiter.check(endpoint.clone(), 1));
 
         // will still fail before the 30 second limit
         time::advance(time::Duration::from_millis(30_000 - 6_000 - 1)).await;
-        assert!(!limiter.check(endpoint.clone()));
+        assert!(!limiter.check(endpoint.clone(), 1));
 
         // after the full 30 seconds, 100 requests are allowed again
         time::advance(time::Duration::from_millis(1)).await;
         for _ in 0..100 {
-            assert!(limiter.check(endpoint.clone()));
+            assert!(limiter.check(endpoint.clone(), 1));
         }
     }
 
@@ -739,14 +764,41 @@ mod tests {
         let rand = rand::rngs::StdRng::from_seed([1; 32]);
         let hasher = BuildHasherDefault::<FxHasher>::default();
 
-        let limiter = EndpointRateLimiter::new_with_rand_and_hasher(
-            &RateBucketInfo::DEFAULT_SET,
+        let limiter = BucketRateLimiter::new_with_rand_and_hasher(
+            &RateBucketInfo::DEFAULT_ENDPOINT_SET,
             rand,
             hasher,
         );
         for i in 0..1_000_000 {
-            limiter.check(format!("{i}").into());
+            limiter.check(i, 1);
         }
         assert!(limiter.map.len() < 150_000);
+    }
+
+    #[test]
+    fn test_default_auth_set() {
+        // these values used to exceed u32::MAX
+        assert_eq!(
+            RateBucketInfo::DEFAULT_AUTH_SET,
+            [
+                RateBucketInfo {
+                    interval: Duration::from_secs(1),
+                    max_rpi: 300 * 4096,
+                },
+                RateBucketInfo {
+                    interval: Duration::from_secs(60),
+                    max_rpi: 200 * 4096 * 60,
+                },
+                RateBucketInfo {
+                    interval: Duration::from_secs(600),
+                    max_rpi: 100 * 4096 * 600,
+                }
+            ]
+        );
+
+        for x in RateBucketInfo::DEFAULT_AUTH_SET {
+            let y = x.to_string().parse().unwrap();
+            assert_eq!(x, y);
+        }
     }
 }

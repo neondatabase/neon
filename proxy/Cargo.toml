@@ -10,6 +10,7 @@ testing = []
 
 [dependencies]
 anyhow.workspace = true
+async-compression.workspace = true
 async-trait.workspace = true
 aws-config.workspace = true
 aws-sdk-iam.workspace = true
@@ -97,6 +98,7 @@ workspace_hack.workspace = true
 
 [dev-dependencies]
 camino-tempfile.workspace = true
+fallible-iterator.workspace = true
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true

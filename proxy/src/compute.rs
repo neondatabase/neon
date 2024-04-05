@@ -82,14 +82,13 @@ pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 /// A config for establishing a connection to compute node.
 /// Eventually, `tokio_postgres` will be replaced with something better.
 /// Newtype allows us to implement methods on top of it.
-#[derive(Clone)]
-#[repr(transparent)]
+#[derive(Clone, Default)]
 pub struct ConnCfg(Box<tokio_postgres::Config>);
 
 /// Creation and initialization routines.
 impl ConnCfg {
     pub fn new() -> Self {
-        Self(Default::default())
+        Self::default()
     }
 
     /// Reuse password or auth keys from the other config.
@@ -162,12 +161,6 @@ impl std::ops::Deref for ConnCfg {
 impl std::ops::DerefMut for ConnCfg {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
-    }
-}
-
-impl Default for ConnCfg {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -283,6 +276,7 @@ impl ConnCfg {
         let stream = connection.stream.into_inner();
 
         info!(
+            cold_start_info = ctx.cold_start_info.as_str(),
             "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
             self.0.get_ssl_mode()
         );

@@ -13,11 +13,13 @@ use parquet::{
     },
     record::RecordWriter,
 };
-use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
 use utils::backoff;
+
+use crate::config::{remote_storage_from_toml, OptRemoteStorageConfig};
 
 use super::{RequestMonitoring, LOG_CHAN};
 
@@ -50,21 +52,13 @@ pub struct ParquetUploadArgs {
     parquet_upload_compression: Compression,
 }
 
-/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
-/// runtime type errors from the value parser we use.
-type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
-
-fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
-    RemoteStorageConfig::from_toml(&s.parse()?)
-}
-
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a upload fails, we log it at info-level, and retry.
 // But after FAILED_UPLOAD_WARN_THRESHOLD retries, we start to log it at WARN
 // level instead, as repeated failures can mean a more serious problem. If it
 // fails more than FAILED_UPLOAD_RETRIES times, we give up
-pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
-pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
+pub const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+pub const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 // the parquet crate leaves a lot to be desired...
 // what follows is an attempt to write parquet files with minimal allocs.
@@ -93,7 +87,7 @@ pub struct RequestData {
     /// Or if we make it to proxy_pass
     success: bool,
     /// Indicates if the cplane started the new compute node for this request.
-    cold_start_info: Option<&'static str>,
+    cold_start_info: &'static str,
     /// Tracks time from session start (HTTP request/libpq TCP handshake)
     /// Through to success/failure
     duration_us: u64,
@@ -121,12 +115,7 @@ impl From<&RequestMonitoring> for RequestData {
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
-            cold_start_info: value.cold_start_info.as_ref().map(|x| match x {
-                crate::console::messages::ColdStartInfo::Unknown => "unknown",
-                crate::console::messages::ColdStartInfo::Warm => "warm",
-                crate::console::messages::ColdStartInfo::PoolHit => "pool_hit",
-                crate::console::messages::ColdStartInfo::PoolMiss => "pool_miss",
-            }),
+            cold_start_info: value.cold_start_info.as_str(),
             duration_us: SystemTime::from(value.first_packet)
                 .elapsed()
                 .unwrap_or_default()
@@ -460,7 +449,7 @@ mod tests {
             region: "us-east-1",
             error: None,
             success: rng.gen(),
-            cold_start_info: Some("no"),
+            cold_start_info: "no",
             duration_us: rng.gen_range(0..30_000_000),
         }
     }
@@ -530,15 +519,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1314406, 3, 6000),
-                (1314399, 3, 6000),
-                (1314459, 3, 6000),
-                (1314416, 3, 6000),
-                (1314546, 3, 6000),
-                (1314388, 3, 6000),
-                (1314180, 3, 6000),
-                (1314416, 3, 6000),
-                (438359, 1, 2000)
+                (1314385, 3, 6000),
+                (1314378, 3, 6000),
+                (1314438, 3, 6000),
+                (1314395, 3, 6000),
+                (1314525, 3, 6000),
+                (1314367, 3, 6000),
+                (1314159, 3, 6000),
+                (1314395, 3, 6000),
+                (438352, 1, 2000)
             ]
         );
 
@@ -568,11 +557,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1220668, 5, 10000),
-                (1226818, 5, 10000),
-                (1228612, 5, 10000),
-                (1227974, 5, 10000),
-                (1219252, 5, 10000)
+                (1220633, 5, 10000),
+                (1226783, 5, 10000),
+                (1228577, 5, 10000),
+                (1227939, 5, 10000),
+                (1219217, 5, 10000)
             ]
         );
 
@@ -604,11 +593,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1206315, 5, 10000),
-                (1206046, 5, 10000),
-                (1206339, 5, 10000),
-                (1206327, 5, 10000),
-                (1206582, 5, 10000)
+                (1206280, 5, 10000),
+                (1206011, 5, 10000),
+                (1206304, 5, 10000),
+                (1206292, 5, 10000),
+                (1206547, 5, 10000)
             ]
         );
 
@@ -633,15 +622,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1314406, 3, 6000),
-                (1314399, 3, 6000),
-                (1314459, 3, 6000),
-                (1314416, 3, 6000),
-                (1314546, 3, 6000),
-                (1314388, 3, 6000),
-                (1314180, 3, 6000),
-                (1314416, 3, 6000),
-                (438359, 1, 2000)
+                (1314385, 3, 6000),
+                (1314378, 3, 6000),
+                (1314438, 3, 6000),
+                (1314395, 3, 6000),
+                (1314525, 3, 6000),
+                (1314367, 3, 6000),
+                (1314159, 3, 6000),
+                (1314395, 3, 6000),
+                (438352, 1, 2000)
             ]
         );
 
@@ -678,7 +667,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(658837, 2, 3001), (658551, 2, 3000), (658347, 2, 2999)]
+            [(658823, 2, 3001), (658537, 2, 3000), (658333, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

@@ -10,6 +10,7 @@ use proxy::auth;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
+use proxy::config::remote_storage_from_toml;
 use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
@@ -18,6 +19,7 @@ use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
 use proxy::metrics::NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT;
+use proxy::rate_limiter::AuthRateLimiter;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
@@ -141,10 +143,16 @@ struct ProxyCliArgs {
     ///
     /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
     /// Can be given multiple times for different bucket sizes.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
+    /// Whether the auth rate limiter actually takes effect (for testing)
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    auth_rate_limit_enabled: bool,
+    /// Authentication rate limiter max number of hashes per second.
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
+    auth_rate_limit: Vec<RateBucketInfo>,
     /// Redis rate limiter max number of requests per second.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
     #[clap(long, default_value_t = 100)]
@@ -186,6 +194,19 @@ struct ProxyCliArgs {
     endpoint_cache_config: String,
     #[clap(flatten)]
     parquet_upload: ParquetUploadArgs,
+
+    /// interval for backup metric collection
+    #[clap(long, default_value = "10m", value_parser = humantime::parse_duration)]
+    metric_backup_collection_interval: std::time::Duration,
+    /// remote storage configuration for backup metric collection
+    /// Encoded as toml (same format as pageservers), eg
+    /// `{bucket_name='the-bucket',bucket_region='us-east-1',prefix_in_bucket='proxy',endpoint='http://minio:9000'}`
+    #[clap(long, default_value = "{}")]
+    metric_backup_collection_remote_storage: String,
+    /// chunk size for backup metric collection
+    /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
+    #[clap(long, default_value = "4194304")]
+    metric_backup_collection_chunk_size: usize,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -367,12 +388,17 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token));
+    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
     maintenance_tasks.spawn(http::health_server::task_main(http_listener));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
+        // TODO: Add gc regardles of the metric collection being enabled.
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
+        client_tasks.spawn(usage_metrics::task_backup(
+            &metrics_config.backup_metric_collection_config,
+            cancellation_token,
+        ));
     }
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
@@ -433,6 +459,13 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     if args.allow_self_signed_compute {
         warn!("allowing self-signed compute certificates");
     }
+    let backup_metric_collection_config = config::MetricBackupCollectionConfig {
+        interval: args.metric_backup_collection_interval,
+        remote_storage_config: remote_storage_from_toml(
+            &args.metric_backup_collection_remote_storage,
+        )?,
+        chunk_size: args.metric_backup_collection_chunk_size,
+    };
 
     let metric_collection = match (
         &args.metric_collection_endpoint,
@@ -441,6 +474,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         (Some(endpoint), Some(interval)) => Some(config::MetricCollectionConfig {
             endpoint: endpoint.parse()?,
             interval: humantime::parse_duration(interval)?,
+            backup_metric_collection_config,
         }),
         (None, None) => None,
         _ => bail!(
@@ -519,6 +553,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
+        rate_limiter_enabled: args.auth_rate_limit_enabled,
+        rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
     };
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();

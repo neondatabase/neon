@@ -34,7 +34,8 @@ use utils::{
 };
 
 use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantShardMigrateRequest,
+    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantPolicyRequest,
+    TenantShardMigrateRequest,
 };
 use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
 
@@ -398,6 +399,15 @@ async fn handle_tenant_describe(
     json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
 }
 
+async fn handle_tenant_list(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    json_response(StatusCode::OK, service.tenant_list())
+}
+
 async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -411,7 +421,10 @@ async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError
     check_permissions(&req, Scope::Admin)?;
 
     let state = get_state(&req);
-    json_response(StatusCode::OK, state.service.node_list().await?)
+    let nodes = state.service.node_list().await?;
+    let api_nodes = nodes.into_iter().map(|n| n.describe()).collect::<Vec<_>>();
+
+    json_response(StatusCode::OK, api_nodes)
 }
 
 async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -478,6 +491,22 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
+async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let update_req = json_request::<TenantPolicyRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state
+            .service
+            .tenant_update_policy(tenant_id, update_req)
+            .await?,
+    )
+}
+
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
@@ -507,6 +536,14 @@ async fn handle_consistency_check(req: Request<Body>) -> Result<Response<Body>, 
     let state = get_state(&req);
 
     json_response(StatusCode::OK, state.service.consistency_check().await?)
+}
+
+async fn handle_reconcile_all(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+
+    json_response(StatusCode::OK, state.service.reconcile_all_now().await?)
 }
 
 /// Status endpoint is just used for checking that our HTTP listener is up
@@ -565,9 +602,17 @@ where
     .await
 }
 
+/// Check if the required scope is held in the request's token, or if the request has
+/// a token with 'admin' scope then always permit it.
 fn check_permissions(request: &Request<Body>, required_scope: Scope) -> Result<(), ApiError> {
     check_permission_with(request, |claims| {
-        crate::auth::check_permission(claims, required_scope)
+        match crate::auth::check_permission(claims, required_scope) {
+            Err(e) => match crate::auth::check_permission(claims, Scope::Admin) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(e),
+            },
+            Ok(()) => Ok(()),
+        }
     })
 }
 
@@ -726,6 +771,9 @@ pub fn make_router(
                 RequestName("debug_v1_consistency_check"),
             )
         })
+        .post("/debug/v1/reconcile_all", |r| {
+            request_span(r, handle_reconcile_all)
+        })
         .put("/debug/v1/failpoints", |r| {
             request_span(r, |r| failpoints_handler(r, CancellationToken::new()))
         })
@@ -763,6 +811,16 @@ pub fn make_router(
                 r,
                 handle_tenant_describe,
                 RequestName("control_v1_tenant_describe"),
+            )
+        })
+        .get("/control/v1/tenant", |r| {
+            tenant_service_handler(r, handle_tenant_list, RequestName("control_v1_tenant_list"))
+        })
+        .put("/control/v1/tenant/:tenant_id/policy", |r| {
+            named_request_span(
+                r,
+                handle_tenant_update_policy,
+                RequestName("control_v1_tenant_policy"),
             )
         })
         // Tenant operations

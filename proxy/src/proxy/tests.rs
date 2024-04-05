@@ -12,11 +12,12 @@ use crate::auth::backend::{
 };
 use crate::config::CertResolver;
 use crate::console::caches::NodeInfoCache;
+use crate::console::messages::MetricsAuxInfo;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
-use crate::{http, sasl, scram};
+use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use rstest::rstest;
@@ -142,8 +143,8 @@ impl Scram {
         Ok(Scram(secret))
     }
 
-    fn mock(user: &str) -> Self {
-        Scram(scram::ServerSecret::mock(user, rand::random()))
+    fn mock() -> Self {
+        Scram(scram::ServerSecret::mock(rand::random()))
     }
 }
 
@@ -330,11 +331,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
 
     let (client_config, server_config) =
         generate_tls_config("generic-project-name.localhost", "localhost")?;
-    let proxy = tokio::spawn(dummy_proxy(
-        client,
-        Some(server_config),
-        Scram::mock("user"),
-    ));
+    let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), Scram::mock()));
 
     use rand::{distributions::Alphanumeric, Rng};
     let password: String = rand::thread_rng()
@@ -516,7 +513,12 @@ impl TestBackend for TestConnectMechanism {
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
         config: compute::ConnCfg::new(),
-        aux: Default::default(),
+        aux: MetricsAuxInfo {
+            endpoint_id: (&EndpointId::from("endpoint")).into(),
+            project_id: (&ProjectId::from("project")).into(),
+            branch_id: (&BranchId::from("branch")).into(),
+            cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+        },
         allow_self_signed_compute: false,
     };
     let (_, node) = cache.insert("key".into(), node);

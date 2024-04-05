@@ -760,6 +760,7 @@ impl PageServerHandler {
         let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &tenant.cancel)));
         timeline
             .import_basebackup_from_tar(
+                tenant.clone(),
                 &mut copyin_reader,
                 base_lsn,
                 self.broker_client.clone(),
@@ -875,7 +876,13 @@ impl PageServerHandler {
             if lsn <= last_record_lsn {
                 lsn = last_record_lsn;
             } else {
-                timeline.wait_lsn(lsn, ctx).await?;
+                timeline
+                    .wait_lsn(
+                        lsn,
+                        crate::tenant::timeline::WaitLsnWaiter::PageService,
+                        ctx,
+                    )
+                    .await?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
@@ -887,7 +894,13 @@ impl PageServerHandler {
                     "invalid LSN(0) in request".into(),
                 ));
             }
-            timeline.wait_lsn(lsn, ctx).await?;
+            timeline
+                .wait_lsn(
+                    lsn,
+                    crate::tenant::timeline::WaitLsnWaiter::PageService,
+                    ctx,
+                )
+                .await?;
         }
 
         if lsn < **latest_gc_cutoff_lsn {
@@ -1214,7 +1227,13 @@ impl PageServerHandler {
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", lsn);
-            timeline.wait_lsn(lsn, ctx).await?;
+            timeline
+                .wait_lsn(
+                    lsn,
+                    crate::tenant::timeline::WaitLsnWaiter::PageService,
+                    ctx,
+                )
+                .await?;
             timeline
                 .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .context("invalid basebackup lsn")?;

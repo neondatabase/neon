@@ -11,7 +11,9 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     StorageControllerApiException,
+    last_flush_lsn_upload,
     tenant_get_shards,
+    wait_for_last_flush_lsn,
 )
 from fixtures.remote_storage import s3_storage
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
@@ -146,7 +148,7 @@ def test_sharding_split_smoke(
     # 8 shards onto separate pageservers
     shard_count = 4
     split_shard_count = 8
-    neon_env_builder.num_pageservers = split_shard_count
+    neon_env_builder.num_pageservers = split_shard_count * 2
 
     # 1MiB stripes: enable getting some meaningful data distribution without
     # writing large quantities of data in this test.  The stripe size is given
@@ -174,6 +176,7 @@ def test_sharding_split_smoke(
         placement_policy='{"Attached": 1}',
         conf=non_default_tenant_config,
     )
+
     workload = Workload(env, tenant_id, timeline_id, branch_name="main")
     workload.init()
 
@@ -252,6 +255,10 @@ def test_sharding_split_smoke(
     # The old parent shards should no longer exist on disk
     assert not shards_on_disk(old_shard_ids)
 
+    # Enough background reconciliations should result in the shards being properly distributed.
+    # Run this before the workload, because its LSN-waiting code presumes stable locations.
+    env.storage_controller.reconcile_until_idle()
+
     workload.validate()
 
     workload.churn_rows(256)
@@ -265,27 +272,6 @@ def test_sharding_split_smoke(
         pageserver.http_client().timeline_gc(tenant_shard_id, timeline_id, None)
     workload.validate()
 
-    migrate_to_pageserver_ids = list(
-        set(p.id for p in env.pageservers) - set(pre_split_pageserver_ids)
-    )
-    assert len(migrate_to_pageserver_ids) == split_shard_count - shard_count
-
-    # Migrate shards away from the node where the split happened
-    for ps_id in pre_split_pageserver_ids:
-        shards_here = [
-            tenant_shard_id
-            for (tenant_shard_id, pageserver) in all_shards
-            if pageserver.id == ps_id
-        ]
-        assert len(shards_here) == 2
-        migrate_shard = shards_here[0]
-        destination = migrate_to_pageserver_ids.pop()
-
-        log.info(f"Migrating shard {migrate_shard} from {ps_id} to {destination}")
-        env.storage_controller.tenant_shard_migrate(migrate_shard, destination)
-
-    workload.validate()
-
     # Assert on how many reconciles happened during the process.  This is something of an
     # implementation detail, but it is useful to detect any bugs that might generate spurious
     # extra reconcile iterations.
@@ -294,8 +280,9 @@ def test_sharding_split_smoke(
     # - shard_count reconciles for the original setup of the tenant
     # - shard_count reconciles for detaching the original secondary locations during split
     # - split_shard_count reconciles during shard splitting, for setting up secondaries.
-    # - shard_count reconciles for the migrations we did to move child shards away from their split location
-    expect_reconciles = shard_count * 2 + split_shard_count + shard_count
+    # - shard_count of the child shards will need to fail over to their secondaries
+    # - shard_count of the child shard secondary locations will get moved to emptier nodes
+    expect_reconciles = shard_count * 2 + split_shard_count + shard_count * 2
     reconcile_ok = env.storage_controller.get_metric_value(
         "storage_controller_reconcile_complete_total", filter={"status": "ok"}
     )
@@ -342,6 +329,31 @@ def test_sharding_split_smoke(
     assert sum(attached.values()) == split_shard_count
     assert sum(total.values()) == split_shard_count * 2
     check_effective_tenant_config()
+
+    # More specific check: that we are fully balanced.  This is deterministic because
+    # the order in which we consider shards for optimization is deterministic, and the
+    # order of preference of nodes is also deterministic (lower node IDs win).
+    log.info(f"total: {total}")
+    assert total == {
+        1: 1,
+        2: 1,
+        3: 1,
+        4: 1,
+        5: 1,
+        6: 1,
+        7: 1,
+        8: 1,
+        9: 1,
+        10: 1,
+        11: 1,
+        12: 1,
+        13: 1,
+        14: 1,
+        15: 1,
+        16: 1,
+    }
+    log.info(f"attached: {attached}")
+    assert attached == {1: 1, 2: 1, 3: 1, 5: 1, 6: 1, 7: 1, 9: 1, 11: 1}
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
     # correctly wrote config to disk, and the storage controller responds correctly
@@ -401,6 +413,7 @@ def test_sharding_split_stripe_size(
     env.storage_controller.tenant_shard_split(
         tenant_id, shard_count=2, shard_stripe_size=new_stripe_size
     )
+    env.storage_controller.reconcile_until_idle()
 
     # Check that we ended up with the stripe size that we expected, both on the pageserver
     # and in the notifications to compute
@@ -455,13 +468,11 @@ def test_sharding_split_stripe_size(
     os.getenv("BUILD_TYPE") == "debug",
     reason="Avoid running bulkier ingest tests in debug mode",
 )
-def test_sharding_ingest(
+def test_sharding_ingest_layer_sizes(
     neon_env_builder: NeonEnvBuilder,
 ):
     """
-    Check behaviors related to ingest:
-    - That we generate properly sized layers
-    - TODO: that updates to remote_consistent_lsn are made correctly via safekeepers
+    Check that when ingesting data to a sharded tenant, we properly respect layer size limts.
     """
 
     # Set a small stripe size and checkpoint distance, so that we can exercise rolling logic
@@ -492,6 +503,7 @@ def test_sharding_ingest(
     workload.write_rows(4096, upload=False)
     workload.write_rows(4096, upload=False)
     workload.write_rows(4096, upload=False)
+
     workload.validate()
 
     small_layer_count = 0
@@ -504,7 +516,9 @@ def test_sharding_ingest(
         shard_id = shard["shard_id"]
         layer_map = pageserver.http_client().layer_map_info(shard_id, timeline_id)
 
-        for layer in layer_map.historic_layers:
+        historic_layers = sorted(layer_map.historic_layers, key=lambda layer: layer.lsn_start)
+
+        for layer in historic_layers:
             assert layer.layer_file_size is not None
             if layer.layer_file_size < expect_layer_size // 2:
                 classification = "Small"
@@ -539,6 +553,93 @@ def test_sharding_ingest(
 
     # Each shard may emit up to one huge layer, because initdb ingest doesn't respect checkpoint_distance.
     assert huge_layer_count <= shard_count
+
+
+def test_sharding_ingest_gaps(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Check ingest behavior when the incoming data results in some shards having gaps where
+    no data is ingested: they should advance their disk_consistent_lsn and remote_consistent_lsn
+    even if they aren't writing out layers.
+    """
+
+    # Set a small stripe size and checkpoint distance, so that we can exercise rolling logic
+    # without writing a lot of data.
+    expect_layer_size = 131072
+    checkpoint_interval_secs = 5
+    TENANT_CONF = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": f"{expect_layer_size}",
+        "compaction_target_size": f"{expect_layer_size}",
+        # Set a short checkpoint interval as we will wait for uploads to happen
+        "checkpoint_timeout": f"{checkpoint_interval_secs}s",
+        # Background checkpointing is done from compaction loop, so set that interval short too
+        "compaction_period": "1s",
+    }
+    shard_count = 4
+    neon_env_builder.num_pageservers = shard_count
+    env = neon_env_builder.init_start(
+        initial_tenant_conf=TENANT_CONF,
+        initial_tenant_shard_count=shard_count,
+        initial_tenant_shard_stripe_size=128,
+    )
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Just a few writes: we aim to produce a situation where some shards are skipping
+    # ingesting some records and thereby won't have layer files that advance their
+    # consistent LSNs, to exercise the code paths that explicitly handle this case by
+    # advancing consistent LSNs in the background if there is no open layer.
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(128, upload=False)
+    workload.churn_rows(128, upload=False)
+
+    # Checkpoint, so that we won't get a background checkpoint happening during the next step
+    workload.endpoint().safe_psql("checkpoint")
+    # Freeze + flush, so that subsequent writes will start from a position of no open layers
+    last_flush_lsn_upload(env, workload.endpoint(), tenant_id, timeline_id)
+
+    # This write is tiny: at least some of the shards should find they don't have any
+    # data to ingest.  This will exercise how they handle that.
+    workload.churn_rows(1, upload=False)
+
+    # The LSN that has reached pageservers, but may not have been flushed to historic layers yet
+    expect_lsn = wait_for_last_flush_lsn(env, workload.endpoint(), tenant_id, timeline_id)
+
+    # Don't leave the endpoint running, we don't want it writing in the background
+    workload.stop()
+
+    log.info(f"Waiting for shards' consistent LSNs to reach {expect_lsn}")
+
+    shards = tenant_get_shards(env, tenant_id, None)
+
+    def assert_all_disk_consistent():
+        """
+        Assert that all the shards' disk_consistent_lsns have reached expect_lsn
+        """
+        for tenant_shard_id, pageserver in shards:
+            timeline_detail = pageserver.http_client().timeline_detail(tenant_shard_id, timeline_id)
+            log.info(f"{tenant_shard_id} (ps {pageserver.id}) detail: {timeline_detail}")
+            assert Lsn(timeline_detail["disk_consistent_lsn"]) >= expect_lsn
+
+    # We set a short checkpoint timeout: expect things to get frozen+flushed within that
+    wait_until(checkpoint_interval_secs * 3, 1, assert_all_disk_consistent)
+
+    def assert_all_remote_consistent():
+        """
+        Assert that all the shards' remote_consistent_lsns have reached expect_lsn
+        """
+        for tenant_shard_id, pageserver in shards:
+            timeline_detail = pageserver.http_client().timeline_detail(tenant_shard_id, timeline_id)
+            log.info(f"{tenant_shard_id} (ps {pageserver.id}) detail: {timeline_detail}")
+            assert Lsn(timeline_detail["remote_consistent_lsn"]) >= expect_lsn
+
+    # We set a short checkpoint timeout: expect things to get frozen+flushed within that
+    wait_until(checkpoint_interval_secs * 3, 1, assert_all_remote_consistent)
+
+    workload.validate()
 
 
 class Failure:
@@ -784,6 +885,8 @@ def test_sharding_split_failures(
             ".*Reconcile error: receive body: error sending request for url.*",
             # Node offline cases will fail inside reconciler when detaching secondaries
             ".*Reconcile error on shard.*: receive body: error sending request for url.*",
+            # While parent shard's client is stopped during split, flush loop updating LSNs will emit this warning
+            ".*Failed to schedule metadata upload after updating disk_consistent_lsn.*",
         ]
     )
 
@@ -869,16 +972,23 @@ def test_sharding_split_failures(
         # Having failed+rolled back, we should be able to split again
         # No failures this time; it will succeed
         env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
+        env.storage_controller.reconcile_until_idle(timeout_secs=30)
 
         workload.churn_rows(10)
         workload.validate()
 
     if failure.expect_available():
-        # Even though the split failed partway through, this should not have interrupted
-        # clients.  Disable waiting for pageservers in the workload helper, because our
-        # failpoints may prevent API access.
-        # This only applies for failure modes that leave pageserver page_service API available.
-        workload.churn_rows(10, upload=False, ingest=False)
+        # Even though the split failed partway through, this should not leave the tenant in
+        # an unavailable state.
+        # - Disable waiting for pageservers in the workload helper, because our
+        #   failpoints may prevent API access. This only applies for failure modes that
+        #   leave pageserver page_service API available.
+        # - This is a wait_until because clients may see transient errors in some split error cases,
+        #   e.g. while waiting for a storage controller to re-attach a parent shard if we failed
+        #   inside the pageserver and the storage controller responds by detaching children and attaching
+        #   parents concurrently (https://github.com/neondatabase/neon/issues/7148)
+        wait_until(10, 1, lambda: workload.churn_rows(10, upload=False, ingest=False))  # type: ignore
+
         workload.validate()
 
     if failure.fails_forward(env):
@@ -915,6 +1025,10 @@ def test_sharding_split_failures(
         # Splitting again should work, since we cleared the failure
         finish_split()
         assert_split_done()
+
+    # Having completed the split, pump the background reconciles to ensure that
+    # the scheduler reaches an idle state
+    env.storage_controller.reconcile_until_idle(timeout_secs=30)
 
     env.storage_controller.consistency_check()
 

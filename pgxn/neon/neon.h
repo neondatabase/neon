@@ -26,6 +26,8 @@ extern void pg_init_libpagestore(void);
 extern void pg_init_walproposer(void);
 
 extern uint64 BackpressureThrottlingTime(void);
+extern void SetNeonCurrentClusterSize(uint64 size);
+extern uint64 GetNeonCurrentClusterSize(void);
 extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
 
 extern void PGDLLEXPORT WalProposerSync(int argc, char *argv[]);

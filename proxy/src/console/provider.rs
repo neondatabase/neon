@@ -12,9 +12,9 @@ use crate::{
     compute,
     config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
     context::RequestMonitoring,
-    scram, EndpointCacheKey, ProjectId,
+    intern::ProjectIdInt,
+    scram, EndpointCacheKey,
 };
-use async_trait::async_trait;
 use dashmap::DashMap;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -272,7 +272,7 @@ pub struct AuthInfo {
     /// List of IP addresses allowed for the autorization.
     pub allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
-    pub project_id: Option<ProjectId>,
+    pub project_id: Option<ProjectIdInt>,
 }
 
 /// Info for establishing a connection to a compute node.
@@ -326,8 +326,7 @@ pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPatt
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
-#[async_trait]
-pub trait Api {
+pub(crate) trait Api {
     /// Get the client's auth secret for authentication.
     /// Returns option because user not found situation is special.
     /// We still have to mock the scram to avoid leaking information that user doesn't exist.
@@ -363,7 +362,6 @@ pub enum ConsoleBackend {
     Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
-#[async_trait]
 impl Api for ConsoleBackend {
     async fn get_role_secret(
         &self,

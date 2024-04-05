@@ -520,9 +520,9 @@ class NeonEnvBuilder:
         self.env = NeonEnv(self)
         return self.env
 
-    def start(self, register_pageservers=False):
+    def start(self):
         assert self.env is not None, "environment is not already initialized, call init() first"
-        self.env.start(register_pageservers=register_pageservers)
+        self.env.start()
 
     def init_start(
         self,
@@ -1115,8 +1115,8 @@ class NeonEnv:
         log.info(f"Config: {cfg}")
         self.neon_cli.init(cfg, force=config.config_init_force)
 
-    def start(self, register_pageservers=False):
-        # storage controller starts first, so that pageserver /re-attach calls don't
+    def start(self):
+        # Storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
         self.storage_controller.start()
 
@@ -1126,11 +1126,6 @@ class NeonEnv:
         # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
         wait_until(30, 1, storage_controller_ready)
-
-        if register_pageservers:
-            # Special case for forward compat tests, this can be removed later.
-            for pageserver in self.pageservers:
-                self.storage_controller.node_register(pageserver)
 
         # Start up broker, pageserver and all safekeepers
         futs = []
@@ -1155,13 +1150,17 @@ class NeonEnv:
         After this method returns, there should be no child processes running.
         """
         self.endpoints.stop_all()
+
+        # Stop storage controller before pageservers: we don't want it to spuriously
+        # detect a pageserver "failure" during test teardown
+        self.storage_controller.stop(immediate=immediate)
+
         for sk in self.safekeepers:
             sk.stop(immediate=immediate)
         for pageserver in self.pageservers:
             if ps_assert_metric_no_errors:
                 pageserver.assert_no_metric_errors()
             pageserver.stop(immediate=immediate)
-        self.storage_controller.stop(immediate=immediate)
         self.broker.stop(immediate=immediate)
 
     @property
@@ -2112,6 +2111,7 @@ class NeonStorageController(MetricsGetter):
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[Dict[Any, Any]] = None,
+        placement_policy: Optional[str] = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters
@@ -2122,6 +2122,8 @@ class NeonStorageController(MetricsGetter):
             shard_params = {"count": shard_count}
             if shard_stripe_size is not None:
                 shard_params["stripe_size"] = shard_stripe_size
+            else:
+                shard_params["stripe_size"] = 32768
 
             body["shard_parameters"] = shard_params
 
@@ -2129,12 +2131,15 @@ class NeonStorageController(MetricsGetter):
             for k, v in tenant_config.items():
                 body[k] = v
 
+        body["placement_policy"] = placement_policy
+
         response = self.request(
             "POST",
             f"{self.env.storage_controller_api}/v1/tenant",
             json=body,
             headers=self.headers(TokenScope.PAGE_SERVER_API),
         )
+        response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
@@ -2185,6 +2190,34 @@ class NeonStorageController(MetricsGetter):
         )
         log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
         assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
+
+    def tenant_policy_update(self, tenant_id: TenantId, body: dict[str, Any]):
+        log.info(f"tenant_policy_update({tenant_id}, {body})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/policy",
+            json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def reconcile_all(self):
+        r = self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/debug/v1/reconcile_all",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        r.raise_for_status()
+        n = r.json()
+        log.info(f"reconcile_all waited for {n} shards")
+        return n
+
+    def reconcile_until_idle(self, timeout_secs=30):
+        start_at = time.time()
+        n = 1
+        while n > 0:
+            n = self.reconcile_all()
+            if time.time() - start_at > timeout_secs:
+                raise RuntimeError("Timeout in reconcile_until_idle")
 
     def consistency_check(self):
         """
@@ -3567,7 +3600,7 @@ class Safekeeper:
         return self
 
     def stop(self, immediate: bool = False) -> "Safekeeper":
-        log.info("Stopping safekeeper {}".format(self.id))
+        log.info(f"Stopping safekeeper {self.id}")
         self.env.neon_cli.safekeeper_stop(self.id, immediate)
         self.running = False
         return self
@@ -3999,13 +4032,13 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     for f in mismatch:
         f1 = os.path.join(endpoint.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
-        stdout_filename = "{}.filediff".format(f2)
+        stdout_filename = f"{f2}.filediff"
 
         with open(stdout_filename, "w") as stdout_f:
-            subprocess.run("xxd -b {} > {}.hex ".format(f1, f1), shell=True)
-            subprocess.run("xxd -b {} > {}.hex ".format(f2, f2), shell=True)
+            subprocess.run(f"xxd -b {f1} > {f1}.hex ", shell=True)
+            subprocess.run(f"xxd -b {f2} > {f2}.hex ", shell=True)
 
-            cmd = "diff {}.hex {}.hex".format(f1, f2)
+            cmd = f"diff {f1}.hex {f2}.hex"
             subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])

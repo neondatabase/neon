@@ -487,6 +487,7 @@ impl Reconciler {
         while let Err(e) = self.compute_notify().await {
             match e {
                 NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
+                NotifyError::ShuttingDown => return Err(ReconcileError::Cancel),
                 _ => {
                     tracing::warn!(
                         "Live migration blocked by compute notification error, retrying: {e}"

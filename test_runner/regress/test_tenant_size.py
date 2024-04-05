@@ -20,9 +20,10 @@ from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
-@pytest.mark.xfail
-def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
-    env = neon_simple_env
+def test_empty_tenant_size(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_configs()
+    env.start()
+
     (tenant_id, _) = env.neon_cli.create_tenant()
     http_client = env.pageserver.http_client()
     initial_size = http_client.tenant_size(tenant_id)
@@ -35,66 +36,25 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
     assert branch_name == main_branch_name
 
-    with env.endpoints.create_start(
+    endpoint = env.endpoints.create_start(
         main_branch_name,
         tenant_id=tenant_id,
         config_lines=["autovacuum=off", "checkpoint_timeout=10min"],
-    ) as endpoint:
-        with endpoint.cursor() as cur:
-            cur.execute("SELECT 1")
-            row = cur.fetchone()
-            assert row is not None
-            assert row[0] == 1
-        size = http_client.tenant_size(tenant_id)
-        # we've disabled the autovacuum and checkpoint
-        # so background processes should not change the size.
-        # If this test will flake we should probably loosen the check
-        assert (
-            size == initial_size
-        ), f"starting idle compute should not change the tenant size (Currently {size}, expected {initial_size})"
+    )
 
-    # the size should be the same, until we increase the size over the
-    # gc_horizon
-    size, inputs = http_client.tenant_size_and_modelinputs(tenant_id)
-    assert (
-        size == initial_size
-    ), f"tenant_size should not be affected by shutdown of compute (Currently {size}, expected {initial_size})"
+    with endpoint.cursor() as cur:
+        cur.execute("SELECT 1")
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 1
 
-    expected_inputs = {
-        "segments": [
-            {
-                "segment": {"parent": None, "lsn": 23694408, "size": 25362432, "needed": True},
-                "timeline_id": f"{main_timeline_id}",
-                "kind": "BranchStart",
-            },
-            {
-                "segment": {"parent": 0, "lsn": 23694528, "size": None, "needed": True},
-                "timeline_id": f"{main_timeline_id}",
-                "kind": "BranchEnd",
-            },
-        ],
-        "timeline_inputs": [
-            {
-                "timeline_id": f"{main_timeline_id}",
-                "ancestor_id": None,
-                "ancestor_lsn": "0/0",
-                "last_record": "0/1698CC0",
-                "latest_gc_cutoff": "0/1698C48",
-                "horizon_cutoff": "0/0",
-                "pitr_cutoff": "0/0",
-                "next_gc_cutoff": "0/0",
-                "retention_param_cutoff": None,
-            }
-        ],
-    }
-    expected_inputs = mask_model_inputs(expected_inputs)
-    actual_inputs = mask_model_inputs(inputs)
+    # The transaction above will make the compute generate a checkpoint.
+    # In turn, the pageserver persists the checkpoint. This should only be
+    # one key with a size of a couple hundred bytes.
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, main_timeline_id)
+    size = http_client.tenant_size(tenant_id)
 
-    assert expected_inputs == actual_inputs
-
-    size_debug_file = open(test_output_dir / "size_debug.html", "w")
-    size_debug = http_client.tenant_size_debug(tenant_id)
-    size_debug_file.write(size_debug)
+    assert size >= initial_size and size - initial_size < 1024
 
 
 def test_branched_empty_timeline_size(neon_simple_env: NeonEnv, test_output_dir: Path):
@@ -190,7 +150,6 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv, test_ou
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
 def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 15
@@ -233,7 +192,6 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: 
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
 def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 5
@@ -282,7 +240,6 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
 def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = small
