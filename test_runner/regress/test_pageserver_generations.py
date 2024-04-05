@@ -111,7 +111,6 @@ def generate_uploads_and_deletions(
             last_flush_lsn_upload(
                 env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
             )
-            ps_http.timeline_checkpoint(tenant_id, timeline_id)
 
         # Compaction should generate some GC-elegible layers
         for i in range(0, 2):
@@ -385,9 +384,8 @@ def test_deletion_queue_recovery(
     if validate_before == ValidateBefore.NO_VALIDATE:
         failpoints.append(
             # Prevent deletion lists from being validated, we will test that they are
-            # dropped properly during recovery.  'pause' is okay here because we kill
-            # the pageserver with immediate=true
-            ("control-plane-client-validate", "pause")
+            # dropped properly during recovery.  This is such a long sleep as to be equivalent to "never"
+            ("control-plane-client-validate", "return(3600000)")
         )
 
     ps_http.configure_failpoints(failpoints)
