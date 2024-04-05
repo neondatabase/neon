@@ -201,7 +201,7 @@ pub fn launch_disk_usage_global_eviction_task(
     info!("launching disk usage based eviction task");
 
     task_mgr::spawn(
-        *BACKGROUND_RUNTIME,
+        BACKGROUND_RUNTIME.handle(),
         TaskKind::DiskUsageEviction,
         None,
         None,

@@ -341,7 +341,7 @@ impl RemoteTimelineClient {
                 // remote_timeline_client.rs tests rely on current-thread runtime
                 tokio::runtime::Handle::current()
             } else {
-                BACKGROUND_RUNTIME.clone()
+                BACKGROUND_RUNTIME.handle().clone()
             },
             tenant_shard_id,
             timeline_id,

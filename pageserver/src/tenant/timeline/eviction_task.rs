@@ -57,7 +57,7 @@ impl Timeline {
         let self_clone = Arc::clone(self);
         let background_tasks_can_start = background_tasks_can_start.cloned();
         task_mgr::spawn(
-            *BACKGROUND_RUNTIME,
+            BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
             Some(self.tenant_shard_id),
             Some(self.timeline_id),

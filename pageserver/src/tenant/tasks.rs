@@ -86,7 +86,7 @@ pub fn start_background_loops(
 ) {
     let tenant_shard_id = tenant.tenant_shard_id;
     task_mgr::spawn(
-        *BACKGROUND_RUNTIME,
+        BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
         Some(tenant_shard_id),
         None,
@@ -110,7 +110,7 @@ pub fn start_background_loops(
         },
     );
     task_mgr::spawn(
-        *BACKGROUND_RUNTIME,
+        BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
         Some(tenant_shard_id),
         None,

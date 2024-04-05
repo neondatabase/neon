@@ -1849,7 +1849,7 @@ impl TenantManager {
         let task_tenant_id = None;
 
         task_mgr::spawn(
-            *task_mgr::BACKGROUND_RUNTIME,
+            task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::MgmtRequest,
             task_tenant_id,
             None,

@@ -147,7 +147,7 @@ impl FromStr for TokioRuntimeMode {
 }
 
 static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
-    let thread_name = "pageserver worker";
+    let thread_name = "tokio-executor";
     let Some(mode) = env::var("NEON_PAGESERVER_USE_ONE_RUNTIME") else {
         // If the env var is not set, leave this static as None.
         set_tokio_runtime_setup(
@@ -190,9 +190,9 @@ static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
 /// otherwise.
 macro_rules! pageserver_runtime {
     ($varname:ident, $name:literal) => {
-        pub static $varname: Lazy<&'static tokio::runtime::Handle> = Lazy::new(|| {
+        pub static $varname: Lazy<&'static tokio::runtime::Runtime> = Lazy::new(|| {
             if let Some(runtime) = &*ONE_RUNTIME {
-                return runtime.handle();
+                return runtime;
             }
             static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
                 tokio::runtime::Builder::new_multi_thread()
@@ -202,7 +202,7 @@ macro_rules! pageserver_runtime {
                     .build()
                     .expect(std::concat!("Failed to create runtime ", $name))
             });
-            RUNTIME.handle()
+            &*RUNTIME
         });
     };
 }

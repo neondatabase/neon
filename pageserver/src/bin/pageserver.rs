@@ -391,7 +391,7 @@ fn start_pageserver(
         conf,
     );
     if let Some(deletion_workers) = deletion_workers {
-        deletion_workers.spawn_with(*BACKGROUND_RUNTIME);
+        deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
     }
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
@@ -569,7 +569,7 @@ fn start_pageserver(
             .with_graceful_shutdown(task_mgr::shutdown_watcher());
 
         task_mgr::spawn(
-            *MGMT_REQUEST_RUNTIME,
+            MGMT_REQUEST_RUNTIME.handle(),
             TaskKind::HttpEndpointListener,
             None,
             None,
@@ -594,7 +594,7 @@ fn start_pageserver(
         let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
 
         task_mgr::spawn(
-            *crate::BACKGROUND_RUNTIME,
+            crate::BACKGROUND_RUNTIME.handle(),
             TaskKind::MetricsCollection,
             None,
             None,
@@ -647,7 +647,7 @@ fn start_pageserver(
             DownloadBehavior::Error,
         );
         task_mgr::spawn(
-            *COMPUTE_REQUEST_RUNTIME,
+            COMPUTE_REQUEST_RUNTIME.handle(),
             TaskKind::LibpqEndpointListener,
             None,
             None,
@@ -682,6 +682,10 @@ fn start_pageserver(
                 .expect("forever() never returns None unless explicitly closed");
         });
         let signal = BACKGROUND_RUNTIME
+            // NB: in `NEON_PAGESERVER_USE_ONE_RUNTIME=current_thread`, this
+            // is where the executor is actually driven. In multi-threaded runtime
+            // modes, the executor threads are spawned internally, so, async execution
+            // is driven even before we reach here.
             .block_on(signal_handler)
             .expect("join error");
         match signal {
