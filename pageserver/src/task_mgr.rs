@@ -126,10 +126,10 @@ impl FromStr for TokioRuntimeMode {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "current_thread" => Ok(TokioRuntimeMode::SingleThreaded),
-            "multi_thread:default" => Ok(TokioRuntimeMode::MultiThreaded {
-                num_workers: *TOKIO_WORKER_THREADS,
-            }),
-            s => match s.strip_prefix("multi:") {
+            s => match s.strip_prefix("multi_thread:") {
+                Some("default") => Ok(TokioRuntimeMode::MultiThreaded {
+                    num_workers: *TOKIO_WORKER_THREADS,
+                }),
                 Some(suffix) => {
                     let num_workers = suffix.parse::<NonZeroUsize>().map_err(|e| {
                         format!(
@@ -138,7 +138,7 @@ impl FromStr for TokioRuntimeMode {
                     })?;
                     Ok(TokioRuntimeMode::MultiThreaded { num_workers })
                 }
-                None => Err(format!("invalid runtime config: {}", s)),
+                None => Err(format!("invalid runtime config: {s:?}")),
             },
         }
     }
