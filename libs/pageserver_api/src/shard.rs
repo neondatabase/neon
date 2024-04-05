@@ -162,7 +162,7 @@ impl TenantShardId {
     }
 
     /// Convenience for code that has special behavior on the 0th shard.
-    pub fn is_zero(&self) -> bool {
+    pub fn is_shard_zero(&self) -> bool {
         self.shard_number == ShardNumber(0)
     }
 
@@ -566,7 +566,7 @@ impl ShardIdentity {
 
     /// Convenience for checking if this identity is the 0th shard in a tenant,
     /// for special cases on shard 0 such as ingesting relation sizes.
-    pub fn is_zero(&self) -> bool {
+    pub fn is_shard_zero(&self) -> bool {
         self.number == ShardNumber(0)
     }
 }
