@@ -11,7 +11,6 @@ mod layers;
 
 use std::str::FromStr;
 
-use anyhow::anyhow;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
 use index_part::IndexPartCmd;
@@ -25,9 +24,12 @@ use pageserver::{
 };
 use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use tokio::fs::read_to_string;
 use tokio_util::sync::CancellationToken;
-use utils::{lsn::Lsn, project_git_version};
+use utils::{
+    logging::{self, LogFormat, TracingErrorLayerEnablement},
+    lsn::Lsn,
+    project_git_version,
+};
 
 project_git_version!(GIT_VERSION);
 
@@ -77,7 +79,7 @@ struct PrintLayerFileCmd {
 
 #[derive(Parser)]
 struct TimeTravelRemotePrefixCmd {
-    config_toml_path: Utf8PathBuf,
+    config_toml_str: String,
     // remote prefix to time travel recover
     prefix: String,
     travel_to: String,
@@ -94,6 +96,14 @@ struct AnalyzeLayerMapCmd {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    logging::init(
+        LogFormat::Plain,
+        TracingErrorLayerEnablement::EnableWithRustLogFilter,
+        logging::Output::Stdout,
+    )?;
+
+    logging::replace_panic_hook_with_tracing_panic_hook().forget();
+
     let cli = CliOpts::parse();
 
     match cli.command {
@@ -129,15 +139,11 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::anyhow!("Invalid time for done_if_after: '{}'", cmd.done_if_after)
             })?;
 
-            let toml = read_to_string(&cmd.config_toml_path).await.map_err(|e| {
-                anyhow!(
-                    "Couldn't read remote storage config toml path at {}: {e:?}",
-                    cmd.config_toml_path
-                )
-            })?;
-
             let prefix = RemotePath::from_string(&cmd.prefix)?;
-            let toml_item = toml_edit::Item::from_str(&toml)?;
+            let toml_document = toml_edit::Document::from_str(&cmd.config_toml_str)?;
+            let toml_item = toml_document
+                .get("remote_storage")
+                .expect("need remote_storage");
             let config = RemoteStorageConfig::from_toml(&toml_item)?.expect("incomplete config");
             let storage = remote_storage::GenericRemoteStorage::from_config(&config);
             let cancel = CancellationToken::new();
