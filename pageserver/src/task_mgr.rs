@@ -165,7 +165,7 @@ static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
                 .thread_name(thread_name)
                 .enable_all()
                 .build()
-                .expect("failed to create single runtime")
+                .expect("failed to create one single runtime")
         }
         TokioRuntimeMode::MultiThreaded { num_workers } => {
             set_tokio_runtime_setup("one-runtime-multi-threaded", num_workers);
@@ -174,7 +174,7 @@ static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
                 .enable_all()
                 .worker_threads(num_workers.get())
                 .build()
-                .expect("failed to create single runtime")
+                .expect("failed to create one multi-threaded runtime")
         }
     })
 });
