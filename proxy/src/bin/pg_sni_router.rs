@@ -10,6 +10,7 @@ use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
 use proxy::proxy::run_until_cancelled;
+use proxy::{BranchId, EndpointId, ProjectId};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
 
@@ -269,7 +270,12 @@ async fn handle_client(
 
     let client = tokio::net::TcpStream::connect(destination).await?;
 
-    let metrics_aux: MetricsAuxInfo = Default::default();
+    let metrics_aux: MetricsAuxInfo = MetricsAuxInfo {
+        endpoint_id: (&EndpointId::from("")).into(),
+        project_id: (&ProjectId::from("")).into(),
+        branch_id: (&BranchId::from("")).into(),
+        cold_start_info: proxy::console::messages::ColdStartInfo::Unknown,
+    };
 
     // doesn't yet matter as pg-sni-router doesn't report analytics logs
     ctx.set_success();

@@ -3,7 +3,8 @@
 use crate::{
     config::{MetricBackupCollectionConfig, MetricCollectionConfig},
     context::parquet::{FAILED_UPLOAD_MAX_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD},
-    http, BranchId, EndpointId,
+    http,
+    intern::{BranchIdInt, EndpointIdInt},
 };
 use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
@@ -43,8 +44,8 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// because we enrich the event with project_id in the control-plane endpoint.
 #[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
 pub struct Ids {
-    pub endpoint_id: EndpointId,
-    pub branch_id: BranchId,
+    pub endpoint_id: EndpointIdInt,
+    pub branch_id: BranchIdInt,
 }
 
 pub trait MetricCounterRecorder {
@@ -494,7 +495,7 @@ mod tests {
     use url::Url;
 
     use super::*;
-    use crate::{http, rate_limiter::RateLimiterConfig};
+    use crate::{http, rate_limiter::RateLimiterConfig, BranchId, EndpointId};
 
     #[tokio::test]
     async fn metrics() {
@@ -536,8 +537,8 @@ mod tests {
         // register a new counter
 
         let counter = metrics.register(Ids {
-            endpoint_id: "e1".into(),
-            branch_id: "b1".into(),
+            endpoint_id: (&EndpointId::from("e1")).into(),
+            branch_id: (&BranchId::from("b1")).into(),
         });
 
         // the counter should be observed despite 0 egress
