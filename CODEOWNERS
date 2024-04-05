@@ -1,5 +1,5 @@
 /compute_tools/ @neondatabase/control-plane @neondatabase/compute
-/control_plane/attachment_service @neondatabase/storage
+/storage_controller @neondatabase/storage
 /libs/pageserver_api/ @neondatabase/storage
 /libs/postgres_ffi/ @neondatabase/compute @neondatabase/safekeepers
 /libs/remote_storage/ @neondatabase/storage

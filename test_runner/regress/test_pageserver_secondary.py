@@ -498,9 +498,19 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
 
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-    assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
-        ps_secondary, tenant_id, timeline_id
-    )
+    try:
+        assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
+            ps_secondary, tenant_id, timeline_id
+        )
+    except:
+        # Do a full listing of the secondary location on errors, to help debug of
+        # https://github.com/neondatabase/neon/issues/6966
+        timeline_path = ps_secondary.timeline_dir(tenant_id, timeline_id)
+        for path, _dirs, files in os.walk(timeline_path):
+            for f in files:
+                log.info(f"Secondary file: {os.path.join(path, f)}")
+
+        raise
 
     # FIXME: this sleep is needed to avoid on-demand promotion of the layers we evict, while
     # walreceiver is still doing something.

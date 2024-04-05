@@ -1,18 +1,19 @@
 use anyhow::{anyhow, Context};
-use attachment_service::http::make_router;
-use attachment_service::metrics::preinitialize_metrics;
-use attachment_service::persistence::Persistence;
-use attachment_service::service::{Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use std::sync::Arc;
+use storage_controller::http::make_router;
+use storage_controller::metrics::preinitialize_metrics;
+use storage_controller::persistence::Persistence;
+use storage_controller::service::{Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT};
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
 
+use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
@@ -50,7 +51,7 @@ struct Cli {
     #[arg(short, long)]
     path: Option<Utf8PathBuf>,
 
-    /// URL to connect to postgres, like postgresql://localhost:1234/attachment_service
+    /// URL to connect to postgres, like postgresql://localhost:1234/storage_controller
     #[arg(long)]
     database_url: Option<String>,
 
@@ -157,6 +158,8 @@ fn main() -> anyhow::Result<()> {
         default_panic(info);
         std::process::exit(1);
     }));
+
+    let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     tokio::runtime::Builder::new_current_thread()
         // We use spawn_blocking for database operations, so require approximately

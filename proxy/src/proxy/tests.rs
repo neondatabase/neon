@@ -12,11 +12,12 @@ use crate::auth::backend::{
 };
 use crate::config::CertResolver;
 use crate::console::caches::NodeInfoCache;
+use crate::console::messages::MetricsAuxInfo;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
-use crate::{http, sasl, scram};
+use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use rstest::rstest;
@@ -512,7 +513,12 @@ impl TestBackend for TestConnectMechanism {
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
         config: compute::ConnCfg::new(),
-        aux: Default::default(),
+        aux: MetricsAuxInfo {
+            endpoint_id: (&EndpointId::from("endpoint")).into(),
+            project_id: (&ProjectId::from("project")).into(),
+            branch_id: (&BranchId::from("branch")).into(),
+            cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+        },
         allow_self_signed_compute: false,
     };
     let (_, node) = cache.insert("key".into(), node);

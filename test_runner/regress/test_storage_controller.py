@@ -1,3 +1,4 @@
+import json
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.types import TenantId, TenantShardId, TimelineId
-from fixtures.utils import run_pg_bench_small, wait_until
+from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
@@ -41,11 +42,11 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-def test_sharding_service_smoke(
+def test_storage_controller_smoke(
     neon_env_builder: NeonEnvBuilder,
 ):
     """
-    Test the basic lifecycle of a sharding service:
+    Test the basic lifecycle of a storage controller:
     - Restarting
     - Restarting a pageserver
     - Creating and deleting tenants and timelines
@@ -203,7 +204,7 @@ def test_node_status_after_restart(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_passthrough(
+def test_storage_controller_passthrough(
     neon_env_builder: NeonEnvBuilder,
 ):
     """
@@ -230,7 +231,7 @@ def test_sharding_service_passthrough(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_restart(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     tenant_a = env.initial_tenant
     tenant_b = TenantId.generate()
@@ -265,7 +266,7 @@ def test_sharding_service_restart(neon_env_builder: NeonEnvBuilder):
 
 
 @pytest.mark.parametrize("warm_up", [True, False])
-def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
+def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
     """
     We onboard tenants to the sharding service by treating it as a 'virtual pageserver'
     which provides the /location_config API.  This is similar to creating a tenant,
@@ -302,7 +303,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     origin_ps.http_client().tenant_create(tenant_id, generation=generation)
 
     # As if doing a live migration, first configure origin into stale mode
-    origin_ps.http_client().tenant_location_conf(
+    r = origin_ps.http_client().tenant_location_conf(
         tenant_id,
         {
             "mode": "AttachedStale",
@@ -311,6 +312,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
             "generation": generation,
         },
     )
+    assert len(r["shards"]) == 1
 
     if warm_up:
         origin_ps.http_client().tenant_heatmap_upload(tenant_id)
@@ -331,7 +333,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
 
     # Call into storage controller to onboard the tenant
     generation += 1
-    virtual_ps_http.tenant_location_conf(
+    r = virtual_ps_http.tenant_location_conf(
         tenant_id,
         {
             "mode": "AttachedMulti",
@@ -340,6 +342,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
             "generation": generation,
         },
     )
+    assert len(r["shards"]) == 1
 
     # As if doing a live migration, detach the original pageserver
     origin_ps.http_client().tenant_location_conf(
@@ -356,7 +359,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     # set it to AttachedSingle: this is a no-op, but we test it because the
     # cloud control plane may call this for symmetry with live migration to
     # an individual pageserver
-    virtual_ps_http.tenant_location_conf(
+    r = virtual_ps_http.tenant_location_conf(
         tenant_id,
         {
             "mode": "AttachedSingle",
@@ -365,6 +368,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
             "generation": generation,
         },
     )
+    assert len(r["shards"]) == 1
 
     # We should see the tenant is now attached to the pageserver managed
     # by the sharding service
@@ -395,7 +399,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     # The generation has moved on since we onboarded
     assert generation != dest_tenant_before_conf_change["generation"]
 
-    virtual_ps_http.tenant_location_conf(
+    r = virtual_ps_http.tenant_location_conf(
         tenant_id,
         {
             "mode": "AttachedSingle",
@@ -405,6 +409,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
             "generation": generation,
         },
     )
+    assert len(r["shards"]) == 1
     dest_tenant_after_conf_change = dest_ps.http_client().tenant_status(tenant_id)
     assert (
         dest_tenant_after_conf_change["generation"] == dest_tenant_before_conf_change["generation"]
@@ -415,7 +420,7 @@ def test_sharding_service_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: 
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_compute_hook(
+def test_storage_controller_compute_hook(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
     httpserver_listen_address,
@@ -528,7 +533,7 @@ def test_sharding_service_compute_hook(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     """
     Verify that occasional-use debug APIs work as expected.  This is a lightweight test
     that just hits the endpoints to check that they don't bitrot.
@@ -589,7 +594,7 @@ def test_sharding_service_debug_apis(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_s3_time_travel_recovery(
+def test_storage_controller_s3_time_travel_recovery(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
 ):
@@ -699,7 +704,7 @@ def test_sharding_service_s3_time_travel_recovery(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_auth(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
     svc = env.storage_controller
@@ -723,12 +728,17 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
         StorageControllerApiException,
         match="Forbidden: JWT authentication error",
     ):
-        svc.request("POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.ADMIN))
+        svc.request(
+            "POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.SAFEKEEPER_DATA)
+        )
 
     # Token with correct scope
     svc.request(
         "POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.PAGE_SERVER_API)
     )
+
+    # Token with admin scope should also be permitted
+    svc.request("POST", f"{api}/v1/tenant", json=body, headers=svc.headers(TokenScope.ADMIN))
 
     # No token
     with pytest.raises(
@@ -763,7 +773,7 @@ def test_sharding_service_auth(neon_env_builder: NeonEnvBuilder):
         )
 
 
-def test_sharding_service_tenant_conf(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_tenant_conf(neon_env_builder: NeonEnvBuilder):
     """
     Validate the pageserver-compatible API endpoints for setting and getting tenant conf, without
     supplying the whole LocationConf.
@@ -866,7 +876,7 @@ def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
         PageserverFailpoint(pageserver_id=1, failpoint="get-utilization-http-handler"),
     ],
 )
-def test_sharding_service_heartbeats(
+def test_storage_controller_heartbeats(
     neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, failure: Failure
 ):
     neon_env_builder.num_pageservers = 2
@@ -976,7 +986,7 @@ def test_sharding_service_heartbeats(
     wait_until(10, 1, storage_controller_consistent)
 
 
-def test_sharding_service_re_attach(neon_env_builder: NeonEnvBuilder):
+def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):
     """
     Exercise the behavior of the /re-attach endpoint on pageserver startup when
     pageservers have a mixture of attached and secondary locations
@@ -1131,3 +1141,92 @@ def test_storage_controller_shard_scheduling_policy(neon_env_builder: NeonEnvBui
 
     # And indeed the tenant should be attached
     assert len(env.pageserver.http_client().tenant_list_locations()["tenant_shards"]) == 1
+
+
+def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
+    """
+    The storage controller command line interface (storcon-cli) is an internal tool.  Most tests
+    just use the APIs directly: this test exercises some basics of the CLI as a regression test
+    that the client remains usable as the server evolves.
+    """
+    output_dir = neon_env_builder.test_output_dir
+    shard_count = 4
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+    base_args = [env.neon_binpath / "storcon_cli", "--api", env.storage_controller_api]
+
+    def storcon_cli(args):
+        """
+        CLI wrapper: returns stdout split into a list of non-empty strings
+        """
+        (output_path, stdout, status_code) = subprocess_capture(
+            output_dir,
+            [str(s) for s in base_args + args],
+            echo_stderr=True,
+            echo_stdout=True,
+            env={},
+            check=False,
+            capture_stdout=True,
+            timeout=10,
+        )
+        if status_code:
+            log.warning(f"Command {args} failed")
+            log.warning(f"Output at: {output_path}")
+
+            raise RuntimeError("CLI failure (check logs for stderr)")
+
+        assert stdout is not None
+        return [line.strip() for line in stdout.split("\n") if line.strip()]
+
+    # List nodes
+    node_lines = storcon_cli(["nodes"])
+    # Table header, footer, and one line of data
+    assert len(node_lines) == 5
+    assert "localhost" in node_lines[3]
+
+    # Pause scheduling onto a node
+    storcon_cli(["node-configure", "--node-id", "1", "--scheduling", "pause"])
+    assert "Pause" in storcon_cli(["nodes"])[3]
+
+    # Make a node offline
+    storcon_cli(["node-configure", "--node-id", "1", "--availability", "offline"])
+    assert "Offline" in storcon_cli(["nodes"])[3]
+
+    # List tenants
+    tenant_lines = storcon_cli(["tenants"])
+    assert len(tenant_lines) == 5
+    assert str(env.initial_tenant) in tenant_lines[3]
+
+    # Setting scheduling policies intentionally result in warnings, they're for rare use.
+    env.storage_controller.allowed_errors.extend(
+        [".*Skipping reconcile for policy.*", ".*Scheduling is disabled by policy.*"]
+    )
+
+    # Describe a tenant
+    tenant_lines = storcon_cli(["tenant-describe", "--tenant-id", str(env.initial_tenant)])
+    assert len(tenant_lines) == 3 + shard_count * 2
+    assert str(env.initial_tenant) in tenant_lines[3]
+
+    # Pause changes on a tenant
+    storcon_cli(["tenant-policy", "--tenant-id", str(env.initial_tenant), "--scheduling", "stop"])
+    assert "Stop" in storcon_cli(["tenants"])[3]
+
+    # Change a tenant's placement
+    storcon_cli(
+        ["tenant-policy", "--tenant-id", str(env.initial_tenant), "--placement", "secondary"]
+    )
+    assert "Secondary" in storcon_cli(["tenants"])[3]
+
+    # Modify a tenant's config
+    storcon_cli(
+        [
+            "tenant-config",
+            "--tenant-id",
+            str(env.initial_tenant),
+            "--config",
+            json.dumps({"pitr_interval": "1m"}),
+        ]
+    )
+
+    # Quiesce any background reconciliation before doing consistency check
+    env.storage_controller.reconcile_until_idle(timeout_secs=10)
+    env.storage_controller.consistency_check()
