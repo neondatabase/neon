@@ -19,17 +19,26 @@ const SLOWDOWN_DELAY: Duration = Duration::from_secs(5);
 
 pub(crate) const API_CONCURRENCY: usize = 32;
 
+struct UnshardedComputeHookTenant {
+    // Which node is this tenant attached to
+    node_id: NodeId,
+
+    // Must hold this lock to send a notification.
+    send_lock: Arc<tokio::sync::Mutex<Option<ComputeHookNotifyRequest>>>,
+}
 struct ShardedComputeHookTenant {
     stripe_size: ShardStripeSize,
     shard_count: ShardCount,
     shards: Vec<(ShardNumber, NodeId)>,
 
-    // Must hold this lock to send a notification.
-    send_lock: Arc<tokio::sync::Mutex<ComputeHookNotifyRequest>>,
+    // Must hold this lock to send a notification.  The contents represent
+    // the last successfully sent notification, and are used to coalesce multiple
+    // updates by only sending when there is a chance since our last successful send.
+    send_lock: Arc<tokio::sync::Mutex<Option<ComputeHookNotifyRequest>>>,
 }
 
 enum ComputeHookTenant {
-    Unsharded((NodeId, Arc<tokio::sync::Mutex<ComputeHookNotifyRequest>>)),
+    Unsharded(UnshardedComputeHookTenant),
     Sharded(ShardedComputeHookTenant),
 }
 
@@ -44,13 +53,16 @@ impl ComputeHookTenant {
                 send_lock: Arc::default(),
             })
         } else {
-            Self::Unsharded((node_id, Arc::default()))
+            Self::Unsharded(UnshardedComputeHookTenant {
+                node_id,
+                send_lock: Arc::default(),
+            })
         }
     }
 
-    fn get_lock(&self) -> &Arc<tokio::sync::Mutex<ComputeHookNotifyRequest>> {
+    fn get_send_lock(&self) -> &Arc<tokio::sync::Mutex<Option<ComputeHookNotifyRequest>>> {
         match self {
-            Self::Unsharded((_node_id, lock)) => lock,
+            Self::Unsharded(unsharded_tenant) => &unsharded_tenant.send_lock,
             Self::Sharded(sharded_tenant) => &sharded_tenant.send_lock,
         }
     }
@@ -64,10 +76,8 @@ impl ComputeHookTenant {
         node_id: NodeId,
     ) {
         match self {
-            Self::Unsharded((existing_node_id, _lock))
-                if tenant_shard_id.shard_count.count() == 1 =>
-            {
-                *existing_node_id = node_id
+            Self::Unsharded(unsharded_tenant) if tenant_shard_id.shard_count.count() == 1 => {
+                unsharded_tenant.node_id = node_id
             }
             Self::Sharded(sharded_tenant)
                 if sharded_tenant.stripe_size == stripe_size
@@ -108,16 +118,6 @@ struct ComputeHookNotifyRequest {
     shards: Vec<ComputeHookNotifyRequestShard>,
 }
 
-impl Default for ComputeHookNotifyRequest {
-    fn default() -> Self {
-        Self {
-            tenant_id: TenantId::from_array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            stripe_size: None,
-            shards: Vec::new(),
-        }
-    }
-}
-
 /// Error type for attempts to call into the control plane compute notification hook
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum NotifyError {
@@ -150,11 +150,11 @@ enum MaybeSendResult {
     Transmit(
         (
             ComputeHookNotifyRequest,
-            tokio::sync::OwnedMutexGuard<ComputeHookNotifyRequest>,
+            tokio::sync::OwnedMutexGuard<Option<ComputeHookNotifyRequest>>,
         ),
     ),
     // Something requires sending, but you must wait for a current sender then call again
-    AwaitLock(Arc<tokio::sync::Mutex<ComputeHookNotifyRequest>>),
+    AwaitLock(Arc<tokio::sync::Mutex<Option<ComputeHookNotifyRequest>>>),
     // Nothing requires sending
     Noop,
 }
@@ -163,24 +163,25 @@ impl ComputeHookTenant {
     fn maybe_send(
         &self,
         tenant_id: TenantId,
-        lock: Option<tokio::sync::OwnedMutexGuard<ComputeHookNotifyRequest>>,
+        lock: Option<tokio::sync::OwnedMutexGuard<Option<ComputeHookNotifyRequest>>>,
     ) -> MaybeSendResult {
         let locked = match lock {
             Some(already_locked) => already_locked,
             None => {
-                let Ok(locked) = self.get_lock().clone().try_lock_owned() else {
-                    return MaybeSendResult::AwaitLock(self.get_lock().clone());
+                // Lock order: this _must_ be only a try_lock, because we are called inside of the [`ComputeHook::state`] lock.
+                let Ok(locked) = self.get_send_lock().clone().try_lock_owned() else {
+                    return MaybeSendResult::AwaitLock(self.get_send_lock().clone());
                 };
                 locked
             }
         };
 
         let request = match self {
-            Self::Unsharded((node_id, _lock)) => Some(ComputeHookNotifyRequest {
+            Self::Unsharded(unsharded_tenant) => Some(ComputeHookNotifyRequest {
                 tenant_id,
                 shards: vec![ComputeHookNotifyRequestShard {
                     shard_number: ShardNumber(0),
-                    node_id: *node_id,
+                    node_id: unsharded_tenant.node_id,
                 }],
                 stripe_size: None,
             }),
@@ -218,7 +219,7 @@ impl ComputeHookTenant {
                 tracing::info!("Tenant isn't yet ready to emit a notification");
                 MaybeSendResult::Noop
             }
-            Some(request) if request == *locked => {
+            Some(request) if Some(&request) == locked.as_ref() => {
                 // No change from the last value successfully sent
                 MaybeSendResult::Noop
             }
@@ -434,10 +435,10 @@ impl ComputeHook {
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         let maybe_send_result = {
-            let mut locked = self.state.lock().unwrap();
+            let mut state_locked = self.state.lock().unwrap();
 
             use std::collections::hash_map::Entry;
-            let tenant = match locked.entry(tenant_shard_id.tenant_id) {
+            let tenant = match state_locked.entry(tenant_shard_id.tenant_id) {
                 Entry::Vacant(e) => e.insert(ComputeHookTenant::new(
                     tenant_shard_id,
                     stripe_size,
@@ -454,15 +455,18 @@ impl ComputeHook {
 
         // Process result: we may get an update to send, or we may have to wait for a lock
         // before trying again.
-        let (request, mut guard) = match maybe_send_result {
+        let (request, mut send_lock_guard) = match maybe_send_result {
             MaybeSendResult::Noop => {
                 return Ok(());
             }
-            MaybeSendResult::AwaitLock(lock) => {
-                let send_locked = lock.lock_owned().await;
+            MaybeSendResult::AwaitLock(send_lock) => {
+                let send_locked = send_lock.lock_owned().await;
 
-                let locked = self.state.lock().unwrap();
-                let Some(tenant) = locked.get(&tenant_shard_id.tenant_id) else {
+                // Lock order: maybe_send is called within the `[Self::state]` lock, and takes the send lock, but here
+                // we have acquired the send lock and take `[Self::state]` lock.  This is safe because maybe_send only uses
+                // try_lock.
+                let state_locked = self.state.lock().unwrap();
+                let Some(tenant) = state_locked.get(&tenant_shard_id.tenant_id) else {
                     return Ok(());
                 };
                 match tenant.maybe_send(tenant_shard_id.tenant_id, Some(send_locked)) {
@@ -489,7 +493,9 @@ impl ComputeHook {
         };
 
         if result.is_ok() {
-            *guard = request;
+            // Before dropping the send lock, stash the request we just sent so that
+            // subsequent callers can avoid redundantly re-sending the same thing.
+            *send_lock_guard = Some(request);
         }
         result
     }
@@ -525,7 +531,7 @@ pub(crate) mod tests {
         assert!(request.stripe_size.is_none());
 
         // Simulate successful send
-        *guard = request;
+        *guard = Some(request);
         drop(guard);
 
         // Try asking again: this should be a no-op
@@ -568,7 +574,7 @@ pub(crate) mod tests {
         assert_eq!(request.stripe_size, Some(ShardStripeSize(32768)));
 
         // Simulate successful send
-        *guard = request;
+        *guard = Some(request);
         drop(guard);
 
         Ok(())
