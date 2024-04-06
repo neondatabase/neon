@@ -94,8 +94,13 @@ impl StorageControllerMetrics {
 
 impl Default for StorageControllerMetrics {
     fn default() -> Self {
+        let mut metrics_group = StorageControllerMetricGroup::new();
+        metrics_group
+            .storage_controller_reconcile_complete
+            .init_all_dense();
+
         Self {
-            metrics_group: StorageControllerMetricGroup::new(),
+            metrics_group,
             encoder: Mutex::new(measured::text::BufferedTextEncoder::new()),
         }
     }
