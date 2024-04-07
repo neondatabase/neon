@@ -15,7 +15,12 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
         .map_err(std::io::Error::from)
         .context("statvfs tenants directory")?;
 
-    let blocksz = statvfs.block_size();
+    // https://unix.stackexchange.com/a/703650
+    let blocksz = if statvfs.fragment_size() > 0 {
+        statvfs.fragment_size()
+    } else {
+        statvfs.block_size()
+    };
 
     #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_cast))]
     let free = statvfs.blocks_available() as u64 * blocksz;
