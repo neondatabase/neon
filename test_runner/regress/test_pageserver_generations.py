@@ -31,6 +31,7 @@ from fixtures.pageserver.utils import (
     list_prefix,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_for_upload_queue_empty
 )
 from fixtures.remote_storage import (
     RemoteStorageKind,
@@ -127,7 +128,10 @@ def generate_uploads_and_deletions(
         # in subsequent actions like pageserver restarts.
         final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
         ps_http.timeline_checkpoint(tenant_id, timeline_id)
+        # Finish uploads
         wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
+        # Finish all remote writes (including deletions)
+        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
 
 def read_all(
