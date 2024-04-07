@@ -1187,7 +1187,14 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     storcon_cli(["node-configure", "--node-id", "1", "--scheduling", "pause"])
     assert "Pause" in storcon_cli(["nodes"])[3]
 
-    # Make a node offline
+    # We will simulate a node death and then marking it offline
+    env.pageservers[0].stop(immediate=True)
+    # Sleep to make it unlikely that the controller's heartbeater will race handling
+    # a /utilization response internally, such that it marks the node back online.  IRL
+    # there would always be a longer delay than this before a node failing and a human
+    # intervening.
+    time.sleep(2)
+
     storcon_cli(["node-configure", "--node-id", "1", "--availability", "offline"])
     assert "Offline" in storcon_cli(["nodes"])[3]
 

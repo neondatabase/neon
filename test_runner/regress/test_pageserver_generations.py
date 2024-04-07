@@ -22,6 +22,7 @@ from fixtures.neon_fixtures import (
     NeonPageserver,
     PgBin,
     S3Scrubber,
+    flush_ep_to_pageserver,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -30,6 +31,7 @@ from fixtures.pageserver.utils import (
     list_prefix,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import (
     RemoteStorageKind,
@@ -119,6 +121,17 @@ def generate_uploads_and_deletions(
         gc_result = ps_http.timeline_gc(tenant_id, timeline_id, 0)
         print_gc_result(gc_result)
         assert gc_result["layers_removed"] > 0
+
+        # Stop endpoint and flush all data to pageserver, then checkpoint it: this
+        # ensures that the pageserver is in a fully idle state: there will be no more
+        # background ingest, no more uploads pending, and therefore no non-determinism
+        # in subsequent actions like pageserver restarts.
+        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id)
+        # Finish uploads
+        wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
+        # Finish all remote writes (including deletions)
+        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
 
 def read_all(
