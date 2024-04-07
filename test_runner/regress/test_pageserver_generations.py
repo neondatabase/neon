@@ -125,7 +125,7 @@ def generate_uploads_and_deletions(
         # ensures that the pageserver is in a fully idle state: there will be no more
         # background ingest, no more uploads pending, and therefore no non-determinism
         # in subsequent actions like pageserver restarts.
-        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
+        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
         ps_http.timeline_checkpoint(tenant_id, timeline_id)
         wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
 
