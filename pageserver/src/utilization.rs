@@ -29,8 +29,7 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
     let used = statvfs
         .blocks()
         // use blocks_free instead of available here to match df in case someone compares
-        .checked_sub(statvfs.blocks_free())
-        .unwrap_or(0) as u64
+        .saturating_sub(statvfs.blocks_free()) as u64
         * blocksz;
 
     let captured_at = std::time::SystemTime::now();
