@@ -31,7 +31,7 @@ from fixtures.pageserver.utils import (
     list_prefix,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_for_upload_queue_empty
+    wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import (
     RemoteStorageKind,
