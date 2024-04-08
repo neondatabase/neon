@@ -106,7 +106,8 @@ lasso = "0.7"
 leaky-bucket = "1.0.1"
 libc = "0.2"
 md5 = "0.7.0"
-measured = { version = "0.0.20", features=["default", "lasso"] }
+measured = { version = "0.0.20", features=["lasso"] }
+measured-process = { version = "0.0.20" }
 memoffset = "0.8"
 native-tls = "0.2"
 nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
