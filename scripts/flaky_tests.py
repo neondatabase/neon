@@ -15,8 +15,7 @@ FLAKY_TESTS_QUERY = """
         DISTINCT parent_suite, suite, name
     FROM results
     WHERE
-        started_at > CURRENT_DATE - INTERVAL '10' day
-        AND started_at > '2024-03-11 14:50:11.845+00' -- we switched the default PAGESERVER_VIRTUAL_FILE_IO_ENGINE to `tokio-epoll-uring` from `std-fs` on this date, we want to ignore the flaky tests for `std-fs`
+        started_at > CURRENT_DATE - INTERVAL '%s' day
         AND (
             (status IN ('failed', 'broken') AND reference = 'refs/heads/main')
             OR flaky
