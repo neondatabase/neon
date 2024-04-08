@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use utils::id::{TenantTimelineId, TimelineId};
 
-use std::sync::{Arc, Mutex};
+use std::{f64, sync::Arc};
 use tokio::{
     sync::{mpsc, OwnedSemaphorePermit},
     task::JoinSet,
@@ -17,16 +17,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
-
-use crate::util::{
-    request_stats,
-    tokio_thread_local_stats::{self, AllThreadLocalStats},
-};
-
-#[derive(serde::Serialize)]
-struct Output {
-    total: request_stats::Output,
-}
 
 /// Evict & on-demand download random layers.
 #[derive(clap::Parser)]
@@ -51,12 +41,27 @@ pub(crate) struct Args {
     targets: Option<Vec<TenantTimelineId>>,
 }
 
-tokio_thread_local_stats::declare!(STATS: request_stats::Stats);
-
 pub(crate) fn main(args: Args) -> anyhow::Result<()> {
-    tokio_thread_local_stats::main!(STATS, move |thread_local_stats| {
-        main_impl(args, thread_local_stats)
-    })
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let task = rt.spawn(main_impl(args));
+    rt.block_on(task).unwrap().unwrap();
+    Ok(())
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+struct Stats {
+    evictions: AtomicU64,
+    downloads: AtomicU64,
+    timeline_restarts: AtomicU64,
+}
+
+#[derive(serde::Serialize)]
+struct Output {
+    downloads: f64,
+    evictions: f64,
+    timeline_restarts: u64,
 }
 
 #[derive(Debug, Default)]
@@ -78,10 +83,7 @@ impl LiveStats {
     }
 }
 
-async fn main_impl(
-    args: Args,
-    all_thread_local_stats: AllThreadLocalStats<request_stats::Stats>,
-) -> anyhow::Result<()> {
+async fn main_impl(args: Args) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
@@ -107,8 +109,12 @@ async fn main_impl(
     let mut tasks = JoinSet::new();
 
     let live_stats = Arc::new(LiveStats::default());
+    let stats = Arc::new(Stats::default());
+
+    let start = Instant::now();
     tasks.spawn({
         let live_stats = Arc::clone(&live_stats);
+        let stats = Arc::clone(&stats);
         let cloned_token = token.clone();
         async move {
             let mut last_at = Instant::now();
@@ -126,10 +132,18 @@ async fn main_impl(
                     downloads,
                     timeline_restarts,
                 } = &*live_stats;
-                let evictions = evictions.swap(0, Ordering::Relaxed) as f64 / delta.as_secs_f64();
-                let downloads = downloads.swap(0, Ordering::Relaxed) as f64 / delta.as_secs_f64();
+                let evictions = evictions.swap(0, Ordering::Relaxed);
+                let downloads = downloads.swap(0, Ordering::Relaxed);
                 let timeline_restarts = timeline_restarts.swap(0, Ordering::Relaxed);
-                info!("evictions={evictions:.2}/s downloads={downloads:.2}/s timeline_restarts={timeline_restarts}");
+
+                stats.evictions.fetch_add(evictions, Ordering::Relaxed);
+                stats.downloads.fetch_add(downloads, Ordering::Relaxed);
+                stats.timeline_restarts.fetch_add(timeline_restarts, Ordering::Relaxed);
+
+                let evictions_per_s = evictions as f64 / delta.as_secs_f64();
+                let downloads_per_s = downloads as f64 / delta.as_secs_f64();
+
+                info!("evictions={evictions_per_s:.2}/s downloads={downloads_per_s:.2}/s timeline_restarts={timeline_restarts}");
             }
         }
     });
@@ -155,18 +169,14 @@ async fn main_impl(
     while let Some(res) = tasks.join_next().await {
         res.unwrap();
     }
+    let end = Instant::now();
+    let duration: Duration = end - start;
 
     let output = Output {
-        total: {
-            let mut agg_stats = request_stats::Stats::new();
-            for stats in all_thread_local_stats.lock().unwrap().iter() {
-                let stats = stats.lock().unwrap();
-                agg_stats.add(&stats);
-            }
-            agg_stats.output()
-        },
+        downloads: stats.downloads.load(Ordering::Relaxed) as f64 / duration.as_secs_f64(),
+        evictions: stats.evictions.load(Ordering::Relaxed) as f64 / duration.as_secs_f64(),
+        timeline_restarts: stats.timeline_restarts.load(Ordering::Relaxed),
     };
-
     let output = serde_json::to_string_pretty(&output).unwrap();
     println!("{output}");
 
@@ -229,7 +239,6 @@ async fn timeline_actor(
                 return;
             }
 
-            let start = std::time::Instant::now();
             assert!(!timeline.joinset.is_empty());
             if let Some(res) = timeline.joinset.try_join_next() {
                 debug!(?res, "a layer actor exited, should not happen");
@@ -260,15 +269,6 @@ async fn timeline_actor(
                     },
                 }
             }
-            let end = Instant::now();
-            STATS.with(|stats| {
-                stats
-                    .borrow()
-                    .lock()
-                    .unwrap()
-                    .observe(end.duration_since(start))
-                    .unwrap();
-            });
         }
     }
 }
