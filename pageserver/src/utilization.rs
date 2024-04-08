@@ -15,12 +15,24 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
         .map_err(std::io::Error::from)
         .context("statvfs tenants directory")?;
 
-    let blocksz = statvfs.block_size();
+    // https://unix.stackexchange.com/a/703650
+    let blocksz = if statvfs.fragment_size() > 0 {
+        statvfs.fragment_size()
+    } else {
+        statvfs.block_size()
+    };
 
     #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_cast))]
     let free = statvfs.blocks_available() as u64 * blocksz;
-    let used = crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.get();
-    let now = std::time::SystemTime::now();
+
+    #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_cast))]
+    let used = statvfs
+        .blocks()
+        // use blocks_free instead of available here to match df in case someone compares
+        .saturating_sub(statvfs.blocks_free()) as u64
+        * blocksz;
+
+    let captured_at = std::time::SystemTime::now();
 
     let doc = PageserverUtilization {
         disk_usage_bytes: used,
@@ -29,7 +41,7 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
         //
         // note that u64::MAX will be output as i64::MAX as u64, but that should not matter
         utilization_score: u64::MAX,
-        captured_at: utils::serde_system_time::SystemTime(now),
+        captured_at: utils::serde_system_time::SystemTime(captured_at),
     };
 
     // TODO: make utilization_score into a metric
