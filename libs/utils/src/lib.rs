@@ -63,6 +63,7 @@ pub mod measured_stream;
 
 pub mod serde_percent;
 pub mod serde_regex;
+pub mod serde_system_time;
 
 pub mod pageserver_feedback;
 
