@@ -97,6 +97,8 @@ pub mod defaults {
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
+    pub const DEFAULT_WALREDO_PROCESS_KIND: &str = crate::walredo::ProcessKind::DEFAULT_TOML;
+
     ///
     /// Default built-in configuration file.
     ///
@@ -139,6 +141,8 @@ pub mod defaults {
 #max_vectored_read_bytes = '{DEFAULT_MAX_VECTORED_READ_BYTES}'
 
 #validate_vectored_get = '{DEFAULT_VALIDATE_VECTORED_GET}'
+
+#walredo_process_kind = '{DEFAULT_WALREDO_PROCESS_KIND}'
 
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -290,6 +294,8 @@ pub struct PageServerConf {
     ///
     /// Setting this to zero disables limits on total ephemeral layer size.
     pub ephemeral_bytes_per_memory_kb: usize,
+
+    pub walredo_process_kind: crate::walredo::ProcessKind,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -413,6 +419,8 @@ struct PageServerConfigBuilder {
     validate_vectored_get: BuilderValue<bool>,
 
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
+
+    walredo_process_kind: BuilderValue<crate::walredo::ProcessKind>,
 }
 
 impl PageServerConfigBuilder {
@@ -500,6 +508,8 @@ impl PageServerConfigBuilder {
             )),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
+
+            walredo_process_kind: Set(DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap()),
         }
     }
 }
@@ -683,6 +693,10 @@ impl PageServerConfigBuilder {
         self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
     }
 
+    pub fn get_walredo_process_kind(&mut self, value: crate::walredo::ProcessKind) {
+        self.walredo_process_kind = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
@@ -739,6 +753,7 @@ impl PageServerConfigBuilder {
                 max_vectored_read_bytes,
                 validate_vectored_get,
                 ephemeral_bytes_per_memory_kb,
+                walredo_process_kind,
             }
             CUSTOM LOGIC
             {
@@ -1032,6 +1047,9 @@ impl PageServerConf {
                 "ephemeral_bytes_per_memory_kb" => {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
                 }
+                "walredo_process_kind" => {
+                    builder.get_walredo_process_kind(parse_toml_from_str("walredo_process_kind", item)?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -1114,6 +1132,7 @@ impl PageServerConf {
             ),
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+            walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
         }
     }
 }
@@ -1351,7 +1370,8 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
-                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1423,7 +1443,8 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
-                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
             },
             "Should be able to parse all basic config values correctly"
         );
