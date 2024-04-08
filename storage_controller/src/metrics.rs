@@ -9,6 +9,7 @@
 //!
 use bytes::Bytes;
 use measured::{label::LabelValue, metric::histogram, FixedCardinalityLabel, MetricGroup};
+use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
@@ -83,8 +84,11 @@ pub(crate) struct StorageControllerMetricGroup {
 }
 
 impl StorageControllerMetrics {
-    pub(crate) fn encode(&self) -> Bytes {
+    pub(crate) fn encode(&self, neon_metrics: &NeonMetrics) -> Bytes {
         let mut encoder = self.encoder.lock().unwrap();
+        neon_metrics
+            .collect_group_into(&mut *encoder)
+            .unwrap_or_else(|infallible| match infallible {});
         self.metrics_group
             .collect_group_into(&mut *encoder)
             .unwrap_or_else(|infallible| match infallible {});

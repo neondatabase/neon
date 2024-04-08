@@ -3,6 +3,7 @@ use camino::Utf8PathBuf;
 use clap::Parser;
 use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
+use metrics::BuildInfo;
 use std::sync::Arc;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
@@ -192,6 +193,11 @@ async fn async_main() -> anyhow::Result<()> {
         args.listen
     );
 
+    let build_info = BuildInfo {
+        revision: GIT_VERSION,
+        build_tag: BUILD_TAG,
+    };
+
     let strict_mode = if args.dev {
         StrictMode::Dev
     } else {
@@ -253,7 +259,7 @@ async fn async_main() -> anyhow::Result<()> {
     let auth = secrets
         .public_key
         .map(|jwt_auth| Arc::new(SwappableJwtAuth::new(jwt_auth)));
-    let router = make_router(service.clone(), auth)
+    let router = make_router(service.clone(), auth, build_info)
         .build()
         .map_err(|err| anyhow!(err))?;
     let router_service = utils::http::RouterService::new(router).unwrap();
