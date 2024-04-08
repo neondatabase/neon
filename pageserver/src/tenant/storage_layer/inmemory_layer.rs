@@ -20,6 +20,7 @@ use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // avoid binding to Write (conflicts with std::io::Write)
@@ -30,7 +31,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::{RwLock, RwLockWriteGuard};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::{
     DeltaLayerWriter, ResidentLayer, ValueReconstructSituation, ValueReconstructState,
@@ -50,6 +51,8 @@ pub struct InMemoryLayer {
     /// This layer contains all the changes from 'start_lsn'. The
     /// start is inclusive.
     start_lsn: Lsn,
+
+    opened_at: Instant,
 
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is `None`.
@@ -463,6 +466,7 @@ impl InMemoryLayer {
             timeline_id,
             tenant_shard_id,
             start_lsn,
+            opened_at: Instant::now(),
             end_lsn: OnceLock::new(),
             inner: RwLock::new(InMemoryLayerInner {
                 index: HashMap::new(),
@@ -617,5 +621,74 @@ impl InMemoryLayer {
         // MAX is used here because we identify L0 layers by full key range
         let delta_layer = delta_layer_writer.finish(Key::MAX, timeline).await?;
         Ok(delta_layer)
+    }
+
+    pub(crate) async fn should_roll(&self, write_size: u64, projected_lsn: Lsn) -> bool {
+        let inner = self.inner.read().await;
+        self.should_roll_locked(inner, write_size, projected_lsn)
+    }
+
+    pub(crate) async fn try_should_roll(
+        &self,
+        write_size: u64,
+        projected_lsn: Lsn,
+    ) -> Option<bool> {
+        let inner = self.inner.try_read().ok()?;
+        Some(self.should_roll_locked(inner, write_size, projected_lsn))
+    }
+
+    fn should_roll_locked(
+        &self,
+        inner: RwLockReadGuard<'_, InMemoryLayerInner>,
+        write_size: u64,
+        projected_lsn: Lsn,
+    ) -> bool {
+        let arc_guard = self.tenant_conf.load();
+        // TODO: This is quick and dirty. Should only merge the configs we need.
+        let tenant_conf = arc_guard
+            .tenant_conf
+            .merge(self.conf.default_tenant_conf.clone());
+
+        let layer_size = inner.file.len();
+        let projected_layer_size = layer_size + write_size;
+        let distance = projected_lsn.widening_sub(self.start_lsn);
+
+        // Rolling the open layer can be triggered by:
+        // 1. The distance from the last LSN we rolled at. This bounds the amount of WAL that
+        //    the safekeepers need to store.  For sharded tenants, we multiply by shard count to
+        //    account for how writes are distributed across shards: we expect each node to consume
+        //    1/count of the LSN on average.
+        // 2. The size of the currently open layer.
+        // 3. The time since the last roll. It helps safekeepers to regard pageserver as caught
+        //    up and suspend activity.
+        if distance
+            >= tenant_conf.checkpoint_distance as i128
+                * self.tenant_shard_id.shard_count.count() as i128
+        {
+            info!(
+                "Will roll layer at {} with layer size {} due to LSN distance ({})",
+                projected_lsn, layer_size, distance
+            );
+
+            true
+        } else if projected_layer_size >= tenant_conf.checkpoint_distance {
+            info!(
+                "Will roll layer at {} with layer size {} due to layer size ({})",
+                projected_lsn, layer_size, projected_layer_size
+            );
+
+            true
+        } else if distance > 0 && self.opened_at.elapsed() >= tenant_conf.checkpoint_timeout {
+            info!(
+                "Will roll layer at {} with layer size {} due to time since last flush ({:?})",
+                projected_lsn,
+                layer_size,
+                self.opened_at.elapsed()
+            );
+
+            true
+        } else {
+            false
+        }
     }
 }

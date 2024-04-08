@@ -223,6 +223,8 @@ pub struct Timeline {
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
     pub(crate) layers: Arc<tokio::sync::RwLock<LayerManager>>,
 
+    open_layer: tokio::sync::RwLock<Option<Arc<InMemoryLayer>>>,
+
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
     last_freeze_ts: RwLock<Instant>,
@@ -1184,13 +1186,8 @@ impl Timeline {
             return;
         };
 
-        let Ok(layers_guard) = self.layers.try_read() else {
-            // Don't block if the layer lock is busy
-            return;
-        };
-
-        let Some(open_layer) = &layers_guard.layer_map().open_layer else {
-            // No open layer, no work to do.
+        let Some(open_layer) = &*self.open_layer.try_read() else {
+            // No open layer or the lock is held, no work to do.
             return;
         };
 
@@ -1235,7 +1232,6 @@ impl Timeline {
                 }
                 InMemoryLayerInfo::Open { .. } => {
                     // Upgrade to a write lock and freeze the layer
-                    drop(layers_guard);
                     let mut layers_guard = self.layers.write().await;
                     layers_guard
                         .try_freeze_in_memory_layer(current_lsn, &self.last_freeze_at)
@@ -1520,7 +1516,7 @@ impl Timeline {
         let guard = self.layers.read().await;
         let layer_map = guard.layer_map();
         let mut in_memory_layers = Vec::with_capacity(layer_map.frozen_layers.len() + 1);
-        if let Some(open_layer) = &layer_map.open_layer {
+        if let Some(open_layer) = &*self.open_layer.read().await {
             in_memory_layers.push(open_layer.info());
         }
         for frozen_layer in &layer_map.frozen_layers {
@@ -2789,9 +2785,11 @@ impl Timeline {
             let guard = timeline.layers.read().await;
             let layers = guard.layer_map();
 
+        
             // Check the open and frozen in-memory layers first, in order from newest
             // to oldest.
-            if let Some(open_layer) = &layers.open_layer {
+            // TODO: structure this so we don't grab the lock unless we need it
+            if let Some(open_layer) = &*self.open_layer.read().await {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
@@ -2989,10 +2987,19 @@ impl Timeline {
             let guard = timeline.layers.read().await;
             let layers = guard.layer_map();
 
-            let in_memory_layer = layers.find_in_memory_layer(|l| {
-                let start_lsn = l.get_lsn_range().start;
-                cont_lsn > start_lsn
-            });
+            let in_memory_layer = {
+                let open_layer = timeline.open_layer.read().await;
+                match open_layer.filter(|l| cont_lsn >= l.get_lsn_range().start).cloned() {
+                    Some(l) => Some(l),
+                    None => {
+                        layers.find_in_memory_layer(|l| {
+                            let start_lsn = l.get_lsn_range().start;
+                            cont_lsn > start_lsn
+                        })
+                    }
+                }
+
+            };
 
             match in_memory_layer {
                 Some(l) => {

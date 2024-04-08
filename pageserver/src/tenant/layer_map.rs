@@ -552,12 +552,6 @@ impl LayerMap {
     where
         Pred: FnMut(&Arc<InMemoryLayer>) -> bool,
     {
-        if let Some(open) = &self.open_layer {
-            if pred(open) {
-                return Some(open.clone());
-            }
-        }
-
         self.frozen_layers.iter().rfind(|l| pred(l)).cloned()
     }
 
@@ -852,11 +846,6 @@ impl LayerMap {
     #[allow(unused)]
     pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!("Begin dump LayerMap");
-
-        println!("open_layer:");
-        if let Some(open_layer) = &self.open_layer {
-            open_layer.dump(verbose, ctx).await?;
-        }
 
         println!("frozen_layers:");
         for frozen_layer in self.frozen_layers.iter() {
