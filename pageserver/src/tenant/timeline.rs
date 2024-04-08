@@ -1257,7 +1257,7 @@ impl Timeline {
             checkpoint_distance,
             self.get_last_record_lsn(),
             self.last_freeze_at.load(),
-            *self.last_freeze_ts.read().unwrap(),
+            open_layer.get_first_write_ts(),
         ) {
             match open_layer.info() {
                 InMemoryLayerInfo::Frozen { lsn_start, lsn_end } => {
@@ -1622,7 +1622,7 @@ impl Timeline {
         checkpoint_distance: u64,
         projected_lsn: Lsn,
         last_freeze_at: Lsn,
-        last_freeze_ts: Instant,
+        first_write_ts: Option<&Instant>,
     ) -> bool {
         let distance = projected_lsn.widening_sub(last_freeze_at);
 
@@ -1640,26 +1640,28 @@ impl Timeline {
                 projected_lsn, layer_size, distance
             );
 
-            true
+            return true;
         } else if projected_layer_size >= checkpoint_distance {
             info!(
                 "Will roll layer at {} with layer size {} due to layer size ({})",
                 projected_lsn, layer_size, projected_layer_size
             );
 
-            true
-        } else if distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
-            info!(
-                "Will roll layer at {} with layer size {} due to time since last flush ({:?})",
-                projected_lsn,
-                layer_size,
-                last_freeze_ts.elapsed()
-            );
+            return true;
+        } else if let Some(first_write_ts) = first_write_ts {
+            if distance > 0 && first_write_ts.elapsed() >= self.get_checkpoint_timeout() {
+                info!(
+                    "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
+                    projected_lsn,
+                    layer_size,
+                    first_write_ts.elapsed()
+                );
 
-            true
-        } else {
-            false
+                return true;
+            }
         }
+
+        false
     }
 }
 
@@ -4703,23 +4705,16 @@ struct TimelineWriterState {
     max_lsn: Option<Lsn>,
     // Cached details of the last freeze. Avoids going trough the atomic/lock on every put.
     cached_last_freeze_at: Lsn,
-    cached_last_freeze_ts: Instant,
 }
 
 impl TimelineWriterState {
-    fn new(
-        open_layer: Arc<InMemoryLayer>,
-        current_size: u64,
-        last_freeze_at: Lsn,
-        last_freeze_ts: Instant,
-    ) -> Self {
+    fn new(open_layer: Arc<InMemoryLayer>, current_size: u64, last_freeze_at: Lsn) -> Self {
         Self {
             open_layer,
             current_size,
             prev_lsn: None,
             max_lsn: None,
             cached_last_freeze_at: last_freeze_at,
-            cached_last_freeze_ts: last_freeze_ts,
         }
     }
 }
@@ -4818,12 +4813,10 @@ impl<'a> TimelineWriter<'a> {
         let initial_size = layer.size().await?;
 
         let last_freeze_at = self.last_freeze_at.load();
-        let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
         self.write_guard.replace(TimelineWriterState::new(
             layer,
             initial_size,
             last_freeze_at,
-            last_freeze_ts,
         ));
 
         Ok(())
@@ -4870,7 +4863,7 @@ impl<'a> TimelineWriter<'a> {
             self.get_checkpoint_distance(),
             lsn,
             state.cached_last_freeze_at,
-            state.cached_last_freeze_ts,
+            state.open_layer.get_first_write_ts(),
         ) {
             OpenLayerAction::Roll
         } else {

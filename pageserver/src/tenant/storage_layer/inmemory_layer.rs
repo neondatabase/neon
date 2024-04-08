@@ -19,6 +19,7 @@ use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // avoid binding to Write (conflicts with std::io::Write)
@@ -52,6 +53,8 @@ pub struct InMemoryLayer {
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is `None`.
     end_lsn: OnceLock<Lsn>,
+
+    first_write_ts: OnceLock<Instant>,
 
     /// The above fields never change, except for `end_lsn`, which is only set once.
     /// All other changing parts are in `inner`, and protected by a mutex.
@@ -460,6 +463,7 @@ impl InMemoryLayer {
             tenant_shard_id,
             start_lsn,
             end_lsn: OnceLock::new(),
+            first_write_ts: OnceLock::new(),
             inner: RwLock::new(InMemoryLayerInner {
                 index: HashMap::new(),
                 file,
@@ -482,6 +486,13 @@ impl InMemoryLayer {
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
+
+        if self.first_write_ts.get().is_none() {
+            self.first_write_ts
+                .set(Instant::now())
+                .expect("InMemoryLayer::put_value is never called from different threads");
+        }
+
         self.put_value_locked(&mut inner, key, lsn, buf, ctx).await
     }
 
@@ -518,6 +529,10 @@ impl InMemoryLayer {
         locked_inner.resource_units.maybe_publish_size(size);
 
         Ok(())
+    }
+
+    pub(crate) fn get_first_write_ts(&self) -> Option<&Instant> {
+        self.first_write_ts.get()
     }
 
     pub(crate) async fn tick(&self) -> Option<u64> {
