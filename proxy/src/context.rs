@@ -11,8 +11,9 @@ use uuid::Uuid;
 use crate::{
     console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
+    intern::{BranchIdInt, ProjectIdInt},
     metrics::{LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND},
-    BranchId, DbName, EndpointId, ProjectId, RoleName,
+    DbName, EndpointId, RoleName,
 };
 
 use self::parquet::RequestData;
@@ -34,8 +35,8 @@ pub struct RequestMonitoring {
     pub span: Span,
 
     // filled in as they are discovered
-    project: Option<ProjectId>,
-    branch: Option<BranchId>,
+    project: Option<ProjectIdInt>,
+    branch: Option<BranchIdInt>,
     endpoint_id: Option<EndpointId>,
     dbname: Option<DbName>,
     user: Option<RoleName>,
@@ -43,7 +44,7 @@ pub struct RequestMonitoring {
     error_kind: Option<ErrorKind>,
     pub(crate) auth_method: Option<AuthMethod>,
     success: bool,
-    cold_start_info: Option<ColdStartInfo>,
+    pub(crate) cold_start_info: ColdStartInfo,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -92,7 +93,7 @@ impl RequestMonitoring {
             error_kind: None,
             auth_method: None,
             success: false,
-            cold_start_info: None,
+            cold_start_info: ColdStartInfo::Unknown,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
@@ -113,26 +114,31 @@ impl RequestMonitoring {
     }
 
     pub fn set_cold_start_info(&mut self, info: ColdStartInfo) {
-        self.cold_start_info = Some(info);
+        self.cold_start_info = info;
+        self.latency_timer.cold_start_info(info);
     }
 
     pub fn set_project(&mut self, x: MetricsAuxInfo) {
-        self.set_endpoint_id(x.endpoint_id);
+        if self.endpoint_id.is_none() {
+            self.set_endpoint_id(x.endpoint_id.as_str().into())
+        }
         self.branch = Some(x.branch_id);
         self.project = Some(x.project_id);
-        self.cold_start_info = x.cold_start_info;
+        self.set_cold_start_info(x.cold_start_info);
     }
 
-    pub fn set_project_id(&mut self, project_id: ProjectId) {
+    pub fn set_project_id(&mut self, project_id: ProjectIdInt) {
         self.project = Some(project_id);
     }
 
     pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
-        self.span.record("ep", display(&endpoint_id));
-        crate::metrics::CONNECTING_ENDPOINTS
-            .with_label_values(&[self.protocol])
-            .measure(&endpoint_id);
-        self.endpoint_id = Some(endpoint_id);
+        if self.endpoint_id.is_none() {
+            self.span.record("ep", display(&endpoint_id));
+            crate::metrics::CONNECTING_ENDPOINTS
+                .with_label_values(&[self.protocol])
+                .measure(&endpoint_id);
+            self.endpoint_id = Some(endpoint_id);
+        }
     }
 
     pub fn set_application(&mut self, app: Option<SmolStr>) {
