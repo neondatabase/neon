@@ -271,45 +271,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "attachment_service"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "aws-config",
- "bytes",
- "camino",
- "clap",
- "control_plane",
- "diesel",
- "diesel_migrations",
- "fail",
- "futures",
- "git-version",
- "hex",
- "humantime",
- "hyper",
- "itertools",
- "lasso",
- "measured",
- "metrics",
- "once_cell",
- "pageserver_api",
- "pageserver_client",
- "postgres_connection",
- "r2d2",
- "reqwest",
- "routerify",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "utils",
- "workspace_hack",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5621,6 +5582,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "storage_controller"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "bytes",
+ "camino",
+ "clap",
+ "control_plane",
+ "diesel",
+ "diesel_migrations",
+ "fail",
+ "futures",
+ "git-version",
+ "hex",
+ "humantime",
+ "hyper",
+ "itertools",
+ "lasso",
+ "measured",
+ "metrics",
+ "once_cell",
+ "pageserver_api",
+ "pageserver_client",
+ "postgres_connection",
+ "r2d2",
+ "reqwest",
+ "routerify",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "storcon_cli"
 version = "0.1.0"
 dependencies = [
@@ -5796,23 +5796,23 @@ dependencies = [
 
 [[package]]
 name = "test-context"
-version = "0.1.4"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "055831a02a4f5aa28fede67f2902014273eb8c21b958ac5ebbd59b71ef30dbc3"
+checksum = "6676ab8513edfd2601a108621103fdb45cac9098305ca25ec93f7023b06b05d9"
 dependencies = [
- "async-trait",
  "futures",
  "test-context-macros",
 ]
 
 [[package]]
 name = "test-context-macros"
-version = "0.1.4"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8901a55b0a7a06ebc4a674dcca925170da8e613fa3b163a1df804ed10afb154d"
+checksum = "78ea17a2dc368aeca6f554343ced1b1e31f76d63683fa8016e5844bd7a5144a1"
 dependencies = [
+ "proc-macro2",
  "quote",
- "syn 1.0.109",
+ "syn 2.0.52",
 ]
 
 [[package]]
@@ -6567,6 +6567,7 @@ dependencies = [
  "heapless",
  "hex",
  "hex-literal",
+ "humantime",
  "hyper",
  "jsonwebtoken",
  "leaky-bucket",

@@ -33,13 +33,14 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::FutureExt;
 use pageserver_api::shard::TenantShardId;
-use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
@@ -48,7 +49,10 @@ use tracing::{debug, error, info, warn};
 
 use once_cell::sync::Lazy;
 
+use utils::env;
 use utils::id::TimelineId;
+
+use crate::metrics::set_tokio_runtime_setup;
 
 //
 // There are four runtimes:
@@ -98,51 +102,118 @@ use utils::id::TimelineId;
 // other operations, if the upload tasks e.g. get blocked on locks. It shouldn't
 // happen, but still.
 //
-pub static COMPUTE_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("compute request worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create compute request runtime")
-});
 
-pub static MGMT_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("mgmt request worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create mgmt request runtime")
-});
-
-pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("walreceiver worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create walreceiver runtime")
-});
-
-pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("background op worker")
-        // if you change the number of worker threads please change the constant below
-        .enable_all()
-        .build()
-        .expect("Failed to create background op runtime")
-});
-
-pub(crate) static BACKGROUND_RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| {
-    // force init and thus panics
-    let _ = BACKGROUND_RUNTIME.handle();
+pub(crate) static TOKIO_WORKER_THREADS: Lazy<NonZeroUsize> = Lazy::new(|| {
     // replicates tokio-1.28.1::loom::sys::num_cpus which is not available publicly
     // tokio would had already panicked for parsing errors or NotUnicode
     //
     // this will be wrong if any of the runtimes gets their worker threads configured to something
     // else, but that has not been needed in a long time.
-    std::env::var("TOKIO_WORKER_THREADS")
-        .map(|s| s.parse::<usize>().unwrap())
-        .unwrap_or_else(|_e| usize::max(2, num_cpus::get()))
+    NonZeroUsize::new(
+        std::env::var("TOKIO_WORKER_THREADS")
+            .map(|s| s.parse::<usize>().unwrap())
+            .unwrap_or_else(|_e| usize::max(2, num_cpus::get())),
+    )
+    .expect("the max() ensures that this is not zero")
 });
+
+enum TokioRuntimeMode {
+    SingleThreaded,
+    MultiThreaded { num_workers: NonZeroUsize },
+}
+
+impl FromStr for TokioRuntimeMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "current_thread" => Ok(TokioRuntimeMode::SingleThreaded),
+            s => match s.strip_prefix("multi_thread:") {
+                Some("default") => Ok(TokioRuntimeMode::MultiThreaded {
+                    num_workers: *TOKIO_WORKER_THREADS,
+                }),
+                Some(suffix) => {
+                    let num_workers = suffix.parse::<NonZeroUsize>().map_err(|e| {
+                        format!(
+                            "invalid number of multi-threaded runtime workers ({suffix:?}): {e}",
+                        )
+                    })?;
+                    Ok(TokioRuntimeMode::MultiThreaded { num_workers })
+                }
+                None => Err(format!("invalid runtime config: {s:?}")),
+            },
+        }
+    }
+}
+
+static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
+    let thread_name = "pageserver-tokio";
+    let Some(mode) = env::var("NEON_PAGESERVER_USE_ONE_RUNTIME") else {
+        // If the env var is not set, leave this static as None.
+        set_tokio_runtime_setup(
+            "multiple-runtimes",
+            NUM_MULTIPLE_RUNTIMES
+                .checked_mul(*TOKIO_WORKER_THREADS)
+                .unwrap(),
+        );
+        return None;
+    };
+    Some(match mode {
+        TokioRuntimeMode::SingleThreaded => {
+            set_tokio_runtime_setup("one-runtime-single-threaded", NonZeroUsize::new(1).unwrap());
+            tokio::runtime::Builder::new_current_thread()
+                .thread_name(thread_name)
+                .enable_all()
+                .build()
+                .expect("failed to create one single runtime")
+        }
+        TokioRuntimeMode::MultiThreaded { num_workers } => {
+            set_tokio_runtime_setup("one-runtime-multi-threaded", num_workers);
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_name(thread_name)
+                .enable_all()
+                .worker_threads(num_workers.get())
+                .build()
+                .expect("failed to create one multi-threaded runtime")
+        }
+    })
+});
+
+/// Declare a lazy static variable named `$varname` that will resolve
+/// to a tokio runtime handle. If the env var `NEON_PAGESERVER_USE_ONE_RUNTIME`
+/// is set, this will resolve to `ONE_RUNTIME`. Otherwise, the macro invocation
+/// declares a separate runtime and the lazy static variable `$varname`
+/// will resolve to that separate runtime.
+///
+/// The result is is that `$varname.spawn()` will use `ONE_RUNTIME` if
+/// `NEON_PAGESERVER_USE_ONE_RUNTIME` is set, and will use the separate runtime
+/// otherwise.
+macro_rules! pageserver_runtime {
+    ($varname:ident, $name:literal) => {
+        pub static $varname: Lazy<&'static tokio::runtime::Runtime> = Lazy::new(|| {
+            if let Some(runtime) = &*ONE_RUNTIME {
+                return runtime;
+            }
+            static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .thread_name($name)
+                    .worker_threads(TOKIO_WORKER_THREADS.get())
+                    .enable_all()
+                    .build()
+                    .expect(std::concat!("Failed to create runtime ", $name))
+            });
+            &*RUNTIME
+        });
+    };
+}
+
+pageserver_runtime!(COMPUTE_REQUEST_RUNTIME, "compute request worker");
+pageserver_runtime!(MGMT_REQUEST_RUNTIME, "mgmt request worker");
+pageserver_runtime!(WALRECEIVER_RUNTIME, "walreceiver worker");
+pageserver_runtime!(BACKGROUND_RUNTIME, "background op worker");
+// Bump this number when adding a new pageserver_runtime!
+// SAFETY: it's obviously correct
+const NUM_MULTIPLE_RUNTIMES: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(4) };
 
 #[derive(Debug, Clone, Copy)]
 pub struct PageserverTaskId(u64);

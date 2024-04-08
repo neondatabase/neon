@@ -308,6 +308,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             params=params,
         )
         self.verbose_error(res)
+        return res.json()
 
     def tenant_list_locations(self):
         res = self.get(

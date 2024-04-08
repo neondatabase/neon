@@ -50,7 +50,7 @@ where
 /// This struct implement Serialize for debugging purposes, but is _not_ persisted
 /// itself: see [`crate::persistence`] for the subset of tenant shard state that is persisted.
 #[derive(Serialize)]
-pub(crate) struct TenantState {
+pub(crate) struct TenantShard {
     pub(crate) tenant_shard_id: TenantShardId,
 
     pub(crate) shard: ShardIdentity,
@@ -354,7 +354,7 @@ pub(crate) struct ReconcilerHandle {
 }
 
 /// When a reconcile task completes, it sends this result object
-/// to be applied to the primary TenantState.
+/// to be applied to the primary TenantShard.
 pub(crate) struct ReconcileResult {
     pub(crate) sequence: Sequence,
     /// On errors, `observed` should be treated as an incompleted description
@@ -367,7 +367,7 @@ pub(crate) struct ReconcileResult {
     pub(crate) generation: Option<Generation>,
     pub(crate) observed: ObservedState,
 
-    /// Set [`TenantState::pending_compute_notification`] from this flag
+    /// Set [`TenantShard::pending_compute_notification`] from this flag
     pub(crate) pending_compute_notification: bool,
 }
 
@@ -379,7 +379,7 @@ impl ObservedState {
     }
 }
 
-impl TenantState {
+impl TenantShard {
     pub(crate) fn new(
         tenant_shard_id: TenantShardId,
         shard: ShardIdentity,
@@ -1143,7 +1143,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantState {
+    fn make_test_tenant_shard(policy: PlacementPolicy) -> TenantShard {
         let tenant_id = TenantId::generate();
         let shard_number = ShardNumber(0);
         let shard_count = ShardCount::new(1);
@@ -1153,7 +1153,7 @@ pub(crate) mod tests {
             shard_number,
             shard_count,
         };
-        TenantState::new(
+        TenantShard::new(
             tenant_shard_id,
             ShardIdentity::new(
                 shard_number,
@@ -1165,7 +1165,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn make_test_tenant(policy: PlacementPolicy, shard_count: ShardCount) -> Vec<TenantState> {
+    fn make_test_tenant(policy: PlacementPolicy, shard_count: ShardCount) -> Vec<TenantShard> {
         let tenant_id = TenantId::generate();
 
         (0..shard_count.count())
@@ -1177,7 +1177,7 @@ pub(crate) mod tests {
                     shard_number,
                     shard_count,
                 };
-                TenantState::new(
+                TenantShard::new(
                     tenant_shard_id,
                     ShardIdentity::new(
                         shard_number,
@@ -1202,24 +1202,24 @@ pub(crate) mod tests {
         let mut scheduler = Scheduler::new(nodes.values());
         let mut context = ScheduleContext::default();
 
-        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Attached(1));
-        tenant_state
+        let mut tenant_shard = make_test_tenant_shard(PlacementPolicy::Attached(1));
+        tenant_shard
             .schedule(&mut scheduler, &mut context)
             .expect("we have enough nodes, scheduling should work");
 
         // Expect to initially be schedule on to different nodes
-        assert_eq!(tenant_state.intent.secondary.len(), 1);
-        assert!(tenant_state.intent.attached.is_some());
+        assert_eq!(tenant_shard.intent.secondary.len(), 1);
+        assert!(tenant_shard.intent.attached.is_some());
 
-        let attached_node_id = tenant_state.intent.attached.unwrap();
-        let secondary_node_id = *tenant_state.intent.secondary.iter().last().unwrap();
+        let attached_node_id = tenant_shard.intent.attached.unwrap();
+        let secondary_node_id = *tenant_shard.intent.secondary.iter().last().unwrap();
         assert_ne!(attached_node_id, secondary_node_id);
 
         // Notifying the attached node is offline should demote it to a secondary
-        let changed = tenant_state.intent.demote_attached(attached_node_id);
+        let changed = tenant_shard.intent.demote_attached(attached_node_id);
         assert!(changed);
-        assert!(tenant_state.intent.attached.is_none());
-        assert_eq!(tenant_state.intent.secondary.len(), 2);
+        assert!(tenant_shard.intent.attached.is_none());
+        assert_eq!(tenant_shard.intent.secondary.len(), 2);
 
         // Update the scheduler state to indicate the node is offline
         nodes
@@ -1229,18 +1229,18 @@ pub(crate) mod tests {
         scheduler.node_upsert(nodes.get(&attached_node_id).unwrap());
 
         // Scheduling the node should promote the still-available secondary node to attached
-        tenant_state
+        tenant_shard
             .schedule(&mut scheduler, &mut context)
             .expect("active nodes are available");
-        assert_eq!(tenant_state.intent.attached.unwrap(), secondary_node_id);
+        assert_eq!(tenant_shard.intent.attached.unwrap(), secondary_node_id);
 
         // The original attached node should have been retained as a secondary
         assert_eq!(
-            *tenant_state.intent.secondary.iter().last().unwrap(),
+            *tenant_shard.intent.secondary.iter().last().unwrap(),
             attached_node_id
         );
 
-        tenant_state.intent.clear(&mut scheduler);
+        tenant_shard.intent.clear(&mut scheduler);
 
         Ok(())
     }
@@ -1250,48 +1250,48 @@ pub(crate) mod tests {
         let nodes = make_test_nodes(3);
         let mut scheduler = Scheduler::new(nodes.values());
 
-        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Attached(1));
+        let mut tenant_shard = make_test_tenant_shard(PlacementPolicy::Attached(1));
 
-        tenant_state.observed.locations.insert(
+        tenant_shard.observed.locations.insert(
             NodeId(3),
             ObservedStateLocation {
                 conf: Some(LocationConfig {
                     mode: LocationConfigMode::AttachedMulti,
                     generation: Some(2),
                     secondary_conf: None,
-                    shard_number: tenant_state.shard.number.0,
-                    shard_count: tenant_state.shard.count.literal(),
-                    shard_stripe_size: tenant_state.shard.stripe_size.0,
+                    shard_number: tenant_shard.shard.number.0,
+                    shard_count: tenant_shard.shard.count.literal(),
+                    shard_stripe_size: tenant_shard.shard.stripe_size.0,
                     tenant_conf: TenantConfig::default(),
                 }),
             },
         );
 
-        tenant_state.observed.locations.insert(
+        tenant_shard.observed.locations.insert(
             NodeId(2),
             ObservedStateLocation {
                 conf: Some(LocationConfig {
                     mode: LocationConfigMode::AttachedStale,
                     generation: Some(1),
                     secondary_conf: None,
-                    shard_number: tenant_state.shard.number.0,
-                    shard_count: tenant_state.shard.count.literal(),
-                    shard_stripe_size: tenant_state.shard.stripe_size.0,
+                    shard_number: tenant_shard.shard.number.0,
+                    shard_count: tenant_shard.shard.count.literal(),
+                    shard_stripe_size: tenant_shard.shard.stripe_size.0,
                     tenant_conf: TenantConfig::default(),
                 }),
             },
         );
 
-        tenant_state.intent_from_observed(&mut scheduler);
+        tenant_shard.intent_from_observed(&mut scheduler);
 
         // The highest generationed attached location gets used as attached
-        assert_eq!(tenant_state.intent.attached, Some(NodeId(3)));
+        assert_eq!(tenant_shard.intent.attached, Some(NodeId(3)));
         // Other locations get used as secondary
-        assert_eq!(tenant_state.intent.secondary, vec![NodeId(2)]);
+        assert_eq!(tenant_shard.intent.secondary, vec![NodeId(2)]);
 
-        scheduler.consistency_check(nodes.values(), [&tenant_state].into_iter())?;
+        scheduler.consistency_check(nodes.values(), [&tenant_shard].into_iter())?;
 
-        tenant_state.intent.clear(&mut scheduler);
+        tenant_shard.intent.clear(&mut scheduler);
         Ok(())
     }
 
@@ -1300,23 +1300,23 @@ pub(crate) mod tests {
         let nodes = make_test_nodes(3);
         let mut scheduler = Scheduler::new(nodes.values());
 
-        let mut tenant_state = make_test_tenant_shard(PlacementPolicy::Attached(1));
+        let mut tenant_shard = make_test_tenant_shard(PlacementPolicy::Attached(1));
 
         // In pause mode, schedule() shouldn't do anything
-        tenant_state.scheduling_policy = ShardSchedulingPolicy::Pause;
-        assert!(tenant_state
+        tenant_shard.scheduling_policy = ShardSchedulingPolicy::Pause;
+        assert!(tenant_shard
             .schedule(&mut scheduler, &mut ScheduleContext::default())
             .is_ok());
-        assert!(tenant_state.intent.all_pageservers().is_empty());
+        assert!(tenant_shard.intent.all_pageservers().is_empty());
 
         // In active mode, schedule() works
-        tenant_state.scheduling_policy = ShardSchedulingPolicy::Active;
-        assert!(tenant_state
+        tenant_shard.scheduling_policy = ShardSchedulingPolicy::Active;
+        assert!(tenant_shard
             .schedule(&mut scheduler, &mut ScheduleContext::default())
             .is_ok());
-        assert!(!tenant_state.intent.all_pageservers().is_empty());
+        assert!(!tenant_shard.intent.all_pageservers().is_empty());
 
-        tenant_state.intent.clear(&mut scheduler);
+        tenant_shard.intent.clear(&mut scheduler);
         Ok(())
     }
 
@@ -1429,7 +1429,7 @@ pub(crate) mod tests {
     fn optimize_til_idle(
         nodes: &HashMap<NodeId, Node>,
         scheduler: &mut Scheduler,
-        shards: &mut [TenantState],
+        shards: &mut [TenantShard],
     ) {
         let mut loop_n = 0;
         loop {

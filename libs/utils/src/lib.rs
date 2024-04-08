@@ -63,6 +63,7 @@ pub mod measured_stream;
 
 pub mod serde_percent;
 pub mod serde_regex;
+pub mod serde_system_time;
 
 pub mod pageserver_feedback;
 
@@ -88,6 +89,8 @@ pub mod failpoint_support;
 pub mod yielding_loop;
 
 pub mod zstd;
+
+pub mod env;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
