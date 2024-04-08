@@ -5,7 +5,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use measured::{
-    label::{LabelGroupVisitor, LabelName, NoLabels},
+    label::{LabelGroupSet, LabelGroupVisitor, LabelName, NoLabels},
     metric::{
         counter::CounterState,
         gauge::GaugeState,
@@ -421,3 +421,171 @@ pub type IntCounterPair = GenericCounterPair<AtomicU64>;
 
 /// A guard for [`IntCounterPair`] that will decrement the gauge on drop
 pub type IntCounterPairGuard = GenericCounterPairGuard<AtomicU64>;
+
+pub trait CounterPairAssoc {
+    const INC_NAME: &'static MetricName;
+    const DEC_NAME: &'static MetricName;
+
+    const INC_HELP: &'static str;
+    const DEC_HELP: &'static str;
+
+    type LabelGroupSet: LabelGroupSet;
+}
+
+pub struct CounterPairVec<A: CounterPairAssoc> {
+    vec: measured::metric::MetricVec<MeasuredCounterPairState, A::LabelGroupSet>,
+}
+
+impl<A: CounterPairAssoc> Default for CounterPairVec<A>
+where
+    A::LabelGroupSet: Default,
+{
+    fn default() -> Self {
+        Self {
+            vec: Default::default(),
+        }
+    }
+}
+
+impl<A: CounterPairAssoc> CounterPairVec<A> {
+    pub fn guard(
+        &self,
+        labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>,
+    ) -> MeasuredCounterPairGuard<'_, A> {
+        let id = self.vec.with_labels(labels);
+        self.vec.get_metric(id).inc.inc();
+        MeasuredCounterPairGuard { vec: &self.vec, id }
+    }
+    pub fn inc(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
+        let id = self.vec.with_labels(labels);
+        self.vec.get_metric(id).inc.inc();
+    }
+    pub fn dec(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
+        let id = self.vec.with_labels(labels);
+        self.vec.get_metric(id).dec.inc();
+    }
+    pub fn remove_metric(
+        &self,
+        labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>,
+    ) -> Option<MeasuredCounterPairState> {
+        let id = self.vec.with_labels(labels);
+        self.vec.remove_metric(id)
+    }
+}
+
+impl<T, A> ::measured::metric::group::MetricGroup<T> for CounterPairVec<A>
+where
+    T: ::measured::metric::group::Encoding,
+    A: CounterPairAssoc,
+    ::measured::metric::counter::CounterState: ::measured::metric::MetricEncoding<T>,
+{
+    fn collect_group_into(&self, enc: &mut T) -> Result<(), T::Err> {
+        // write decrement first to avoid a race condition where inc - dec < 0
+        T::write_help(enc, A::DEC_NAME, A::DEC_HELP)?;
+        self.vec
+            .collect_family_into(A::DEC_NAME, &mut Dec(&mut *enc))?;
+
+        T::write_help(enc, A::INC_NAME, A::INC_HELP)?;
+        self.vec
+            .collect_family_into(A::INC_NAME, &mut Inc(&mut *enc))?;
+
+        Ok(())
+    }
+}
+
+#[derive(MetricGroup, Default)]
+pub struct MeasuredCounterPairState {
+    pub inc: CounterState,
+    pub dec: CounterState,
+}
+
+impl measured::metric::MetricType for MeasuredCounterPairState {
+    type Metadata = ();
+}
+
+pub struct MeasuredCounterPairGuard<'a, A: CounterPairAssoc> {
+    vec: &'a measured::metric::MetricVec<MeasuredCounterPairState, A::LabelGroupSet>,
+    id: measured::metric::LabelId<A::LabelGroupSet>,
+}
+
+impl<A: CounterPairAssoc> Drop for MeasuredCounterPairGuard<'_, A> {
+    fn drop(&mut self) {
+        self.vec.get_metric(self.id).dec.inc();
+    }
+}
+
+/// [`MetricEncoding`] for [`MeasuredCounterPairState`] that only writes the inc counter to the inner encoder.
+struct Inc<T>(T);
+/// [`MetricEncoding`] for [`MeasuredCounterPairState`] that only writes the dec counter to the inner encoder.
+struct Dec<T>(T);
+
+impl<T: Encoding> Encoding for Inc<T> {
+    type Err = T::Err;
+
+    fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
+        self.0.write_help(name, help)
+    }
+
+    fn write_metric_value(
+        &mut self,
+        name: impl MetricNameEncoder,
+        labels: impl LabelGroup,
+        value: measured::metric::group::MetricValue,
+    ) -> Result<(), Self::Err> {
+        self.0.write_metric_value(name, labels, value)
+    }
+}
+
+impl<T: Encoding> MetricEncoding<Inc<T>> for MeasuredCounterPairState
+where
+    CounterState: MetricEncoding<T>,
+{
+    fn write_type(name: impl MetricNameEncoder, enc: &mut Inc<T>) -> Result<(), T::Err> {
+        CounterState::write_type(name, &mut enc.0)
+    }
+    fn collect_into(
+        &self,
+        metadata: &(),
+        labels: impl LabelGroup,
+        name: impl MetricNameEncoder,
+        enc: &mut Inc<T>,
+    ) -> Result<(), T::Err> {
+        self.inc.collect_into(metadata, labels, name, &mut enc.0)
+    }
+}
+
+impl<T: Encoding> Encoding for Dec<T> {
+    type Err = T::Err;
+
+    fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
+        self.0.write_help(name, help)
+    }
+
+    fn write_metric_value(
+        &mut self,
+        name: impl MetricNameEncoder,
+        labels: impl LabelGroup,
+        value: measured::metric::group::MetricValue,
+    ) -> Result<(), Self::Err> {
+        self.0.write_metric_value(name, labels, value)
+    }
+}
+
+/// Write the dec counter to the encoder
+impl<T: Encoding> MetricEncoding<Dec<T>> for MeasuredCounterPairState
+where
+    CounterState: MetricEncoding<T>,
+{
+    fn write_type(name: impl MetricNameEncoder, enc: &mut Dec<T>) -> Result<(), T::Err> {
+        CounterState::write_type(name, &mut enc.0)
+    }
+    fn collect_into(
+        &self,
+        metadata: &(),
+        labels: impl LabelGroup,
+        name: impl MetricNameEncoder,
+        enc: &mut Dec<T>,
+    ) -> Result<(), T::Err> {
+        self.dec.collect_into(metadata, labels, name, &mut enc.0)
+    }
+}

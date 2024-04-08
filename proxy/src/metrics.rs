@@ -1,12 +1,13 @@
 use std::sync::OnceLock;
 
+use ::measured::metric::name::MetricName;
 use ::metrics::{register_hll_vec, HyperLogLogVec};
 use lasso::ThreadedRodeo;
 use measured::{
     label::StaticLabelSet, metric::histogram::Thresholds, Counter, CounterVec,
     FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec, LabelGroup, MetricGroup,
 };
-use metrics::{register_hll, HyperLogLog};
+use metrics::{register_hll, CounterPairAssoc, CounterPairVec, HyperLogLog};
 
 use once_cell::sync::Lazy;
 use tokio::time::{self, Instant};
@@ -36,11 +37,11 @@ impl Metrics {
 #[metric(new())]
 pub struct ProxyMetrics {
     #[metric(flatten)]
-    pub db_connections: NumDbConnectionsGauge,
+    pub db_connections: CounterPairVec<NumDbConnectionsGauge>,
     #[metric(flatten)]
-    pub client_connections: NumClientConnectionsGauge,
+    pub client_connections: CounterPairVec<NumClientConnectionsGauge>,
     #[metric(flatten)]
-    pub connection_requests: NumConnectionRequestsGauge,
+    pub connection_requests: CounterPairVec<NumConnectionRequestsGauge>,
     #[metric(flatten)]
     pub http_endpoint_pools: HttpEndpointPools,
 
@@ -208,93 +209,37 @@ impl HttpEndpointPools {
         }
     }
 }
-
-#[derive(MetricGroup, Default)]
-pub struct NumDbConnectionsGauge {
-    /// Number of opened connections to a database.
-    pub opened_db_connections_total: CounterVec<StaticLabelSet<Protocol>>,
-    /// Number of closed connections to a database.
-    pub closed_db_connections_total: CounterVec<StaticLabelSet<Protocol>>,
+pub struct NumDbConnectionsGauge;
+impl CounterPairAssoc for NumDbConnectionsGauge {
+    const INC_NAME: &'static MetricName = MetricName::from_str("opened_db_connections_total");
+    const DEC_NAME: &'static MetricName = MetricName::from_str("closed_db_connections_total");
+    const INC_HELP: &'static str = "Number of opened connections to a database.";
+    const DEC_HELP: &'static str = "Number of closed connections to a database.";
+    type LabelGroupSet = StaticLabelSet<Protocol>;
 }
+pub type NumDbConnectionsGuard<'a> = metrics::MeasuredCounterPairGuard<'a, NumDbConnectionsGauge>;
 
-pub struct NumDbConnectionsGuard<'a> {
-    protocol: Protocol,
-    dec: &'a CounterVec<StaticLabelSet<Protocol>>,
+pub struct NumClientConnectionsGauge;
+impl CounterPairAssoc for NumClientConnectionsGauge {
+    const INC_NAME: &'static MetricName = MetricName::from_str("opened_client_connections_total");
+    const DEC_NAME: &'static MetricName = MetricName::from_str("closed_client_connections_total");
+    const INC_HELP: &'static str = "Number of opened connections from a client.";
+    const DEC_HELP: &'static str = "Number of closed connections from a client.";
+    type LabelGroupSet = StaticLabelSet<Protocol>;
 }
+pub type NumClientConnectionsGuard<'a> =
+    metrics::MeasuredCounterPairGuard<'a, NumClientConnectionsGauge>;
 
-impl Drop for NumDbConnectionsGuard<'_> {
-    fn drop(&mut self) {
-        self.dec.inc(self.protocol);
-    }
+pub struct NumConnectionRequestsGauge;
+impl CounterPairAssoc for NumConnectionRequestsGauge {
+    const INC_NAME: &'static MetricName = MetricName::from_str("accepted_connections_total");
+    const DEC_NAME: &'static MetricName = MetricName::from_str("closed_connections_total");
+    const INC_HELP: &'static str = "Number of client connections accepted.";
+    const DEC_HELP: &'static str = "Number of client connections closed.";
+    type LabelGroupSet = StaticLabelSet<Protocol>;
 }
-
-impl NumDbConnectionsGauge {
-    pub fn guard(&self, protocol: Protocol) -> NumDbConnectionsGuard {
-        self.opened_db_connections_total.inc(protocol);
-        NumDbConnectionsGuard {
-            protocol,
-            dec: &self.closed_db_connections_total,
-        }
-    }
-}
-
-#[derive(MetricGroup, Default)]
-pub struct NumClientConnectionsGauge {
-    /// Number of opened connections from a client.
-    pub opened_client_connections_total: CounterVec<StaticLabelSet<Protocol>>,
-    /// Number of closed connections from a client.
-    pub closed_client_connections_total: CounterVec<StaticLabelSet<Protocol>>,
-}
-
-pub struct NumClientConnectionsGuard<'a> {
-    protocol: Protocol,
-    dec: &'a CounterVec<StaticLabelSet<Protocol>>,
-}
-
-impl Drop for NumClientConnectionsGuard<'_> {
-    fn drop(&mut self) {
-        self.dec.inc(self.protocol);
-    }
-}
-
-impl NumClientConnectionsGauge {
-    pub fn guard(&self, protocol: Protocol) -> NumClientConnectionsGuard {
-        self.opened_client_connections_total.inc(protocol);
-        NumClientConnectionsGuard {
-            protocol,
-            dec: &self.closed_client_connections_total,
-        }
-    }
-}
-
-#[derive(MetricGroup, Default)]
-pub struct NumConnectionRequestsGauge {
-    /// Number of client connections accepted.
-    pub accepted_connections_total: CounterVec<StaticLabelSet<Protocol>>,
-    /// Number of client connections closed.
-    pub closed_connections_total: CounterVec<StaticLabelSet<Protocol>>,
-}
-
-pub struct NumConnectionRequestsGuard<'a> {
-    protocol: Protocol,
-    dec: &'a CounterVec<StaticLabelSet<Protocol>>,
-}
-
-impl Drop for NumConnectionRequestsGuard<'_> {
-    fn drop(&mut self) {
-        self.dec.inc(self.protocol);
-    }
-}
-
-impl NumConnectionRequestsGauge {
-    pub fn guard(&self, protocol: Protocol) -> NumConnectionRequestsGuard {
-        self.accepted_connections_total.inc(protocol);
-        NumConnectionRequestsGuard {
-            protocol,
-            dec: &self.closed_connections_total,
-        }
-    }
-}
+pub type NumConnectionRequestsGuard<'a> =
+    metrics::MeasuredCounterPairGuard<'a, NumConnectionRequestsGauge>;
 
 #[derive(LabelGroup)]
 #[label(set = ComputeConnectionLatencySet)]
