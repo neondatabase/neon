@@ -11,7 +11,7 @@ use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogState};
 
 use tokio::time::{self, Instant};
 
-use crate::{console::messages::ColdStartInfo, error::ErrorKind};
+use crate::console::messages::ColdStartInfo;
 
 #[derive(MetricGroup)]
 pub struct Metrics {
@@ -112,7 +112,8 @@ pub struct ProxyMetrics {
     pub connecting_endpoints: MetricVec<HyperLogLogState<32>, StaticLabelSet<Protocol>>,
 
     /// Number of endpoints affected by errors of a given classification
-    pub endpoints_affected_by_errors: MetricVec<HyperLogLogState<32>, ErrorTypeSet>,
+    pub endpoints_affected_by_errors:
+        MetricVec<HyperLogLogState<32>, StaticLabelSet<crate::error::ErrorKind>>,
 
     /// Number of endpoints affected by authentication rate limits
     pub endpoints_auth_rate_limits: Metric<HyperLogLogState<32>>,
@@ -445,7 +446,7 @@ impl Drop for LatencyTimer {
                 protocol: self.protocol,
                 cold_start_info: self.cold_start_info,
                 outcome: self.outcome,
-                excluded: LatencyExclusions::Client,
+                excluded: LatencyExclusions::ClientAndCplane,
             },
             duration.saturating_sub(accumulated_total).as_secs_f64(),
         );
@@ -460,11 +461,4 @@ impl From<bool> for Bool {
             Bool::False
         }
     }
-}
-
-#[derive(LabelGroup)]
-#[label(set = ErrorTypeSet)]
-pub struct ErrorType {
-    // todo: rename to 'type'
-    pub kind: ErrorKind,
 }

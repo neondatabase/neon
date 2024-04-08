@@ -32,7 +32,7 @@ pub trait UserFacingError: ReportableError {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, FixedCardinalityLabel)]
-#[label(singleton = "kind")]
+#[label(singleton = "type")]
 pub enum ErrorKind {
     /// Wrong password, unknown endpoint, protocol violation, etc...
     User,

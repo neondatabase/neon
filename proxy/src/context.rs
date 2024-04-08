@@ -12,7 +12,7 @@ use crate::{
     console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     intern::{BranchIdInt, ProjectIdInt},
-    metrics::{ErrorType, LatencyTimer, Metrics, Protocol},
+    metrics::{LatencyTimer, Metrics, Protocol},
     DbName, EndpointId, RoleName,
 };
 
@@ -161,7 +161,7 @@ impl RequestMonitoring {
         Metrics::get().proxy.errors_total.inc(kind);
         if let Some(ep) = &self.endpoint_id {
             let metric = &Metrics::get().proxy.endpoints_affected_by_errors;
-            let label = metric.with_labels(ErrorType { kind });
+            let label = metric.with_labels(kind);
             metric.get_metric(label).measure(ep);
         }
         self.error_kind = Some(kind);
