@@ -96,7 +96,7 @@ impl Endpoint {
     pub async fn execute(&self, request: Request) -> Result<Response, Error> {
         let _timer = Metrics::get()
             .proxy
-            .compute_console_request_latency
+            .console_request_latency
             .start_timer(ConsoleRequest {
                 request: request.url().path(),
             });

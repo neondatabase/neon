@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail};
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, StatusCode};
-use measured::{metric::name::WithNamespace, text::BufferedTextEncoder, MetricGroup};
+use measured::{text::BufferedTextEncoder, MetricGroup};
 use metrics::NeonMetrics;
 use std::{
     convert::Infallible,
@@ -21,14 +21,10 @@ async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, "")
 }
 
-fn make_router(
-    neon_metrics: NeonMetrics,
-    jemalloc: Option<jemalloc::MetricRecorder>,
-) -> RouterBuilder<hyper::Body, ApiError> {
+fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper::Body, ApiError> {
     let state = Arc::new(Mutex::new(PrometheusHandler {
         encoder: BufferedTextEncoder::new(),
-        jemalloc,
-        neon_metrics,
+        metrics,
     }));
 
     endpoint::make_router()
@@ -41,14 +37,13 @@ fn make_router(
 
 pub async fn task_main(
     http_listener: TcpListener,
-    neon_metrics: NeonMetrics,
-    jemalloc: Option<jemalloc::MetricRecorder>,
+    metrics: AppMetrics,
 ) -> anyhow::Result<Infallible> {
     scopeguard::defer! {
         info!("http has shut down");
     }
 
-    let service = || RouterService::new(make_router(neon_metrics, jemalloc).build()?);
+    let service = || RouterService::new(make_router(metrics).build()?);
 
     hyper::Server::from_tcp(http_listener)?
         .serve(service().map_err(|e| anyhow!(e))?)
@@ -59,8 +54,17 @@ pub async fn task_main(
 
 struct PrometheusHandler {
     encoder: BufferedTextEncoder,
-    jemalloc: Option<jemalloc::MetricRecorder>,
-    neon_metrics: NeonMetrics,
+    metrics: AppMetrics,
+}
+
+#[derive(MetricGroup)]
+pub struct AppMetrics {
+    #[metric(namespace = "jemalloc")]
+    pub jemalloc: Option<jemalloc::MetricRecorder>,
+    #[metric(flatten)]
+    pub neon_metrics: NeonMetrics,
+    #[metric(flatten)]
+    pub proxy: &'static crate::metrics::Metrics,
 }
 
 async fn prometheus_metrics_handler(
@@ -74,21 +78,11 @@ async fn prometheus_metrics_handler(
         let _span = span.entered();
 
         let mut state = state.lock().unwrap();
-        let PrometheusHandler {
-            encoder,
-            jemalloc,
-            neon_metrics,
-        } = &mut *state;
+        let PrometheusHandler { encoder, metrics } = &mut *state;
 
-        neon_metrics
+        metrics
             .collect_group_into(&mut *encoder)
             .unwrap_or_else(|infallible| match infallible {});
-        WithNamespace::new("jemalloc", &*jemalloc)
-            .collect_group_into(&mut *encoder)
-            .unwrap_or_else(|infallible| match infallible {});
-        crate::metrics::Metrics::get()
-            .collect_group_into(&mut *encoder)
-            .expect("BytesMut IO should not fail");
 
         let body = encoder.finish();
 

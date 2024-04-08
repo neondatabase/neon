@@ -530,7 +530,7 @@ impl<T: Encoding> Encoding for Inc<T> {
         &mut self,
         name: impl MetricNameEncoder,
         labels: impl LabelGroup,
-        value: measured::metric::group::MetricValue,
+        value: MetricValue,
     ) -> Result<(), Self::Err> {
         self.0.write_metric_value(name, labels, value)
     }
@@ -565,7 +565,7 @@ impl<T: Encoding> Encoding for Dec<T> {
         &mut self,
         name: impl MetricNameEncoder,
         labels: impl LabelGroup,
-        value: measured::metric::group::MetricValue,
+        value: MetricValue,
     ) -> Result<(), Self::Err> {
         self.0.write_metric_value(name, labels, value)
     }

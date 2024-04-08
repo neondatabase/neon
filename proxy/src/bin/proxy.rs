@@ -18,6 +18,8 @@ use proxy::config::ProjectInfoCacheOptions;
 use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
+use proxy::http::health_server::AppMetrics;
+use proxy::metrics::Metrics;
 use proxy::rate_limiter::AuthRateLimiter;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
@@ -392,8 +394,11 @@ async fn main() -> anyhow::Result<()> {
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
-        neon_metrics,
-        jemalloc,
+        AppMetrics {
+            jemalloc,
+            neon_metrics,
+            proxy: proxy::metrics::Metrics::get(),
+        },
     ));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
@@ -514,8 +519,14 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             } = args.wake_compute_lock.parse()?;
             info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
             let locks = Box::leak(Box::new(
-                console::locks::ApiLocks::new("wake_compute_lock", permits, shards, timeout)
-                    .unwrap(),
+                console::locks::ApiLocks::new(
+                    "wake_compute_lock",
+                    permits,
+                    shards,
+                    timeout,
+                    &Metrics::get().wake_compute_lock,
+                )
+                .unwrap(),
             ));
             tokio::spawn(locks.garbage_collect_worker(epoch));
 

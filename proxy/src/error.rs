@@ -38,18 +38,22 @@ pub enum ErrorKind {
     User,
 
     /// Network error between user and proxy. Not necessarily user error
+    #[label(rename = "clientdisconnect")]
     ClientDisconnect,
 
     /// Proxy self-imposed user rate limits
+    #[label(rename = "ratelimit")]
     RateLimit,
 
     /// Proxy self-imposed service-wise rate limits
+    #[label(rename = "serviceratelimit")]
     ServiceRateLimit,
 
     /// internal errors
     Service,
 
     /// Error communicating with control plane
+    #[label(rename = "controlplane")]
     ControlPlane,
 
     /// Postgres error

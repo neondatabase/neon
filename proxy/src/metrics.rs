@@ -11,12 +11,15 @@ use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogState};
 
 use tokio::time::{self, Instant};
 
-use crate::console::messages::ColdStartInfo;
+use crate::console::{messages::ColdStartInfo, provider::ApiLockMetrics};
 
 #[derive(MetricGroup)]
 pub struct Metrics {
     #[metric(namespace = "proxy")]
     pub proxy: ProxyMetrics,
+
+    #[metric(namespace = "wake_compute_lock")]
+    pub wake_compute_lock: ApiLockMetrics,
 
     // the one metric not called proxy_....
     pub semaphore_control_plane_limit: GaugeVec<StaticLabelSet<RateLimit>>,
@@ -27,6 +30,7 @@ impl Metrics {
         static SELF: OnceLock<Metrics> = OnceLock::new();
         SELF.get_or_init(|| Metrics {
             proxy: ProxyMetrics::default(),
+            wake_compute_lock: ApiLockMetrics::new(),
             semaphore_control_plane_limit: GaugeVec::default(),
         })
     }
@@ -54,7 +58,7 @@ pub struct ProxyMetrics {
         // largest bucket = 2^16 * 0.2ms = 13s
         metadata = Thresholds::exponential_buckets(0.0002, 2.0),
     )]
-    pub compute_console_request_latency: HistogramVec<ConsoleRequestSet, 16>,
+    pub console_request_latency: HistogramVec<ConsoleRequestSet, 16>,
 
     /// Time it takes to acquire a token to call console plane.
     // largest bucket = 3^16 * 0.05ms = 2.15s
