@@ -111,6 +111,7 @@ impl PostgresRedoManager {
                         img,
                         base_img_lsn,
                         &records[batch_start..i],
+                        self.conf.wal_redo_timeout,
                         pg_version,
                     )
                     .await
@@ -131,6 +132,7 @@ impl PostgresRedoManager {
                 img,
                 base_img_lsn,
                 &records[batch_start..],
+                self.conf.wal_redo_timeout,
                 pg_version,
             )
             .await
@@ -197,6 +199,7 @@ impl PostgresRedoManager {
         base_img: Option<Bytes>,
         base_img_lsn: Lsn,
         records: &[(Lsn, NeonWalRecord)],
+        wal_redo_timeout: Duration,
         pg_version: u32,
     ) -> anyhow::Result<Bytes> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
@@ -235,7 +238,7 @@ impl PostgresRedoManager {
 
             // Relational WAL records are applied using wal-redo-postgres
             let result = proc
-                .apply_wal_records(rel, blknum, &base_img, records)
+                .apply_wal_records(rel, blknum, &base_img, records, wal_redo_timeout)
                 .await
                 .context("apply_wal_records");
 
