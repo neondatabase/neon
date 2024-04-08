@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "compute_tools",
     "control_plane",
-    "control_plane/attachment_service",
+    "control_plane/storcon_cli",
     "pageserver",
     "pageserver/compaction",
     "pageserver/ctl",
@@ -12,6 +12,7 @@ members = [
     "proxy",
     "safekeeper",
     "storage_broker",
+    "storage_controller",
     "s3_scrubber",
     "workspace_hack",
     "trace",
@@ -158,7 +159,7 @@ svg_fmt = "0.4.1"
 sync_wrapper = "0.1.2"
 tar = "0.4"
 task-local-extensions = "0.1.4"
-test-context = "0.1"
+test-context = "0.3"
 thiserror = "1.0"
 tikv-jemallocator = "0.5"
 tikv-jemalloc-ctl = "0.5"

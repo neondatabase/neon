@@ -495,16 +495,17 @@ retry:
 static void
 pageserver_disconnect(shardno_t shard_no)
 {
-	if (page_servers[shard_no].conn)
-	{
-		/*
-		 * If the connection to any pageserver is lost, we throw away the
-		 * whole prefetch queue, even for other pageservers. It should not
-		 * cause big problems, because connection loss is supposed to be a
-		 * rare event.
-		 */
-		prefetch_on_ps_disconnect();
-	}
+	/*
+	 * If the connection to any pageserver is lost, we throw away the
+	 * whole prefetch queue, even for other pageservers. It should not
+	 * cause big problems, because connection loss is supposed to be a
+	 * rare event.
+	 *
+	 * Prefetch state should be reset even if page_servers[shard_no].conn == NULL,
+	 * because prefetch request may be registered before connection is established.
+	 */
+	prefetch_on_ps_disconnect();
+
 	pageserver_disconnect_shard(shard_no);
 }
 

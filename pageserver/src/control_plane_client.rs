@@ -12,7 +12,7 @@ use pageserver_api::{
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use utils::{backoff, generation::Generation, id::NodeId};
+use utils::{backoff, failpoint_support, generation::Generation, id::NodeId};
 
 use crate::{
     config::{NodeMetadata, PageServerConf},
@@ -210,7 +210,10 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
                 .collect(),
         };
 
-        fail::fail_point!("control-plane-client-validate");
+        failpoint_support::sleep_millis_async!("control-plane-client-validate-sleep", &self.cancel);
+        if self.cancel.is_cancelled() {
+            return Err(RetryForeverError::ShuttingDown);
+        }
 
         let response: ValidateResponse = self.retry_http_forever(&re_attach_path, request).await?;
 

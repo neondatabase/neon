@@ -10,9 +10,13 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    S3Scrubber,
     StorageControllerApiException,
+    last_flush_lsn_upload,
     tenant_get_shards,
+    wait_for_last_flush_lsn,
 )
+from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty
 from fixtures.remote_storage import s3_storage
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
@@ -67,6 +71,15 @@ def test_sharding_smoke(
         log.info(f"sizes = {sizes}")
         return sizes
 
+    # The imported initdb for timeline creation should
+    # not be fully imported on every shard.  We use a 1MB strripe size so expect
+    # pretty good distribution: no one shard should have more than half the data
+    sizes = get_sizes()
+    physical_initdb_total = sum(sizes.values())
+    expect_initdb_size = 20 * 1024 * 1024
+    assert physical_initdb_total > expect_initdb_size
+    assert all(s < expect_initdb_size // 2 for s in sizes.values())
+
     # Test that timeline creation works on a sharded tenant
     timeline_b = env.neon_cli.create_branch("branch_b", tenant_id=tenant_id)
 
@@ -96,6 +109,38 @@ def test_sharding_smoke(
             for tl in pageserver.http_client().timeline_list(shard["shard_id"])
         )
         assert timelines == {env.initial_timeline, timeline_b}
+
+    env.storage_controller.consistency_check()
+
+    # Validate that deleting a sharded tenant removes all files in the prefix
+
+    # Before deleting, stop the client and check we have some objects to delete
+    workload.stop()
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
+
+    # Check the scrubber isn't confused by sharded content, then disable
+    # it during teardown because we'll have deleted by then
+    S3Scrubber(neon_env_builder).scan_metadata()
+    neon_env_builder.scrub_on_exit = False
+
+    env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
 
     env.storage_controller.consistency_check()
 
@@ -466,13 +511,11 @@ def test_sharding_split_stripe_size(
     os.getenv("BUILD_TYPE") == "debug",
     reason="Avoid running bulkier ingest tests in debug mode",
 )
-def test_sharding_ingest(
+def test_sharding_ingest_layer_sizes(
     neon_env_builder: NeonEnvBuilder,
 ):
     """
-    Check behaviors related to ingest:
-    - That we generate properly sized layers
-    - TODO: that updates to remote_consistent_lsn are made correctly via safekeepers
+    Check that when ingesting data to a sharded tenant, we properly respect layer size limts.
     """
 
     # Set a small stripe size and checkpoint distance, so that we can exercise rolling logic
@@ -503,6 +546,7 @@ def test_sharding_ingest(
     workload.write_rows(4096, upload=False)
     workload.write_rows(4096, upload=False)
     workload.write_rows(4096, upload=False)
+
     workload.validate()
 
     small_layer_count = 0
@@ -515,7 +559,9 @@ def test_sharding_ingest(
         shard_id = shard["shard_id"]
         layer_map = pageserver.http_client().layer_map_info(shard_id, timeline_id)
 
-        for layer in layer_map.historic_layers:
+        historic_layers = sorted(layer_map.historic_layers, key=lambda layer: layer.lsn_start)
+
+        for layer in historic_layers:
             assert layer.layer_file_size is not None
             if layer.layer_file_size < expect_layer_size // 2:
                 classification = "Small"
@@ -550,6 +596,93 @@ def test_sharding_ingest(
 
     # Each shard may emit up to one huge layer, because initdb ingest doesn't respect checkpoint_distance.
     assert huge_layer_count <= shard_count
+
+
+def test_sharding_ingest_gaps(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Check ingest behavior when the incoming data results in some shards having gaps where
+    no data is ingested: they should advance their disk_consistent_lsn and remote_consistent_lsn
+    even if they aren't writing out layers.
+    """
+
+    # Set a small stripe size and checkpoint distance, so that we can exercise rolling logic
+    # without writing a lot of data.
+    expect_layer_size = 131072
+    checkpoint_interval_secs = 5
+    TENANT_CONF = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": f"{expect_layer_size}",
+        "compaction_target_size": f"{expect_layer_size}",
+        # Set a short checkpoint interval as we will wait for uploads to happen
+        "checkpoint_timeout": f"{checkpoint_interval_secs}s",
+        # Background checkpointing is done from compaction loop, so set that interval short too
+        "compaction_period": "1s",
+    }
+    shard_count = 4
+    neon_env_builder.num_pageservers = shard_count
+    env = neon_env_builder.init_start(
+        initial_tenant_conf=TENANT_CONF,
+        initial_tenant_shard_count=shard_count,
+        initial_tenant_shard_stripe_size=128,
+    )
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Just a few writes: we aim to produce a situation where some shards are skipping
+    # ingesting some records and thereby won't have layer files that advance their
+    # consistent LSNs, to exercise the code paths that explicitly handle this case by
+    # advancing consistent LSNs in the background if there is no open layer.
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(128, upload=False)
+    workload.churn_rows(128, upload=False)
+
+    # Checkpoint, so that we won't get a background checkpoint happening during the next step
+    workload.endpoint().safe_psql("checkpoint")
+    # Freeze + flush, so that subsequent writes will start from a position of no open layers
+    last_flush_lsn_upload(env, workload.endpoint(), tenant_id, timeline_id)
+
+    # This write is tiny: at least some of the shards should find they don't have any
+    # data to ingest.  This will exercise how they handle that.
+    workload.churn_rows(1, upload=False)
+
+    # The LSN that has reached pageservers, but may not have been flushed to historic layers yet
+    expect_lsn = wait_for_last_flush_lsn(env, workload.endpoint(), tenant_id, timeline_id)
+
+    # Don't leave the endpoint running, we don't want it writing in the background
+    workload.stop()
+
+    log.info(f"Waiting for shards' consistent LSNs to reach {expect_lsn}")
+
+    shards = tenant_get_shards(env, tenant_id, None)
+
+    def assert_all_disk_consistent():
+        """
+        Assert that all the shards' disk_consistent_lsns have reached expect_lsn
+        """
+        for tenant_shard_id, pageserver in shards:
+            timeline_detail = pageserver.http_client().timeline_detail(tenant_shard_id, timeline_id)
+            log.info(f"{tenant_shard_id} (ps {pageserver.id}) detail: {timeline_detail}")
+            assert Lsn(timeline_detail["disk_consistent_lsn"]) >= expect_lsn
+
+    # We set a short checkpoint timeout: expect things to get frozen+flushed within that
+    wait_until(checkpoint_interval_secs * 3, 1, assert_all_disk_consistent)
+
+    def assert_all_remote_consistent():
+        """
+        Assert that all the shards' remote_consistent_lsns have reached expect_lsn
+        """
+        for tenant_shard_id, pageserver in shards:
+            timeline_detail = pageserver.http_client().timeline_detail(tenant_shard_id, timeline_id)
+            log.info(f"{tenant_shard_id} (ps {pageserver.id}) detail: {timeline_detail}")
+            assert Lsn(timeline_detail["remote_consistent_lsn"]) >= expect_lsn
+
+    # We set a short checkpoint timeout: expect things to get frozen+flushed within that
+    wait_until(checkpoint_interval_secs * 3, 1, assert_all_remote_consistent)
+
+    workload.validate()
 
 
 class Failure:
@@ -795,6 +928,8 @@ def test_sharding_split_failures(
             ".*Reconcile error: receive body: error sending request for url.*",
             # Node offline cases will fail inside reconciler when detaching secondaries
             ".*Reconcile error on shard.*: receive body: error sending request for url.*",
+            # While parent shard's client is stopped during split, flush loop updating LSNs will emit this warning
+            ".*Failed to schedule metadata upload after updating disk_consistent_lsn.*",
         ]
     )
 

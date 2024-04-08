@@ -214,13 +214,12 @@ pub enum TaskKind {
     /// Internally, `Client` hands over requests to the `Connection` object.
     /// The `Connection` object is responsible for speaking the wire protocol.
     ///
-    /// Walreceiver uses its own abstraction called `TaskHandle` to represent the activity of establishing and handling a connection.
-    /// That abstraction doesn't use `task_mgr`.
+    /// Walreceiver uses a legacy abstraction called `TaskHandle` to represent the activity of establishing and handling a connection.
     /// The `WalReceiverManager` task ensures that this `TaskHandle` task does not outlive the `WalReceiverManager` task.
     /// For the `RequestContext` that we hand to the TaskHandle, we use the [`WalReceiverConnectionHandler`] task kind.
     ///
-    /// Once the connection is established, the `TaskHandle` task creates a
-    /// [`WalReceiverConnectionPoller`] task_mgr task that is responsible for polling
+    /// Once the connection is established, the `TaskHandle` task spawns a
+    /// [`WalReceiverConnectionPoller`] task that is responsible for polling
     /// the `Connection` object.
     /// A `CancellationToken` created by the `TaskHandle` task ensures
     /// that the [`WalReceiverConnectionPoller`] task will cancel soon after as the `TaskHandle` is dropped.
@@ -230,7 +229,6 @@ pub enum TaskKind {
     WalReceiverManager,
 
     /// The `TaskHandle` task that executes `handle_walreceiver_connection`.
-    /// Not a `task_mgr` task, but we use this `TaskKind` for its `RequestContext`.
     /// See the comment on [`WalReceiverManager`].
     ///
     /// [`WalReceiverManager`]: Self::WalReceiverManager

@@ -520,9 +520,9 @@ class NeonEnvBuilder:
         self.env = NeonEnv(self)
         return self.env
 
-    def start(self, register_pageservers=False):
+    def start(self):
         assert self.env is not None, "environment is not already initialized, call init() first"
-        self.env.start(register_pageservers=register_pageservers)
+        self.env.start()
 
     def init_start(
         self,
@@ -1115,8 +1115,8 @@ class NeonEnv:
         log.info(f"Config: {cfg}")
         self.neon_cli.init(cfg, force=config.config_init_force)
 
-    def start(self, register_pageservers=False):
-        # storage controller starts first, so that pageserver /re-attach calls don't
+    def start(self):
+        # Storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
         self.storage_controller.start()
 
@@ -1126,11 +1126,6 @@ class NeonEnv:
         # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
         wait_until(30, 1, storage_controller_ready)
-
-        if register_pageservers:
-            # Special case for forward compat tests, this can be removed later.
-            for pageserver in self.pageservers:
-                self.storage_controller.node_register(pageserver)
 
         # Start up broker, pageserver and all safekeepers
         futs = []
@@ -3605,7 +3600,7 @@ class Safekeeper:
         return self
 
     def stop(self, immediate: bool = False) -> "Safekeeper":
-        log.info("Stopping safekeeper {}".format(self.id))
+        log.info(f"Stopping safekeeper {self.id}")
         self.env.neon_cli.safekeeper_stop(self.id, immediate)
         self.running = False
         return self
@@ -4037,13 +4032,13 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     for f in mismatch:
         f1 = os.path.join(endpoint.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
-        stdout_filename = "{}.filediff".format(f2)
+        stdout_filename = f"{f2}.filediff"
 
         with open(stdout_filename, "w") as stdout_f:
-            subprocess.run("xxd -b {} > {}.hex ".format(f1, f1), shell=True)
-            subprocess.run("xxd -b {} > {}.hex ".format(f2, f2), shell=True)
+            subprocess.run(f"xxd -b {f1} > {f1}.hex ", shell=True)
+            subprocess.run(f"xxd -b {f2} > {f2}.hex ", shell=True)
 
-            cmd = "diff {}.hex {}.hex".format(f1, f2)
+            cmd = f"diff {f1}.hex {f2}.hex"
             subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])

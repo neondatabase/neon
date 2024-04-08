@@ -12,7 +12,8 @@ use crate::{
     compute,
     config::{CacheOptions, ProjectInfoCacheOptions},
     context::RequestMonitoring,
-    scram, EndpointCacheKey, ProjectId,
+    intern::ProjectIdInt,
+    scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
 use std::{sync::Arc, time::Duration};
@@ -271,7 +272,7 @@ pub struct AuthInfo {
     /// List of IP addresses allowed for the autorization.
     pub allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
-    pub project_id: Option<ProjectId>,
+    pub project_id: Option<ProjectIdInt>,
 }
 
 /// Info for establishing a connection to a compute node.

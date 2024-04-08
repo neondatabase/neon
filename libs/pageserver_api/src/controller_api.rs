@@ -2,9 +2,9 @@ use std::str::FromStr;
 
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
-/// in [`attachment_service::http`]
+/// in [`storage_controller::http`]
 use serde::{Deserialize, Serialize};
-use utils::id::NodeId;
+use utils::id::{NodeId, TenantId};
 
 use crate::{
     models::{ShardParameters, TenantConfig},
@@ -68,10 +68,25 @@ pub struct TenantLocateResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct TenantDescribeResponse {
+    pub tenant_id: TenantId,
     pub shards: Vec<TenantDescribeResponseShard>,
     pub stripe_size: ShardStripeSize,
     pub policy: PlacementPolicy,
     pub config: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NodeDescribeResponse {
+    pub id: NodeId,
+
+    pub availability: NodeAvailabilityWrapper,
+    pub scheduling: NodeSchedulingPolicy,
+
+    pub listen_http_addr: String,
+    pub listen_http_port: u16,
+
+    pub listen_pg_addr: String,
+    pub listen_pg_port: u16,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -89,6 +104,8 @@ pub struct TenantDescribeResponseShard {
     pub is_pending_compute_notification: bool,
     /// A shard split is currently underway
     pub is_splitting: bool,
+
+    pub scheduling_policy: ShardSchedulingPolicy,
 }
 
 /// Explicitly migrating a particular shard is a low level operation
@@ -103,7 +120,7 @@ pub struct TenantShardMigrateRequest {
 /// Utilisation score indicating how good a candidate a pageserver
 /// is for scheduling the next tenant. See [`crate::models::PageserverUtilization`].
 /// Lower values are better.
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Debug)]
 pub struct UtilizationScore(pub u64);
 
 impl UtilizationScore {
@@ -112,7 +129,7 @@ impl UtilizationScore {
     }
 }
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 #[serde(into = "NodeAvailabilityWrapper")]
 pub enum NodeAvailability {
     // Normal, happy state
@@ -135,7 +152,7 @@ impl Eq for NodeAvailability {}
 // This wrapper provides serde functionality and it should only be used to
 // communicate with external callers which don't know or care about the
 // utilisation score of the pageserver it is targeting.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum NodeAvailabilityWrapper {
     Active,
     Offline,
@@ -157,21 +174,6 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
         match val {
             NodeAvailability::Active(_) => NodeAvailabilityWrapper::Active,
             NodeAvailability::Offline => NodeAvailabilityWrapper::Offline,
-        }
-    }
-}
-
-impl FromStr for NodeAvailability {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            // This is used when parsing node configuration requests from neon-local.
-            // Assume the worst possible utilisation score
-            // and let it get updated via the heartbeats.
-            "active" => Ok(Self::Active(UtilizationScore::worst())),
-            "offline" => Ok(Self::Offline),
-            _ => Err(anyhow::anyhow!("Unknown availability state '{s}'")),
         }
     }
 }
@@ -202,7 +204,7 @@ impl Default for ShardSchedulingPolicy {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum NodeSchedulingPolicy {
     Active,
     Filling,

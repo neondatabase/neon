@@ -17,7 +17,7 @@ use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
 
-use crate::console::messages::MetricsAuxInfo;
+use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{ENDPOINT_POOLS, GC_LATENCY, NUM_OPEN_CLIENTS_IN_HTTP_POOL};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{
@@ -383,9 +383,12 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                     "pid",
                     &tracing::field::display(client.inner.get_process_id()),
                 );
-                info!("pool: reusing connection '{conn_info}'");
+                info!(
+                    cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
+                    "pool: reusing connection '{conn_info}'"
+                );
                 client.session.send(ctx.session_id)?;
-                ctx.latency_timer.pool_hit();
+                ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
                 ctx.latency_timer.success();
                 return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
             }
@@ -454,8 +457,9 @@ pub fn poll_client<C: ClientInnerExt>(
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
     let span = info_span!(parent: None, "connection", %conn_id);
+    let cold_start_info = ctx.cold_start_info;
     span.in_scope(|| {
-        info!(%conn_info, %session_id, "new connection");
+        info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
     });
     let pool = match conn_info.endpoint_cache_key() {
         Some(endpoint) => Arc::downgrade(&global_pool.get_or_create_endpoint_pool(&endpoint)),
@@ -565,8 +569,8 @@ impl<C: ClientInnerExt> Client<C> {
     pub fn metrics(&self) -> Arc<MetricCounter> {
         let aux = &self.inner.as_ref().unwrap().aux;
         USAGE_METRICS.register(Ids {
-            endpoint_id: aux.endpoint_id.clone(),
-            branch_id: aux.branch_id.clone(),
+            endpoint_id: aux.endpoint_id,
+            branch_id: aux.branch_id,
         })
     }
 }
@@ -666,6 +670,8 @@ impl<C: ClientInnerExt> Drop for Client<C> {
 mod tests {
     use std::{mem, sync::atomic::AtomicBool};
 
+    use crate::{BranchId, EndpointId, ProjectId};
+
     use super::*;
 
     struct MockClient(Arc<AtomicBool>);
@@ -691,7 +697,12 @@ mod tests {
         ClientInner {
             inner: client,
             session: tokio::sync::watch::Sender::new(uuid::Uuid::new_v4()),
-            aux: Default::default(),
+            aux: MetricsAuxInfo {
+                endpoint_id: (&EndpointId::from("endpoint")).into(),
+                project_id: (&ProjectId::from("project")).into(),
+                branch_id: (&BranchId::from("branch")).into(),
+                cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+            },
             conn_id: uuid::Uuid::new_v4(),
         }
     }
