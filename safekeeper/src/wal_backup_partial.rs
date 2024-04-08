@@ -337,6 +337,17 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
             }
         }
 
+        // if we don't have any data and zero LSNs, wait for something
+        while flush_lsn_rx.borrow().lsn == Lsn(0) {
+            tokio::select! {
+                _ = cancellation_rx.changed() => {
+                    info!("timeline canceled");
+                    return;
+                }
+                _ = flush_lsn_rx.changed() => {}
+            }
+        }
+
         // fixing the segno and waiting some time to prevent reuploading the same segment too often
         let pending_segno = backup.segno(flush_lsn_rx.borrow().lsn);
         let timeout = tokio::time::sleep(await_duration);

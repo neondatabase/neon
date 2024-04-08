@@ -15,11 +15,23 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
         .map_err(std::io::Error::from)
         .context("statvfs tenants directory")?;
 
-    let blocksz = statvfs.block_size();
+    // https://unix.stackexchange.com/a/703650
+    let blocksz = if statvfs.fragment_size() > 0 {
+        statvfs.fragment_size()
+    } else {
+        statvfs.block_size()
+    };
 
     #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_cast))]
     let free = statvfs.blocks_available() as u64 * blocksz;
-    let used = crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.get();
+
+    #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_cast))]
+    let used = statvfs
+        .blocks()
+        // use blocks_free instead of available here to match df in case someone compares
+        .saturating_sub(statvfs.blocks_free()) as u64
+        * blocksz;
+
     let captured_at = std::time::SystemTime::now();
 
     let doc = PageserverUtilization {

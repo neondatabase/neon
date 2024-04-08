@@ -128,12 +128,12 @@ impl Client {
 
     pub async fn timeline_info(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         force_await_logical_size: ForceAwaitLogicalSize,
     ) -> Result<pageserver_api::models::TimelineInfo> {
         let uri = format!(
-            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}",
             self.mgmt_api_endpoint
         );
 
@@ -151,11 +151,11 @@ impl Client {
 
     pub async fn keyspace(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
     ) -> Result<pageserver_api::models::partitioning::Partitioning> {
         let uri = format!(
-            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/keyspace",
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/keyspace",
             self.mgmt_api_endpoint
         );
         self.get(&uri)

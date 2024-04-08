@@ -223,7 +223,7 @@ impl Client {
         }
     }
 
-    /// Simple HTTP request wrapper for calling into attachment service
+    /// Simple HTTP request wrapper for calling into storage controller
     async fn dispatch<RQ, RS>(
         &self,
         method: hyper::Method,

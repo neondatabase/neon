@@ -19,8 +19,8 @@ pub async fn proxy_pass(
     aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let usage = USAGE_METRICS.register(Ids {
-        endpoint_id: aux.endpoint_id.clone(),
-        branch_id: aux.branch_id.clone(),
+        endpoint_id: aux.endpoint_id,
+        branch_id: aux.branch_id,
     });
 
     let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);

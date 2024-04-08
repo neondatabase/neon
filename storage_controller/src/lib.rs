@@ -14,7 +14,7 @@ mod reconciler;
 mod scheduler;
 mod schema;
 pub mod service;
-mod tenant_state;
+mod tenant_shard;
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Serialize)]
 struct Sequence(u64);

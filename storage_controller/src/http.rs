@@ -602,9 +602,17 @@ where
     .await
 }
 
+/// Check if the required scope is held in the request's token, or if the request has
+/// a token with 'admin' scope then always permit it.
 fn check_permissions(request: &Request<Body>, required_scope: Scope) -> Result<(), ApiError> {
     check_permission_with(request, |claims| {
-        crate::auth::check_permission(claims, required_scope)
+        match crate::auth::check_permission(claims, required_scope) {
+            Err(e) => match crate::auth::check_permission(claims, Scope::Admin) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(e),
+            },
+            Ok(()) => Ok(()),
+        }
     })
 }
 

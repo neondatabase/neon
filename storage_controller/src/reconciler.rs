@@ -18,14 +18,14 @@ use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
-use crate::tenant_state::{IntentState, ObservedState, ObservedStateLocation};
+use crate::tenant_shard::{IntentState, ObservedState, ObservedStateLocation};
 
 const DEFAULT_HEATMAP_PERIOD: &str = "60s";
 
 /// Object with the lifetime of the background reconcile task that is created
 /// for tenants which have a difference between their intent and observed states.
 pub(super) struct Reconciler {
-    /// See [`crate::tenant_state::TenantState`] for the meanings of these fields: they are a snapshot
+    /// See [`crate::tenant_shard::TenantShard`] for the meanings of these fields: they are a snapshot
     /// of a tenant's state from when we spawned a reconcile task.
     pub(super) tenant_shard_id: TenantShardId,
     pub(crate) shard: ShardIdentity,
@@ -48,11 +48,11 @@ pub(super) struct Reconciler {
 
     /// To avoid stalling if the cloud control plane is unavailable, we may proceed
     /// past failures in [`ComputeHook::notify`], but we _must_ remember that we failed
-    /// so that we can set [`crate::tenant_state::TenantState::pending_compute_notification`] to ensure a later retry.
+    /// so that we can set [`crate::tenant_shard::TenantShard::pending_compute_notification`] to ensure a later retry.
     pub(crate) compute_notify_failure: bool,
 
     /// A means to abort background reconciliation: it is essential to
-    /// call this when something changes in the original TenantState that
+    /// call this when something changes in the original TenantShard that
     /// will make this reconciliation impossible or unnecessary, for
     /// example when a pageserver node goes offline, or the PlacementPolicy for
     /// the tenant is changed.
@@ -66,7 +66,7 @@ pub(super) struct Reconciler {
     pub(crate) persistence: Arc<Persistence>,
 }
 
-/// This is a snapshot of [`crate::tenant_state::IntentState`], but it does not do any
+/// This is a snapshot of [`crate::tenant_shard::IntentState`], but it does not do any
 /// reference counting for Scheduler.  The IntentState is what the scheduler works with,
 /// and the TargetState is just the instruction for a particular Reconciler run.
 #[derive(Debug)]
