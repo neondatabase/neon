@@ -472,7 +472,8 @@ jobs:
           real_s3_region: eu-central-1
           rerun_flaky: true
           pg_version: ${{ matrix.pg_version }}
-          session_timeout: '3600'
+          # Set pytest session timeout to 30 minutes
+          session_timeout: '1800'
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
