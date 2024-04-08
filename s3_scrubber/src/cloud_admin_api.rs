@@ -155,7 +155,7 @@ pub struct ProjectData {
     pub maintenance_set: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct BranchData {
     pub id: BranchId,
     pub created_at: DateTime<Utc>,
@@ -327,6 +327,7 @@ impl CloudAdminApiClient {
 
     pub async fn find_timeline_branch(
         &self,
+        tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> Result<Option<BranchData>, Error> {
         let _permit = self
@@ -359,19 +360,28 @@ impl CloudAdminApiClient {
                 ErrorKind::BodyRead(e),
             )
         })?;
-        match response.data.len() {
-            0 => Ok(None),
-            1 => Ok(Some(
-                response
-                    .data
-                    .into_iter()
-                    .next()
-                    .expect("Should have exactly one element"),
-            )),
-            too_many => Err(Error::new(
-                format!("Find branch for timeline returned {too_many} branches instead of 0 or 1"),
+        let mut branches: Vec<BranchData> = response.data.into_iter().collect();
+        // Normally timeline_id is unique. However, we do have at least one case
+        // of the same timeline_id in two different projects, apparently after
+        // manual recovery. So always recheck project_id (discovered through
+        // tenant_id).
+        let project_data = match self.find_tenant_project(tenant_id).await? {
+            Some(pd) => pd,
+            None => return Ok(None),
+        };
+        branches.retain(|b| b.project_id == project_data.id);
+        if branches.len() < 2 {
+            Ok(branches.first().cloned())
+        } else {
+            Err(Error::new(
+                format!(
+                    "Find branch for timeline {}/{} returned {} branches instead of 0 or 1",
+                    tenant_id,
+                    timeline_id,
+                    branches.len()
+                ),
                 ErrorKind::UnexpectedState,
-            )),
+            ))
         }
     }
 
