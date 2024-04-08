@@ -13,7 +13,7 @@ use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::{AuthSecret, NodeInfo};
 use crate::context::RequestMonitoring;
 use crate::intern::EndpointIdInt;
-use crate::metrics::{Metrics, ENDPOINTS_AUTH_RATE_LIMITED};
+use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
 use crate::stream::Stream;
@@ -211,7 +211,11 @@ impl AuthenticationConfig {
                 "rate limiting authentication"
             );
             Metrics::get().proxy.requests_auth_rate_limits_total.inc();
-            ENDPOINTS_AUTH_RATE_LIMITED.measure(endpoint);
+            Metrics::get()
+                .proxy
+                .endpoints_auth_rate_limits
+                .get_metric()
+                .measure(endpoint);
 
             if self.rate_limiter_enabled {
                 return Err(auth::AuthError::too_many_connections());

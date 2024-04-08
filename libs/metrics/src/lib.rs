@@ -40,7 +40,7 @@ pub mod launch_timestamp;
 mod wrappers;
 pub use wrappers::{CountedReader, CountedWriter};
 mod hll;
-pub use hll::{HyperLogLog, HyperLogLogVec};
+pub use hll::{HyperLogLog, HyperLogLogState, HyperLogLogVec};
 #[cfg(target_os = "linux")]
 pub mod more_process_metrics;
 

@@ -12,7 +12,7 @@ use crate::{
     console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     intern::{BranchIdInt, ProjectIdInt},
-    metrics::{LatencyTimer, Metrics, Protocol, ENDPOINT_ERRORS_BY_KIND},
+    metrics::{ErrorType, LatencyTimer, Metrics, Protocol},
     DbName, EndpointId, RoleName,
 };
 
@@ -134,9 +134,9 @@ impl RequestMonitoring {
     pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
         if self.endpoint_id.is_none() {
             self.span.record("ep", display(&endpoint_id));
-            crate::metrics::CONNECTING_ENDPOINTS
-                .with_label_values(&[self.protocol.as_str()])
-                .measure(&endpoint_id);
+            let metric = &Metrics::get().proxy.connecting_endpoints;
+            let label = metric.with_labels(self.protocol);
+            metric.get_metric(label).measure(&endpoint_id);
             self.endpoint_id = Some(endpoint_id);
         }
     }
@@ -160,9 +160,9 @@ impl RequestMonitoring {
     pub fn set_error_kind(&mut self, kind: ErrorKind) {
         Metrics::get().proxy.errors_total.inc(kind);
         if let Some(ep) = &self.endpoint_id {
-            ENDPOINT_ERRORS_BY_KIND
-                .with_label_values(&[kind.to_metric_label()])
-                .measure(ep);
+            let metric = &Metrics::get().proxy.endpoints_affected_by_errors;
+            let label = metric.with_labels(ErrorType { kind });
+            metric.get_metric(label).measure(ep);
         }
         self.error_kind = Some(kind);
     }

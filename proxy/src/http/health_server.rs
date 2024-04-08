@@ -88,7 +88,7 @@ async fn prometheus_metrics_handler(
             .unwrap_or_else(|infallible| match infallible {});
         crate::metrics::Metrics::get()
             .collect_group_into(&mut *encoder)
-            .unwrap_or_else(|infallible| match infallible {});
+            .expect("BytesMut IO should not fail");
 
         let body = encoder.finish();
 

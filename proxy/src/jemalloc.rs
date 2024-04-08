@@ -6,10 +6,9 @@ use measured::{
         gauge::GaugeState, group::Encoding, group::MetricValue, name::MetricNameEncoder,
         MetricEncoding, MetricFamilyEncoding, MetricType,
     },
-    text::BufferedTextEncoder,
+    text::TextEncoder,
     LabelGroup, MetricGroup,
 };
-use std::convert::Infallible;
 use tikv_jemalloc_ctl::{config, epoch, epoch_mib, stats, version};
 
 pub struct MetricRecorder {
@@ -85,11 +84,11 @@ where
 
 macro_rules! jemalloc_gauge {
     ($stat:ident, $mib:ident) => {
-        impl MetricEncoding<BufferedTextEncoder> for JemallocGauge<stats::$mib> {
+        impl<W: std::io::Write> MetricEncoding<TextEncoder<W>> for JemallocGauge<stats::$mib> {
             fn write_type(
                 name: impl MetricNameEncoder,
-                enc: &mut BufferedTextEncoder,
-            ) -> Result<(), Infallible> {
+                enc: &mut TextEncoder<W>,
+            ) -> Result<(), std::io::Error> {
                 GaugeState::write_type(name, enc)
             }
 
@@ -98,8 +97,8 @@ macro_rules! jemalloc_gauge {
                 mib: &stats::$mib,
                 labels: impl LabelGroup,
                 name: impl MetricNameEncoder,
-                enc: &mut BufferedTextEncoder,
-            ) -> Result<(), Infallible> {
+                enc: &mut TextEncoder<W>,
+            ) -> Result<(), std::io::Error> {
                 if let Ok(v) = mib.read() {
                     enc.write_metric_value(name, labels, MetricValue::Int(v as i64))?;
                 }

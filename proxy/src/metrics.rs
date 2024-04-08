@@ -1,18 +1,17 @@
 use std::sync::OnceLock;
 
-use ::measured::metric::name::MetricName;
-use ::metrics::{register_hll_vec, HyperLogLogVec};
 use lasso::ThreadedRodeo;
 use measured::{
-    label::StaticLabelSet, metric::histogram::Thresholds, Counter, CounterVec,
-    FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec, LabelGroup, MetricGroup,
+    label::StaticLabelSet,
+    metric::{histogram::Thresholds, name::MetricName, Metric, MetricVec},
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
+    LabelGroup, MetricGroup,
 };
-use metrics::{register_hll, CounterPairAssoc, CounterPairVec, HyperLogLog};
+use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogState};
 
-use once_cell::sync::Lazy;
 use tokio::time::{self, Instant};
 
-use crate::console::messages::ColdStartInfo;
+use crate::{console::messages::ColdStartInfo, error::ErrorKind};
 
 #[derive(MetricGroup)]
 pub struct Metrics {
@@ -108,6 +107,15 @@ pub struct ProxyMetrics {
 
     /// Number of connection requests affected by authentication rate limits
     pub requests_auth_rate_limits_total: Counter,
+
+    /// HLL approximate cardinality of endpoints that are connecting
+    pub connecting_endpoints: MetricVec<HyperLogLogState<32>, StaticLabelSet<Protocol>>,
+
+    /// Number of endpoints affected by errors of a given classification
+    pub endpoints_affected_by_errors: MetricVec<HyperLogLogState<32>, ErrorTypeSet>,
+
+    /// Number of endpoints affected by authentication rate limits
+    pub endpoints_auth_rate_limits: Metric<HyperLogLogState<32>>,
 }
 
 impl Default for ProxyMetrics {
@@ -454,31 +462,9 @@ impl From<bool> for Bool {
     }
 }
 
-pub static CONNECTING_ENDPOINTS: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
-    register_hll_vec!(
-        32,
-        "proxy_connecting_endpoints",
-        "HLL approximate cardinality of endpoints that are connecting",
-        &["protocol"],
-    )
-    .unwrap()
-});
-
-pub static ENDPOINT_ERRORS_BY_KIND: Lazy<HyperLogLogVec<32>> = Lazy::new(|| {
-    register_hll_vec!(
-        32,
-        "proxy_endpoints_affected_by_errors",
-        "Number of endpoints affected by errors of a given classification",
-        &["type"],
-    )
-    .unwrap()
-});
-
-pub static ENDPOINTS_AUTH_RATE_LIMITED: Lazy<HyperLogLog<32>> = Lazy::new(|| {
-    register_hll!(
-        32,
-        "proxy_endpoints_auth_rate_limits",
-        "Number of endpoints affected by authentication rate limits",
-    )
-    .unwrap()
-});
+#[derive(LabelGroup)]
+#[label(set = ErrorTypeSet)]
+pub struct ErrorType {
+    // todo: rename to 'type'
+    pub kind: ErrorKind,
+}

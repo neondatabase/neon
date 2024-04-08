@@ -12,6 +12,16 @@ use std::{
     sync::{atomic::AtomicU8, Arc, RwLock},
 };
 
+use measured::{
+    label::{LabelGroupVisitor, LabelName, LabelValue, LabelVisitor},
+    metric::{
+        group::{Encoding, MetricValue},
+        name::MetricNameEncoder,
+        MetricType,
+    },
+    text::TextEncoder,
+    LabelGroup,
+};
 use prometheus::{
     core::{self, Describer},
     proto, Opts,
@@ -394,6 +404,96 @@ fn make_label_pairs(
     }
     label_pairs.sort();
     Ok(label_pairs)
+}
+
+pub struct HyperLogLogState<const N: usize> {
+    shards: [AtomicU8; N],
+}
+impl<const N: usize> Default for HyperLogLogState<N> {
+    fn default() -> Self {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ZERO: AtomicU8 = AtomicU8::new(0);
+        Self { shards: [ZERO; N] }
+    }
+}
+
+impl<const N: usize> MetricType for HyperLogLogState<N> {
+    type Metadata = ();
+}
+
+impl<const N: usize> HyperLogLogState<N> {
+    pub fn measure(&self, item: &impl Hash) {
+        // changing the hasher will break compatibility with previous measurements.
+        self.record(BuildHasherDefault::<xxh3::Hash64>::default().hash_one(item));
+    }
+
+    fn record(&self, hash: u64) {
+        let p = N.ilog2() as u8;
+        let j = hash & (N as u64 - 1);
+        let rho = (hash >> p).leading_zeros() as u8 + 1 - p;
+        self.shards[j as usize].fetch_max(rho, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+impl<W: std::io::Write, const N: usize> measured::metric::MetricEncoding<TextEncoder<W>>
+    for HyperLogLogState<N>
+{
+    fn write_type(
+        name: impl MetricNameEncoder,
+        enc: &mut TextEncoder<W>,
+    ) -> Result<(), std::io::Error> {
+        enc.write_type(&name, measured::text::MetricType::Gauge)
+    }
+    fn collect_into(
+        &self,
+        _: &(),
+        labels: impl LabelGroup,
+        name: impl MetricNameEncoder,
+        enc: &mut TextEncoder<W>,
+    ) -> Result<(), std::io::Error> {
+        struct I64(i64);
+        impl LabelValue for I64 {
+            fn visit<V: LabelVisitor>(&self, v: V) -> V::Output {
+                v.write_int(self.0)
+            }
+        }
+
+        struct HllShardLabel {
+            hll_shard: i64,
+        }
+
+        impl LabelGroup for HllShardLabel {
+            fn visit_values(&self, v: &mut impl LabelGroupVisitor) {
+                const LE: &LabelName = LabelName::from_str("hll_shard");
+                v.write_value(LE, &I64(self.hll_shard));
+            }
+        }
+
+        let sample = self.shards.each_ref().map(|x| {
+            // We reset the counter to 0 so we can perform a cardinality measure over any time slice in prometheus.
+
+            // This seems like it would be a race condition,
+            // but HLL is not impacted by a write in one shard happening in between.
+            // This is because in PromQL we will be implementing a harmonic mean of all buckets.
+            // we will also merge samples in a time series using `max by (hll_shard)`.
+
+            // TODO: maybe we shouldn't reset this on every collect, instead, only after a time window.
+            // this would mean that a dev port-forwarding the metrics url won't break the sampling.
+            x.swap(0, std::sync::atomic::Ordering::Relaxed)
+        });
+
+        sample
+            .into_iter()
+            .enumerate()
+            .try_for_each(|(hll_shard, val)| {
+                enc.write_metric_value(
+                    name.by_ref(),
+                    labels.by_ref().compose_with(HllShardLabel {
+                        hll_shard: hll_shard as i64,
+                    }),
+                    MetricValue::Int(val as i64),
+                )
+            })
+    }
 }
 
 #[cfg(test)]
