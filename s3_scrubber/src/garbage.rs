@@ -267,7 +267,7 @@ async fn find_garbage_inner(
         let api_client = cloud_admin_api_client.clone();
         async move {
             api_client
-                .find_timeline_branch(ttid.timeline_id)
+                .find_timeline_branch(ttid.tenant_shard_id.tenant_id, ttid.timeline_id)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))
                 .map(|r| (ttid, r))

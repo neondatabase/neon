@@ -195,7 +195,9 @@ async fn check_timeline(
     }
     if !expected_segfiles.is_empty() {
         // Before complaining check cplane, probably timeline is already deleted.
-        let bdata = api_client.find_timeline_branch(ttid.timeline_id).await?;
+        let bdata = api_client
+            .find_timeline_branch(ttid.tenant_id, ttid.timeline_id)
+            .await?;
         let deleted = match bdata {
             Some(bdata) => bdata.deleted,
             None => {
