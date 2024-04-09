@@ -92,23 +92,25 @@ pub fn write_postgres_conf(
         }
     }
 
-    // Check /proc/sys/vm/overcommit_memory -- if it equals 2 (i.e. linux memory overcommit is
-    // disabled), then the control plane has enabled swap and we should set
-    // dynamic_shared_memory_type = 'mmap'.
-    //
-    // This is (maybe?) temporary - for more, see https://github.com/neondatabase/cloud/issues/12047.
-    let overcommit_memory_contents = std::fs::read_to_string("/proc/sys/vm/overcommit_memory")
-        // ignore any errors - they may be expected to occur under certain situations (e.g. when
-        // not running in Linux).
-        .unwrap_or_else(|_| String::new());
-    if overcommit_memory_contents.trim() == "2" {
-        let opt = GenericOption {
-            name: "dynamic_shared_memory_type".to_owned(),
-            value: Some("mmap".to_owned()),
-            vartype: "enum".to_owned(),
-        };
+    if cfg!(target_os = "linux") {
+        // Check /proc/sys/vm/overcommit_memory -- if it equals 2 (i.e. linux memory overcommit is
+        // disabled), then the control plane has enabled swap and we should set
+        // dynamic_shared_memory_type = 'mmap'.
+        //
+        // This is (maybe?) temporary - for more, see https://github.com/neondatabase/cloud/issues/12047.
+        let overcommit_memory_contents = std::fs::read_to_string("/proc/sys/vm/overcommit_memory")
+            // ignore any errors - they may be expected to occur under certain situations (e.g. when
+            // not running in Linux).
+            .unwrap_or_else(|_| String::new());
+        if overcommit_memory_contents.trim() == "2" {
+            let opt = GenericOption {
+                name: "dynamic_shared_memory_type".to_owned(),
+                value: Some("mmap".to_owned()),
+                vartype: "enum".to_owned(),
+            };
 
-        write!(file, "{}", opt.to_pg_setting())?;
+            write!(file, "{}", opt.to_pg_setting())?;
+        }
     }
 
     // If there are any extra options in the 'settings' field, append those
