@@ -3312,7 +3312,7 @@ impl Tenant {
             )
             .context("Failed to create timeline data structure")?;
 
-        timeline_struct.init_empty_layer_map(start_lsn);
+        timeline_struct.init_empty_timeline(start_lsn);
 
         if let Err(e) = self
             .create_timeline_files(&create_guard.timeline_path)

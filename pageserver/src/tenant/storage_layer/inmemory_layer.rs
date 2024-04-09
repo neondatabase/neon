@@ -235,6 +235,10 @@ impl InMemoryLayer {
         assert!(self.end_lsn.get().is_none());
     }
 
+    pub(crate) fn assert_frozen(&self) {
+        assert!(self.end_lsn.get().is_some());
+    }
+
     pub(crate) fn end_lsn_or_max(&self) -> Lsn {
         self.end_lsn.get().copied().unwrap_or(Lsn::MAX)
     }

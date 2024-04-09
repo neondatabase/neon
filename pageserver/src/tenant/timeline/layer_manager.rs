@@ -1,15 +1,7 @@
-use anyhow::{bail, ensure, Context, Result};
-use arc_swap::ArcSwap;
-use pageserver_api::shard::TenantShardId;
+use anyhow::Context;
 use std::{collections::HashMap, sync::Arc};
-use tracing::trace;
-use utils::{
-    id::TimelineId,
-    lsn::{AtomicLsn, Lsn},
-};
 
 use crate::{
-    config::PageServerConf,
     metrics::TimelineMetrics,
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
@@ -17,26 +9,17 @@ use crate::{
             AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
             ResidentLayer,
         },
-        AttachedTenantConf,
     },
 };
 
 /// Provides semantic APIs to manipulate the layer map.
+#[derive(Default)]
 pub(crate) struct LayerManager {
     layer_map: LayerMap,
     layer_fmgr: LayerFileManager<Layer>,
-    tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
 }
 
 impl LayerManager {
-    pub(crate) fn new(tenant_conf: Arc<ArcSwap<AttachedTenantConf>>) -> Self {
-        Self {
-            layer_map: LayerMap::default(),
-            layer_fmgr: LayerFileManager::default(),
-            tenant_conf,
-        }
-    }
-
     pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Layer {
         self.layer_fmgr.get_from_desc(desc)
     }
@@ -52,107 +35,18 @@ impl LayerManager {
     /// Called from `load_layer_map`. Initialize the layer manager with:
     /// 1. all on-disk layers
     /// 2. next open layer (with disk disk_consistent_lsn LSN)
-    pub(crate) fn initialize_local_layers(
-        &mut self,
-        on_disk_layers: Vec<Layer>,
-        next_open_layer_at: Lsn,
-    ) {
+    pub(crate) fn initialize_local_layers(&mut self, on_disk_layers: Vec<Layer>) {
         let mut updates = self.layer_map.batch_update();
         for layer in on_disk_layers {
             Self::insert_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
-        self.layer_map.next_open_layer_at = Some(next_open_layer_at);
-    }
-
-    /// Initialize when creating a new timeline, called in `init_empty_layer_map`.
-    pub(crate) fn initialize_empty(&mut self, next_open_layer_at: Lsn) {
-        self.layer_map.next_open_layer_at = Some(next_open_layer_at);
-    }
-
-    /// Open a new writable layer to append data if there is no open layer, otherwise return the current open layer,
-    /// called within `get_layer_for_write`.
-    pub(crate) async fn get_layer_for_write(
-        &mut self,
-        lsn: Lsn,
-        last_record_lsn: Lsn,
-        conf: &'static PageServerConf,
-        timeline_id: TimelineId,
-        tenant_shard_id: TenantShardId,
-    ) -> Result<Arc<InMemoryLayer>> {
-        ensure!(lsn.is_aligned());
-
-        ensure!(
-            lsn > last_record_lsn,
-            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
-            lsn,
-            last_record_lsn,
-        );
-
-        // Do we have a layer open for writing already?
-        let layer = if let Some(open_layer) = &self.layer_map.open_layer {
-            if open_layer.get_lsn_range().start > lsn {
-                bail!(
-                    "unexpected open layer in the future: open layers starts at {}, write lsn {}",
-                    open_layer.get_lsn_range().start,
-                    lsn
-                );
-            }
-
-            Arc::clone(open_layer)
-        } else {
-            // No writeable layer yet. Create one.
-            let start_lsn = self
-                .layer_map
-                .next_open_layer_at
-                .context("No next open layer found")?;
-
-            trace!(
-                "creating in-memory layer at {}/{} for record at {}",
-                timeline_id,
-                start_lsn,
-                lsn
-            );
-
-            let new_layer = InMemoryLayer::create(
-                conf,
-                Arc::clone(&self.tenant_conf),
-                timeline_id,
-                tenant_shard_id,
-                start_lsn,
-            )
-            .await?;
-            let layer = Arc::new(new_layer);
-
-            self.layer_map.open_layer = Some(layer.clone());
-            self.layer_map.next_open_layer_at = None;
-
-            layer
-        };
-
-        Ok(layer)
     }
 
     /// Called from `freeze_inmem_layer`, returns true if successfully frozen.
-    pub(crate) async fn try_freeze_in_memory_layer(
-        &mut self,
-        Lsn(last_record_lsn): Lsn,
-        last_freeze_at: &AtomicLsn,
-    ) {
-        let end_lsn = Lsn(last_record_lsn + 1);
-
-        if let Some(open_layer) = &self.layer_map.open_layer {
-            let open_layer_rc = Arc::clone(open_layer);
-            // Does this layer need freezing?
-            open_layer.freeze(end_lsn).await;
-
-            // The layer is no longer open, update the layer map to reflect this.
-            // We will replace it with on-disk historics below.
-            self.layer_map.frozen_layers.push_back(open_layer_rc);
-            self.layer_map.open_layer = None;
-            self.layer_map.next_open_layer_at = Some(end_lsn);
-            last_freeze_at.store(end_lsn);
-        }
+    pub(crate) fn track_frozen_layer(&mut self, frozen_layer: Arc<InMemoryLayer>) {
+        frozen_layer.assert_frozen();
+        self.layer_map.frozen_layers.push_back(frozen_layer);
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.

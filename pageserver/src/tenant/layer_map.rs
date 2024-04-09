@@ -74,7 +74,6 @@ pub struct LayerMap {
     // where the start LSN of the next InMemoryLayer that is to be created.
     //
     pub open_layer: Option<Arc<InMemoryLayer>>,
-    pub next_open_layer_at: Option<Lsn>,
 
     ///
     /// Frozen layers, if any. Frozen layers are in-memory layers that

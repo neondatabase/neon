@@ -1171,7 +1171,8 @@ impl Timeline {
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub(crate) async fn freeze_and_flush(&self) -> anyhow::Result<()> {
-        self.freeze_inmem_layer(false).await;
+        self.freeze_inmem_layer(false, self.get_last_record_lsn())
+            .await;
         self.flush_frozen_layers_and_wait().await
     }
 
@@ -1186,8 +1187,11 @@ impl Timeline {
             return;
         };
 
-        let Some(open_layer) = &*self.open_layer.try_read() else {
-            // No open layer or the lock is held, no work to do.
+        let Some(open_layer_guard) = self.open_layer.try_read().ok() else {
+            return;
+        };
+
+        let Some(open_layer) = &*open_layer_guard else {
             return;
         };
 
@@ -1211,17 +1215,7 @@ impl Timeline {
             }
         }
 
-        let checkpoint_distance =
-            checkpoint_distance_override.unwrap_or(self.get_checkpoint_distance());
-
-        if self.should_roll(
-            current_size,
-            current_size,
-            checkpoint_distance,
-            self.get_last_record_lsn(),
-            self.last_freeze_at.load(),
-            *self.last_freeze_ts.read().unwrap(),
-        ) {
+        if open_layer.should_roll(0, current_lsn).await {
             match open_layer.info() {
                 InMemoryLayerInfo::Frozen { lsn_start, lsn_end } => {
                     // We may reach this point if the layer was already frozen by not yet flushed: flushing
@@ -1231,11 +1225,9 @@ impl Timeline {
                     );
                 }
                 InMemoryLayerInfo::Open { .. } => {
-                    // Upgrade to a write lock and freeze the layer
-                    let mut layers_guard = self.layers.write().await;
-                    layers_guard
-                        .try_freeze_in_memory_layer(current_lsn, &self.last_freeze_at)
-                        .await;
+                    // TODO: this is not ideal
+                    drop(open_layer_guard);
+                    self.freeze_inmem_layer(true, current_lsn).await
                 }
             }
             self.flush_frozen_layers();
@@ -1786,9 +1778,8 @@ impl Timeline {
                 generation,
                 shard_identity,
                 pg_version,
-                layers: Arc::new(tokio::sync::RwLock::new(LayerManager::new(Arc::clone(
-                    &tenant_conf,
-                )))),
+                layers: Default::default(),
+                open_layer: tokio::sync::RwLock::new(None),
 
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
@@ -1993,12 +1984,8 @@ impl Timeline {
         ));
     }
 
-    /// Initialize with an empty layer map. Used when creating a new timeline.
-    pub(super) fn init_empty_layer_map(&self, start_lsn: Lsn) {
-        let mut layers = self.layers.try_write().expect(
-            "in the context where we call this function, no other task has access to the object",
-        );
-        layers.initialize_empty(Lsn(start_lsn.0));
+    pub(super) fn init_empty_timeline(&self, start_lsn: Lsn) {
+        self.last_freeze_at.store(start_lsn)
     }
 
     /// Scan the timeline directory, cleanup, populate the layer map, and schedule uploads for local-only
@@ -2148,7 +2135,8 @@ impl Timeline {
 
         let num_layers = loaded_layers.len();
 
-        guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
+        self.last_freeze_at.store(disk_consistent_lsn);
+        guard.initialize_local_layers(loaded_layers);
 
         if let Some(rtc) = self.remote_client.as_ref() {
             rtc.schedule_layer_file_deletion(&needs_cleanup)?;
@@ -2785,7 +2773,6 @@ impl Timeline {
             let guard = timeline.layers.read().await;
             let layers = guard.layer_map();
 
-        
             // Check the open and frozen in-memory layers first, in order from newest
             // to oldest.
             // TODO: structure this so we don't grab the lock unless we need it
@@ -2987,18 +2974,18 @@ impl Timeline {
             let guard = timeline.layers.read().await;
             let layers = guard.layer_map();
 
+            // TODO: don't grab the lock just for the check
             let in_memory_layer = {
                 let open_layer = timeline.open_layer.read().await;
-                match open_layer.filter(|l| cont_lsn >= l.get_lsn_range().start).cloned() {
-                    Some(l) => Some(l),
-                    None => {
-                        layers.find_in_memory_layer(|l| {
-                            let start_lsn = l.get_lsn_range().start;
-                            cont_lsn > start_lsn
-                        })
+                if let Some(open_layer) = &*open_layer {
+                    if cont_lsn >= open_layer.get_lsn_range().start {
+                        Some(open_layer.clone())
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
-
             };
 
             match in_memory_layer {
@@ -3163,17 +3150,55 @@ impl Timeline {
     /// Get a handle to the latest layer for appending.
     ///
     async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
-        let mut guard = self.layers.write().await;
-        let layer = guard
-            .get_layer_for_write(
-                lsn,
-                self.get_last_record_lsn(),
+        let mut guard = self.open_layer.write().await;
+
+        // Do we have a layer open for writing already?
+        if let Some(open_layer) = &*guard {
+            if open_layer.get_lsn_range().start > lsn {
+                bail!(
+                    "unexpected open layer in the future: open layers starts at {}, write lsn {}",
+                    open_layer.get_lsn_range().start,
+                    lsn
+                );
+            }
+
+            return Ok(Arc::clone(open_layer));
+        }
+
+        // No writeable layer yet. Validate and create one.
+        ensure!(lsn.is_aligned());
+
+        let last_record_lsn = self.get_last_record_lsn();
+        ensure!(
+            lsn > last_record_lsn,
+            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
+            lsn,
+            last_record_lsn,
+        );
+
+        let start_lsn = Lsn(self.last_freeze_at.load().0 + 1);
+
+        trace!(
+            "creating in-memory layer at {}/{} for record at {}",
+            self.timeline_id,
+            start_lsn,
+            lsn
+        );
+
+        let new_layer = Arc::new(
+            InMemoryLayer::create(
                 self.conf,
+                Arc::clone(&self.tenant_conf),
                 self.timeline_id,
                 self.tenant_shard_id,
+                start_lsn,
             )
-            .await?;
-        Ok(layer)
+            .await?,
+        );
+
+        *guard = Some(Arc::clone(&new_layer));
+
+        Ok(new_layer)
     }
 
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
@@ -3183,7 +3208,7 @@ impl Timeline {
         self.last_record_lsn.advance(new_lsn);
     }
 
-    async fn freeze_inmem_layer(&self, write_lock_held: bool) {
+    async fn freeze_inmem_layer(&self, write_lock_held: bool, at: Lsn) {
         // Freeze the current open in-memory layer. It will be written to disk on next
         // iteration.
 
@@ -3193,14 +3218,16 @@ impl Timeline {
             Some(self.write_lock.lock().await)
         };
 
-        self.freeze_inmem_layer_at(self.get_last_record_lsn()).await;
-    }
+        // Note inverted locks
+        let mut open_layer_guard = self.open_layer.write().await;
+        let mut layers_guard = self.layers.write().await;
+        if let Some(open_layer) = open_layer_guard.take() {
+            open_layer.freeze(at).await;
+            layers_guard.track_frozen_layer(open_layer);
+        }
 
-    async fn freeze_inmem_layer_at(&self, at: Lsn) {
-        let mut guard = self.layers.write().await;
-        guard
-            .try_freeze_in_memory_layer(at, &self.last_freeze_at)
-            .await;
+        self.last_freeze_at.store(at);
+        *self.last_freeze_ts.write().unwrap() = Instant::now();
     }
 
     /// Layer flusher task's main loop.
@@ -4618,24 +4645,15 @@ struct TimelineWriterState {
     // Largest Lsn which passed through the current writer
     max_lsn: Option<Lsn>,
     // Cached details of the last freeze. Avoids going trough the atomic/lock on every put.
-    cached_last_freeze_at: Lsn,
-    cached_last_freeze_ts: Instant,
 }
 
 impl TimelineWriterState {
-    fn new(
-        open_layer: Arc<InMemoryLayer>,
-        current_size: u64,
-        last_freeze_at: Lsn,
-        last_freeze_ts: Instant,
-    ) -> Self {
+    fn new(open_layer: Arc<InMemoryLayer>, current_size: u64) -> Self {
         Self {
             open_layer,
             current_size,
             prev_lsn: None,
             max_lsn: None,
-            cached_last_freeze_at: last_freeze_at,
-            cached_last_freeze_ts: last_freeze_ts,
         }
     }
 }
@@ -4689,7 +4707,7 @@ impl<'a> TimelineWriter<'a> {
         value.ser_into(&mut buf)?;
         let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
 
-        let action = self.get_open_layer_action(lsn, buf_size);
+        let action = self.get_open_layer_action(lsn, buf_size).await;
         let layer = self.handle_open_layer_action(lsn, action).await?;
         let res = layer.put_value(key, lsn, &buf, ctx).await;
 
@@ -4733,14 +4751,8 @@ impl<'a> TimelineWriter<'a> {
         let layer = self.tl.get_layer_for_write(at).await?;
         let initial_size = layer.size().await?;
 
-        let last_freeze_at = self.last_freeze_at.load();
-        let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
-        self.write_guard.replace(TimelineWriterState::new(
-            layer,
-            initial_size,
-            last_freeze_at,
-            last_freeze_ts,
-        ));
+        self.write_guard
+            .replace(TimelineWriterState::new(layer, initial_size));
 
         Ok(())
     }
@@ -4748,11 +4760,7 @@ impl<'a> TimelineWriter<'a> {
     async fn roll_layer(&mut self, freeze_at: Lsn) -> anyhow::Result<()> {
         assert!(self.write_guard.is_some());
 
-        self.tl.freeze_inmem_layer_at(freeze_at).await;
-
-        let now = Instant::now();
-        *(self.last_freeze_ts.write().unwrap()) = now;
-
+        self.tl.freeze_inmem_layer(true, freeze_at).await;
         self.tl.flush_frozen_layers();
 
         let current_size = self.write_guard.as_ref().unwrap().current_size;
@@ -4763,7 +4771,7 @@ impl<'a> TimelineWriter<'a> {
         Ok(())
     }
 
-    fn get_open_layer_action(&self, lsn: Lsn, new_value_size: u64) -> OpenLayerAction {
+    async fn get_open_layer_action(&self, lsn: Lsn, new_value_size: u64) -> OpenLayerAction {
         let state = &*self.write_guard;
         let Some(state) = &state else {
             return OpenLayerAction::Open;
@@ -4780,14 +4788,7 @@ impl<'a> TimelineWriter<'a> {
             return OpenLayerAction::None;
         }
 
-        if self.tl.should_roll(
-            state.current_size,
-            state.current_size + new_value_size,
-            self.get_checkpoint_distance(),
-            lsn,
-            state.cached_last_freeze_at,
-            state.cached_last_freeze_ts,
-        ) {
+        if state.open_layer.should_roll(new_value_size, lsn).await {
             OpenLayerAction::Roll
         } else {
             OpenLayerAction::None
@@ -4811,7 +4812,7 @@ impl<'a> TimelineWriter<'a> {
 
     pub(crate) async fn delete_batch(&mut self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
         if let Some((_, lsn)) = batch.first() {
-            let action = self.get_open_layer_action(*lsn, 0);
+            let action = self.get_open_layer_action(*lsn, 0).await;
             let layer = self.handle_open_layer_action(*lsn, action).await?;
             layer.put_tombstones(batch).await?;
         }
