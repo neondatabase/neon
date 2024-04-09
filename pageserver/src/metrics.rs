@@ -2775,4 +2775,7 @@ pub fn preinitialize_metrics() {
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&tenant_throttling::TIMELINE_GET);
+
+    // XXX this is a bit unclean
+    crate::walredo::set_process_kind(crate::walredo::ProcessKind::DEFAULT);
 }
