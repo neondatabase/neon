@@ -27,41 +27,10 @@
 //!
 //! # Reference Numbers
 //!
-//! 2024-04-09 on i3en.3xlarge
+//! 2024-04-04 on i3en.3xlarge
 //!
 //! ```text
-//! async-short/1           time:   [26.344 µs 26.641 µs 26.981 µs]
-//! async-short/2           time:   [35.082 µs 35.285 µs 35.512 µs]
-//! async-short/4           time:   [46.158 µs 46.602 µs 47.088 µs]
-//! async-short/8           time:   [79.547 µs 80.463 µs 81.443 µs]
-//! async-short/16          time:   [144.98 µs 146.71 µs 148.54 µs]
-//! async-short/32          time:   [283.31 µs 285.69 µs 288.09 µs]
-//! async-short/64          time:   [549.30 µs 551.92 µs 554.89 µs]
-//! async-short/128         time:   [1.0721 ms 1.0782 ms 1.0854 ms]
-//! async-medium/1          time:   [115.54 µs 116.19 µs 116.99 µs]
-//! async-medium/2          time:   [160.66 µs 161.78 µs 163.19 µs]
-//! async-medium/4          time:   [332.31 µs 335.46 µs 339.15 µs]
-//! async-medium/8          time:   [668.93 µs 676.05 µs 683.84 µs]
-//! async-medium/16         time:   [1.3409 ms 1.3567 ms 1.3734 ms]
-//! async-medium/32         time:   [2.6024 ms 2.6264 ms 2.6535 ms]
-//! async-medium/64         time:   [5.0257 ms 5.0876 ms 5.1531 ms]
-//! async-medium/128        time:   [9.2159 ms 9.3596 ms 9.4982 ms]
-//! sync-short/1            time:   [26.816 µs 26.944 µs 27.092 µs]
-//! sync-short/2            time:   [33.146 µs 33.494 µs 33.886 µs]
-//! sync-short/4            time:   [48.142 µs 48.541 µs 48.980 µs]
-//! sync-short/8            time:   [89.318 µs 89.975 µs 90.735 µs]
-//! sync-short/16           time:   [191.97 µs 193.03 µs 194.10 µs]
-//! sync-short/32           time:   [392.33 µs 394.02 µs 395.82 µs]
-//! sync-short/64           time:   [784.92 µs 786.94 µs 789.21 µs]
-//! sync-short/128          time:   [1.5424 ms 1.5554 ms 1.5702 ms]
-//! sync-medium/1           time:   [110.82 µs 111.29 µs 111.84 µs]
-//! sync-medium/2           time:   [161.43 µs 162.78 µs 164.44 µs]
-//! sync-medium/4           time:   [346.45 µs 349.52 µs 352.97 µs]
-//! sync-medium/8           time:   [687.54 µs 691.84 µs 696.82 µs]
-//! sync-medium/16          time:   [1.3342 ms 1.3398 ms 1.3460 ms]
-//! sync-medium/32          time:   [2.5687 ms 2.5805 ms 2.5944 ms]
-//! sync-medium/64          time:   [4.8806 ms 4.9156 ms 4.9497 ms]
-//! sync-medium/128         time:   [9.0518 ms 9.1719 ms 9.2871 ms]
+//! TODO
 //! ```
 
 use bytes::{Buf, Bytes};
