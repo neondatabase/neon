@@ -230,7 +230,7 @@ impl super::Api for Api {
         let allowed_ips = Arc::new(auth_info.allowed_ips);
         let user = &user_info.user;
         if let Some(project_id) = auth_info.project_id {
-            let ep_int = ep.into();
+            let ep_int = ep.normalize().into();
             self.caches.project_info.insert_role_secret(
                 project_id,
                 ep_int,
