@@ -214,11 +214,7 @@ impl WalRedoProcess {
         protocol::build_get_page_msg(tag, &mut writebuf);
         WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
 
-        let Ok(res) =
-            tokio::time::timeout(wal_redo_timeout, self.apply_wal_records0(&writebuf)).await
-        else {
-            anyhow::bail!("WAL redo timed out");
-        };
+        let res = self.apply_wal_records0(&writebuf).await;
 
         if res.is_err() {
             // not all of these can be caused by this particular input, however these are so rare
@@ -231,10 +227,7 @@ impl WalRedoProcess {
 
     /// # Cancel-Safety
     ///
-    /// When not polled to completion (e.g. because in `tokio::select!` another
-    /// branch becomes ready before this future), concurrent and subsequent
-    /// calls may fail due to [`utils::poison::Poison::check_and_arm`] calls.
-    /// Dispose of this process instance and create a new one.
+    /// Cancellation safe (enforced through the use of [`utils::poison::Poison`]).
     async fn apply_wal_records0(&self, writebuf: &[u8]) -> anyhow::Result<Bytes> {
         let request_no = {
             let mut lock_guard = self.stdin.lock().await;
