@@ -55,7 +55,7 @@ impl Kind {
 
 static PROCESS_KIND: AtomicU8 = AtomicU8::new(Kind::DEFAULT as u8);
 
-pub(crate) fn set_kind(kind: Kind) {
+pub fn set_kind(kind: Kind) {
     PROCESS_KIND.store(kind as u8, std::sync::atomic::Ordering::Relaxed);
     #[cfg(not(test))]
     {

@@ -45,33 +45,39 @@ use tokio::{sync::Barrier, task::JoinSet};
 use utils::{id::TenantId, lsn::Lsn};
 
 fn bench(c: &mut Criterion) {
-    {
-        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
-        for nclients in nclients {
-            let mut group = c.benchmark_group("short");
-            group.bench_with_input(
-                BenchmarkId::from_parameter(nclients),
-                &nclients,
-                |b, nclients| {
-                    let redo_work = Arc::new(Request::short_input());
-                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
-                },
-            );
+    for process_kind in &[
+        pageserver::walredo::ProcessKind::Async,
+        pageserver::walredo::ProcessKind::Sync,
+    ] {
+        pageserver::walredo::set_process_kind(*process_kind);
+        {
+            let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
+            for nclients in nclients {
+                let mut group = c.benchmark_group(format!("{process_kind}-short"));
+                group.bench_with_input(
+                    BenchmarkId::from_parameter(nclients),
+                    &nclients,
+                    |b, nclients| {
+                        let redo_work = Arc::new(Request::short_input());
+                        b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
+                    },
+                );
+            }
         }
-    }
 
-    {
-        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
-        for nclients in nclients {
-            let mut group = c.benchmark_group("medium");
-            group.bench_with_input(
-                BenchmarkId::from_parameter(nclients),
-                &nclients,
-                |b, nclients| {
-                    let redo_work = Arc::new(Request::medium_input());
-                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
-                },
-            );
+        {
+            let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
+            for nclients in nclients {
+                let mut group = c.benchmark_group(format!("{process_kind}-medium"));
+                group.bench_with_input(
+                    BenchmarkId::from_parameter(nclients),
+                    &nclients,
+                    |b, nclients| {
+                        let redo_work = Arc::new(Request::medium_input());
+                        b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
+                    },
+                );
+            }
         }
     }
 }
