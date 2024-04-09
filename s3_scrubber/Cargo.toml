@@ -27,6 +27,7 @@ postgres-native-tls.workspace = true
 postgres_ffi.workspace = true
 tokio-stream.workspace = true
 tokio-postgres.workspace = true
+tokio-util = { workspace = true }
 futures-util.workspace = true
 itertools.workspace = true
 camino.workspace = true
