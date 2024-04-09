@@ -14,6 +14,7 @@ clap = { workspace = true, features = ["string"] }
 git-version.workspace = true
 humantime.workspace = true
 pageserver = { path = ".." }
+pageserver_api.workspace = true
 remote_storage = { path = "../../libs/remote_storage" }
 postgres_ffi.workspace = true
 tokio.workspace = true

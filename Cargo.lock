@@ -3506,6 +3506,7 @@ dependencies = [
  "git-version",
  "humantime",
  "pageserver",
+ "pageserver_api",
  "postgres_ffi",
  "remote_storage",
  "serde",

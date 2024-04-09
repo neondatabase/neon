@@ -25,11 +25,12 @@ use pageserver::{
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
     virtual_file,
 };
+use pageserver_api::shard::TenantShardId;
 use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use tokio_util::sync::CancellationToken;
 use utils::{
-    id::{TenantId, TimelineId},
+    id::TimelineId,
     logging::{self, LogFormat, TracingErrorLayerEnablement},
     lsn::Lsn,
     project_git_version,
@@ -273,10 +274,10 @@ fn validate_prefix(prefix: &str) -> Option<RemotePath> {
         // Empty prefix means we want to specify the *whole* bucket
         return None;
     }
-    let components = prefix.split("/").collect::<Vec<_>>();
+    let components = prefix.split('/').collect::<Vec<_>>();
     let (last, components) = {
         let last = components.last()?;
-        if *last == "" {
+        if last.is_empty() {
             (
                 components.iter().nth_back(1)?,
                 &components[..(components.len() - 1)],
@@ -292,7 +293,7 @@ fn validate_prefix(prefix: &str) -> Option<RemotePath> {
         }
         if *last == "timelines" {
             if let Some(before_last) = components.iter().nth_back(1) {
-                if let Ok(_tenant_id) = TenantId::from_str(before_last) {
+                if let Ok(_tenant_id) = TenantShardId::from_str(before_last) {
                     // Has a valid tenant id
                     break 'valid;
                 }
@@ -342,6 +343,7 @@ mod tests {
             None
         );
         assert_valid("pageserver/v1/tenants/3aa8fcc61f6d357410b7de754b1d9001/timelines");
+        assert_valid("pageserver/v1/tenants/3aa8fcc61f6d357410b7de754b1d9001-0004/timelines");
         assert_valid("pageserver/v1/tenants/3aa8fcc61f6d357410b7de754b1d9001/timelines/");
         assert_valid("pageserver/v1/tenants/3aa8fcc61f6d357410b7de754b1d9001/timelines/641e5342083b2235ee3deb8066819683");
         assert_eq!(validate_prefix("pageserver/v1/tenants/"), None);
