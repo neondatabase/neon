@@ -16,7 +16,7 @@ use crate::{
     config::ProjectInfoCacheOptions,
     console::AuthSecret,
     intern::{EndpointIdInt, ProjectIdInt, RoleNameInt},
-    EndpointId, Normalize, ProjectId, RoleName,
+    EndpointId, RoleName,
 };
 
 use super::{Cache, Cached};

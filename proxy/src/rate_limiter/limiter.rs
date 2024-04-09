@@ -17,7 +17,7 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Duration, Instant};
 use tracing::info;
 
-use crate::{intern::EndpointIdInt, EndpointId, Normalize};
+use crate::{intern::EndpointIdInt, EndpointId};
 
 use super::{
     limit_algorithm::{LimitAlgorithm, Sample},
@@ -50,7 +50,7 @@ impl GlobalRateLimiter {
         let should_allow_request = self
             .data
             .iter_mut()
-            .zip(self.info)
+            .zip(&self.info)
             .all(|(bucket, info)| bucket.should_allow_request(info, now, 1));
 
         if should_allow_request {
@@ -211,7 +211,6 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
     pub fn check(&self, key: K, n: u32) -> bool {
-        // TODO(anna): normalize the key
         // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)

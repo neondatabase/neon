@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{
     auth::backend::ComputeUserInfo, compute, console::messages::ColdStartInfo, http, scram,
+    Normalize,
 };
 use crate::{
     cache::Cached,
@@ -192,7 +193,7 @@ impl super::Api for Api {
         }
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         if let Some(project_id) = auth_info.project_id {
-            let ep_int = ep.into();
+            let ep_int = ep.normalize().into();
             self.caches.project_info.insert_role_secret(
                 project_id,
                 ep_int,

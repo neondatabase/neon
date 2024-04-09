@@ -12,8 +12,10 @@ use crate::{
     console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     intern::{BranchIdInt, ProjectIdInt},
-    metrics::{bool_to_str, LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND, NUM_INVALID_ENDPOINTS},
-    DbName, EndpointId, BranchId, ProjectId, RoleName,
+    metrics::{
+        bool_to_str, LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND, NUM_INVALID_ENDPOINTS,
+    },
+    DbName, EndpointId, RoleName,
 };
 
 use self::parquet::RequestData;
