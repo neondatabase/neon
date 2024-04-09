@@ -78,12 +78,23 @@ struct PrintLayerFileCmd {
     path: Utf8PathBuf,
 }
 
+/// Roll back the time for the specified prefix using S3 history.
+///
+/// The command is fairly low level and powerful. Validation is only very light,
+/// so it is more powerful, and thus potentially more dangerous.
 #[derive(Parser)]
 struct TimeTravelRemotePrefixCmd {
+    /// A configuration string for the remote_storage configuration.
+    ///
+    /// Example: `remote_storage = { bucket_name = "aws-storage-bucket-name", bucket_region = "us-east-2" }`
     config_toml_str: String,
-    // remote prefix to time travel recover
+    /// remote prefix to time travel recover. For safety reasons, we require it to contain
+    /// a timeline or tenant ID in the prefix.
     prefix: String,
+    /// Timestamp to travel to. Given in format like `2024-01-20T10:45:45Z`.
     travel_to: String,
+    /// Timestamp of the start of the operation, must be after any changes we want to roll back and after.
+    /// You can use a few seconds before invoking the command. Same format as `travel_to`.
     done_if_after: String,
 }
 
