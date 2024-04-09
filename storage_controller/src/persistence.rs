@@ -79,7 +79,7 @@ pub(crate) enum DatabaseError {
     Logical(String),
 }
 
-#[derive(measured::FixedCardinalityLabel, Clone)]
+#[derive(measured::FixedCardinalityLabel, Copy, Clone)]
 pub(crate) enum DatabaseOperation {
     InsertNode,
     UpdateNode,
@@ -153,9 +153,7 @@ impl Persistence {
         let latency = &METRICS_REGISTRY
             .metrics_group
             .storage_controller_database_query_latency;
-        let _timer = latency.start_timer(DatabaseQueryLatencyLabelGroup {
-            operation: op.clone(),
-        });
+        let _timer = latency.start_timer(DatabaseQueryLatencyLabelGroup { operation: op });
 
         let res = self.with_conn(func).await;
 
@@ -696,7 +694,7 @@ impl Persistence {
     }
 }
 
-/// Parts of [`crate::tenant_state::TenantState`] that are stored durably
+/// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
 #[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq)]
 #[diesel(table_name = crate::schema::tenant_shards)]
 pub(crate) struct TenantShardPersistence {

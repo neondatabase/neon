@@ -180,7 +180,7 @@ where
                 match top.deref_mut() {
                     LazyLoadLayer::Unloaded(ref mut l) => {
                         let fut = l.load_keys(this.ctx);
-                        this.load_future.set(Some(fut));
+                        this.load_future.set(Some(Box::pin(fut)));
                         continue;
                     }
                     LazyLoadLayer::Loaded(ref mut entries) => {

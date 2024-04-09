@@ -10,11 +10,13 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    S3Scrubber,
     StorageControllerApiException,
     last_flush_lsn_upload,
     tenant_get_shards,
     wait_for_last_flush_lsn,
 )
+from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty
 from fixtures.remote_storage import s3_storage
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
@@ -69,6 +71,15 @@ def test_sharding_smoke(
         log.info(f"sizes = {sizes}")
         return sizes
 
+    # The imported initdb for timeline creation should
+    # not be fully imported on every shard.  We use a 1MB strripe size so expect
+    # pretty good distribution: no one shard should have more than half the data
+    sizes = get_sizes()
+    physical_initdb_total = sum(sizes.values())
+    expect_initdb_size = 20 * 1024 * 1024
+    assert physical_initdb_total > expect_initdb_size
+    assert all(s < expect_initdb_size // 2 for s in sizes.values())
+
     # Test that timeline creation works on a sharded tenant
     timeline_b = env.neon_cli.create_branch("branch_b", tenant_id=tenant_id)
 
@@ -98,6 +109,38 @@ def test_sharding_smoke(
             for tl in pageserver.http_client().timeline_list(shard["shard_id"])
         )
         assert timelines == {env.initial_timeline, timeline_b}
+
+    env.storage_controller.consistency_check()
+
+    # Validate that deleting a sharded tenant removes all files in the prefix
+
+    # Before deleting, stop the client and check we have some objects to delete
+    workload.stop()
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
+
+    # Check the scrubber isn't confused by sharded content, then disable
+    # it during teardown because we'll have deleted by then
+    S3Scrubber(neon_env_builder).scan_metadata()
+    neon_env_builder.scrub_on_exit = False
+
+    env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
 
     env.storage_controller.consistency_check()
 
