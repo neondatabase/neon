@@ -632,6 +632,7 @@ impl InMemoryLayer {
         self.should_roll_locked(inner, write_size, projected_lsn)
     }
 
+    // TODO: maybe remove this?
     pub(crate) async fn try_should_roll(
         &self,
         write_size: u64,

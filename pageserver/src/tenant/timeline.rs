@@ -9,7 +9,7 @@ pub mod uninit;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use bytes::Bytes;
 use camino::Utf8Path;
 use enumset::EnumSet;
@@ -223,7 +223,7 @@ pub struct Timeline {
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
     pub(crate) layers: Arc<tokio::sync::RwLock<LayerManager>>,
 
-    open_layer: tokio::sync::RwLock<Option<Arc<InMemoryLayer>>>,
+    open_layer: ArcSwapOption<InMemoryLayer>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -1187,11 +1187,8 @@ impl Timeline {
             return;
         };
 
-        let Some(open_layer_guard) = self.open_layer.try_read().ok() else {
-            return;
-        };
-
-        let Some(open_layer) = &*open_layer_guard else {
+        let open_layer = self.open_layer.load();
+        let Some(open_layer) = &*open_layer else {
             return;
         };
 
@@ -1224,11 +1221,7 @@ impl Timeline {
                         "Not freezing open layer, it's already frozen ({lsn_start}..{lsn_end})"
                     );
                 }
-                InMemoryLayerInfo::Open { .. } => {
-                    // TODO: this is not ideal
-                    drop(open_layer_guard);
-                    self.freeze_inmem_layer(true, current_lsn).await
-                }
+                InMemoryLayerInfo::Open { .. } => self.freeze_inmem_layer(true, current_lsn).await,
             }
             self.flush_frozen_layers();
         }
@@ -1508,7 +1501,8 @@ impl Timeline {
         let guard = self.layers.read().await;
         let layer_map = guard.layer_map();
         let mut in_memory_layers = Vec::with_capacity(layer_map.frozen_layers.len() + 1);
-        if let Some(open_layer) = &*self.open_layer.read().await {
+        let open_layer = self.open_layer.load();
+        if let Some(open_layer) = &*open_layer {
             in_memory_layers.push(open_layer.info());
         }
         for frozen_layer in &layer_map.frozen_layers {
@@ -1779,7 +1773,7 @@ impl Timeline {
                 shard_identity,
                 pg_version,
                 layers: Default::default(),
-                open_layer: tokio::sync::RwLock::new(None),
+                open_layer: Default::default(),
 
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
@@ -2775,8 +2769,8 @@ impl Timeline {
 
             // Check the open and frozen in-memory layers first, in order from newest
             // to oldest.
-            // TODO: structure this so we don't grab the lock unless we need it
-            if let Some(open_layer) = &*self.open_layer.read().await {
+            let open_layer = self.open_layer.load_full();
+            if let Some(open_layer) = open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
                     //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
@@ -2976,8 +2970,8 @@ impl Timeline {
 
             // TODO: don't grab the lock just for the check
             let in_memory_layer = {
-                let open_layer = timeline.open_layer.read().await;
-                if let Some(open_layer) = &*open_layer {
+                let open_layer = timeline.open_layer.load_full();
+                if let Some(open_layer) = open_layer {
                     if cont_lsn >= open_layer.get_lsn_range().start {
                         Some(open_layer.clone())
                     } else {
@@ -3150,10 +3144,9 @@ impl Timeline {
     /// Get a handle to the latest layer for appending.
     ///
     async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
-        let mut guard = self.open_layer.write().await;
-
         // Do we have a layer open for writing already?
-        if let Some(open_layer) = &*guard {
+        let open_layer = self.open_layer.load_full();
+        if let Some(open_layer) = open_layer {
             if open_layer.get_lsn_range().start > lsn {
                 bail!(
                     "unexpected open layer in the future: open layers starts at {}, write lsn {}",
@@ -3162,7 +3155,7 @@ impl Timeline {
                 );
             }
 
-            return Ok(Arc::clone(open_layer));
+            return Ok(open_layer);
         }
 
         // No writeable layer yet. Validate and create one.
@@ -3196,7 +3189,7 @@ impl Timeline {
             .await?,
         );
 
-        *guard = Some(Arc::clone(&new_layer));
+        self.open_layer.store(Some(Arc::clone(&new_layer)));
 
         Ok(new_layer)
     }
@@ -3218,10 +3211,9 @@ impl Timeline {
             Some(self.write_lock.lock().await)
         };
 
-        // Note inverted locks
-        let mut open_layer_guard = self.open_layer.write().await;
         let mut layers_guard = self.layers.write().await;
-        if let Some(open_layer) = open_layer_guard.take() {
+        let open_layer = self.open_layer.load_full();
+        if let Some(open_layer) = open_layer {
             open_layer.freeze(at).await;
             layers_guard.track_frozen_layer(open_layer);
         }
