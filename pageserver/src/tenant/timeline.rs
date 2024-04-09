@@ -1257,7 +1257,7 @@ impl Timeline {
             checkpoint_distance,
             self.get_last_record_lsn(),
             self.last_freeze_at.load(),
-            open_layer.get_first_write_ts(),
+            open_layer.get_opened_at(),
         ) {
             match open_layer.info() {
                 InMemoryLayerInfo::Frozen { lsn_start, lsn_end } => {
@@ -1622,7 +1622,7 @@ impl Timeline {
         checkpoint_distance: u64,
         projected_lsn: Lsn,
         last_freeze_at: Lsn,
-        first_write_ts: Option<&Instant>,
+        opened_at: Instant,
     ) -> bool {
         let distance = projected_lsn.widening_sub(last_freeze_at);
 
@@ -1640,28 +1640,26 @@ impl Timeline {
                 projected_lsn, layer_size, distance
             );
 
-            return true;
+            true
         } else if projected_layer_size >= checkpoint_distance {
             info!(
                 "Will roll layer at {} with layer size {} due to layer size ({})",
                 projected_lsn, layer_size, projected_layer_size
             );
 
-            return true;
-        } else if let Some(first_write_ts) = first_write_ts {
-            if distance > 0 && first_write_ts.elapsed() >= self.get_checkpoint_timeout() {
-                info!(
+            true
+        } else if distance > 0 && opened_at.elapsed() >= self.get_checkpoint_timeout() {
+            info!(
                     "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
                     projected_lsn,
                     layer_size,
-                    first_write_ts.elapsed()
+                    opened_at.elapsed()
                 );
 
-                return true;
-            }
+            true
+        } else {
+            false
         }
-
-        false
     }
 }
 
@@ -4863,7 +4861,7 @@ impl<'a> TimelineWriter<'a> {
             self.get_checkpoint_distance(),
             lsn,
             state.cached_last_freeze_at,
-            state.open_layer.get_first_write_ts(),
+            state.open_layer.get_opened_at(),
         ) {
             OpenLayerAction::Roll
         } else {

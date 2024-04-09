@@ -54,7 +54,7 @@ pub struct InMemoryLayer {
     /// Writes are only allowed when this is `None`.
     end_lsn: OnceLock<Lsn>,
 
-    first_write_ts: OnceLock<Instant>,
+    opened_at: Instant,
 
     /// The above fields never change, except for `end_lsn`, which is only set once.
     /// All other changing parts are in `inner`, and protected by a mutex.
@@ -463,7 +463,7 @@ impl InMemoryLayer {
             tenant_shard_id,
             start_lsn,
             end_lsn: OnceLock::new(),
-            first_write_ts: OnceLock::new(),
+            opened_at: Instant::now(),
             inner: RwLock::new(InMemoryLayerInner {
                 index: HashMap::new(),
                 file,
@@ -486,13 +486,6 @@ impl InMemoryLayer {
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
-
-        if self.first_write_ts.get().is_none() {
-            self.first_write_ts
-                .set(Instant::now())
-                .expect("InMemoryLayer::put_value is never called from different threads");
-        }
-
         self.put_value_locked(&mut inner, key, lsn, buf, ctx).await
     }
 
@@ -531,8 +524,8 @@ impl InMemoryLayer {
         Ok(())
     }
 
-    pub(crate) fn get_first_write_ts(&self) -> Option<&Instant> {
-        self.first_write_ts.get()
+    pub(crate) fn get_opened_at(&self) -> Instant {
+        self.opened_at
     }
 
     pub(crate) async fn tick(&self) -> Option<u64> {
