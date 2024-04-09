@@ -26,6 +26,7 @@ use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use tokio_util::sync::CancellationToken;
 use utils::{
+    id::{TenantId, TimelineId},
     logging::{self, LogFormat, TracingErrorLayerEnablement},
     lsn::Lsn,
     project_git_version,
@@ -139,7 +140,10 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::anyhow!("Invalid time for done_if_after: '{}'", cmd.done_if_after)
             })?;
 
-            let prefix = RemotePath::from_string(&cmd.prefix)?;
+            let Some(prefix) = validate_prefix(&cmd.prefix) else {
+                println!("specified prefix '{}' failed validation", cmd.prefix);
+                return Ok(());
+            };
             let toml_document = toml_edit::Document::from_str(&cmd.config_toml_str)?;
             let toml_item = toml_document
                 .get("remote_storage")
@@ -231,4 +235,84 @@ fn handle_metadata(
     }
 
     Ok(())
+}
+
+/// Ensures that the given S3 prefix is sufficiently constrained.
+/// The command is very risky already and we don't want to expose something
+/// that allows usually unintentional and quite catastrophic time travel of
+/// an entire bucket, which would be a major catastrophy and away
+/// by only one character change (similar to "rm -r /home /username/foobar").
+fn validate_prefix(prefix: &str) -> Option<RemotePath> {
+    if prefix.is_empty() {
+        // Empty prefix means we want to specify the *whole* bucket
+        return None;
+    }
+    let components = prefix.split("/").collect::<Vec<_>>();
+    let (last, components) = {
+        let last = components.last()?;
+        if *last == "" {
+            (
+                components.iter().nth_back(1)?,
+                &components[..(components.len() - 1)],
+            )
+        } else {
+            (last, &components[..])
+        }
+    };
+    'valid: {
+        if let Ok(_timeline_id) = TimelineId::from_str(last) {
+            // Ends in either a tenant or timeline ID
+            break 'valid;
+        }
+        if *last == "timelines" {
+            if let Some(before_last) = components.iter().nth_back(1) {
+                if let Ok(_tenant_id) = TenantId::from_str(before_last) {
+                    // Has a valid tenant id
+                    break 'valid;
+                }
+            }
+        }
+
+        return None;
+    }
+    RemotePath::from_string(prefix).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_prefix() {
+        assert_eq!(validate_prefix(""), None);
+        assert_eq!(validate_prefix("/"), None);
+        #[track_caller]
+        fn assert_valid(prefix: &str) {
+            let remote_path = RemotePath::from_string(prefix).unwrap();
+            assert_eq!(validate_prefix(prefix), Some(remote_path));
+        }
+        assert_valid("wal/3aa8fcc61f6d357410b7de754b1d9001/641e5342083b2235ee3deb8066819683/");
+        // Path is not relative but absolute
+        assert_eq!(
+            validate_prefix(
+                "/wal/3aa8fcc61f6d357410b7de754b1d9001/641e5342083b2235ee3deb8066819683/"
+            ),
+            None
+        );
+        assert_valid("wal/3aa8fcc61f6d357410b7de754b1d9001/");
+        // Partial tenant IDs should be invalid, S3 will match all tenants with the specific ID prefix
+        assert_eq!(validate_prefix("wal/3aa8fcc61f6d357410b7d"), None);
+        assert_eq!(validate_prefix("wal"), None);
+        assert_eq!(validate_prefix("/wal/"), None);
+        assert_valid("pageserver/v1/tenants/3aa8fcc61f6d357410b7de754b1d9001");
+        // Partial tenant ID
+        assert_eq!(
+            validate_prefix("pageserver/v1/tenants/3aa8fcc61f6d357410b"),
+            None
+        );
+        assert_valid("pageserver/v1/tenants/3aa8fcc61f6d357410b7de754b1d9001/timelines");
+        assert_valid("pageserver/v1/tenants/3aa8fcc61f6d357410b7de754b1d9001/timelines/");
+        assert_valid("pageserver/v1/tenants/3aa8fcc61f6d357410b7de754b1d9001/timelines/641e5342083b2235ee3deb8066819683");
+        assert_eq!(validate_prefix("pageserver/v1/tenants/"), None);
+    }
 }
