@@ -1632,14 +1632,6 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_distance)
     }
 
-    fn get_checkpoint_timeout(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.load();
-        tenant_conf
-            .tenant_conf
-            .checkpoint_timeout
-            .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
-    }
-
     fn get_compaction_target_size(&self) -> u64 {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
