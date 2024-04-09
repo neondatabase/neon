@@ -9,7 +9,10 @@ mod index_part;
 mod layer_map_analyzer;
 mod layers;
 
-use std::str::FromStr;
+use std::{
+    str::FromStr,
+    time::{Duration, SystemTime},
+};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
@@ -91,11 +94,11 @@ struct TimeTravelRemotePrefixCmd {
     /// remote prefix to time travel recover. For safety reasons, we require it to contain
     /// a timeline or tenant ID in the prefix.
     prefix: String,
-    /// Timestamp to travel to. Given in format like `2024-01-20T10:45:45Z`.
+    /// Timestamp to travel to. Given in format like `2024-01-20T10:45:45Z`. Assumes UTC and second accuracy.
     travel_to: String,
     /// Timestamp of the start of the operation, must be after any changes we want to roll back and after.
     /// You can use a few seconds before invoking the command. Same format as `travel_to`.
-    done_if_after: String,
+    done_if_after: Option<String>,
 }
 
 #[derive(Parser)]
@@ -147,9 +150,21 @@ async fn main() -> anyhow::Result<()> {
             let timestamp = humantime::parse_rfc3339(&cmd.travel_to)
                 .map_err(|_e| anyhow::anyhow!("Invalid time for travel_to: '{}'", cmd.travel_to))?;
 
-            let done_if_after = humantime::parse_rfc3339(&cmd.done_if_after).map_err(|_e| {
-                anyhow::anyhow!("Invalid time for done_if_after: '{}'", cmd.done_if_after)
-            })?;
+            let done_if_after = if let Some(done_if_after) = &cmd.done_if_after {
+                humantime::parse_rfc3339(done_if_after).map_err(|_e| {
+                    anyhow::anyhow!("Invalid time for done_if_after: '{}'", done_if_after)
+                })?
+            } else {
+                const SAFETY_MARGIN: Duration = Duration::from_secs(3);
+                tokio::time::sleep(SAFETY_MARGIN).await;
+                // Convert to string representation and back to get rid of sub-second values
+                let done_if_after = SystemTime::now();
+                tokio::time::sleep(SAFETY_MARGIN).await;
+                done_if_after
+            };
+
+            let timestamp = strip_subsecond(timestamp);
+            let done_if_after = strip_subsecond(done_if_after);
 
             let Some(prefix) = validate_prefix(&cmd.prefix) else {
                 println!("specified prefix '{}' failed validation", cmd.prefix);
@@ -287,6 +302,11 @@ fn validate_prefix(prefix: &str) -> Option<RemotePath> {
         return None;
     }
     RemotePath::from_string(prefix).ok()
+}
+
+fn strip_subsecond(timestamp: SystemTime) -> SystemTime {
+    let ts_str = humantime::format_rfc3339_seconds(timestamp).to_string();
+    humantime::parse_rfc3339(&ts_str).expect("can't parse just created timestamp")
 }
 
 #[cfg(test)]
