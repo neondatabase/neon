@@ -5127,6 +5127,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-rustls 0.25.0",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
