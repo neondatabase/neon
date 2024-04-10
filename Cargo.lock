@@ -2000,7 +2000,7 @@ dependencies = [
 [[package]]
 name = "framed-websockets"
 version = "0.1.0"
-source = "git+https://github.com/conradludgate/fastwebsockets#d32e475140838dceb8b0e13f449acb48f1fd44a9"
+source = "git+https://github.com/conradludgate/fastwebsockets#0cdf2c5273339a02d73c8f613b63e780b5718bc7"
 dependencies = [
  "base64 0.21.1",
  "bytes",
