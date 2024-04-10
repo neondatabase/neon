@@ -25,11 +25,22 @@ use crate::{
 };
 
 #[derive(Deserialize, Debug, Clone)]
-#[serde(rename_all(deserialize = "snake_case"))]
-pub enum ControlPlaneEventKey {
-    EndpointCreated { endpoint_id: String },
-    BranchCreated { branch_id: String },
-    ProjectCreated { project_id: String },
+pub struct ControlPlaneEventKey {
+    endpoint_created: Option<EndpointCreated>,
+    branch_created: Option<BranchCreated>,
+    project_created: Option<ProjectCreated>,
+}
+#[derive(Deserialize, Debug, Clone)]
+struct EndpointCreated {
+    endpoint_id: String,
+}
+#[derive(Deserialize, Debug, Clone)]
+struct BranchCreated {
+    branch_id: String,
+}
+#[derive(Deserialize, Debug, Clone)]
+struct ProjectCreated {
+    project_id: String,
 }
 
 pub struct EndpointsCache {
@@ -86,17 +97,17 @@ impl EndpointsCache {
     }
     fn insert_event(&self, key: ControlPlaneEventKey) {
         // Do not do normalization here, we expect the events to be normalized.
-        match key {
-            ControlPlaneEventKey::EndpointCreated { endpoint_id } => {
-                self.endpoints
-                    .insert(EndpointIdInt::from(&endpoint_id.into()));
-            }
-            ControlPlaneEventKey::BranchCreated { branch_id } => {
-                self.branches.insert(BranchIdInt::from(&branch_id.into()));
-            }
-            ControlPlaneEventKey::ProjectCreated { project_id } => {
-                self.projects.insert(ProjectIdInt::from(&project_id.into()));
-            }
+        if let Some(endpoint_created) = key.endpoint_created {
+            self.endpoints
+                .insert(EndpointIdInt::from(&endpoint_created.endpoint_id.into()));
+        }
+        if let Some(branch_created) = key.branch_created {
+            self.branches
+                .insert(BranchIdInt::from(&branch_created.branch_id.into()));
+        }
+        if let Some(project_created) = key.project_created {
+            self.projects
+                .insert(ProjectIdInt::from(&project_created.project_id.into()));
         }
     }
     pub async fn do_read(
@@ -172,7 +183,7 @@ impl EndpointsCache {
                             REDIS_BROKEN_MESSAGES
                                 .with_label_values(&[&self.config.stream_name])
                                 .inc();
-                            tracing::error!("error parsing key-value {k}: {e:?}");
+                            tracing::error!("error parsing key-value {v:?}: {e:?}");
                             continue;
                         }
                     };
@@ -189,5 +200,15 @@ impl EndpointsCache {
         }
         tracing::info!("read {} endpoints/branches/projects from redis", total);
         Ok(())
+    }
+}
+
+mod tests {
+    use super::ControlPlaneEventKey;
+
+    #[test]
+    fn test() {
+        let s = "{\"branch_created\":null,\"endpoint_created\":{\"endpoint_id\":\"ep-rapid-thunder-w0qqw2q9\"},\"project_created\":null,\"type\":\"endpoint_created\"}";
+        let _: ControlPlaneEventKey = serde_json::from_str(s).unwrap();
     }
 }
