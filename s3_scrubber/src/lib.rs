@@ -368,7 +368,10 @@ async fn list_objects_with_retries(
         {
             Ok(response) => return Ok(response),
             Err(e) => {
-                error!("list_objects_v2 query failed: {e}");
+                error!(
+                    "list_objects_v2 query failed: {e}, bucket_name={}, prefix={}, delimiter={}",
+                    s3_target.bucket_name, s3_target.prefix_in_bucket, s3_target.delimiter
+                );
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
