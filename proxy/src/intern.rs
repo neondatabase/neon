@@ -5,7 +5,7 @@ use std::{
 use lasso::{Capacity, MemoryLimits, Spur, ThreadedRodeo};
 use rustc_hash::FxHasher;
 
-use crate::{BranchId, EndpointId, ProjectId, RoleName};
+use crate::{BranchId, EndpointCacheKey, EndpointId, ProjectId, RoleName};
 
 pub trait InternId: Sized + 'static {
     fn get_interner() -> &'static StringInterner<Self>;
@@ -162,6 +162,11 @@ impl From<&EndpointId> for EndpointIdInt {
 }
 impl From<EndpointId> for EndpointIdInt {
     fn from(value: EndpointId) -> Self {
+        EndpointIdTag::get_interner().get_or_intern(&value)
+    }
+}
+impl From<EndpointCacheKey> for EndpointIdInt {
+    fn from(value: EndpointCacheKey) -> Self {
         EndpointIdTag::get_interner().get_or_intern(&value)
     }
 }

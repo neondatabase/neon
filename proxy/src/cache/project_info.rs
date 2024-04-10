@@ -16,7 +16,7 @@ use crate::{
     config::ProjectInfoCacheOptions,
     console::AuthSecret,
     intern::{EndpointIdInt, ProjectIdInt, RoleNameInt},
-    EndpointId, RoleName,
+    EndpointCacheKey, EndpointId, RoleName,
 };
 
 use super::{Cache, Cached};
@@ -196,7 +196,7 @@ impl ProjectInfoCacheImpl {
     }
     pub fn get_allowed_ips(
         &self,
-        endpoint_id: &EndpointId,
+        endpoint_id: &EndpointCacheKey,
     ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
         let endpoint_id = EndpointIdInt::get(endpoint_id)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();

@@ -222,8 +222,8 @@ impl super::Api for Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
-        let ep = &user_info.endpoint;
-        if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(ep) {
+        let cache_key = user_info.endpoint_cache_key();
+        if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(&cache_key) {
             ALLOWED_IPS_BY_CACHE_OUTCOME
                 .with_label_values(&["hit"])
                 .inc();
@@ -236,7 +236,7 @@ impl super::Api for Api {
         let allowed_ips = Arc::new(auth_info.allowed_ips);
         let user = &user_info.user;
         if let Some(project_id) = auth_info.project_id {
-            let ep_int = ep.normalize().into();
+            let ep_int = cache_key.normalize().into();
             self.caches.project_info.insert_role_secret(
                 project_id,
                 ep_int,
