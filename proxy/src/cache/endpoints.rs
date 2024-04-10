@@ -64,9 +64,9 @@ impl EndpointsCache {
             return true;
         }
         // If the limiter allows, we don't need to check the cache.
-        if self.limiter.lock().await.check() {
-            return true;
-        }
+        // if self.limiter.lock().await.check() {
+        //     return true;
+        // }
         let rejected = self.should_reject(endpoint);
         ctx.set_rejected(rejected);
         !rejected
