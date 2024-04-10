@@ -301,7 +301,7 @@ async fn request_handler(
         .map(|s| s.to_string());
 
     // Check if the request is a websocket upgrade request.
-    if hyper_tungstenite::is_upgrade_request(&request) {
+    if framed_websockets::upgrade::is_upgrade_request(&request) {
         let ctx = RequestMonitoring::new(
             session_id,
             peer_addr,
@@ -312,7 +312,7 @@ async fn request_handler(
         let span = ctx.span.clone();
         info!(parent: &span, "performing websocket upgrade");
 
-        let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
+        let (response, websocket) = framed_websockets::upgrade::upgrade(&mut request)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
         ws_connections.spawn(
@@ -334,7 +334,7 @@ async fn request_handler(
         );
 
         // Return the response so the spawned future can continue.
-        Ok(response)
+        Ok(response.map(|_: http_body_util::Empty<Bytes>| Full::new(Bytes::new())))
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
         let ctx = RequestMonitoring::new(
             session_id,

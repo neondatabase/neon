@@ -8,9 +8,9 @@ use crate::{
     rate_limiter::EndpointRateLimiter,
 };
 use bytes::{Buf, Bytes};
+use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
 use hyper::upgrade::Upgraded;
-use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
 
 use std::{
@@ -30,13 +30,13 @@ pin_project! {
     /// implements [`AsyncRead`] and [`AsyncWrite`].
     pub struct WebSocketRw<S = Upgraded> {
         #[pin]
-        stream: SyncWrapper<WebSocketStream<S>>,
+        stream: SyncWrapper<WebSocketServer<S>>,
         bytes: Bytes,
     }
 }
 
 impl<S> WebSocketRw<S> {
-    pub fn new(stream: WebSocketStream<S>) -> Self {
+    pub fn new(stream: WebSocketServer<S>) -> Self {
         Self {
             stream: stream.into(),
             bytes: Bytes::new(),
@@ -53,7 +53,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
         let mut stream = self.project().stream.get_pin_mut();
 
         ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
-        match stream.as_mut().start_send(Message::Binary(buf.into())) {
+        match stream
+            .as_mut()
+            .start_send(Frame::binary(buf.to_vec().into()))
+        {
             Ok(()) => Poll::Ready(Ok(buf.len())),
             Err(e) => Poll::Ready(Err(io_error(e))),
         }
@@ -76,13 +79,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for WebSocketRw<S> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if buf.remaining() > 0 {
-            let bytes = ready!(self.as_mut().poll_fill_buf(cx))?;
-            let len = std::cmp::min(bytes.len(), buf.remaining());
-            buf.put_slice(&bytes[..len]);
-            self.consume(len);
-        }
-
+        let bytes = ready!(self.as_mut().poll_fill_buf(cx))?;
+        let len = std::cmp::min(bytes.len(), buf.remaining());
+        buf.put_slice(&bytes[..len]);
+        self.consume(len);
         Poll::Ready(Ok(()))
     }
 }
@@ -101,24 +101,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
             let res = ready!(this.stream.as_mut().get_pin_mut().poll_next(cx));
             match res.transpose().map_err(io_error)? {
-                Some(message) => match message {
-                    Message::Ping(_) => {}
-                    Message::Pong(_) => {}
-                    Message::Text(text) => {
+                Some(message) => match message.opcode {
+                    OpCode::Ping => {}
+                    OpCode::Pong => {}
+                    OpCode::Continuation => {}
+                    OpCode::Text => {
                         // We expect to see only binary messages.
                         let error = "unexpected text message in the websocket";
-                        warn!(length = text.len(), error);
+                        warn!(length = message.payload.len(), error);
                         return Poll::Ready(Err(io_error(error)));
                     }
-                    Message::Frame(_) => {
-                        // This case is impossible according to Frame's doc.
-                        panic!("unexpected raw frame in the websocket");
-                    }
-                    Message::Binary(chunk) => {
+                    OpCode::Binary => {
                         assert!(this.bytes.is_empty());
-                        *this.bytes = Bytes::from(chunk);
+                        *this.bytes = message.payload;
                     }
-                    Message::Close(_) => return EOF,
+                    OpCode::Close => return EOF,
                 },
                 None => return EOF,
             }
@@ -133,7 +130,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 pub async fn serve_websocket(
     config: &'static ProxyConfig,
     mut ctx: RequestMonitoring,
-    websocket: HyperWebsocket,
+    websocket: framed_websockets::upgrade::UpgradeFut,
     cancellation_handler: Arc<CancellationHandlerMain>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
@@ -177,6 +174,7 @@ pub async fn serve_websocket(
 mod tests {
     use std::pin::pin;
 
+    use framed_websockets::WebSocketServer;
     use futures::{SinkExt, StreamExt};
     use hyper_tungstenite::{
         tungstenite::{protocol::Role, Message},
@@ -210,9 +208,7 @@ mod tests {
         });
 
         js.spawn(async move {
-            let mut rw = pin!(WebSocketRw::new(
-                WebSocketStream::from_raw_socket(stream2, Role::Server, None).await
-            ));
+            let mut rw = pin!(WebSocketRw::new(WebSocketServer::after_handshake(stream2)));
 
             let mut buf = vec![0; 1024];
             let n = rw.read(&mut buf).await.unwrap();

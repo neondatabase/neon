@@ -1998,6 +1998,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "framed-websockets"
+version = "0.7.1"
+source = "git+https://github.com/conradludgate/fastwebsockets#820af80f34be5c781109f3f8f7d8be53926cb324"
+dependencies = [
+ "base64 0.21.1",
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "http-body-util",
+ "hyper 1.2.0",
+ "hyper-util",
+ "pin-project",
+ "rand 0.8.5",
+ "sha1",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "fs2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4378,6 +4398,7 @@ dependencies = [
  "dashmap",
  "env_logger",
  "fallible-iterator",
+ "framed-websockets",
  "futures",
  "git-version",
  "hashbrown 0.13.2",
