@@ -92,7 +92,7 @@ pub fn write_postgres_conf(
         }
     }
 
-    if cfg!(linux) {
+    if cfg!(target_os = "linux") {
         // Check /proc/sys/vm/overcommit_memory -- if it equals 2 (i.e. linux memory overcommit is
         // disabled), then the control plane has enabled swap and we should set
         // dynamic_shared_memory_type = 'mmap'.
