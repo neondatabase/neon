@@ -9,7 +9,7 @@ use std::{
 use dashmap::DashSet;
 use redis::{
     streams::{StreamReadOptions, StreamReadReply},
-    AsyncCommands, FromRedisValue, Value,
+    AsyncCommands,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -27,9 +27,9 @@ use crate::{
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all(deserialize = "snake_case"))]
 pub enum ControlPlaneEventKey {
-    EndpointCreated,
-    BranchCreated,
-    ProjectCreated,
+    EndpointCreated { endpoint_id: String },
+    BranchCreated { branch_id: String },
+    ProjectCreated { project_id: String },
 }
 
 pub struct EndpointsCache {
@@ -84,17 +84,18 @@ impl EndpointsCache {
                 .contains(&ProjectIdInt::from(&endpoint.as_project()))
         }
     }
-    fn insert_event(&self, key: ControlPlaneEventKey, value: String) {
+    fn insert_event(&self, key: ControlPlaneEventKey) {
         // Do not do normalization here, we expect the events to be normalized.
         match key {
-            ControlPlaneEventKey::EndpointCreated => {
-                self.endpoints.insert(EndpointIdInt::from(&value.into()));
+            ControlPlaneEventKey::EndpointCreated { endpoint_id } => {
+                self.endpoints
+                    .insert(EndpointIdInt::from(&endpoint_id.into()));
             }
-            ControlPlaneEventKey::BranchCreated => {
-                self.branches.insert(BranchIdInt::from(&value.into()));
+            ControlPlaneEventKey::BranchCreated { branch_id } => {
+                self.branches.insert(BranchIdInt::from(&branch_id.into()));
             }
-            ControlPlaneEventKey::ProjectCreated => {
-                self.projects.insert(ProjectIdInt::from(&value.into()));
+            ControlPlaneEventKey::ProjectCreated { project_id } => {
+                self.projects.insert(ProjectIdInt::from(&project_id.into()));
             }
         }
     }
@@ -112,6 +113,7 @@ impl EndpointsCache {
             if let Err(e) = self.read_from_stream(&mut con, &mut last_id).await {
                 tracing::error!("error reading from redis: {:?}", e);
             }
+            tokio::time::sleep(self.config.retry_interval).await;
         }
     }
     async fn read_from_stream(
@@ -132,15 +134,15 @@ impl EndpointsCache {
         self.batch_read(
             con,
             StreamReadOptions::default()
-                .count(self.config.initial_batch_size)
+                .count(self.config.default_batch_size)
                 .block(self.config.xread_timeout.as_millis() as usize),
             last_id,
             false,
         )
         .await
     }
-    fn parse_key_value(key: &str, value: &Value) -> anyhow::Result<(ControlPlaneEventKey, String)> {
-        Ok((serde_json::from_str(key)?, String::from_redis_value(value)?))
+    fn parse_key_value(key: &str) -> anyhow::Result<ControlPlaneEventKey> {
+        Ok(serde_json::from_str(key)?)
     }
     async fn batch_read(
         &self,
@@ -165,18 +167,18 @@ impl EndpointsCache {
             }
             for x in res.ids {
                 total += 1;
-                for (k, v) in x.map {
-                    let (key, value) = match Self::parse_key_value(&k, &v) {
+                for (k, _) in x.map {
+                    let key = match Self::parse_key_value(&k) {
                         Ok(x) => x,
                         Err(e) => {
                             REDIS_BROKEN_MESSAGES
                                 .with_label_values(&[&self.config.stream_name])
                                 .inc();
-                            tracing::error!("error parsing key-value {k}-{v:?}: {e:?}");
+                            tracing::error!("error parsing key-value {k}: {e:?}");
                             continue;
                         }
                     };
-                    self.insert_event(key, value);
+                    self.insert_event(key);
                 }
                 if total.is_power_of_two() {
                     tracing::debug!("endpoints read {}", total);

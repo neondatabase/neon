@@ -328,13 +328,15 @@ pub struct EndpointCacheConfig {
     /// Disable cache.
     /// If true, cache is ignored, but reports all statistics.
     pub disable_cache: bool,
+    /// Retry interval for the stream read operation.
+    pub retry_interval: Duration,
 }
 
 impl EndpointCacheConfig {
     /// Default options for [`crate::console::provider::NodeInfoCache`].
     /// Notice that by default the limiter is empty, which means that cache is disabled.
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
-        "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s";
+        "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
 
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
@@ -345,6 +347,7 @@ impl EndpointCacheConfig {
         let mut stream_name = None;
         let mut limiter_info = vec![];
         let mut disable_cache = false;
+        let mut retry_interval = None;
 
         for option in options.split(',') {
             let (key, value) = option
@@ -358,6 +361,7 @@ impl EndpointCacheConfig {
                 "stream_name" => stream_name = Some(value.to_string()),
                 "limiter_info" => limiter_info.push(RateBucketInfo::from_str(value)?),
                 "disable_cache" => disable_cache = value.parse()?,
+                "retry_interval" => retry_interval = Some(humantime::parse_duration(value)?),
                 unknown => bail!("unknown key: {unknown}"),
             }
         }
@@ -370,6 +374,7 @@ impl EndpointCacheConfig {
             stream_name: stream_name.context("missing `stream_name`")?,
             disable_cache,
             limiter_info,
+            retry_interval: retry_interval.context("missing `retry_interval`")?,
         })
     }
 }

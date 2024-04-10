@@ -16,7 +16,7 @@ use crate::{
     scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tracing::info;
@@ -543,7 +543,10 @@ impl ApiLocks {
         })
     }
 
-    pub async fn garbage_collect_worker(&self) -> anyhow::Result<Infallible> {
+    pub async fn garbage_collect_worker(&self) {
+        if self.permits == 0 {
+            return;
+        }
         let mut interval =
             tokio::time::interval(self.epoch / (self.node_locks.shards().len()) as u32);
         loop {
