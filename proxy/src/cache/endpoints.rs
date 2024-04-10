@@ -9,7 +9,7 @@ use std::{
 use dashmap::DashSet;
 use redis::{
     streams::{StreamReadOptions, StreamReadReply},
-    AsyncCommands,
+    AsyncCommands, FromRedisValue, Value,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -141,8 +141,9 @@ impl EndpointsCache {
         )
         .await
     }
-    fn parse_key_value(key: &str) -> anyhow::Result<ControlPlaneEventKey> {
-        Ok(serde_json::from_str(key)?)
+    fn parse_key_value(_: &str, value: &Value) -> anyhow::Result<ControlPlaneEventKey> {
+        let s: String = FromRedisValue::from_redis_value(value)?;
+        Ok(serde_json::from_str(&s)?)
     }
     async fn batch_read(
         &self,
@@ -167,8 +168,8 @@ impl EndpointsCache {
             }
             for x in res.ids {
                 total += 1;
-                for (k, _) in x.map {
-                    let key = match Self::parse_key_value(&k) {
+                for (k, v) in x.map {
+                    let key = match Self::parse_key_value(&k, &v) {
                         Ok(x) => x,
                         Err(e) => {
                             REDIS_BROKEN_MESSAGES
