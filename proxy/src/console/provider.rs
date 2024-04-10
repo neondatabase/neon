@@ -543,7 +543,10 @@ impl ApiLocks {
         })
     }
 
-    pub async fn garbage_collect_worker(&self) -> anyhow::Result<Infallible> {
+    pub async fn garbage_collect_worker(&self) {
+        if self.permits == 0 {
+            return;
+        }
         let mut interval =
             tokio::time::interval(self.epoch / (self.node_locks.shards().len()) as u32);
         loop {
