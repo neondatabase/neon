@@ -21,7 +21,7 @@ use crate::{
     metrics::REDIS_BROKEN_MESSAGES,
     rate_limiter::GlobalRateLimiter,
     redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider,
-    EndpointId, Normalize,
+    EndpointId,
 };
 
 #[derive(Deserialize, Debug, Clone)]
@@ -72,9 +72,8 @@ impl EndpointsCache {
         !rejected
     }
     fn should_reject(&self, endpoint: &EndpointId) -> bool {
-        let endpoint = endpoint.normalize();
         if endpoint.is_endpoint() {
-            !self.endpoints.contains(&EndpointIdInt::from(&endpoint))
+            !self.endpoints.contains(&EndpointIdInt::from(endpoint))
         } else if endpoint.is_branch() {
             !self
                 .branches
