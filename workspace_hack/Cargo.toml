@@ -63,7 +63,7 @@ scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = { version = "0.10", features = ["asm"] }
-smallvec = { version = "1", default-features = false, features = ["write"] }
+smallvec = { version = "1", default-features = false, features = ["const_new", "write"] }
 subtle = { version = "2" }
 time = { version = "0.3", features = ["local-offset", "macros", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
@@ -75,7 +75,6 @@ tonic = { version = "0.9", features = ["tls-roots"] }
 tower = { version = "0.4", default-features = false, features = ["balance", "buffer", "limit", "log", "timeout", "util"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
-tungstenite = { version = "0.20" }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 zeroize = { version = "1", features = ["derive"] }

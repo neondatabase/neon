@@ -169,18 +169,6 @@ pub static NUM_CANCELLATION_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static NUM_INVALID_ENDPOINTS: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "proxy_invalid_endpoints_total",
-        "Number of invalid endpoints (per protocol, per rejected).",
-        // http/ws/tcp, true/false, success/failure
-        // TODO(anna): the last dimension is just a proxy to what we actually want to measure.
-        // We need to measure whether the endpoint was found by cplane or not.
-        &["protocol", "rejected", "outcome"],
-    )
-    .unwrap()
-});
-
 pub const NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT: &str = "from_client";
 pub const NUM_CANCELLATION_REQUESTS_SOURCE_FROM_REDIS: &str = "from_redis";
 
