@@ -81,6 +81,7 @@ enum-map = "2.4.2"
 enumset = "1.0.12"
 fail = "0.5.0"
 fallible-iterator = "0.2"
+framed-websockets = { version = "0.1.0", git = "https://github.com/neondatabase/framed-websockets" }
 fs2 = "0.4.3"
 futures = "0.3"
 futures-core = "0.3"
