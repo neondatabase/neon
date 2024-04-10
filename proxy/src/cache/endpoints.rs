@@ -162,10 +162,7 @@ impl EndpointsCache {
             }
 
             let res = res.keys.pop().expect("Checked length above");
-
-            if return_when_finish && res.ids.len() <= self.config.default_batch_size {
-                break;
-            }
+            let len = res.ids.len();
             for x in res.ids {
                 total += 1;
                 for (k, v) in x.map {
@@ -185,6 +182,9 @@ impl EndpointsCache {
                     tracing::debug!("endpoints read {}", total);
                 }
                 *last_id = x.id;
+            }
+            if return_when_finish && len <= self.config.default_batch_size {
+                break;
             }
         }
         tracing::info!("read {} endpoints/branches/projects from redis", total);
