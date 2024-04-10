@@ -68,7 +68,7 @@ impl Api {
         let request_id = ctx.session_id.to_string();
         let application_name = ctx.console_application_name();
         async {
-            let request = self
+            let mut request_builder = self
                 .endpoint
                 .get("proxy_get_role_secret")
                 .header("X-Request-ID", &request_id)
@@ -78,8 +78,14 @@ impl Api {
                     ("application_name", application_name.as_str()),
                     ("project", user_info.endpoint.as_str()),
                     ("role", user_info.user.as_str()),
-                ])
-                .build()?;
+                ]);
+
+            let options = user_info.options.to_deep_object();
+            if !options.is_empty() {
+                request_builder = request_builder.query(&options);
+            }
+
+            let request = request_builder.build()?;
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
