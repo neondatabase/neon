@@ -21,16 +21,12 @@ use std::{
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tracing::warn;
 
-// TODO: use `std::sync::Exclusive` once it's stabilized.
-// Tracking issue: https://github.com/rust-lang/rust/issues/98407.
-use sync_wrapper::SyncWrapper;
-
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
     /// implements [`AsyncRead`] and [`AsyncWrite`].
     pub struct WebSocketRw<S = Upgraded> {
         #[pin]
-        stream: SyncWrapper<WebSocketServer<S>>,
+        stream: WebSocketServer<S>,
         bytes: Bytes,
     }
 }
@@ -38,7 +34,7 @@ pin_project! {
 impl<S> WebSocketRw<S> {
     pub fn new(stream: WebSocketServer<S>) -> Self {
         Self {
-            stream: stream.into(),
+            stream,
             bytes: Bytes::new(),
         }
     }
@@ -50,7 +46,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let mut stream = self.project().stream.get_pin_mut();
+        let mut stream = self.project().stream;
 
         ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
         match stream
@@ -63,12 +59,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let stream = self.project().stream.get_pin_mut();
+        let stream = self.project().stream;
         stream.poll_flush(cx).map_err(io_error)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let stream = self.project().stream.get_pin_mut();
+        let stream = self.project().stream;
         stream.poll_close(cx).map_err(io_error)
     }
 }
@@ -99,7 +95,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
                 return Poll::Ready(Ok(chunk));
             }
 
-            let res = ready!(this.stream.as_mut().get_pin_mut().poll_next(cx));
+            let res = ready!(this.stream.as_mut().poll_next(cx));
             match res.transpose().map_err(io_error)? {
                 Some(message) => match message.opcode {
                     OpCode::Ping => {}
@@ -176,13 +172,13 @@ mod tests {
 
     use framed_websockets::WebSocketServer;
     use futures::{SinkExt, StreamExt};
-    use hyper_tungstenite::{
-        tungstenite::{protocol::Role, Message},
-        WebSocketStream,
-    };
     use tokio::{
         io::{duplex, AsyncReadExt, AsyncWriteExt},
         task::JoinSet,
+    };
+    use tokio_tungstenite::{
+        tungstenite::{protocol::Role, Message},
+        WebSocketStream,
     };
 
     use super::WebSocketRw;
