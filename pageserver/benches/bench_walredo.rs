@@ -27,10 +27,25 @@
 //!
 //! # Reference Numbers
 //!
-//! 2024-04-04 on i3en.3xlarge
+//! 2024-04-10 on i3en.3xlarge
 //!
 //! ```text
-//! TODO
+//! short/1                 time:   [25.197 µs 25.322 µs 25.471 µs]
+//! short/2                 time:   [34.661 µs 34.810 µs 34.994 µs]
+//! short/4                 time:   [45.369 µs 45.686 µs 46.036 µs]
+//! short/8                 time:   [76.653 µs 77.234 µs 77.901 µs]
+//! short/16                time:   [140.61 µs 142.45 µs 144.33 µs]
+//! short/32                time:   [275.59 µs 277.42 µs 279.32 µs]
+//! short/64                time:   [545.53 µs 547.73 µs 550.05 µs]
+//! short/128               time:   [1.0531 ms 1.0606 ms 1.0693 ms]
+//! medium/1                time:   [114.98 µs 115.58 µs 116.29 µs]
+//! medium/2                time:   [159.51 µs 160.12 µs 160.89 µs]
+//! medium/4                time:   [330.33 µs 334.07 µs 338.96 µs]
+//! medium/8                time:   [660.55 µs 666.29 µs 673.20 µs]
+//! medium/16               time:   [1.3094 ms 1.3210 ms 1.3347 ms]
+//! medium/32               time:   [2.5856 ms 2.6100 ms 2.6387 ms]
+//! medium/64               time:   [4.9600 ms 5.0052 ms 5.0545 ms]
+//! medium/128              time:   [9.2382 ms 9.4334 ms 9.6216 ms]
 //! ```
 
 use bytes::{Buf, Bytes};
