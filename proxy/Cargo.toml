@@ -26,7 +26,7 @@ clap.workspace = true
 consumption_metrics.workspace = true
 dashmap.workspace = true
 env_logger.workspace = true
-framed-websockets = { version = "0.7.1", git = "https://github.com/conradludgate/fastwebsockets" }
+framed-websockets = { version = "0.1.0", git = "https://github.com/conradludgate/fastwebsockets" }
 futures.workspace = true
 git-version.workspace = true
 hashbrown.workspace = true

@@ -1999,8 +1999,8 @@ dependencies = [
 
 [[package]]
 name = "framed-websockets"
-version = "0.7.1"
-source = "git+https://github.com/conradludgate/fastwebsockets#820af80f34be5c781109f3f8f7d8be53926cb324"
+version = "0.1.0"
+source = "git+https://github.com/conradludgate/fastwebsockets#d32e475140838dceb8b0e13f449acb48f1fd44a9"
 dependencies = [
  "base64 0.21.1",
  "bytes",
