@@ -97,18 +97,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
             let res = ready!(this.stream.as_mut().poll_next(cx));
             match res.transpose().map_err(io_error)? {
-                Some(message) => match message.opcode {
+                Some(message) => match dbg!(message.opcode) {
                     OpCode::Ping => {}
                     OpCode::Pong => {}
-                    OpCode::Continuation => {}
                     OpCode::Text => {
                         // We expect to see only binary messages.
                         let error = "unexpected text message in the websocket";
                         warn!(length = message.payload.len(), error);
                         return Poll::Ready(Err(io_error(error)));
                     }
-                    OpCode::Binary => {
-                        assert!(this.bytes.is_empty());
+                    OpCode::Binary | OpCode::Continuation => {
+                        debug_assert!(this.bytes.is_empty());
                         *this.bytes = message.payload;
                     }
                     OpCode::Close => return EOF,
