@@ -20,7 +20,7 @@ use crate::{
     proxy::handshake::{handshake, HandshakeData},
     rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
-    EndpointCacheKey, Normalize,
+    EndpointCacheKey,
 };
 use futures::TryFutureExt;
 use itertools::Itertools;
@@ -280,7 +280,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     // check rate limit
     if let Some(ep) = user_info.get_endpoint() {
-        if !endpoint_rate_limiter.check(ep.normalize(), 1) {
+        if !endpoint_rate_limiter.check(ep, 1) {
             return stream
                 .throw_error(auth::AuthError::too_many_connections())
                 .await?;

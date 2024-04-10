@@ -160,11 +160,6 @@ impl From<&EndpointId> for EndpointIdInt {
         EndpointIdTag::get_interner().get_or_intern(value)
     }
 }
-impl From<EndpointId> for EndpointIdInt {
-    fn from(value: EndpointId) -> Self {
-        EndpointIdTag::get_interner().get_or_intern(&value)
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BranchIdTag;
@@ -180,11 +175,6 @@ impl From<&BranchId> for BranchIdInt {
         BranchIdTag::get_interner().get_or_intern(value)
     }
 }
-impl From<BranchId> for BranchIdInt {
-    fn from(value: BranchId) -> Self {
-        BranchIdTag::get_interner().get_or_intern(&value)
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectIdTag;
@@ -198,11 +188,6 @@ pub type ProjectIdInt = InternedString<ProjectIdTag>;
 impl From<&ProjectId> for ProjectIdInt {
     fn from(value: &ProjectId) -> Self {
         ProjectIdTag::get_interner().get_or_intern(value)
-    }
-}
-impl From<ProjectId> for ProjectIdInt {
-    fn from(value: ProjectId) -> Self {
-        ProjectIdTag::get_interner().get_or_intern(&value)
     }
 }
 

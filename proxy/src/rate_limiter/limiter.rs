@@ -24,13 +24,13 @@ use super::{
     RateLimiterConfig,
 };
 
-pub struct GlobalRateLimiter {
+pub struct RedisRateLimiter {
     data: Vec<RateBucket>,
-    info: Vec<RateBucketInfo>,
+    info: &'static [RateBucketInfo],
 }
 
-impl GlobalRateLimiter {
-    pub fn new(info: Vec<RateBucketInfo>) -> Self {
+impl RedisRateLimiter {
+    pub fn new(info: &'static [RateBucketInfo]) -> Self {
         Self {
             data: vec![
                 RateBucket {
@@ -50,7 +50,7 @@ impl GlobalRateLimiter {
         let should_allow_request = self
             .data
             .iter_mut()
-            .zip(&self.info)
+            .zip(self.info)
             .all(|(bucket, info)| bucket.should_allow_request(info, now, 1));
 
         if should_allow_request {

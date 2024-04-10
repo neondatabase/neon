@@ -8,15 +8,15 @@ use crate::{
         backend::{ComputeCredentialKeys, ComputeUserInfo},
         IpPattern,
     },
-    cache::{endpoints::EndpointsCache, project_info::ProjectInfoCacheImpl, Cached, TimedLru},
+    cache::{project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
-    config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
+    config::{CacheOptions, ProjectInfoCacheOptions},
     context::RequestMonitoring,
     intern::ProjectIdInt,
     scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tracing::info;
@@ -416,15 +416,12 @@ pub struct ApiCaches {
     pub node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
     pub project_info: Arc<ProjectInfoCacheImpl>,
-    /// List of all valid endpoints.
-    pub endpoints_cache: Arc<EndpointsCache>,
 }
 
 impl ApiCaches {
     pub fn new(
         wake_compute_cache_config: CacheOptions,
         project_info_cache_config: ProjectInfoCacheOptions,
-        endpoint_cache_config: EndpointCacheConfig,
     ) -> Self {
         Self {
             node_info: NodeInfoCache::new(
@@ -434,7 +431,6 @@ impl ApiCaches {
                 true,
             ),
             project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
-            endpoints_cache: Arc::new(EndpointsCache::new(endpoint_cache_config)),
         }
     }
 }
@@ -445,7 +441,6 @@ pub struct ApiLocks {
     node_locks: DashMap<EndpointCacheKey, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
-    epoch: std::time::Duration,
     registered: prometheus::IntCounter,
     unregistered: prometheus::IntCounter,
     reclamation_lag: prometheus::Histogram,
@@ -458,7 +453,6 @@ impl ApiLocks {
         permits: usize,
         shards: usize,
         timeout: Duration,
-        epoch: std::time::Duration,
     ) -> prometheus::Result<Self> {
         let registered = prometheus::IntCounter::with_opts(
             prometheus::Opts::new(
@@ -503,7 +497,6 @@ impl ApiLocks {
             node_locks: DashMap::with_shard_amount(shards),
             permits,
             timeout,
-            epoch,
             lock_acquire_lag,
             registered,
             unregistered,
@@ -543,9 +536,12 @@ impl ApiLocks {
         })
     }
 
-    pub async fn garbage_collect_worker(&self) -> anyhow::Result<Infallible> {
-        let mut interval =
-            tokio::time::interval(self.epoch / (self.node_locks.shards().len()) as u32);
+    pub async fn garbage_collect_worker(&self, epoch: std::time::Duration) {
+        if self.permits == 0 {
+            return;
+        }
+
+        let mut interval = tokio::time::interval(epoch / (self.node_locks.shards().len()) as u32);
         loop {
             for (i, shard) in self.node_locks.shards().iter().enumerate() {
                 interval.tick().await;
