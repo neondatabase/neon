@@ -6,25 +6,17 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
-from fixtures.utils import get_scale_for_db, humantime_to_ms
-
-from performance.pageserver.util import (
-    setup_pageserver_with_tenants,
-)
+from fixtures.remote_storage import s3_storage
 
 
 @pytest.mark.parametrize("duration", [30])
-@pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
 @pytest.mark.parametrize("io_engine", ["tokio-epoll-uring", "std-fs"])
-@pytest.mark.parametrize("concurrency_per_target", [1, 10])
-@pytest.mark.parametrize("n_tenants", [1])
+@pytest.mark.parametrize("concurrency_per_target", [1, 10, 100])
 @pytest.mark.timeout(1000)
 def test_download_churn(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
-    n_tenants: int,
-    pgbench_scale: int,
     io_engine: str,
     concurrency_per_target: int,
     duration: int,
@@ -37,8 +29,6 @@ def test_download_churn(
     # params from fixtures
     params.update(
         {
-            "n_tenants": (n_tenants, {"unit": ""}),
-            "pgbench_scale": (pgbench_scale, {"unit": ""}),
             "duration": (duration, {"unit": "s"}),
         }
     )
@@ -62,45 +52,32 @@ def test_download_churn(
     for param, (value, kwargs) in params.items():
         record(param, metric_value=value, report=MetricReport.TEST_PARAM, **kwargs)
 
-    def setup_wrapper(env: NeonEnv):
-        return setup_tenant_template(env, pg_bin, pgbench_scale)
+    # Setup env
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
-    env = setup_pageserver_with_tenants(
-        neon_env_builder,
-        f"download_churn-{n_tenants}-{pgbench_scale}-{io_engine}-{concurrency_per_target}",
-        n_tenants,
-        setup_wrapper,
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",  # disable periodic gc
+            "checkpoint_timeout": "10years",
+            "compaction_period": "0s",  # disable periodic compaction
+            "checkpoint_distance": 10485760,
+            "image_creation_threshold": 1000,
+            "compaction_threshold": 1,
+            "pitr_interval": "1000d",
+        }
     )
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    client = env.pageserver.http_client()
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as ep:
+        pg_bin.run_capture(["pgbench", "-i", "-s200", ep.connstr()])
+        wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
+        client.timeline_checkpoint(tenant_id, timeline_id)
+        client.timeline_compact(tenant_id, timeline_id)
+
     run_benchmark(env, pg_bin, record, io_engine, concurrency_per_target, duration)
-
-
-def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
-    config = {
-        "gc_period": "0s",  # disable periodic gc
-        "checkpoint_timeout": "10 years",
-        "compaction_period": "0s",  # disable periodic compaction
-        "checkpoint_distance": 10485760,
-        "image_creation_threshold": 1000,
-        "compaction_threshold": 1,
-        "pitr_interval": "1000d",
-    }
-
-    template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
-    env.pageserver.tenant_detach(template_tenant)
-    env.pageserver.allowed_errors.append(
-        # tenant detach causes this because the underlying attach-hook removes the tenant from storage controller entirely
-        ".*Dropped remote consistent LSN updates.*",
-    )
-    env.pageserver.tenant_attach(template_tenant, config)
-    ps_http = env.pageserver.http_client()
-
-    with env.endpoints.create_start("main", tenant_id=template_tenant) as ep:
-        pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", "-I", "dtGvp", ep.connstr()])
-        wait_for_last_flush_lsn(env, ep, template_tenant, template_timeline)
-        ps_http.timeline_checkpoint(template_tenant, template_timeline)
-        ps_http.timeline_compact(template_tenant, template_timeline)
-
-    return (template_tenant, template_timeline, config)
 
 
 def run_benchmark(
@@ -135,29 +112,26 @@ def run_benchmark(
         results = json.load(f)
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 
-    total = results["total"]
-
-    metric = "request_count"
+    metric = "downloads"
     record(
         metric,
-        metric_value=total[metric],
+        metric_value=results[metric],
         unit="",
         report=MetricReport.HIGHER_IS_BETTER,
     )
 
-    metric = "latency_mean"
+    metric = "evictions"
     record(
         metric,
-        metric_value=humantime_to_ms(total[metric]),
-        unit="ms",
-        report=MetricReport.LOWER_IS_BETTER,
+        metric_value=results[metric],
+        unit="",
+        report=MetricReport.HIGHER_IS_BETTER,
     )
 
-    metric = "latency_percentiles"
-    for k, v in total[metric].items():
-        record(
-            f"{metric}.{k}",
-            metric_value=humantime_to_ms(v),
-            unit="ms",
-            report=MetricReport.LOWER_IS_BETTER,
-        )
+    metric = "timeline_restarts"
+    record(
+        metric,
+        metric_value=results[metric],
+        unit="",
+        report=MetricReport.LOWER_IS_BETTER,
+    )
