@@ -403,7 +403,6 @@ async fn main() -> anyhow::Result<()> {
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
-            maintenance_tasks.spawn(api.locks.garbage_collect_worker());
             if let Some(redis_notifications_client) = redis_notifications_client {
                 let cache = api.caches.project_info.clone();
                 maintenance_tasks.spawn(notifications::task_main(
@@ -520,6 +519,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 console::locks::ApiLocks::new("wake_compute_lock", permits, shards, timeout, epoch)
                     .unwrap(),
             ));
+            tokio::spawn(locks.garbage_collect_worker());
 
             let url = args.auth_endpoint.parse()?;
             let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));
