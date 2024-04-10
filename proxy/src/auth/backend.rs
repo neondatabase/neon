@@ -27,7 +27,7 @@ use crate::{
     },
     stream, url,
 };
-use crate::{scram, EndpointCacheKey, EndpointId, Normalize, RoleName};
+use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -186,7 +186,7 @@ impl AuthenticationConfig {
         is_cleartext: bool,
     ) -> auth::Result<AuthSecret> {
         // we have validated the endpoint exists, so let's intern it.
-        let endpoint_int = EndpointIdInt::from(endpoint.normalize());
+        let endpoint_int = EndpointIdInt::from(endpoint);
 
         // only count the full hash count if password hack or websocket flow.
         // in other words, if proxy needs to run the hashing
