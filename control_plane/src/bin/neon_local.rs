@@ -1231,7 +1231,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
-                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast " }, false) {
+                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast" }, false) {
                     eprintln!("postgres stop failed: {e:#}");
                 }
             }
