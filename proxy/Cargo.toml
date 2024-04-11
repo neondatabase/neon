@@ -98,6 +98,7 @@ native-tls.workspace = true
 postgres-native-tls.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
+jsonwebtoken.workspace = true
 
 workspace_hack.workspace = true
 
