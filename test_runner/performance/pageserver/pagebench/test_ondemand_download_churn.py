@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -53,6 +54,12 @@ def test_download_churn(
         record(param, metric_value=value, report=MetricReport.TEST_PARAM, **kwargs)
 
     # Setup env
+    env = setup_env(neon_env_builder, pg_bin)
+
+    run_benchmark(env, pg_bin, record, io_engine, concurrency_per_target, duration)
+
+
+def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     remote_storage_kind = s3_storage()
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
@@ -71,13 +78,15 @@ def test_download_churn(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     client = env.pageserver.http_client()
+
     with env.endpoints.create_start("main", tenant_id=tenant_id) as ep:
-        pg_bin.run_capture(["pgbench", "-i", "-s200", ep.connstr()])
+        if os.getenv("CI", "false") == "true":
+            pg_bin.run_capture(["pgbench", "-i", "-s200", ep.connstr()])
         wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
         client.timeline_checkpoint(tenant_id, timeline_id)
         client.timeline_compact(tenant_id, timeline_id)
 
-    run_benchmark(env, pg_bin, record, io_engine, concurrency_per_target, duration)
+    return env
 
 
 def run_benchmark(

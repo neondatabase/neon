@@ -350,6 +350,7 @@ class RemoteStorageKind(str, enum.Enum):
         env_access_key = os.getenv("AWS_ACCESS_KEY_ID")
         env_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
         env_profile = os.getenv("AWS_PROFILE")
+        env_endpoint = os.getenv("AWS_ENDPOINT_URL", None)
         assert (
             env_access_key and env_secret_key
         ) or env_profile, "need to specify either access key and secret access key or profile"
@@ -363,6 +364,7 @@ class RemoteStorageKind(str, enum.Enum):
 
         client = boto3.client(
             "s3",
+            endpoint_url=env_endpoint,
             region_name=bucket_region,
         )
 
@@ -376,6 +378,7 @@ class RemoteStorageKind(str, enum.Enum):
             client=client,
             cleanup=True,
             real=True,
+            endpoint=env_endpoint,
         )
 
 
