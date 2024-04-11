@@ -203,6 +203,7 @@ impl EndpointsCache {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::ControlPlaneEventKey;
 
