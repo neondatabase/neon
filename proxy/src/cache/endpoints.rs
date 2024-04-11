@@ -18,7 +18,7 @@ use crate::{
     config::EndpointCacheConfig,
     context::RequestMonitoring,
     intern::{BranchIdInt, EndpointIdInt, ProjectIdInt},
-    metrics::REDIS_BROKEN_MESSAGES,
+    metrics::{Metrics, RedisErrors},
     rate_limiter::GlobalRateLimiter,
     redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider,
     EndpointId,
@@ -191,9 +191,9 @@ impl EndpointsCache {
                     let key = match Self::parse_key_value(&v) {
                         Ok(x) => x,
                         Err(e) => {
-                            REDIS_BROKEN_MESSAGES
-                                .with_label_values(&[&self.config.stream_name])
-                                .inc();
+                            Metrics::get().proxy.redis_errors_total.inc(RedisErrors {
+                                channel: &self.config.stream_name,
+                            });
                             tracing::error!("error parsing value {v:?}: {e:?}");
                             continue;
                         }

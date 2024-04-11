@@ -120,6 +120,9 @@ pub struct ProxyMetrics {
 
     /// Number of endpoints affected by authentication rate limits
     pub endpoints_auth_rate_limits: HyperLogLog<32>,
+
+    /// Number of invalid endpoints (per protocol, per rejected).
+    pub invalid_endpoints_total: CounterVec<InvalidEndpointsSet>,
 }
 
 #[derive(MetricGroup)]
@@ -430,7 +433,7 @@ impl Drop for LatencyTimerPause<'_> {
 }
 
 #[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
-enum ConnectOutcome {
+pub enum ConnectOutcome {
     Success,
     Failed,
 }
@@ -479,4 +482,12 @@ impl From<bool> for Bool {
             Bool::False
         }
     }
+}
+
+#[derive(LabelGroup)]
+#[label(set = InvalidEndpointsSet)]
+pub struct InvalidEndpointsGroup {
+    pub protocol: Protocol,
+    pub rejected: Bool,
+    pub outcome: ConnectOutcome,
 }

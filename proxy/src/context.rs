@@ -12,7 +12,7 @@ use crate::{
     console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     intern::{BranchIdInt, ProjectIdInt},
-    metrics::{LatencyTimer, Metrics, Protocol},
+    metrics::{ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol},
     DbName, EndpointId, RoleName,
 };
 
@@ -183,10 +183,19 @@ impl RequestMonitoring {
 
 impl Drop for RequestMonitoring {
     fn drop(&mut self) {
-        let outcome = if self.success { "success" } else { "failure" };
-        NUM_INVALID_ENDPOINTS
-            .with_label_values(&[self.protocol, bool_to_str(self.rejected), outcome])
-            .inc();
+        let outcome = if self.success {
+            ConnectOutcome::Success
+        } else {
+            ConnectOutcome::Failed
+        };
+        Metrics::get()
+            .proxy
+            .invalid_endpoints_total
+            .inc(InvalidEndpointsGroup {
+                protocol: self.protocol,
+                rejected: self.rejected.into(),
+                outcome,
+            });
         if let Some(tx) = self.sender.take() {
             let _: Result<(), _> = tx.send(RequestData::from(&*self));
         }
