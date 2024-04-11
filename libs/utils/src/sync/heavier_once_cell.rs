@@ -192,6 +192,14 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Like [`Guard::take_and_deinit`], but will return `None` if this OnceCell was never
+    /// initialized.
+    pub fn take_and_deinit(&mut self) -> Option<(T, InitPermit)> {
+        let inner = self.inner.get_mut().unwrap();
+
+        inner.take_and_deinit()
+    }
+
     /// Return the number of [`Self::get_or_init`] calls waiting for initialization to complete.
     pub fn initializer_count(&self) -> usize {
         self.initializers.load(Ordering::Relaxed)
@@ -246,15 +254,20 @@ impl<'a, T> Guard<'a, T> {
     /// The permit will be on a semaphore part of the new internal value, and any following
     /// [`OnceCell::get_or_init`] will wait on it to complete.
     pub fn take_and_deinit(mut self) -> (T, InitPermit) {
+        self.0
+            .take_and_deinit()
+            .expect("guard is not created unless value has been initialized")
+    }
+}
+
+impl<T> Inner<T> {
+    pub fn take_and_deinit(&mut self) -> Option<(T, InitPermit)> {
         let mut swapped = Inner::default();
         let sem = swapped.init_semaphore.clone();
         // acquire and forget right away, moving the control over to InitPermit
         sem.try_acquire().expect("we just created this").forget();
-        std::mem::swap(&mut *self.0, &mut swapped);
-        swapped
-            .value
-            .map(|v| (v, InitPermit(sem)))
-            .expect("guard is not created unless value has been initialized")
+        std::mem::swap(self, &mut swapped);
+        swapped.value.map(|v| (v, InitPermit(sem)))
     }
 }
 
