@@ -312,7 +312,7 @@ async fn request_handler(
         let span = ctx.span.clone();
         info!(parent: &span, "performing websocket upgrade");
 
-        let (response, websocket) = framed_websockets::upgrade::upgrade(&mut request)
+        let (response, websocket) = framed_websockets::upgrade::upgrade_downcast(&mut request)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
         ws_connections.spawn(

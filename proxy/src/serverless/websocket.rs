@@ -4,21 +4,26 @@ use crate::{
     context::RequestMonitoring,
     error::{io_error, ReportableError},
     metrics::Metrics,
+    protocol2::ChainRW,
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
 };
 use bytes::{Buf, Bytes};
-use framed_websockets::{Frame, OpCode, WebSocketServer};
+use framed_websockets::{upgrade::UpgradeDowncastFut, Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
 use hyper::upgrade::Upgraded;
 use pin_project_lite::pin_project;
+use tokio_rustls::server::TlsStream;
 
 use std::{
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
 };
-use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
+use tokio::{
+    io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf},
+    net::TcpStream,
+};
 use tracing::warn;
 
 pin_project! {
@@ -125,7 +130,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 pub async fn serve_websocket(
     config: &'static ProxyConfig,
     mut ctx: RequestMonitoring,
-    websocket: framed_websockets::upgrade::UpgradeFut,
+    websocket: UpgradeDowncastFut<TlsStream<ChainRW<TcpStream>>>,
     cancellation_handler: Arc<CancellationHandlerMain>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
