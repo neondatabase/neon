@@ -97,7 +97,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
             let res = ready!(this.stream.as_mut().poll_next(cx));
             match res.transpose().map_err(io_error)? {
-                Some(message) => match dbg!(message.opcode) {
+                Some(message) => match message.opcode {
                     OpCode::Ping => {}
                     OpCode::Pong => {}
                     OpCode::Text => {
