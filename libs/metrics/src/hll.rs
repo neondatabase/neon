@@ -293,7 +293,7 @@ impl<const N: usize> HyperLogLog<N> {
         let labels = make_label_pairs(&desc, label_values)?;
 
         let v = HyperLogLogCore {
-            shards: [0; N].map(AtomicU8::new),
+            shards: HyperLogLogState::default(),
             desc,
             labels,
         };
@@ -301,20 +301,12 @@ impl<const N: usize> HyperLogLog<N> {
     }
 
     pub fn measure(&self, item: &impl Hash) {
-        // changing the hasher will break compatibility with previous measurements.
-        self.record(BuildHasherDefault::<xxh3::Hash64>::default().hash_one(item));
-    }
-
-    fn record(&self, hash: u64) {
-        let p = N.ilog2() as u8;
-        let j = hash & (N as u64 - 1);
-        let rho = (hash >> p).leading_zeros() as u8 + 1 - p;
-        self.core.shards[j as usize].fetch_max(rho, std::sync::atomic::Ordering::Relaxed);
+        self.core.shards.measure(item);
     }
 }
 
 struct HyperLogLogCore<const N: usize> {
-    shards: [AtomicU8; N],
+    shards: HyperLogLogState<N>,
     desc: core::Desc,
     labels: Vec<proto::LabelPair>,
 }
@@ -340,34 +332,27 @@ impl<const N: usize> core::Collector for HyperLogLog<N> {
 
 impl<const N: usize> HyperLogLogCore<N> {
     fn collect_into(&self, metrics: &mut Vec<proto::Metric>) {
-        self.shards.iter().enumerate().for_each(|(i, x)| {
-            let mut shard_label = proto::LabelPair::default();
-            shard_label.set_name("hll_shard".to_owned());
-            shard_label.set_value(format!("{i}"));
+        self.shards
+            .take_sample()
+            .into_iter()
+            .enumerate()
+            .for_each(|(i, v)| {
+                let mut shard_label = proto::LabelPair::default();
+                shard_label.set_name("hll_shard".to_owned());
+                shard_label.set_value(format!("{i}"));
 
-            // We reset the counter to 0 so we can perform a cardinality measure over any time slice in prometheus.
+                let mut m = proto::Metric::default();
+                let mut c = proto::Gauge::default();
+                c.set_value(v as f64);
+                m.set_gauge(c);
 
-            // This seems like it would be a race condition,
-            // but HLL is not impacted by a write in one shard happening in between.
-            // This is because in PromQL we will be implementing a harmonic mean of all buckets.
-            // we will also merge samples in a time series using `max by (hll_shard)`.
+                let mut labels = Vec::with_capacity(self.labels.len() + 1);
+                labels.extend_from_slice(&self.labels);
+                labels.push(shard_label);
 
-            // TODO: maybe we shouldn't reset this on every collect, instead, only after a time window.
-            // this would mean that a dev port-forwarding the metrics url won't break the sampling.
-            let v = x.swap(0, std::sync::atomic::Ordering::Relaxed);
-
-            let mut m = proto::Metric::default();
-            let mut c = proto::Gauge::default();
-            c.set_value(v as f64);
-            m.set_gauge(c);
-
-            let mut labels = Vec::with_capacity(self.labels.len() + 1);
-            labels.extend_from_slice(&self.labels);
-            labels.push(shard_label);
-
-            m.set_label(labels);
-            metrics.push(m);
-        })
+                m.set_label(labels);
+                metrics.push(m);
+            })
     }
 }
 
@@ -433,6 +418,21 @@ impl<const N: usize> HyperLogLogState<N> {
         let rho = (hash >> p).leading_zeros() as u8 + 1 - p;
         self.shards[j as usize].fetch_max(rho, std::sync::atomic::Ordering::Relaxed);
     }
+
+    fn take_sample(&self) -> [u8; N] {
+        self.shards.each_ref().map(|x| {
+            // We reset the counter to 0 so we can perform a cardinality measure over any time slice in prometheus.
+
+            // This seems like it would be a race condition,
+            // but HLL is not impacted by a write in one shard happening in between.
+            // This is because in PromQL we will be implementing a harmonic mean of all buckets.
+            // we will also merge samples in a time series using `max by (hll_shard)`.
+
+            // TODO: maybe we shouldn't reset this on every collect, instead, only after a time window.
+            // this would mean that a dev port-forwarding the metrics url won't break the sampling.
+            x.swap(0, std::sync::atomic::Ordering::Relaxed)
+        })
+    }
 }
 impl<W: std::io::Write, const N: usize> measured::metric::MetricEncoding<TextEncoder<W>>
     for HyperLogLogState<N>
@@ -468,20 +468,7 @@ impl<W: std::io::Write, const N: usize> measured::metric::MetricEncoding<TextEnc
             }
         }
 
-        let sample = self.shards.each_ref().map(|x| {
-            // We reset the counter to 0 so we can perform a cardinality measure over any time slice in prometheus.
-
-            // This seems like it would be a race condition,
-            // but HLL is not impacted by a write in one shard happening in between.
-            // This is because in PromQL we will be implementing a harmonic mean of all buckets.
-            // we will also merge samples in a time series using `max by (hll_shard)`.
-
-            // TODO: maybe we shouldn't reset this on every collect, instead, only after a time window.
-            // this would mean that a dev port-forwarding the metrics url won't break the sampling.
-            x.swap(0, std::sync::atomic::Ordering::Relaxed)
-        });
-
-        sample
+        self.take_sample()
             .into_iter()
             .enumerate()
             .try_for_each(|(hll_shard, val)| {
@@ -500,11 +487,14 @@ impl<W: std::io::Write, const N: usize> measured::metric::MetricEncoding<TextEnc
 mod tests {
     use std::collections::HashSet;
 
+    use measured::{label::StaticLabelSet, metric::MetricVec, FixedCardinalityLabel};
     use prometheus::{proto, Opts};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use rand_distr::{Distribution, Zipf};
 
-    use crate::HyperLogLogVec;
+    use crate::{HyperLogLogState, HyperLogLogVec};
+
+    type HyperLogLogVec2 = MetricVec<HyperLogLogState<32>, StaticLabelSet<Label>>;
 
     fn collect(hll: &HyperLogLogVec<32>) -> Vec<proto::Metric> {
         let mut metrics = vec![];
@@ -516,6 +506,41 @@ mod tests {
             .for_each(|c| c.core.collect_into(&mut metrics));
         metrics
     }
+
+    #[derive(FixedCardinalityLabel, Clone, Copy)]
+    #[label(singleton = "x")]
+    enum Label {
+        A,
+        B,
+    }
+
+    fn collect_measured(hll: &HyperLogLogVec2) -> ([u8; 32], [u8; 32]) {
+        // cannot go through the `hll.collect_family_into` interface yet...
+        // need to see if I can fix the conflicting impls problem in measured.
+        (
+            hll.get_metric(hll.with_labels(Label::A)).take_sample(),
+            hll.get_metric(hll.with_labels(Label::B)).take_sample(),
+        )
+    }
+
+    fn get_cardinality_measured(samples: &[[u8; 32]]) -> f64 {
+        let mut buckets = [0.0; 32];
+        for &sample in samples {
+            for (i, m) in sample.into_iter().enumerate() {
+                buckets[i] = f64::max(buckets[i], m as f64);
+            }
+        }
+
+        buckets
+            .into_iter()
+            .map(|f| 2.0f64.powf(-f))
+            .sum::<f64>()
+            .recip()
+            * 0.697
+            * 32.0
+            * 32.0
+    }
+
     fn get_cardinality(metrics: &[proto::Metric], filter: impl Fn(&proto::Metric) -> bool) -> f64 {
         let mut buckets = [0.0; 32];
         for metric in metrics.chunks_exact(32) {
@@ -538,6 +563,7 @@ mod tests {
 
     fn test_cardinality(n: usize, dist: impl Distribution<f64>) -> ([usize; 3], [f64; 3]) {
         let hll = HyperLogLogVec::<32>::new(Opts::new("foo", "bar"), &["x"]).unwrap();
+        let hll2 = HyperLogLogVec2::new();
 
         let mut iter = StdRng::seed_from_u64(0x2024_0112).sample_iter(dist);
         let mut set_a = HashSet::new();
@@ -546,10 +572,14 @@ mod tests {
         for x in iter.by_ref().take(n) {
             set_a.insert(x.to_bits());
             hll.with_label_values(&["a"]).measure(&x.to_bits());
+            hll2.get_metric(hll2.with_labels(Label::A))
+                .measure(&x.to_bits());
         }
         for x in iter.by_ref().take(n) {
             set_b.insert(x.to_bits());
             hll.with_label_values(&["b"]).measure(&x.to_bits());
+            hll2.get_metric(hll2.with_labels(Label::B))
+                .measure(&x.to_bits());
         }
         let merge = &set_a | &set_b;
 
@@ -557,6 +587,15 @@ mod tests {
         let len = get_cardinality(&metrics, |_| true);
         let len_a = get_cardinality(&metrics, |l| l.get_label()[0].get_value() == "a");
         let len_b = get_cardinality(&metrics, |l| l.get_label()[0].get_value() == "b");
+
+        let (a, b) = collect_measured(&hll2);
+        let len2 = get_cardinality_measured(&[a, b]);
+        let len_a2 = get_cardinality_measured(&[a]);
+        let len_b2 = get_cardinality_measured(&[b]);
+
+        assert_eq!(len, len2);
+        assert_eq!(len_a, len_a2);
+        assert_eq!(len_b, len_b2);
 
         ([merge.len(), set_a.len(), set_b.len()], [len, len_a, len_b])
     }

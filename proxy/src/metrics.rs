@@ -11,7 +11,7 @@ use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogState};
 
 use tokio::time::{self, Instant};
 
-use crate::console::{messages::ColdStartInfo, provider::ApiLockMetrics};
+use crate::console::messages::ColdStartInfo;
 
 #[derive(MetricGroup)]
 pub struct Metrics {
@@ -121,6 +121,21 @@ pub struct ProxyMetrics {
 
     /// Number of endpoints affected by authentication rate limits
     pub endpoints_auth_rate_limits: Metric<HyperLogLogState<32>>,
+}
+
+#[derive(MetricGroup)]
+#[metric(new())]
+pub struct ApiLockMetrics {
+    /// Number of semaphores registered in this api lock
+    pub semaphores_registered: Counter,
+    /// Number of semaphores unregistered in this api lock
+    pub semaphores_unregistered: Counter,
+    /// Time it takes to reclaim unused semaphores in the api lock
+    #[metric(metadata = Thresholds::exponential_buckets(1e-6, 2.0))]
+    pub reclamation_lag_seconds: Histogram<16>,
+    /// Time it takes to acquire a semaphore lock
+    #[metric(metadata = Thresholds::exponential_buckets(1e-4, 2.0))]
+    pub semaphore_acquire_seconds: Histogram<16>,
 }
 
 impl Default for ProxyMetrics {

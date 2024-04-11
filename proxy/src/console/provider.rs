@@ -13,10 +13,10 @@ use crate::{
     config::{CacheOptions, ProjectInfoCacheOptions},
     context::RequestMonitoring,
     intern::ProjectIdInt,
+    metrics::ApiLockMetrics,
     scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
-use measured::{metric::histogram::Thresholds, Counter, Histogram, MetricGroup};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
@@ -443,21 +443,6 @@ pub struct ApiLocks {
     permits: usize,
     timeout: Duration,
     metrics: &'static ApiLockMetrics,
-}
-
-#[derive(MetricGroup)]
-#[metric(new())]
-pub struct ApiLockMetrics {
-    /// Number of semaphores registered in this api lock
-    semaphores_registered: Counter,
-    /// Number of semaphores unregistered in this api lock
-    semaphores_unregistered: Counter,
-    /// Time it takes to reclaim unused semaphores in the api lock
-    #[metric(metadata = Thresholds::exponential_buckets(1e-6, 2.0))]
-    reclamation_lag_seconds: Histogram<16>,
-    /// Time it takes to acquire a semaphore lock
-    #[metric(metadata = Thresholds::exponential_buckets(1e-4, 2.0))]
-    semaphore_acquire_seconds: Histogram<16>,
 }
 
 impl ApiLocks {
