@@ -1561,7 +1561,7 @@ impl Drop for DownloadedLayer {
             owner.on_downloaded_layer_drop(self.version);
         } else {
             // Layer::drop will handle cancelling the eviction; because of drop order and
-            // `DownloadedLayer` never leaking, we cannot know here if layer is actually gone.
+            // `DownloadedLayer` never leaking, we cannot know here if eviction was requested.
         }
     }
 }
