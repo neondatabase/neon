@@ -28,6 +28,7 @@ use crate::{
     stream, url,
 };
 use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -251,11 +252,13 @@ async fn auth_quirks(
         Ok(info) => (info, None),
     };
 
+    let bypass_ipcheck = apply_caps(&config, &info, &ctx.peer_addr)?;
+
     info!("fetching user's authentication info");
     let (allowed_ips, maybe_secret) = api.get_allowed_ips_and_secret(ctx, &info).await?;
 
     // check allowed list
-    if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
+    if !bypass_ipcheck && !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
         return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr));
     }
     let cached_secret = match maybe_secret {
@@ -537,6 +540,7 @@ mod tests {
         scram_protocol_timeout: std::time::Duration::from_secs(5),
         rate_limiter_enabled: true,
         rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
+        caps: None,
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {
@@ -693,5 +697,45 @@ mod tests {
         assert_eq!(creds.info.endpoint, "my-endpoint");
 
         handle.await.unwrap();
+    }
+}
+
+// It checks that provided JWT capabilities are valid for the connection
+//
+// if it returns Ok(true), futher peer IP checks has to be disabled
+//
+// If proxy isn't configured for JWT capabilities or neon_caps option
+// isn't set, it skips any checks
+pub fn apply_caps(
+    config: &AuthenticationConfig,
+    info: &ComputeUserInfo,
+    peer_addr: &IpAddr,
+) -> auth::Result<bool> {
+    match (&config.caps, info.options.caps()) {
+        (Some(caps_config), Some(caps)) => {
+            let token = match caps_config.decode(&caps) {
+                Err(_) => {
+                    return Err(auth::AuthError::caps_invalid());
+                }
+                Ok(token) => token,
+            };
+
+            if token.claims.endpoint_id != *info.endpoint {
+                return Err(auth::AuthError::caps_invalid());
+            }
+
+            match token.claims.check_ip(peer_addr) {
+                None => return Ok(false),
+                Some(true) => {
+                    return Ok(true);
+                }
+                Some(false) => {
+                    return Err(auth::AuthError::ip_address_not_allowed(*peer_addr));
+                }
+            }
+        }
+        _ => {
+            return Ok(false);
+        }
     }
 }

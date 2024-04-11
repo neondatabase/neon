@@ -13,6 +13,8 @@ mod password_hack;
 pub use password_hack::parse_endpoint_param;
 use password_hack::PasswordHackPayload;
 
+pub mod caps;
+
 mod flow;
 pub use flow::*;
 use tokio::time::error::Elapsed;
@@ -71,6 +73,9 @@ pub enum AuthErrorImpl {
     #[error("Too many connections to this endpoint. Please try again later.")]
     TooManyConnections,
 
+    #[error("neon_caps token is invalid")]
+    CapsInvalid,
+
     #[error("Authentication timed out")]
     UserTimeout(Elapsed),
 }
@@ -94,6 +99,10 @@ impl AuthError {
 
     pub fn too_many_connections() -> Self {
         AuthErrorImpl::TooManyConnections.into()
+    }
+
+    pub fn caps_invalid() -> Self {
+        AuthErrorImpl::CapsInvalid.into()
     }
 
     pub fn is_auth_failed(&self) -> bool {
@@ -126,6 +135,7 @@ impl UserFacingError for AuthError {
             IpAddressNotAllowed(_) => self.to_string(),
             TooManyConnections => self.to_string(),
             UserTimeout(_) => self.to_string(),
+            CapsInvalid => self.to_string(),
         }
     }
 }
@@ -145,6 +155,7 @@ impl ReportableError for AuthError {
             IpAddressNotAllowed(_) => crate::error::ErrorKind::User,
             TooManyConnections => crate::error::ErrorKind::RateLimit,
             UserTimeout(_) => crate::error::ErrorKind::User,
+            CapsInvalid => crate::error::ErrorKind::User,
         }
     }
 }

@@ -385,6 +385,10 @@ impl NeonOptions {
         !self.0.is_empty()
     }
 
+    pub fn caps(&self) -> Option<&str> {
+        self.0.iter().find(|(k, _)| k == "caps").map(|(_, v)| &**v)
+    }
+
     fn parse_from_iter<'a>(options: impl Iterator<Item = &'a str>) -> Self {
         let mut options = options
             .filter_map(neon_option)
@@ -398,7 +402,13 @@ impl NeonOptions {
         // prefix + format!(" {k}:{v}")
         // kinda jank because SmolStr is immutable
         std::iter::once(prefix)
-            .chain(self.0.iter().flat_map(|(k, v)| [" ", &**k, ":", &**v]))
+            // exclude caps from cache key
+            .chain(
+                self.0
+                    .iter()
+                    .filter(|(k, _)| k != "caps")
+                    .flat_map(|(k, v)| [" ", &**k, ":", &**v]),
+            )
             .collect::<SmolStr>()
             .into()
     }

@@ -1,5 +1,5 @@
 use crate::{
-    auth,
+    auth::{self, caps::CapsValidator},
     rate_limiter::{AuthRateLimiter, RateBucketInfo},
     serverless::GlobalConnPoolOptions,
 };
@@ -58,6 +58,7 @@ pub struct AuthenticationConfig {
     pub scram_protocol_timeout: tokio::time::Duration,
     pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,
+    pub caps: Option<CapsValidator>,
 }
 
 impl TlsConfig {

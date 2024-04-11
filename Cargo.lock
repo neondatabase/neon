@@ -4320,6 +4320,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "itertools",
+ "jsonwebtoken",
  "lasso",
  "md5",
  "metrics",

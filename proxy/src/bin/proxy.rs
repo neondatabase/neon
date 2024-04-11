@@ -5,9 +5,11 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
+use camino::Utf8Path;
 use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::MaybeOwned;
+use proxy::auth::caps::CapsValidator;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
 use proxy::config::remote_storage_from_toml;
@@ -192,6 +194,9 @@ struct ProxyCliArgs {
 
     #[clap(flatten)]
     parquet_upload: ParquetUploadArgs,
+
+    #[clap(long)]
+    caps_key: Option<String>,
 
     /// interval for backup metric collection
     #[clap(long, default_value = "10m", value_parser = humantime::parse_duration)]
@@ -542,10 +547,20 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             max_total_conns: args.sql_over_http.sql_over_http_pool_max_total_conns,
         },
     };
+
+    let caps;
+    if let Some(key) = &args.caps_key {
+        let path = Utf8Path::new(key);
+        caps = Some(CapsValidator::from_key_path(path)?);
+    } else {
+        caps = None;
+    }
+
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
+        caps,
     };
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();

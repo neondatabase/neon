@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use tracing::{field::display, info};
 
 use crate::{
-    auth::{backend::ComputeCredentials, check_peer_addr_is_in_list, AuthError},
+    auth::{
+        backend::{apply_caps, ComputeCredentials},
+        check_peer_addr_is_in_list, AuthError,
+    },
     compute,
     config::ProxyConfig,
     console::{
@@ -31,8 +34,15 @@ impl PoolingBackend {
     ) -> Result<ComputeCredentials, AuthError> {
         let user_info = conn_info.user_info.clone();
         let backend = self.config.auth_backend.as_ref().map(|_| user_info.clone());
+
+        let bypass_ipcheck = apply_caps(
+            &&self.config.authentication_config,
+            &user_info,
+            &ctx.peer_addr,
+        )?;
+
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
-        if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
+        if !bypass_ipcheck && !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr));
         }
         let cached_secret = match maybe_secret {
