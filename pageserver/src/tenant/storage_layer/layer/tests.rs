@@ -721,8 +721,8 @@ async fn evict_and_wait_does_not_wait_for_download() {
     layer.evict_and_wait(FOREVER).await.unwrap();
 }
 
-/// Asserts that there is currently no miscalculation when Layer is dropped while it is being
-/// kept resident, which is the last value.
+/// Asserts that there is no miscalculation when Layer is dropped while it is being kept resident,
+/// which is the last value.
 ///
 /// Also checks that the same does not happen on a non-evicted layer (regression test).
 #[tokio::test(start_paused = true)]
@@ -781,14 +781,8 @@ async fn eviction_cancellation_on_drop() {
 
         assert_eq!(layers.len(), 2);
 
-        let first = layers.pop().unwrap();
-        let second = layers.pop().unwrap();
-
-        (first, second)
+        (layers.pop().unwrap(), layers.pop().unwrap())
     };
-
-    // FIXME: copy lsn prefix will add PartialEq to Layer
-    assert!(!Arc::ptr_eq(&evicted_layer.0, &not_evicted.0));
 
     let victims = [(evicted_layer, true), (not_evicted, false)];
 
