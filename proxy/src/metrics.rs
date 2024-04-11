@@ -3,11 +3,11 @@ use std::sync::OnceLock;
 use lasso::ThreadedRodeo;
 use measured::{
     label::StaticLabelSet,
-    metric::{histogram::Thresholds, name::MetricName, Metric, MetricVec},
+    metric::{histogram::Thresholds, name::MetricName},
     Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
     LabelGroup, MetricGroup,
 };
-use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogState};
+use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 
 use tokio::time::{self, Instant};
 
@@ -113,14 +113,13 @@ pub struct ProxyMetrics {
     pub requests_auth_rate_limits_total: Counter,
 
     /// HLL approximate cardinality of endpoints that are connecting
-    pub connecting_endpoints: MetricVec<HyperLogLogState<32>, StaticLabelSet<Protocol>>,
+    pub connecting_endpoints: HyperLogLogVec<StaticLabelSet<Protocol>, 32>,
 
     /// Number of endpoints affected by errors of a given classification
-    pub endpoints_affected_by_errors:
-        MetricVec<HyperLogLogState<32>, StaticLabelSet<crate::error::ErrorKind>>,
+    pub endpoints_affected_by_errors: HyperLogLogVec<StaticLabelSet<crate::error::ErrorKind>, 32>,
 
     /// Number of endpoints affected by authentication rate limits
-    pub endpoints_auth_rate_limits: Metric<HyperLogLogState<32>>,
+    pub endpoints_auth_rate_limits: HyperLogLog<32>,
 }
 
 #[derive(MetricGroup)]
