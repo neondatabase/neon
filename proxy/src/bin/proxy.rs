@@ -6,7 +6,6 @@ use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use futures::future::Either;
-use pbkdf2::password_hash::rand_core::le;
 use proxy::auth;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;

@@ -75,9 +75,9 @@ impl EndpointsCache {
             return true;
         }
         // If the limiter allows, we don't need to check the cache.
-        // if self.limiter.lock().await.check() {
-        //     return true;
-        // }
+        if self.limiter.lock().await.check() {
+            return true;
+        }
         let rejected = self.should_reject(endpoint);
         ctx.set_rejected(rejected);
         !rejected
@@ -152,7 +152,7 @@ impl EndpointsCache {
         )
         .await
     }
-    fn parse_key_value(_: &str, value: &Value) -> anyhow::Result<ControlPlaneEventKey> {
+    fn parse_key_value(value: &Value) -> anyhow::Result<ControlPlaneEventKey> {
         let s: String = FromRedisValue::from_redis_value(value)?;
         Ok(serde_json::from_str(&s)?)
     }
@@ -168,6 +168,17 @@ impl EndpointsCache {
             let mut res: StreamReadReply = conn
                 .xread_options(&[&self.config.stream_name], &[last_id.as_str()], &opts)
                 .await?;
+
+            if res.keys.len() == 0 {
+                if return_when_finish {
+                    anyhow::bail!(
+                        "Redis stream {} is empty, cannot be used to filter endpoints",
+                        self.config.stream_name
+                    );
+                }
+                // If we are not returning when finish, we should wait for more data.
+                continue;
+            }
             if res.keys.len() != 1 {
                 anyhow::bail!("Cannot read from redis stream {}", self.config.stream_name);
             }
@@ -176,14 +187,14 @@ impl EndpointsCache {
             let len = res.ids.len();
             for x in res.ids {
                 total += 1;
-                for (k, v) in x.map {
-                    let key = match Self::parse_key_value(&k, &v) {
+                for (_, v) in x.map {
+                    let key = match Self::parse_key_value(&v) {
                         Ok(x) => x,
                         Err(e) => {
                             REDIS_BROKEN_MESSAGES
                                 .with_label_values(&[&self.config.stream_name])
                                 .inc();
-                            tracing::error!("error parsing key-value {v:?}: {e:?}");
+                            tracing::error!("error parsing value {v:?}: {e:?}");
                             continue;
                         }
                     };
