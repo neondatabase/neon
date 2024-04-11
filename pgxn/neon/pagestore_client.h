@@ -79,14 +79,20 @@ typedef enum {
 /*
  * supertype of all the Neon*Request structs below
  *
- * If 'latest' is true, we are requesting the latest page version, and 'lsn'
+ * In old version of Neon we have 'latest' flag indicating that we are requesting the latest page version, and 'lsn'
  * is just a hint to the server that we know there are no versions of the page
  * (or relation size, for exists/nblocks requests) later than the 'lsn'.
+ * 
+ * But it doesn't work for hot-standby replica because it may be not at the latest LSN position.
+ * So we need to be able to specify upper boundary for LSN which page server can send to us.
+ * This is why 'latest' flag is replaced with 'horizon'. MAX_LSN=~0 value of 'horizon' means that we are requesting latest version.
+ * If we need version on exact LSN (for static RO replicas), 'horizon' should be set to 0: in this case range [lsn,lsn] is used by page server.
+ * Otherwise for hot-standby replica we specify in 'horizon' current replay position.
  */
 typedef struct
 {
 	NeonMessageTag tag;
-	XLogRecPtr	horizon;		/* uppe boundary for page LSN */
+	XLogRecPtr	horizon;		/* upper boundary for page LSN */
 	XLogRecPtr	lsn;			/* request page version @ this LSN */
 } NeonRequest;
 
