@@ -169,7 +169,7 @@ impl EndpointsCache {
                 .xread_options(&[&self.config.stream_name], &[last_id.as_str()], &opts)
                 .await?;
 
-            if res.keys.len() == 0 {
+            if res.keys.is_empty() {
                 if return_when_finish {
                     anyhow::bail!(
                         "Redis stream {} is empty, cannot be used to filter endpoints",
