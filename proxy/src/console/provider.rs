@@ -13,6 +13,7 @@ use crate::{
     config::{CacheOptions, ProjectInfoCacheOptions},
     context::RequestMonitoring,
     intern::ProjectIdInt,
+    metrics::ApiLockMetrics,
     scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
@@ -441,10 +442,7 @@ pub struct ApiLocks {
     node_locks: DashMap<EndpointCacheKey, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
-    registered: prometheus::IntCounter,
-    unregistered: prometheus::IntCounter,
-    reclamation_lag: prometheus::Histogram,
-    lock_acquire_lag: prometheus::Histogram,
+    metrics: &'static ApiLockMetrics,
 }
 
 impl ApiLocks {
@@ -453,54 +451,14 @@ impl ApiLocks {
         permits: usize,
         shards: usize,
         timeout: Duration,
+        metrics: &'static ApiLockMetrics,
     ) -> prometheus::Result<Self> {
-        let registered = prometheus::IntCounter::with_opts(
-            prometheus::Opts::new(
-                "semaphores_registered",
-                "Number of semaphores registered in this api lock",
-            )
-            .namespace(name),
-        )?;
-        prometheus::register(Box::new(registered.clone()))?;
-        let unregistered = prometheus::IntCounter::with_opts(
-            prometheus::Opts::new(
-                "semaphores_unregistered",
-                "Number of semaphores unregistered in this api lock",
-            )
-            .namespace(name),
-        )?;
-        prometheus::register(Box::new(unregistered.clone()))?;
-        let reclamation_lag = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                "reclamation_lag_seconds",
-                "Time it takes to reclaim unused semaphores in the api lock",
-            )
-            .namespace(name)
-            // 1us -> 65ms
-            // benchmarks on my mac indicate it's usually in the range of 256us and 512us
-            .buckets(prometheus::exponential_buckets(1e-6, 2.0, 16)?),
-        )?;
-        prometheus::register(Box::new(reclamation_lag.clone()))?;
-        let lock_acquire_lag = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                "semaphore_acquire_seconds",
-                "Time it takes to reclaim unused semaphores in the api lock",
-            )
-            .namespace(name)
-            // 0.1ms -> 6s
-            .buckets(prometheus::exponential_buckets(1e-4, 2.0, 16)?),
-        )?;
-        prometheus::register(Box::new(lock_acquire_lag.clone()))?;
-
         Ok(Self {
             name,
             node_locks: DashMap::with_shard_amount(shards),
             permits,
             timeout,
-            lock_acquire_lag,
-            registered,
-            unregistered,
-            reclamation_lag,
+            metrics,
         })
     }
 
@@ -520,7 +478,7 @@ impl ApiLocks {
                 self.node_locks
                     .entry(key.clone())
                     .or_insert_with(|| {
-                        self.registered.inc();
+                        self.metrics.semaphores_registered.inc();
                         Arc::new(Semaphore::new(self.permits))
                     })
                     .clone()
@@ -528,8 +486,9 @@ impl ApiLocks {
         };
         let permit = tokio::time::timeout_at(now + self.timeout, semaphore.acquire_owned()).await;
 
-        self.lock_acquire_lag
-            .observe((Instant::now() - now).as_secs_f64());
+        self.metrics
+            .semaphore_acquire_seconds
+            .observe(now.elapsed().as_secs_f64());
 
         Ok(WakeComputePermit {
             permit: Some(permit??),
@@ -554,13 +513,13 @@ impl ApiLocks {
                     "performing epoch reclamation on api lock"
                 );
                 let mut lock = shard.write();
-                let timer = self.reclamation_lag.start_timer();
+                let timer = self.metrics.reclamation_lag_seconds.start_timer();
                 let count = lock
                     .extract_if(|_, semaphore| Arc::strong_count(semaphore.get_mut()) == 1)
                     .count();
                 drop(lock);
-                self.unregistered.inc_by(count as u64);
-                timer.observe_duration()
+                self.metrics.semaphores_unregistered.inc_by(count as u64);
+                timer.observe();
             }
         }
     }
