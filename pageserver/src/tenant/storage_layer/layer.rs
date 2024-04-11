@@ -604,9 +604,17 @@ enum Status {
 
 impl Drop for LayerInner {
     fn drop(&mut self) {
+        // if there was a pending cancellation, mark it cancelled here to balance metrics
+        if let Some((ResidentOrWantedEvicted::WantedEvicted(..), _)) = self.inner.take_and_deinit()
+        {
+            // eviction has already been started
+            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
+
+            // eviction request is intentionally not honored as no one is present to wait for it
+            // and we could be delaying shutdown for nothing.
+        }
+
         if !*self.wanted_deleted.get_mut() {
-            // should we try to evict if the last wish was for eviction? seems more like a hazard
-            // than a clear win.
             return;
         }
 
@@ -1552,8 +1560,8 @@ impl Drop for DownloadedLayer {
         if let Some(owner) = self.owner.upgrade() {
             owner.on_downloaded_layer_drop(self.version);
         } else {
-            // no need to do anything, we are shutting down
-            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
+            // Layer::drop will handle cancelling the eviction; because of drop order and
+            // `DownloadedLayer` never leaking, we cannot know here if layer is actually gone.
         }
     }
 }

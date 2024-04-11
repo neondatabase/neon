@@ -721,6 +721,113 @@ async fn evict_and_wait_does_not_wait_for_download() {
     layer.evict_and_wait(FOREVER).await.unwrap();
 }
 
+/// Asserts that there is currently no miscalculation when Layer is dropped while it is being
+/// kept resident, which is the last value.
+#[tokio::test(start_paused = true)]
+async fn eviction_cancellation_on_drop() {
+    // this is the runtime on which Layer spawns the blocking tasks on
+    let handle = tokio::runtime::Handle::current();
+
+    let h = TenantHarness::create("eviction_cancellation_on_drop").unwrap();
+    utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
+    let (tenant, ctx) = h.load().await;
+
+    let timeline = tenant
+        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .await
+        .unwrap();
+
+    let layer = {
+        let mut layers = {
+            let mut guard = timeline.layers.write().await;
+            let layers = guard.likely_resident_layers().collect::<Vec<_>>();
+            guard.finish_gc_timeline(&layers);
+
+            layers
+        };
+
+        assert_eq!(layers.len(), 1);
+
+        layers.swap_remove(0)
+    };
+
+    let resident = layer.keep_resident().await.unwrap();
+    drop(layer);
+
+    assert_eq!(Arc::strong_count(&resident.owner.0), 1);
+
+    let evict_and_wait = resident.owner.evict_and_wait(FOREVER);
+
+    // drive the future to await on the status channel, and then drop it
+    tokio::time::timeout(ADVANCE, evict_and_wait)
+        .await
+        .expect_err("should had been a timeout since we are holding the layer resident");
+
+    assert_eq!(1, LAYER_IMPL_METRICS.started_evictions.get());
+
+    drop(resident);
+    // run any spawned
+    tokio::time::sleep(ADVANCE).await;
+
+    SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(&handle).await;
+
+    assert_eq!(
+        1,
+        LAYER_IMPL_METRICS.cancelled_evictions[EvictionCancelled::LayerGone].get()
+    );
+}
+
+/// Asserts that there is currently no miscalculation when Layer is dropped while it is being
+/// kept resident, which is the last value.
+#[tokio::test(start_paused = true)]
+async fn eviction_cancellation_on_drop_without_starting_eviction() {
+    // this is the runtime on which Layer spawns the blocking tasks on
+    let handle = tokio::runtime::Handle::current();
+
+    let h =
+        TenantHarness::create("eviction_cancellation_on_drop_without_starting_eviction").unwrap();
+    utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
+    let (tenant, ctx) = h.load().await;
+
+    let timeline = tenant
+        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .await
+        .unwrap();
+
+    let layer = {
+        let mut layers = {
+            let mut guard = timeline.layers.write().await;
+            let layers = guard.likely_resident_layers().collect::<Vec<_>>();
+            guard.finish_gc_timeline(&layers);
+
+            layers
+        };
+
+        assert_eq!(layers.len(), 1);
+
+        layers.swap_remove(0)
+    };
+
+    let resident = layer.keep_resident().await.unwrap();
+    drop(layer);
+
+    assert_eq!(Arc::strong_count(&resident.owner.0), 1);
+
+    assert_eq!(0, LAYER_IMPL_METRICS.started_evictions.get());
+
+    drop(resident);
+
+    // run any spawned
+    tokio::time::sleep(ADVANCE).await;
+
+    SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(&handle).await;
+
+    assert_eq!(
+        0,
+        LAYER_IMPL_METRICS.cancelled_evictions[EvictionCancelled::LayerGone].get()
+    );
+}
+
 #[test]
 fn layer_size() {
     assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2040);
