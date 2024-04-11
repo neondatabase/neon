@@ -548,13 +548,12 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         },
     };
 
-    let caps;
-    if let Some(key) = &args.caps_key {
+    let caps = if let Some(key) = &args.caps_key {
         let path = Utf8Path::new(key);
-        caps = Some(CapsValidator::from_key_path(path)?);
+        Some(CapsValidator::from_key_path(path)?);
     } else {
-        caps = None;
-    }
+        None;
+    };
 
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
