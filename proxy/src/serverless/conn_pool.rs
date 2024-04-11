@@ -16,6 +16,7 @@ use std::{
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
+use tokio_util::sync::CancellationToken;
 
 use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{ENDPOINT_POOLS, GC_LATENCY, NUM_OPEN_CLIENTS_IN_HTTP_POOL};
@@ -469,15 +470,32 @@ pub fn poll_client<C: ClientInnerExt>(
 
     let db_user = conn_info.db_and_user();
     let idle = global_pool.get_idle_timeout();
+    let cancel = CancellationToken::new();
+    let cancelled = cancel.clone().cancelled_owned();
+
     tokio::spawn(
     async move {
         let _conn_gauge = conn_gauge;
         let mut idle_timeout = pin!(tokio::time::sleep(idle));
+        let mut cancelled = pin!(cancelled);
+
         poll_fn(move |cx| {
-            if matches!(rx.has_changed(), Ok(true)) {
-                session_id = *rx.borrow_and_update();
-                info!(%session_id, "changed session");
-                idle_timeout.as_mut().reset(Instant::now() + idle);
+            if cancelled.as_mut().poll(cx).is_ready() {
+                info!("connection dropped");
+                return Poll::Ready(())
+            }
+
+            match rx.has_changed() {
+                Ok(true) => {
+                    session_id = *rx.borrow_and_update();
+                    info!(%session_id, "changed session");
+                    idle_timeout.as_mut().reset(Instant::now() + idle);
+                }
+                Err(_) => {
+                    info!("connection dropped");
+                    return Poll::Ready(())
+                }
+                _ => {}
             }
 
             // 5 minute idle connection timeout
@@ -532,6 +550,7 @@ pub fn poll_client<C: ClientInnerExt>(
     let inner = ClientInner {
         inner: client,
         session: tx,
+        cancel,
         aux,
         conn_id,
     };
@@ -541,8 +560,16 @@ pub fn poll_client<C: ClientInnerExt>(
 struct ClientInner<C: ClientInnerExt> {
     inner: C,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
+    cancel: CancellationToken,
     aux: MetricsAuxInfo,
     conn_id: uuid::Uuid,
+}
+
+impl<C: ClientInnerExt> Drop for ClientInner<C> {
+    fn drop(&mut self) {
+        // on client drop, tell the conn to shut down
+        self.cancel.cancel();
+    }
 }
 
 pub trait ClientInnerExt: Sync + Send + 'static {
@@ -697,6 +724,7 @@ mod tests {
         ClientInner {
             inner: client,
             session: tokio::sync::watch::Sender::new(uuid::Uuid::new_v4()),
+            cancel: CancellationToken::new(),
             aux: MetricsAuxInfo {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
