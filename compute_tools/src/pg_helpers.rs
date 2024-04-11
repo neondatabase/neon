@@ -44,7 +44,7 @@ pub fn escape_conf_value(s: &str) -> String {
     format!("'{}'", res)
 }
 
-trait GenericOptionExt {
+pub trait GenericOptionExt {
     fn to_pg_option(&self) -> String;
     fn to_pg_setting(&self) -> String;
 }
