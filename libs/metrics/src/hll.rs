@@ -14,7 +14,9 @@ use std::{
 use measured::{
     label::{LabelGroupVisitor, LabelName, LabelValue, LabelVisitor},
     metric::{
-        group::{Encoding, MetricValue}, name::MetricNameEncoder, Metric, MetricType, MetricVec
+        group::{Encoding, MetricValue},
+        name::MetricNameEncoder,
+        Metric, MetricType, MetricVec,
     },
     text::TextEncoder,
     LabelGroup,
