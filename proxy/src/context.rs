@@ -12,7 +12,7 @@ use crate::{
     console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     intern::{BranchIdInt, ProjectIdInt},
-    metrics::{LatencyTimer, Metrics, Protocol},
+    metrics::{ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol},
     DbName, EndpointId, RoleName,
 };
 
@@ -50,6 +50,8 @@ pub struct RequestMonitoring {
     // This sender is here to keep the request monitoring channel open while requests are taking place.
     sender: Option<mpsc::UnboundedSender<RequestData>>,
     pub latency_timer: LatencyTimer,
+    // Whether proxy decided that it's not a valid endpoint end rejected it before going to cplane.
+    rejected: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +95,7 @@ impl RequestMonitoring {
             error_kind: None,
             auth_method: None,
             success: false,
+            rejected: false,
             cold_start_info: ColdStartInfo::Unknown,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
@@ -111,6 +114,10 @@ impl RequestMonitoring {
             self.application.as_deref().unwrap_or_default(),
             self.protocol
         )
+    }
+
+    pub fn set_rejected(&mut self, rejected: bool) {
+        self.rejected = rejected;
     }
 
     pub fn set_cold_start_info(&mut self, info: ColdStartInfo) {
@@ -176,6 +183,19 @@ impl RequestMonitoring {
 
 impl Drop for RequestMonitoring {
     fn drop(&mut self) {
+        let outcome = if self.success {
+            ConnectOutcome::Success
+        } else {
+            ConnectOutcome::Failed
+        };
+        Metrics::get()
+            .proxy
+            .invalid_endpoints_total
+            .inc(InvalidEndpointsGroup {
+                protocol: self.protocol,
+                rejected: self.rejected.into(),
+                outcome,
+            });
         if let Some(tx) = self.sender.take() {
             let _: Result<(), _> = tx.send(RequestData::from(&*self));
         }

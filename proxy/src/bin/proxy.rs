@@ -190,7 +190,9 @@ struct ProxyCliArgs {
     /// cache for `project_info` (use `size=0` to disable)
     #[clap(long, default_value = config::ProjectInfoCacheOptions::CACHE_DEFAULT_OPTIONS)]
     project_info_cache: String,
-
+    /// cache for all valid endpoints
+    #[clap(long, default_value = config::EndpointCacheConfig::CACHE_DEFAULT_OPTIONS)]
+    endpoint_cache_config: String,
     #[clap(flatten)]
     parquet_upload: ParquetUploadArgs,
 
@@ -301,27 +303,27 @@ async fn main() -> anyhow::Result<()> {
         ),
         aws_credentials_provider,
     ));
-    let redis_notifications_client =
-        match (args.redis_notifications, (args.redis_host, args.redis_port)) {
-            (Some(url), _) => {
-                info!("Starting redis notifications listener ({url})");
-                Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
-            }
-            (None, (Some(host), Some(port))) => Some(
-                ConnectionWithCredentialsProvider::new_with_credentials_provider(
-                    host,
-                    port,
-                    elasticache_credentials_provider.clone(),
-                ),
+    let regional_redis_client = match (args.redis_host, args.redis_port) {
+        (Some(host), Some(port)) => Some(
+            ConnectionWithCredentialsProvider::new_with_credentials_provider(
+                host,
+                port,
+                elasticache_credentials_provider.clone(),
             ),
-            (None, (None, None)) => {
-                warn!("Redis is disabled");
-                None
-            }
-            _ => {
-                bail!("redis-host and redis-port must be specified together");
-            }
-        };
+        ),
+        (None, None) => {
+            warn!("Redis events from console are disabled");
+            None
+        }
+        _ => {
+            bail!("redis-host and redis-port must be specified together");
+        }
+    };
+    let redis_notifications_client = if let Some(url) = args.redis_notifications {
+        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
+    } else {
+        regional_redis_client.clone()
+    };
 
     // Check that we can bind to address before further initialization
     let http_address: SocketAddr = args.http.parse()?;
@@ -340,8 +342,7 @@ async fn main() -> anyhow::Result<()> {
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
     let cancel_map = CancelMap::default();
 
-    // let redis_notifications_client = redis_notifications_client.map(|x| Box::leak(Box::new(x)));
-    let redis_publisher = match &redis_notifications_client {
+    let redis_publisher = match &regional_redis_client {
         Some(redis_publisher) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
             redis_publisher.clone(),
             args.region.clone(),
@@ -416,12 +417,17 @@ async fn main() -> anyhow::Result<()> {
             if let Some(redis_notifications_client) = redis_notifications_client {
                 let cache = api.caches.project_info.clone();
                 maintenance_tasks.spawn(notifications::task_main(
-                    redis_notifications_client.clone(),
+                    redis_notifications_client,
                     cache.clone(),
                     cancel_map.clone(),
                     args.region.clone(),
                 ));
                 maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+            }
+            if let Some(regional_redis_client) = regional_redis_client {
+                let cache = api.caches.endpoints_cache.clone();
+                let con = regional_redis_client;
+                maintenance_tasks.spawn(async move { cache.do_read(con).await });
             }
         }
     }
@@ -501,14 +507,18 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
 
             info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
             info!(
                 "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
             );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
             let caches = Box::leak(Box::new(console::caches::ApiCaches::new(
                 wake_compute_cache_config,
                 project_info_cache_config,
+                endpoint_cache_config,
             )));
 
             let config::WakeComputeLockOptions {
@@ -524,11 +534,12 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                     permits,
                     shards,
                     timeout,
+                    epoch,
                     &Metrics::get().wake_compute_lock,
                 )
                 .unwrap(),
             ));
-            tokio::spawn(locks.garbage_collect_worker(epoch));
+            tokio::spawn(locks.garbage_collect_worker());
 
             let url = args.auth_endpoint.parse()?;
             let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));
