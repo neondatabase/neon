@@ -12,6 +12,8 @@ use metrics::{
 use once_cell::sync::Lazy;
 use tokio::time::{self, Instant};
 
+use crate::console::messages::ColdStartInfo;
+
 pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
     register_int_counter_pair_vec!(
         "proxy_opened_db_connections_total",
@@ -50,8 +52,8 @@ pub static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
         "proxy_compute_connection_latency_seconds",
         "Time it took for proxy to establish a connection to the compute endpoint",
         // http/ws/tcp, true/false, true/false, success/failure, client/client_and_cplane
-        // 3 * 2 * 2 * 2 * 2 = 48 counters
-        &["protocol", "cache_miss", "pool_miss", "outcome", "excluded"],
+        // 3 * 6 * 2 * 2 = 72 counters
+        &["protocol", "cold_start_info", "outcome", "excluded"],
         // largest bucket = 2^16 * 0.5ms = 32s
         exponential_buckets(0.0005, 2.0, 16).unwrap(),
     )
@@ -183,6 +185,20 @@ struct Accumulated {
     compute: time::Duration,
 }
 
+enum Outcome {
+    Success,
+    Failed,
+}
+
+impl Outcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Outcome::Success => "success",
+            Outcome::Failed => "failed",
+        }
+    }
+}
+
 pub struct LatencyTimer {
     // time since the stopwatch was started
     start: time::Instant,
@@ -192,9 +208,8 @@ pub struct LatencyTimer {
     accumulated: Accumulated,
     // label data
     protocol: &'static str,
-    cache_miss: bool,
-    pool_miss: bool,
-    outcome: &'static str,
+    cold_start_info: ColdStartInfo,
+    outcome: Outcome,
 }
 
 pub struct LatencyTimerPause<'a> {
@@ -210,11 +225,9 @@ impl LatencyTimer {
             stop: None,
             accumulated: Accumulated::default(),
             protocol,
-            cache_miss: false,
-            // by default we don't do pooling
-            pool_miss: true,
+            cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
-            outcome: "failed",
+            outcome: Outcome::Failed,
         }
     }
 
@@ -226,12 +239,8 @@ impl LatencyTimer {
         }
     }
 
-    pub fn cache_miss(&mut self) {
-        self.cache_miss = true;
-    }
-
-    pub fn pool_hit(&mut self) {
-        self.pool_miss = false;
+    pub fn cold_start_info(&mut self, cold_start_info: ColdStartInfo) {
+        self.cold_start_info = cold_start_info;
     }
 
     pub fn success(&mut self) {
@@ -239,7 +248,7 @@ impl LatencyTimer {
         self.stop = Some(time::Instant::now());
 
         // success
-        self.outcome = "success";
+        self.outcome = Outcome::Success;
     }
 }
 
@@ -264,9 +273,8 @@ impl Drop for LatencyTimer {
         COMPUTE_CONNECTION_LATENCY
             .with_label_values(&[
                 self.protocol,
-                bool_to_str(self.cache_miss),
-                bool_to_str(self.pool_miss),
-                self.outcome,
+                self.cold_start_info.as_str(),
+                self.outcome.as_str(),
                 "client",
             ])
             .observe((duration.saturating_sub(self.accumulated.client)).as_secs_f64());
@@ -275,9 +283,8 @@ impl Drop for LatencyTimer {
         COMPUTE_CONNECTION_LATENCY
             .with_label_values(&[
                 self.protocol,
-                bool_to_str(self.cache_miss),
-                bool_to_str(self.pool_miss),
-                self.outcome,
+                self.cold_start_info.as_str(),
+                self.outcome.as_str(),
                 "client_and_cplane",
             ])
             .observe((duration.saturating_sub(accumulated_total)).as_secs_f64());

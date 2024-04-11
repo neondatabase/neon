@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "compute_tools",
     "control_plane",
-    "control_plane/attachment_service",
     "control_plane/storcon_cli",
     "pageserver",
     "pageserver/compaction",
@@ -13,6 +12,7 @@ members = [
     "proxy",
     "safekeeper",
     "storage_broker",
+    "storage_controller",
     "s3_scrubber",
     "workspace_hack",
     "trace",
@@ -44,6 +44,7 @@ license = "Apache-2.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
+atomic-take = "1.1.0"
 azure_core = "0.18"
 azure_identity = "0.18"
 azure_storage = "0.18"
@@ -97,7 +98,7 @@ http-types = { version = "2", default-features = false }
 humantime = "2.1"
 humantime-serde = "1.1.1"
 hyper = "0.14"
-hyper-tungstenite = "0.11"
+hyper-tungstenite = "0.13.0"
 inotify = "0.10.2"
 ipnet = "2.9.0"
 itertools = "0.10"
@@ -106,7 +107,8 @@ lasso = "0.7"
 leaky-bucket = "1.0.1"
 libc = "0.2"
 md5 = "0.7.0"
-measured = { version = "0.0.13", features=["default", "lasso"] }
+measured = { version = "0.0.20", features=["lasso"] }
+measured-process = { version = "0.0.20" }
 memoffset = "0.8"
 native-tls = "0.2"
 nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
@@ -159,7 +161,7 @@ svg_fmt = "0.4.1"
 sync_wrapper = "0.1.2"
 tar = "0.4"
 task-local-extensions = "0.1.4"
-test-context = "0.1"
+test-context = "0.3"
 thiserror = "1.0"
 tikv-jemallocator = "0.5"
 tikv-jemalloc-ctl = "0.5"

@@ -8,10 +8,8 @@
 //! The rest of the code defines label group types and deals with converting outer types to labels.
 //!
 use bytes::Bytes;
-use measured::{
-    label::{LabelValue, StaticLabelSet},
-    FixedCardinalityLabel, MetricGroup,
-};
+use measured::{label::LabelValue, metric::histogram, FixedCardinalityLabel, MetricGroup};
+use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
@@ -26,13 +24,15 @@ pub fn preinitialize_metrics() {
 
 pub(crate) struct StorageControllerMetrics {
     pub(crate) metrics_group: StorageControllerMetricGroup,
-    encoder: Mutex<measured::text::TextEncoder>,
+    encoder: Mutex<measured::text::BufferedTextEncoder>,
 }
 
 #[derive(measured::MetricGroup)]
+#[metric(new())]
 pub(crate) struct StorageControllerMetricGroup {
     /// Count of how many times we spawn a reconcile task
     pub(crate) storage_controller_reconcile_spawn: measured::Counter,
+
     /// Reconciler tasks completed, broken down by success/failure/cancelled
     pub(crate) storage_controller_reconcile_complete:
         measured::CounterVec<ReconcileCompleteLabelGroupSet>,
@@ -43,7 +43,9 @@ pub(crate) struct StorageControllerMetricGroup {
     /// HTTP request status counters for handled requests
     pub(crate) storage_controller_http_request_status:
         measured::CounterVec<HttpRequestStatusLabelGroupSet>,
+
     /// HTTP request handler latency across all status codes
+    #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
     pub(crate) storage_controller_http_request_latency:
         measured::HistogramVec<HttpRequestLatencyLabelGroupSet, 5>,
 
@@ -55,6 +57,7 @@ pub(crate) struct StorageControllerMetricGroup {
     /// Latency of HTTP requests to the pageserver, broken down by pageserver
     /// node id, request name and method. This include both successful and unsuccessful
     /// requests.
+    #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
     pub(crate) storage_controller_pageserver_request_latency:
         measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
 
@@ -66,6 +69,7 @@ pub(crate) struct StorageControllerMetricGroup {
     /// Latency of pass-through HTTP requests to the pageserver, broken down by pageserver
     /// node id, request name and method. This include both successful and unsuccessful
     /// requests.
+    #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
     pub(crate) storage_controller_passthrough_request_latency:
         measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
 
@@ -74,76 +78,34 @@ pub(crate) struct StorageControllerMetricGroup {
         measured::CounterVec<DatabaseQueryErrorLabelGroupSet>,
 
     /// Latency of database queries, broken down by operation.
+    #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
     pub(crate) storage_controller_database_query_latency:
         measured::HistogramVec<DatabaseQueryLatencyLabelGroupSet, 5>,
 }
 
 impl StorageControllerMetrics {
-    pub(crate) fn encode(&self) -> Bytes {
+    pub(crate) fn encode(&self, neon_metrics: &NeonMetrics) -> Bytes {
         let mut encoder = self.encoder.lock().unwrap();
-        self.metrics_group.collect_into(&mut *encoder);
+        neon_metrics
+            .collect_group_into(&mut *encoder)
+            .unwrap_or_else(|infallible| match infallible {});
+        self.metrics_group
+            .collect_group_into(&mut *encoder)
+            .unwrap_or_else(|infallible| match infallible {});
         encoder.finish()
     }
 }
 
 impl Default for StorageControllerMetrics {
     fn default() -> Self {
-        Self {
-            metrics_group: StorageControllerMetricGroup::new(),
-            encoder: Mutex::new(measured::text::TextEncoder::new()),
-        }
-    }
-}
+        let mut metrics_group = StorageControllerMetricGroup::new();
+        metrics_group
+            .storage_controller_reconcile_complete
+            .init_all_dense();
 
-impl StorageControllerMetricGroup {
-    pub(crate) fn new() -> Self {
         Self {
-            storage_controller_reconcile_spawn: measured::Counter::new(),
-            storage_controller_reconcile_complete: measured::CounterVec::new(
-                ReconcileCompleteLabelGroupSet {
-                    status: StaticLabelSet::new(),
-                },
-            ),
-            storage_controller_schedule_optimization: measured::Counter::new(),
-            storage_controller_http_request_status: measured::CounterVec::new(
-                HttpRequestStatusLabelGroupSet {
-                    path: lasso::ThreadedRodeo::new(),
-                    method: StaticLabelSet::new(),
-                    status: StaticLabelSet::new(),
-                },
-            ),
-            storage_controller_http_request_latency: measured::HistogramVec::new(
-                measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
-            ),
-            storage_controller_pageserver_request_error: measured::CounterVec::new(
-                PageserverRequestLabelGroupSet {
-                    pageserver_id: lasso::ThreadedRodeo::new(),
-                    path: lasso::ThreadedRodeo::new(),
-                    method: StaticLabelSet::new(),
-                },
-            ),
-            storage_controller_pageserver_request_latency: measured::HistogramVec::new(
-                measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
-            ),
-            storage_controller_passthrough_request_error: measured::CounterVec::new(
-                PageserverRequestLabelGroupSet {
-                    pageserver_id: lasso::ThreadedRodeo::new(),
-                    path: lasso::ThreadedRodeo::new(),
-                    method: StaticLabelSet::new(),
-                },
-            ),
-            storage_controller_passthrough_request_latency: measured::HistogramVec::new(
-                measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
-            ),
-            storage_controller_database_query_error: measured::CounterVec::new(
-                DatabaseQueryErrorLabelGroupSet {
-                    operation: StaticLabelSet::new(),
-                    error_type: StaticLabelSet::new(),
-                },
-            ),
-            storage_controller_database_query_latency: measured::HistogramVec::new(
-                measured::metric::histogram::Thresholds::exponential_buckets(0.1, 2.0),
-            ),
+            metrics_group,
+            encoder: Mutex::new(measured::text::BufferedTextEncoder::new()),
         }
     }
 }
@@ -157,7 +119,7 @@ pub(crate) struct ReconcileCompleteLabelGroup {
 #[derive(measured::LabelGroup)]
 #[label(set = HttpRequestStatusLabelGroupSet)]
 pub(crate) struct HttpRequestStatusLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo)]
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
     pub(crate) path: &'a str,
     pub(crate) method: Method,
     pub(crate) status: StatusCode,
@@ -166,38 +128,19 @@ pub(crate) struct HttpRequestStatusLabelGroup<'a> {
 #[derive(measured::LabelGroup)]
 #[label(set = HttpRequestLatencyLabelGroupSet)]
 pub(crate) struct HttpRequestLatencyLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo)]
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
     pub(crate) path: &'a str,
     pub(crate) method: Method,
-}
-
-impl Default for HttpRequestLatencyLabelGroupSet {
-    fn default() -> Self {
-        Self {
-            path: lasso::ThreadedRodeo::new(),
-            method: StaticLabelSet::new(),
-        }
-    }
 }
 
 #[derive(measured::LabelGroup, Clone)]
 #[label(set = PageserverRequestLabelGroupSet)]
 pub(crate) struct PageserverRequestLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo)]
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
     pub(crate) pageserver_id: &'a str,
-    #[label(dynamic_with = lasso::ThreadedRodeo)]
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
     pub(crate) path: &'a str,
     pub(crate) method: Method,
-}
-
-impl Default for PageserverRequestLabelGroupSet {
-    fn default() -> Self {
-        Self {
-            pageserver_id: lasso::ThreadedRodeo::new(),
-            path: lasso::ThreadedRodeo::new(),
-            method: StaticLabelSet::new(),
-        }
-    }
 }
 
 #[derive(measured::LabelGroup)]
@@ -213,7 +156,7 @@ pub(crate) struct DatabaseQueryLatencyLabelGroup {
     pub(crate) operation: DatabaseOperation,
 }
 
-#[derive(FixedCardinalityLabel)]
+#[derive(FixedCardinalityLabel, Clone, Copy)]
 pub(crate) enum ReconcileOutcome {
     #[label(rename = "ok")]
     Success,
@@ -221,7 +164,7 @@ pub(crate) enum ReconcileOutcome {
     Cancel,
 }
 
-#[derive(FixedCardinalityLabel, Clone)]
+#[derive(FixedCardinalityLabel, Copy, Clone)]
 pub(crate) enum Method {
     Get,
     Put,
@@ -246,11 +189,12 @@ impl From<hyper::Method> for Method {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct StatusCode(pub(crate) hyper::http::StatusCode);
 
 impl LabelValue for StatusCode {
     fn visit<V: measured::label::LabelVisitor>(&self, v: V) -> V::Output {
-        v.write_int(self.0.as_u16() as u64)
+        v.write_int(self.0.as_u16() as i64)
     }
 }
 
@@ -268,7 +212,7 @@ impl FixedCardinalityLabel for StatusCode {
     }
 }
 
-#[derive(FixedCardinalityLabel)]
+#[derive(FixedCardinalityLabel, Clone, Copy)]
 pub(crate) enum DatabaseErrorLabel {
     Query,
     Connection,

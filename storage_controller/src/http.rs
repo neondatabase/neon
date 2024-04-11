@@ -8,6 +8,7 @@ use futures::Future;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
+use metrics::{BuildInfo, NeonMetrics};
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
@@ -44,15 +45,19 @@ use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
 use routerify::Middleware;
 
 /// State available to HTTP request handlers
-#[derive(Clone)]
 pub struct HttpState {
     service: Arc<crate::service::Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
+    neon_metrics: NeonMetrics,
     allowlist_routes: Vec<Uri>,
 }
 
 impl HttpState {
-    pub fn new(service: Arc<crate::service::Service>, auth: Option<Arc<SwappableJwtAuth>>) -> Self {
+    pub fn new(
+        service: Arc<crate::service::Service>,
+        auth: Option<Arc<SwappableJwtAuth>>,
+        build_info: BuildInfo,
+    ) -> Self {
         let allowlist_routes = ["/status", "/ready", "/metrics"]
             .iter()
             .map(|v| v.parse().unwrap())
@@ -60,6 +65,7 @@ impl HttpState {
         Self {
             service,
             auth,
+            neon_metrics: NeonMetrics::new(build_info),
             allowlist_routes,
         }
     }
@@ -602,9 +608,17 @@ where
     .await
 }
 
+/// Check if the required scope is held in the request's token, or if the request has
+/// a token with 'admin' scope then always permit it.
 fn check_permissions(request: &Request<Body>, required_scope: Scope) -> Result<(), ApiError> {
     check_permission_with(request, |claims| {
-        crate::auth::check_permission(claims, required_scope)
+        match crate::auth::check_permission(claims, required_scope) {
+            Err(e) => match crate::auth::check_permission(claims, Scope::Admin) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(e),
+            },
+            Ok(()) => Ok(()),
+        }
     })
 }
 
@@ -664,10 +678,11 @@ fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>
     })
 }
 
-pub async fn measured_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+pub async fn measured_metrics_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     pub const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
 
-    let payload = crate::metrics::METRICS_REGISTRY.encode();
+    let state = get_state(&req);
+    let payload = crate::metrics::METRICS_REGISTRY.encode(&state.neon_metrics);
     let response = Response::builder()
         .status(200)
         .header(CONTENT_TYPE, TEXT_FORMAT)
@@ -696,6 +711,7 @@ where
 pub fn make_router(
     service: Arc<Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
+    build_info: BuildInfo,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router()
         .middleware(prologue_metrics_middleware())
@@ -712,7 +728,7 @@ pub fn make_router(
     }
 
     router
-        .data(Arc::new(HttpState::new(service, auth)))
+        .data(Arc::new(HttpState::new(service, auth, build_info)))
         .get("/metrics", |r| {
             named_request_span(r, measured_metrics_handler, RequestName("metrics"))
         })

@@ -276,6 +276,7 @@ impl ConnCfg {
         let stream = connection.stream.into_inner();
 
         info!(
+            cold_start_info = ctx.cold_start_info.as_str(),
             "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
             self.0.get_ssl_mode()
         );

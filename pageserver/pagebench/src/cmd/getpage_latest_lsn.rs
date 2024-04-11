@@ -4,6 +4,7 @@ use pageserver_api::key::{is_rel_block_key, key_to_rel_block, Key};
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::PagestreamGetPageRequest;
 
+use pageserver_api::shard::TenantShardId;
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
@@ -173,7 +174,10 @@ async fn main_impl(
                 let timeline = *timeline;
                 async move {
                     let partitioning = mgmt_api_client
-                        .keyspace(timeline.tenant_id, timeline.timeline_id)
+                        .keyspace(
+                            TenantShardId::unsharded(timeline.tenant_id),
+                            timeline.timeline_id,
+                        )
                         .await?;
                     let lsn = partitioning.at_lsn;
                     let start = Instant::now();

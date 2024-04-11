@@ -12,7 +12,6 @@ use super::layer_manager::LayerManager;
 use super::{CompactFlags, DurationRecorder, RecordedDuration, Timeline};
 
 use anyhow::{anyhow, Context};
-use async_trait::async_trait;
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
@@ -1122,7 +1121,6 @@ impl CompactionLayer<Key> for ResidentDeltaLayer {
     }
 }
 
-#[async_trait]
 impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 
