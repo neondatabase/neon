@@ -11,7 +11,7 @@ use crate::{
     cache::project_info::ProjectInfoCache,
     cancellation::{CancelMap, CancellationHandler},
     intern::{ProjectIdInt, RoleNameInt},
-    metrics::{NUM_CANCELLATION_REQUESTS_SOURCE_FROM_REDIS, REDIS_BROKEN_MESSAGES},
+    metrics::{Metrics, RedisErrors},
 };
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
@@ -104,9 +104,9 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
         let msg: Notification = match serde_json::from_str(&payload) {
             Ok(msg) => msg,
             Err(e) => {
-                REDIS_BROKEN_MESSAGES
-                    .with_label_values(&[msg.get_channel_name()])
-                    .inc();
+                Metrics::get().proxy.redis_errors_total.inc(RedisErrors {
+                    channel: msg.get_channel_name(),
+                });
                 tracing::error!("broken message: {e}");
                 return Ok(());
             }
@@ -183,7 +183,7 @@ where
         cache,
         Arc::new(CancellationHandler::<()>::new(
             cancel_map,
-            NUM_CANCELLATION_REQUESTS_SOURCE_FROM_REDIS,
+            crate::metrics::CancellationSource::FromRedis,
         )),
         region_id,
     );

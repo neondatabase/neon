@@ -32,7 +32,7 @@ use tokio_util::task::TaskTracker;
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
-use crate::metrics::{NUM_CLIENT_CONNECTION_GAUGE, TLS_HANDSHAKE_FAILURES};
+use crate::metrics::Metrics;
 use crate::protocol2::WithClientIp;
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
@@ -156,9 +156,10 @@ async fn connection_handler(
 ) {
     let session_id = uuid::Uuid::new_v4();
 
-    let _gauge = NUM_CLIENT_CONNECTION_GAUGE
-        .with_label_values(&["http"])
-        .guard();
+    let _gauge = Metrics::get()
+        .proxy
+        .client_connections
+        .guard(crate::metrics::Protocol::Http);
 
     // handle PROXY protocol
     let mut conn = WithClientIp::new(conn);
@@ -181,13 +182,13 @@ async fn connection_handler(
         }
         // The handshake failed
         Ok(Err(e)) => {
-            TLS_HANDSHAKE_FAILURES.inc();
+            Metrics::get().proxy.tls_handshake_failures.inc();
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
             return;
         }
         // The handshake timed out
         Err(e) => {
-            TLS_HANDSHAKE_FAILURES.inc();
+            Metrics::get().proxy.tls_handshake_failures.inc();
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
             return;
         }
@@ -274,7 +275,13 @@ async fn request_handler(
 
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&request) {
-        let ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
+        let ctx = RequestMonitoring::new(
+            session_id,
+            peer_addr,
+            crate::metrics::Protocol::Ws,
+            &config.region,
+        );
+
         let span = ctx.span.clone();
         info!(parent: &span, "performing websocket upgrade");
 
@@ -302,7 +309,12 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
-        let ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
+        let ctx = RequestMonitoring::new(
+            session_id,
+            peer_addr,
+            crate::metrics::Protocol::Http,
+            &config.region,
+        );
         let span = ctx.span.clone();
 
         sql_over_http::handle(config, ctx, request, backend, http_cancellation_token)

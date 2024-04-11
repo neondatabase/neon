@@ -21,6 +21,7 @@ defaults:
 
 concurrency:
   group: build-build-tools-image-${{ inputs.image-tag }}
+  cancel-in-progress: false
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}

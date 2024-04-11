@@ -12,9 +12,7 @@ use crate::{
     console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     intern::{BranchIdInt, ProjectIdInt},
-    metrics::{
-        bool_to_str, LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND, NUM_INVALID_ENDPOINTS,
-    },
+    metrics::{LatencyTimer, Metrics, Protocol},
     DbName, EndpointId, RoleName,
 };
 
@@ -31,7 +29,7 @@ static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestData>> = OnceCell::ne
 pub struct RequestMonitoring {
     pub peer_addr: IpAddr,
     pub session_id: Uuid,
-    pub protocol: &'static str,
+    pub protocol: Protocol,
     first_packet: chrono::DateTime<Utc>,
     region: &'static str,
     pub span: Span,
@@ -69,7 +67,7 @@ impl RequestMonitoring {
     pub fn new(
         session_id: Uuid,
         peer_addr: IpAddr,
-        protocol: &'static str,
+        protocol: Protocol,
         region: &'static str,
     ) -> Self {
         let span = info_span!(
@@ -107,7 +105,7 @@ impl RequestMonitoring {
 
     #[cfg(test)]
     pub fn test() -> Self {
-        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), "test", "test")
+        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), Protocol::Tcp, "test")
     }
 
     pub fn console_application_name(&self) -> String {
@@ -143,9 +141,9 @@ impl RequestMonitoring {
     pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
         if self.endpoint_id.is_none() {
             self.span.record("ep", display(&endpoint_id));
-            crate::metrics::CONNECTING_ENDPOINTS
-                .with_label_values(&[self.protocol])
-                .measure(&endpoint_id);
+            let metric = &Metrics::get().proxy.connecting_endpoints;
+            let label = metric.with_labels(self.protocol);
+            metric.get_metric(label).measure(&endpoint_id);
             self.endpoint_id = Some(endpoint_id);
         }
     }
@@ -167,13 +165,11 @@ impl RequestMonitoring {
     }
 
     pub fn set_error_kind(&mut self, kind: ErrorKind) {
-        ERROR_BY_KIND
-            .with_label_values(&[kind.to_metric_label()])
-            .inc();
+        Metrics::get().proxy.errors_total.inc(kind);
         if let Some(ep) = &self.endpoint_id {
-            ENDPOINT_ERRORS_BY_KIND
-                .with_label_values(&[kind.to_metric_label()])
-                .measure(ep);
+            let metric = &Metrics::get().proxy.endpoints_affected_by_errors;
+            let label = metric.with_labels(kind);
+            metric.get_metric(label).measure(ep);
         }
         self.error_kind = Some(kind);
     }

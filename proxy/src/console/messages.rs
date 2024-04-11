@@ -1,3 +1,4 @@
+use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -102,7 +103,7 @@ pub struct MetricsAuxInfo {
     pub cold_start_info: ColdStartInfo,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, FixedCardinalityLabel)]
 #[serde(rename_all = "snake_case")]
 pub enum ColdStartInfo {
     #[default]
@@ -110,9 +111,11 @@ pub enum ColdStartInfo {
     /// Compute was already running
     Warm,
     #[serde(rename = "pool_hit")]
+    #[label(rename = "pool_hit")]
     /// Compute was not running but there was an available VM
     VmPoolHit,
     #[serde(rename = "pool_miss")]
+    #[label(rename = "pool_miss")]
     /// Compute was not running and there were no VMs available
     VmPoolMiss,
 

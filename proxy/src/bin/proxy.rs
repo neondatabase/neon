@@ -18,7 +18,8 @@ use proxy::config::ProjectInfoCacheOptions;
 use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
-use proxy::metrics::NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT;
+use proxy::http::health_server::AppMetrics;
+use proxy::metrics::Metrics;
 use proxy::rate_limiter::AuthRateLimiter;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
@@ -251,14 +252,18 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Version: {GIT_VERSION}");
     info!("Build_tag: {BUILD_TAG}");
-    ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
+    let neon_metrics = ::metrics::NeonMetrics::new(::metrics::BuildInfo {
+        revision: GIT_VERSION,
+        build_tag: BUILD_TAG,
+    });
 
-    match proxy::jemalloc::MetricRecorder::new(prometheus::default_registry()) {
-        Ok(t) => {
-            t.start();
+    let jemalloc = match proxy::jemalloc::MetricRecorder::new() {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::error!(error = ?e, "could not start jemalloc metrics loop");
+            None
         }
-        Err(e) => tracing::error!(error = ?e, "could not start jemalloc metrics loop"),
-    }
+    };
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
@@ -350,7 +355,7 @@ async fn main() -> anyhow::Result<()> {
     >::new(
         cancel_map.clone(),
         redis_publisher,
-        NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT,
+        proxy::metrics::CancellationSource::FromClient,
     ));
 
     // client facing tasks. these will exit on error or on cancellation
@@ -388,7 +393,14 @@ async fn main() -> anyhow::Result<()> {
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
-    maintenance_tasks.spawn(http::health_server::task_main(http_listener));
+    maintenance_tasks.spawn(http::health_server::task_main(
+        http_listener,
+        AppMetrics {
+            jemalloc,
+            neon_metrics,
+            proxy: proxy::metrics::Metrics::get(),
+        },
+    ));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
@@ -517,8 +529,15 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             } = args.wake_compute_lock.parse()?;
             info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
             let locks = Box::leak(Box::new(
-                console::locks::ApiLocks::new("wake_compute_lock", permits, shards, timeout, epoch)
-                    .unwrap(),
+                console::locks::ApiLocks::new(
+                    "wake_compute_lock",
+                    permits,
+                    shards,
+                    timeout,
+                    epoch,
+                    &Metrics::get().wake_compute_lock,
+                )
+                .unwrap(),
             ));
             tokio::spawn(locks.garbage_collect_worker());
 

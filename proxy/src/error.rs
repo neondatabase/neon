@@ -1,5 +1,7 @@
 use std::{error::Error as StdError, fmt, io};
 
+use measured::FixedCardinalityLabel;
+
 /// Upcast (almost) any error into an opaque [`io::Error`].
 pub fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
@@ -29,24 +31,29 @@ pub trait UserFacingError: ReportableError {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, FixedCardinalityLabel)]
+#[label(singleton = "type")]
 pub enum ErrorKind {
     /// Wrong password, unknown endpoint, protocol violation, etc...
     User,
 
     /// Network error between user and proxy. Not necessarily user error
+    #[label(rename = "clientdisconnect")]
     ClientDisconnect,
 
     /// Proxy self-imposed user rate limits
+    #[label(rename = "ratelimit")]
     RateLimit,
 
     /// Proxy self-imposed service-wise rate limits
+    #[label(rename = "serviceratelimit")]
     ServiceRateLimit,
 
     /// internal errors
     Service,
 
     /// Error communicating with control plane
+    #[label(rename = "controlplane")]
     ControlPlane,
 
     /// Postgres error

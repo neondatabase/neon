@@ -7,14 +7,15 @@ use super::{
     NodeInfo,
 };
 use crate::{
-    auth::backend::ComputeUserInfo, compute, console::messages::ColdStartInfo, http, scram,
+    auth::backend::ComputeUserInfo,
+    compute,
+    console::messages::ColdStartInfo,
+    http,
+    metrics::{CacheOutcome, Metrics},
+    scram,
     Normalize,
 };
-use crate::{
-    cache::Cached,
-    context::RequestMonitoring,
-    metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
-};
+use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -107,7 +108,10 @@ impl Api {
                 Some(secret)
             };
             let allowed_ips = body.allowed_ips.unwrap_or_default();
-            ALLOWED_IPS_NUMBER.observe(allowed_ips.len() as f64);
+            Metrics::get()
+                .proxy
+                .allowed_ips_number
+                .observe(allowed_ips.len() as f64);
             Ok(AuthInfo {
                 secret,
                 allowed_ips,
@@ -222,14 +226,16 @@ impl super::Api for Api {
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         let normalized_ep = &user_info.endpoint.normalize();
         if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(normalized_ep) {
-            ALLOWED_IPS_BY_CACHE_OUTCOME
-                .with_label_values(&["hit"])
-                .inc();
+            Metrics::get()
+                .proxy
+                .allowed_ips_cache_misses
+                .inc(CacheOutcome::Hit);
             return Ok((allowed_ips, None));
         }
-        ALLOWED_IPS_BY_CACHE_OUTCOME
-            .with_label_values(&["miss"])
-            .inc();
+        Metrics::get()
+            .proxy
+            .allowed_ips_cache_misses
+            .inc(CacheOutcome::Miss);
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         let allowed_ips = Arc::new(auth_info.allowed_ips);
         let user = &user_info.user;

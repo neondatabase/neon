@@ -15,7 +15,7 @@ use crate::{
     config::{ProxyConfig, TlsConfig},
     context::RequestMonitoring,
     error::ReportableError,
-    metrics::{NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE},
+    metrics::{Metrics, NumClientConnectionsGuard},
     protocol2::WithClientIp,
     proxy::handshake::{handshake, HandshakeData},
     rate_limiter::EndpointRateLimiter,
@@ -24,7 +24,6 @@ use crate::{
 };
 use futures::TryFutureExt;
 use itertools::Itertools;
-use metrics::IntCounterPairGuard;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, StartupMessageParams};
 use regex::Regex;
@@ -79,9 +78,10 @@ pub async fn task_main(
     {
         let (socket, peer_addr) = accept_result?;
 
-        let conn_gauge = NUM_CLIENT_CONNECTION_GAUGE
-            .with_label_values(&["tcp"])
-            .guard();
+        let conn_gauge = Metrics::get()
+            .proxy
+            .client_connections
+            .guard(crate::metrics::Protocol::Tcp);
 
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
@@ -113,7 +113,12 @@ pub async fn task_main(
                 },
             };
 
-            let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
+            let mut ctx = RequestMonitoring::new(
+                    session_id,
+                    peer_addr,
+                    crate::metrics::Protocol::Tcp,
+                    &config.region,
+                );
             let span = ctx.span.clone();
 
             let res = handle_client(
@@ -237,14 +242,17 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    conn_gauge: IntCounterPairGuard,
+    conn_gauge: NumClientConnectionsGuard<'static>,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
-    info!("handling interactive connection from client");
+    info!(
+        protocol = %ctx.protocol,
+        "handling interactive connection from client"
+    );
 
+    let metrics = &Metrics::get().proxy;
     let proto = ctx.protocol;
-    let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
-        .with_label_values(&[proto])
-        .guard();
+    // let _client_gauge = metrics.client_connections.guard(proto);
+    let _request_gauge = metrics.connection_requests.guard(proto);
 
     let tls = config.tls_config.as_ref();
 

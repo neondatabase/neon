@@ -2,11 +2,10 @@ use crate::{
     cancellation,
     compute::PostgresConnection,
     console::messages::MetricsAuxInfo,
-    metrics::NUM_BYTES_PROXIED_COUNTER,
+    metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard},
     stream::Stream,
     usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS},
 };
-use metrics::IntCounterPairGuard;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 use utils::measured_stream::MeasuredStream;
@@ -23,24 +22,25 @@ pub async fn proxy_pass(
         branch_id: aux.branch_id,
     });
 
-    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
+    let metrics = &Metrics::get().proxy.io_bytes;
+    let m_sent = metrics.with_labels(Direction::Tx);
     let mut client = MeasuredStream::new(
         client,
         |_| {},
         |cnt| {
             // Number of bytes we sent to the client (outbound).
-            m_sent.inc_by(cnt as u64);
+            metrics.get_metric(m_sent).inc_by(cnt as u64);
             usage.record_egress(cnt as u64);
         },
     );
 
-    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx"]);
+    let m_recv = metrics.with_labels(Direction::Rx);
     let mut compute = MeasuredStream::new(
         compute,
         |_| {},
         |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
-            m_recv.inc_by(cnt as u64);
+            metrics.get_metric(m_recv).inc_by(cnt as u64);
         },
     );
 
@@ -60,8 +60,8 @@ pub struct ProxyPassthrough<P, S> {
     pub compute: PostgresConnection,
     pub aux: MetricsAuxInfo,
 
-    pub req: IntCounterPairGuard,
-    pub conn: IntCounterPairGuard,
+    pub req: NumConnectionRequestsGuard<'static>,
+    pub conn: NumClientConnectionsGuard<'static>,
     pub cancel: cancellation::Session<P>,
 }
 
