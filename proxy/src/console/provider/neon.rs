@@ -12,8 +12,7 @@ use crate::{
     console::messages::ColdStartInfo,
     http,
     metrics::{CacheOutcome, Metrics},
-    scram,
-    Normalize,
+    scram, Normalize,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
