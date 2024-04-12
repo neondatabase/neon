@@ -26,6 +26,7 @@ mod process_impl {
     Eq,
     strum_macros::EnumString,
     strum_macros::Display,
+    strum_macros::IntoStaticStr,
     serde_with::DeserializeFromStr,
     serde_with::SerializeDisplay,
 )]
@@ -118,6 +119,13 @@ impl Process {
         match self {
             Process::Sync(p) => p.id(),
             Process::Async(p) => p.id(),
+        }
+    }
+
+    pub(crate) fn kind(&self) -> Kind {
+        match self {
+            Process::Sync(_) => Kind::Sync,
+            Process::Async(_) => Kind::Async,
         }
     }
 }

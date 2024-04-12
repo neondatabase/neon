@@ -153,6 +153,10 @@ impl PostgresRedoManager {
                 })
             },
             pid: self.redo_process.get().map(|p| p.id()),
+            kind: self
+                .redo_process
+                .get()
+                .map(|p| std::borrow::Cow::Borrowed(p.kind().into())),
         })
     }
 }
