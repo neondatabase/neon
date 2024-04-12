@@ -1823,14 +1823,24 @@ pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
 pub(crate) mod wal_redo {
     use super::*;
 
-    pub(crate) static PROCESS_KIND: Lazy<UIntGaugeVec> = Lazy::new(|| {
-        register_uint_gauge_vec!(
-            "pageserver_wal_redo_process_kind",
-            "The configured process kind for walredo",
-            &["kind"],
+    static PROCESS_KIND: Lazy<std::sync::Mutex<UIntGaugeVec>> = Lazy::new(|| {
+        std::sync::Mutex::new(
+            register_uint_gauge_vec!(
+                "pageserver_wal_redo_process_kind",
+                "The configured process kind for walredo",
+                &["kind"],
+            )
+            .unwrap(),
         )
-        .unwrap()
     });
+
+    pub(crate) fn sync_metric_with_runtime_value() {
+        // use guard to avoid races around the next two steps
+        let guard = PROCESS_KIND.lock().unwrap();
+        let kind = crate::walredo::get_process_kind();
+        guard.reset();
+        guard.with_label_values(&[&format!("{kind}")]).set(1);
+    }
 }
 
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
@@ -2775,7 +2785,6 @@ pub fn preinitialize_metrics() {
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&tenant_throttling::TIMELINE_GET);
-
-    // XXX this is a bit unclean
-    crate::walredo::set_process_kind(crate::walredo::ProcessKind::DEFAULT);
+    #[cfg(not(test))]
+    wal_redo::sync_metric_with_runtime_value();
 }

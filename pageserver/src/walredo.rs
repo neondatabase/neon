@@ -20,7 +20,9 @@
 
 /// Process lifecycle and abstracction for the IPC protocol.
 mod process;
-pub use process::{set_kind as set_process_kind, Kind as ProcessKind};
+pub use process::{
+    get_kind as get_process_kind, set_kind as set_process_kind, Kind as ProcessKind,
+};
 
 /// Code to apply [`NeonWalRecord`]s.
 pub(crate) mod apply_neon;
