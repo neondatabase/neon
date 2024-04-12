@@ -1,7 +1,4 @@
-use std::{
-    sync::atomic::{AtomicU8, Ordering},
-    time::Duration,
-};
+use std::time::Duration;
 
 use bytes::Bytes;
 use pageserver_api::{reltag::RelTag, shard::TenantShardId};
@@ -50,22 +47,9 @@ impl TryFrom<u8> for Kind {
 }
 
 impl Kind {
+    // TODO: remove
     pub const DEFAULT: Kind = Kind::Sync;
     pub const DEFAULT_TOML: &'static str = "sync";
-}
-
-static PROCESS_KIND: AtomicU8 = AtomicU8::new(Kind::DEFAULT as u8);
-
-/// Walredo processes that are [`Process::launch`]ed after the call to this function returns
-/// will be of the given `kind`. Existing processes are not affected.
-pub fn set_kind(kind: Kind) {
-    PROCESS_KIND.store(kind as u8, std::sync::atomic::Ordering::Relaxed);
-    #[cfg(not(test))]
-    crate::metrics::wal_redo::sync_metric_with_runtime_value();
-}
-
-pub fn get_kind() -> Kind {
-    Kind::try_from(PROCESS_KIND.load(Ordering::Relaxed)).unwrap()
 }
 
 pub(crate) enum Process {
@@ -80,7 +64,7 @@ impl Process {
         tenant_shard_id: TenantShardId,
         pg_version: u32,
     ) -> anyhow::Result<Self> {
-        Ok(match get_kind() {
+        Ok(match conf.walredo_process_kind {
             Kind::Sync => Self::Sync(process_impl::process_std::WalRedoProcess::launch(
                 conf,
                 tenant_shard_id,

@@ -20,9 +20,7 @@
 
 /// Process lifecycle and abstracction for the IPC protocol.
 mod process;
-pub use process::{
-    get_kind as get_process_kind, set_kind as set_process_kind, Kind as ProcessKind,
-};
+pub use process::Kind as ProcessKind;
 
 /// Code to apply [`NeonWalRecord`]s.
 pub(crate) mod apply_neon;
@@ -142,8 +140,8 @@ impl PostgresRedoManager {
         }
     }
 
-    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
-        Some(WalRedoManagerStatus {
+    pub fn status(&self) -> WalRedoManagerStatus {
+        WalRedoManagerStatus {
             last_redo_at: {
                 let at = *self.last_redo_at.lock().unwrap();
                 at.and_then(|at| {
@@ -157,7 +155,7 @@ impl PostgresRedoManager {
                 .redo_process
                 .get()
                 .map(|p| std::borrow::Cow::Borrowed(p.kind().into())),
-        })
+        }
     }
 }
 

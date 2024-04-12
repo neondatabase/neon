@@ -66,7 +66,11 @@
 
 use bytes::{Buf, Bytes};
 use criterion::{BenchmarkId, Criterion};
-use pageserver::{config::PageServerConf, walrecord::NeonWalRecord, walredo::PostgresRedoManager};
+use pageserver::{
+    config::PageServerConf,
+    walrecord::NeonWalRecord,
+    walredo::{PostgresRedoManager, ProcessKind},
+};
 use pageserver_api::{key::Key, shard::TenantShardId};
 use std::{
     sync::Arc,
@@ -76,11 +80,7 @@ use tokio::{sync::Barrier, task::JoinSet};
 use utils::{id::TenantId, lsn::Lsn};
 
 fn bench(c: &mut Criterion) {
-    for process_kind in &[
-        pageserver::walredo::ProcessKind::Async,
-        pageserver::walredo::ProcessKind::Sync,
-    ] {
-        pageserver::walredo::set_process_kind(*process_kind);
+    for process_kind in &[ProcessKind::Async, ProcessKind::Sync] {
         {
             let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
             for nclients in nclients {
@@ -90,7 +90,9 @@ fn bench(c: &mut Criterion) {
                     &nclients,
                     |b, nclients| {
                         let redo_work = Arc::new(Request::short_input());
-                        b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
+                        b.iter_custom(|iters| {
+                            bench_impl(*process_kind, Arc::clone(&redo_work), iters, *nclients)
+                        });
                     },
                 );
             }
@@ -105,7 +107,9 @@ fn bench(c: &mut Criterion) {
                     &nclients,
                     |b, nclients| {
                         let redo_work = Arc::new(Request::medium_input());
-                        b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
+                        b.iter_custom(|iters| {
+                            bench_impl(*process_kind, Arc::clone(&redo_work), iters, *nclients)
+                        });
                     },
                 );
             }
@@ -116,10 +120,16 @@ criterion::criterion_group!(benches, bench);
 criterion::criterion_main!(benches);
 
 // Returns the sum of each client's wall-clock time spent executing their share of the n_redos.
-fn bench_impl(redo_work: Arc<Request>, n_redos: u64, nclients: u64) -> Duration {
+fn bench_impl(
+    process_kind: ProcessKind,
+    redo_work: Arc<Request>,
+    n_redos: u64,
+    nclients: u64,
+) -> Duration {
     let repo_dir = camino_tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
 
-    let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
+    let mut conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
+    conf.walredo_process_kind = process_kind;
     let conf = Box::leak(Box::new(conf));
     let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
 
@@ -147,13 +157,24 @@ fn bench_impl(redo_work: Arc<Request>, n_redos: u64, nclients: u64) -> Duration 
         });
     }
 
-    rt.block_on(async move {
+    let elapsed = rt.block_on(async move {
         let mut total_wallclock_time = Duration::ZERO;
         while let Some(res) = tasks.join_next().await {
             total_wallclock_time += res.unwrap();
         }
         total_wallclock_time
-    })
+    });
+
+    // consistency check to ensure process kind setting worked
+    assert_eq!(
+        manager
+            .status()
+            .process_kind
+            .expect("the benchmark work causes a walredo process to be spawned"),
+        std::borrow::Cow::Borrowed(process_kind.into())
+    );
+
+    elapsed
 }
 
 async fn client(
