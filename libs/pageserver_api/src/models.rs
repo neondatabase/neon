@@ -750,7 +750,7 @@ pub struct TimelineGcRequest {
 pub struct WalRedoManagerStatus {
     pub last_redo_at: Option<chrono::DateTime<chrono::Utc>>,
     pub pid: Option<u32>,
-    pub kind: Option<Cow<'static, str>>,
+    pub process_kind: Option<Cow<'static, str>>,
 }
 
 /// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating
