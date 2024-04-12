@@ -23,7 +23,7 @@ use utils::id::TenantId;
 ///   without the tenant ID.  This is useful for things that are implicitly scoped to a particular
 ///   tenant, such as layer files.
 /// - [`ShardIdentity`]` is the full description of a particular shard's parameters, in sufficient
-///   detail to
+///   detail to convert a [`Key`] to a [`ShardNumber`] when deciding where to write/read.
 /// - The [`ShardSlug`] is a terse formatter for ShardCount and ShardNumber, written as
 ///   four hex digits.  An unsharded tenant is `0000`.
 /// - [`TenantShardId`] is the unique ID of a particular shard within a particular tenant
