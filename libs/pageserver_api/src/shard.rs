@@ -24,12 +24,12 @@ use utils::id::TenantId;
 ///   tenant, such as layer files.
 /// - [`ShardIdentity`]` is the full description of a particular shard's parameters, in sufficient
 ///   detail to
-/// - The [`ShardSlug`] is a terse formatter for of ShardCount and ShardNumber, written as
+/// - The [`ShardSlug`] is a terse formatter for ShardCount and ShardNumber, written as
 ///   four hex digits.  An unsharded tenant is `0000`.
 /// - [`TenantShardId`] is the unique ID of a particular shard within a particular tenant
 ///
 /// Types used to describe the parameters for data distribution in a sharded tenant:
-/// - [`ShardStripeSize`] controls how long contiguous runs of [`Key`]s are when distributed across
+/// - [`ShardStripeSize`] controls how long contiguous runs of [`Key`]s (stripes) are when distributed across
 ///   multiple shards.  Its value is given in 8kiB pages.
 /// - [`ShardLayout`] describes the data distribution scheme, and at time of writing is
 ///   always zero: this is provided for future upgrades that might introduce different
@@ -67,7 +67,7 @@ pub struct ShardIdentity {
     layout: ShardLayout,
 }
 
-/// Formatting helper, for generatin the `shard_id` label in traces.
+/// Formatting helper, for generating the `shard_id` label in traces.
 struct ShardSlug<'a>(&'a TenantShardId);
 
 /// TenantShardId globally identifies a particular shard in a particular tenant.
