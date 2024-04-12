@@ -10,6 +10,11 @@ def test_walredo_process_kind_config(neon_env_builder: NeonEnvBuilder, kind: str
     neon_env_builder.pageserver_config_override = f"walredo_process_kind = '{kind}'"
     # ensure it starts
     env = neon_env_builder.init_start()
+    # ensure the metric is set
+    ps_http = env.pageserver.http_client()
+    metrics = ps_http.get_metrics()
+    samples = metrics.query_all("pageserver_wal_redo_process_kind")
+    assert [(s.labels, s.value) for s in samples] == [({"kind": kind}, 1)]
     # ensure default tenant's config kind matches
     # => write some data to force-spawn walredo
     ep = env.endpoints.create_start("main")
@@ -26,6 +31,5 @@ def test_walredo_process_kind_config(neon_env_builder: NeonEnvBuilder, kind: str
             [(count,)] = cur.fetchall()
             assert count == 100
 
-    ps_http = env.pageserver.http_client()
     status = ps_http.tenant_status(env.initial_tenant)
     assert status["walredo"]["process_kind"] == kind
