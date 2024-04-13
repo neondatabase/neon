@@ -858,11 +858,11 @@ impl PageServerHandler {
     /// until PS caught up (while for this particular page it is not needed).
     ///
     /// We actually need to handle just three cases:
-    /// [page_last_written_lsn, +inf] - primary node
-    /// [page_last_written_lsn, last_replay_lsn] - hot-standby replica (receiving WAL from primary)
-    /// [snapshot_lsn, snapshot_lsn] - static RO replica (not receiving WAL fro primary)
+    /// \[page_last_written_lsn, +inf\] - primary node
+    /// \[page_last_written_lsn, last_replay_lsn\] - hot-standby replica (receiving WAL from primary)
+    /// \[snapshot_lsn, snapshot_lsn\] - static RO replica (not receiving WAL fro primary)
     ///
-    /// Case [0, lsn] is not actually needed and added mostly for convenience as alias for [lsn,lsn]
+    /// Case \[0, lsn\] is not actually needed and added mostly for convenience as alias for \[lsn,lsn\]
 
     async fn wait_or_get_last_lsn(
         timeline: &Timeline,
