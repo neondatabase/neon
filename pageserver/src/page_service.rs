@@ -847,6 +847,23 @@ impl PageServerHandler {
     /// In either case, if the page server hasn't received the WAL up to the
     /// requested LSN yet, we will wait for it to arrive. The return value is
     /// the LSN that should be used to look up the page versions.
+    ///
+    /// Compute needs to specify:
+    /// 1. "desired" LSN - which LSN compute expects to be acceptable
+    /// 2. Upper boundary LSN - PS should not send page with greater LSN to preserver consistency
+    ///
+    /// In case of primary node then upper boundary is always +inf: nobody except this node can produce more recent version of the page.
+    /// In case of replica it is not true: replica can lag from primary node and PS and should not receive pages newer than its last_replay_lsn.
+    /// But it is not good always to request pages at `last_replay_lsn` because replica can be ahead PS and so it has to wait
+    /// until PS caught up (while for this particular page it is not needed).
+    ///
+    /// We actually need to handle just three cases:
+    /// [page_last_written_lsn, +inf] - primary node
+    /// [page_last_written_lsn, last_replay_lsn] - hot-standby replica (receiving WAL from primary)
+    /// [snapshot_lsn, snapshot_lsn] - static RO replica (not receiving WAL fro primary)
+    ///
+    /// Case [0, lsn] is not actually needed and added mostly for convenience as alias for [lsn,lsn]
+
     async fn wait_or_get_last_lsn(
         timeline: &Timeline,
         lsn: Lsn,
