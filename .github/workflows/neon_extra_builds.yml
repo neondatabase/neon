@@ -232,20 +232,20 @@ jobs:
 
       - name: Run cargo build
         run: |
-          mold -run cargo build --locked $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          mold -run cargo build --locked $CARGO_FLAGS $CARGO_FEATURES --bins --tests -j$(nproc)
 
       - name: Run cargo test
         env:
           NEXTEST_RETRIES: 3
         run: |
-          cargo nextest run $CARGO_FEATURES
+          cargo nextest run $CARGO_FEATURES -j$(nproc)
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
           export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo nextest run --package remote_storage --test test_real_s3
+          cargo nextest run --package remote_storage --test test_real_s3 -j$(nproc)
 
           # Run separate tests for real Azure Blob Storage
           # XXX: replace region with `eu-central-1`-like region
@@ -255,7 +255,7 @@ jobs:
           export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
           export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo nextest run --package remote_storage --test test_real_azure
+          cargo nextest run --package remote_storage --test test_real_azure -j$(nproc)
 
   check-codestyle-rust-arm:
     needs: [ check-permissions, build-build-tools-image ]
@@ -306,12 +306,12 @@ jobs:
           fi
           echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
       - name: Run cargo clippy (debug)
-        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
+        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS -j$(nproc)
       - name: Run cargo clippy (release)
-        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
+        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS -j$(nproc)
 
       - name: Check documentation generation
-        run: cargo doc --workspace --no-deps --document-private-items
+        run: cargo doc --workspace --no-deps --document-private-items -j$(nproc)
         env:
             RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
 
@@ -369,7 +369,7 @@ jobs:
         run: make walproposer-lib -j$(nproc)
 
       - name: Produce the build stats
-        run: cargo build --all --release --timings
+        run: cargo build --all --release --timings -j$(nproc)
 
       - name: Upload the build stats
         id: upload-stats
