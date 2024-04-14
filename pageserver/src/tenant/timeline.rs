@@ -1916,7 +1916,6 @@ impl Timeline {
                 max_lsn_wal_lag,
                 auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
                 availability_zone: self.conf.availability_zone.clone(),
-                ingest_batch_size: self.conf.ingest_batch_size,
             },
             broker_client,
             ctx,
@@ -4766,11 +4765,11 @@ impl<'a> TimelineWriter<'a> {
     /// 'lsn' must be aligned. This wakes up any wait_lsn() callers waiting for
     /// the 'lsn' or anything older. The previous last record LSN is stored alongside
     /// the latest and can be read.
-    pub(crate) fn finish_write(&self, new_lsn: Lsn) {
+    pub fn finish_write(&self, new_lsn: Lsn) {
         self.tl.finish_write(new_lsn);
     }
 
-    pub(crate) fn update_current_logical_size(&self, delta: i64) {
+    pub fn update_current_logical_size(&self, delta: i64) {
         self.tl.update_current_logical_size(delta)
     }
 }

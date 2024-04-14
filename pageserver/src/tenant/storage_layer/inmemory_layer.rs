@@ -484,7 +484,6 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-
     pub(crate) async fn put_value(
         &self,
         key: Key,
@@ -506,6 +505,8 @@ impl InMemoryLayer {
         ctx: &RequestContext,
     ) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
+        let inner: &mut _ = &mut *self.inner.write().await;
+        self.assert_writable();
 
         let off = {
             locked_inner
@@ -519,7 +520,7 @@ impl InMemoryLayer {
                 .await?
         };
 
-        let vec_map = locked_inner.index.entry(key).or_default();
+        let vec_map = inner.index.entry(key).or_default();
         let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -540,9 +541,11 @@ impl InMemoryLayer {
 
     pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
         // TODO: Currently, we just leak the storage for any deleted keys
+
         Ok(())
     }
 
+    /// Make the layer non-writeable. Only call once.
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub async fn freeze(&self, end_lsn: Lsn) {

@@ -24,7 +24,6 @@ use tracing::*;
 use tokio_tar::{Builder, EntryType, Header};
 
 use crate::context::RequestContext;
-use crate::pgdatadir_mapping::Version;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
@@ -261,7 +260,7 @@ where
             // Gather non-relational files from object storage pages.
             let slru_partitions = self
                 .timeline
-                .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
+                .get_slru_keyspace(self.lsn, self.ctx)
                 .await?
                 .partition(Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64);
 
@@ -288,7 +287,7 @@ where
             // Otherwise only include init forks of unlogged relations.
             let rels = self
                 .timeline
-                .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                .list_rels(spcnode, dbnode, self.lsn, self.ctx)
                 .await?;
             for &rel in rels.iter() {
                 // Send init fork as main fork to provide well formed empty
@@ -363,7 +362,7 @@ where
     async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> anyhow::Result<()> {
         let nblocks = self
             .timeline
-            .get_rel_size(src, Version::Lsn(self.lsn), false, self.ctx)
+            .get_rel_size(src, self.lsn, false, self.ctx)
             .await?;
 
         // If the relation is empty, create an empty file
@@ -384,7 +383,7 @@ where
             for blknum in startblk..endblk {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(src, blknum, Version::Lsn(self.lsn), false, self.ctx)
+                    .get_rel_page_at_lsn(src, blknum, self.lsn, false, self.ctx)
                     .await?;
                 segment_data.extend_from_slice(&img[..]);
             }
@@ -401,6 +400,42 @@ where
     }
 
     //
+<<<<<<< HEAD
+=======
+    // Generate SLRU segment files from repository.
+    //
+    async fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
+        let nblocks = self
+            .timeline
+            .get_slru_segment_size(slru, segno, self.lsn, self.ctx)
+            .await?;
+
+        let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
+        for blknum in 0..nblocks {
+            let img = self
+                .timeline
+                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn, self.ctx)
+                .await?;
+
+            if slru == SlruKind::Clog {
+                ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
+            } else {
+                ensure!(img.len() == BLCKSZ as usize);
+            }
+
+            slru_buf.extend_from_slice(&img[..BLCKSZ as usize]);
+        }
+
+        let segname = format!("{}/{:>04X}", slru.to_str(), segno);
+        let header = new_tar_header(&segname, slru_buf.len() as u64)?;
+        self.ar.append(&header, slru_buf.as_slice()).await?;
+
+        trace!("Added to basebackup slru {} relsize {}", segname, nblocks);
+        Ok(())
+    }
+
+    //
+>>>>>>> parent of fb518aea0 (Add batch ingestion mechanism to avoid high contention (#5886))
     // Include database/tablespace directories.
     //
     // Each directory contains a PG_VERSION file, and the default database
@@ -415,7 +450,7 @@ where
         let relmap_img = if has_relmap_file {
             let img = self
                 .timeline
-                .get_relmap_file(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                .get_relmap_file(spcnode, dbnode, self.lsn, self.ctx)
                 .await?;
 
             ensure!(
@@ -462,7 +497,7 @@ where
             if !has_relmap_file
                 && self
                     .timeline
-                    .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
                     .await?
                     .is_empty()
             {

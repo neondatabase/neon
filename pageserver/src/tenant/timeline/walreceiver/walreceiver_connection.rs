@@ -106,7 +106,6 @@ impl From<WalDecodeError> for WalReceiverError {
 
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
     wal_source_connconf: PgConnectionConfig,
@@ -115,7 +114,6 @@ pub(super) async fn handle_walreceiver_connection(
     connect_timeout: Duration,
     ctx: RequestContext,
     node: NodeId,
-    ingest_batch_size: u64,
 ) -> Result<(), WalReceiverError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -318,9 +316,7 @@ pub(super) async fn handle_walreceiver_connection(
 
                 {
                     let mut decoded = DecodedWALRecord::default();
-                    let mut modification = timeline.begin_modification(startlsn);
-                    let mut uncommitted_records = 0;
-                    let mut filtered_records = 0;
+                    let mut modification = timeline.begin_modification(endlsn);
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         // It is important to deal with the aligned records as lsn in getPage@LSN is
                         // aligned and can be several bytes bigger. Without this alignment we are
@@ -329,40 +325,14 @@ pub(super) async fn handle_walreceiver_connection(
                             return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
                         }
 
-                        // Ingest the records without immediately committing them.
-                        let ingested = walingest
+                        walingest
                             .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
                             .await
                             .with_context(|| format!("could not ingest record at {lsn}"))?;
-                        if !ingested {
-                            tracing::debug!("ingest: filtered out record @ LSN {lsn}");
-                            WAL_INGEST.records_filtered.inc();
-                            filtered_records += 1;
-                        }
 
                         fail_point!("walreceiver-after-ingest");
 
                         last_rec_lsn = lsn;
-
-                        // Commit every ingest_batch_size records. Even if we filtered out
-                        // all records, we still need to call commit to advance the LSN.
-                        uncommitted_records += 1;
-                        if uncommitted_records >= ingest_batch_size {
-                            WAL_INGEST
-                                .records_committed
-                                .inc_by(uncommitted_records - filtered_records);
-                            modification.commit(&ctx).await?;
-                            uncommitted_records = 0;
-                            filtered_records = 0;
-                        }
-                    }
-
-                    // Commit the remaining records.
-                    if uncommitted_records > 0 {
-                        WAL_INGEST
-                            .records_committed
-                            .inc_by(uncommitted_records - filtered_records);
-                        modification.commit(&ctx).await?;
                     }
                 }
 

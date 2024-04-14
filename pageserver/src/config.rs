@@ -81,8 +81,6 @@ pub mod defaults {
     pub const DEFAULT_HEATMAP_UPLOAD_CONCURRENCY: usize = 8;
     pub const DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY: usize = 1;
 
-    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
-
     #[cfg(target_os = "linux")]
     pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "tokio-epoll-uring";
 
@@ -109,7 +107,6 @@ pub mod defaults {
 #wait_lsn_timeout = '{DEFAULT_WAIT_LSN_TIMEOUT}'
 #wal_redo_timeout = '{DEFAULT_WAL_REDO_TIMEOUT}'
 
-#page_cache_size = {DEFAULT_PAGE_CACHE_SIZE}
 #max_file_descriptors = {DEFAULT_MAX_FILE_DESCRIPTORS}
 
 # initial superuser role name to use when creating a new tenant
@@ -130,7 +127,6 @@ pub mod defaults {
 
 #background_task_maximum_delay = '{DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY}'
 
-#ingest_batch_size = {DEFAULT_INGEST_BATCH_SIZE}
 
 #virtual_file_io_engine = '{DEFAULT_VIRTUAL_FILE_IO_ENGINE}'
 
@@ -273,9 +269,6 @@ pub struct PageServerConf {
     /// deprioritises secondary downloads vs. remote storage operations for attached tenants.
     pub secondary_download_concurrency: usize,
 
-    /// Maximum number of WAL records to be ingested and committed at the same time
-    pub ingest_batch_size: u64,
-
     pub virtual_file_io_engine: virtual_file::IoEngineKind,
 
     pub get_vectored_impl: GetVectoredImpl,
@@ -400,9 +393,8 @@ struct PageServerConfigBuilder {
     control_plane_emergency_mode: BuilderValue<bool>,
 
     heatmap_upload_concurrency: BuilderValue<usize>,
-    secondary_download_concurrency: BuilderValue<usize>,
 
-    ingest_batch_size: BuilderValue<u64>,
+    secondary_download_concurrency: BuilderValue<usize>,
 
     virtual_file_io_engine: BuilderValue<virtual_file::IoEngineKind>,
 
@@ -489,8 +481,6 @@ impl PageServerConfigBuilder {
 
             heatmap_upload_concurrency: Set(DEFAULT_HEATMAP_UPLOAD_CONCURRENCY),
             secondary_download_concurrency: Set(DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY),
-
-            ingest_batch_size: Set(DEFAULT_INGEST_BATCH_SIZE),
 
             virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
 
@@ -659,10 +649,6 @@ impl PageServerConfigBuilder {
         self.secondary_download_concurrency = BuilderValue::Set(value)
     }
 
-    pub fn ingest_batch_size(&mut self, ingest_batch_size: u64) {
-        self.ingest_batch_size = BuilderValue::Set(ingest_batch_size)
-    }
-
     pub fn virtual_file_io_engine(&mut self, value: virtual_file::IoEngineKind) {
         self.virtual_file_io_engine = BuilderValue::Set(value);
     }
@@ -734,7 +720,6 @@ impl PageServerConfigBuilder {
                 control_plane_emergency_mode,
                 heatmap_upload_concurrency,
                 secondary_download_concurrency,
-                ingest_batch_size,
                 get_vectored_impl,
                 max_vectored_read_bytes,
                 validate_vectored_get,
@@ -1013,7 +998,6 @@ impl PageServerConf {
                 "secondary_download_concurrency" => {
                     builder.secondary_download_concurrency(parse_toml_u64(key, item)? as usize)
                 },
-                "ingest_batch_size" => builder.ingest_batch_size(parse_toml_u64(key, item)?),
                 "virtual_file_io_engine" => {
                     builder.virtual_file_io_engine(parse_toml_from_str("virtual_file_io_engine", item)?)
                 }
@@ -1105,7 +1089,6 @@ impl PageServerConf {
             control_plane_emergency_mode: false,
             heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
             secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
-            ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
             virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
             get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
             max_vectored_read_bytes: MaxVectoredReadBytes(
@@ -1343,7 +1326,6 @@ background_task_maximum_delay = '334 s'
                 control_plane_emergency_mode: false,
                 heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
-                ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
@@ -1415,7 +1397,6 @@ background_task_maximum_delay = '334 s'
                 control_plane_emergency_mode: false,
                 heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
-                ingest_batch_size: 100,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
@@ -1424,6 +1405,7 @@ background_task_maximum_delay = '334 s'
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB
+                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY
             },
             "Should be able to parse all basic config values correctly"
         );
