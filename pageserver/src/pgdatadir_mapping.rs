@@ -878,11 +878,14 @@ fn hash_to_raw_key(prefix: u16, data: &[u8]) -> [u8; RAW_KEY_SIZE] {
 }
 
 pub fn encode_aux_file_key(path: &str) -> anyhow::Result<Key> {
-    if let Some(fname) = split_prefix(path, "pg_logical/") {
+    if let Some(fname) = split_prefix(path, "pg_logical/mappings/") {
         let key = hash_to_raw_key(0x0101, fname.as_bytes());
         Ok(Key::from_raw_key_fixed(&key))
     } else if let Some(fname) = split_prefix(path, "pg_replslot/") {
         let key = hash_to_raw_key(0x0102, fname.as_bytes());
+        Ok(Key::from_raw_key_fixed(&key))
+    } else if let Some(fname) = split_prefix(path, "pg_logical/snapshots/") {
+        let key = hash_to_raw_key(0x0103, fname.as_bytes());
         Ok(Key::from_raw_key_fixed(&key))
     } else {
         let key = hash_to_raw_key(0x01FF, path.as_bytes());
