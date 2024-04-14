@@ -48,10 +48,10 @@ PG_FUNCTION_INFO_V1(neon_xlogflush);
  */
 #if PG_MAJORVERSION_NUM < 16
 typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-									   XLogRecPtr request_lsn, bool request_latest, char *buffer);
+									   XLogRecPtr request_lsn, XLogRecPtr not_modified_since, char *buffer);
 #else
 typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-									   XLogRecPtr request_lsn, bool request_latest, void *buffer);
+									   XLogRecPtr request_lsn, XLogRecPtr not_modified_since, void *buffer);
 #endif
 
 static neon_read_at_lsn_type neon_read_at_lsn_ptr;
