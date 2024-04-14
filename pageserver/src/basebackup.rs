@@ -11,9 +11,10 @@
 //! from data stored in object storage.
 //!
 use anyhow::{anyhow, bail, ensure, Context};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use fail::fail_point;
 use pageserver_api::key::{key_to_slru_block, Key};
+use pageserver_api::keyspace::KeySpace;
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
@@ -24,7 +25,7 @@ use tracing::*;
 use tokio_tar::{Builder, EntryType, Header};
 
 use crate::context::RequestContext;
-use crate::pgdatadir_mapping::Version;
+use crate::pgdatadir_mapping::{Version, AUX_FILES_V2};
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
@@ -312,20 +313,59 @@ where
                 }
             }
 
-            for (path, content) in self.timeline.list_aux_files(self.lsn, self.ctx).await? {
-                if path.starts_with("pg_replslot") {
-                    let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
-                    let restart_lsn = Lsn(u64::from_le_bytes(
-                        content[offs..offs + 8].try_into().unwrap(),
-                    ));
-                    info!("Replication slot {} restart LSN={}", path, restart_lsn);
-                    min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+            if AUX_FILES_V2 {
+                let files = self
+                    .timeline
+                    .get_vectored_alternative(
+                        KeySpace::single(Key::raw_key_range()),
+                        self.lsn,
+                        self.ctx,
+                    )
+                    .await?;
+                for (_, val) in files {
+                    let val = val?;
+                    let mut ptr = &val[..];
+                    while ptr.has_remaining() {
+                        let key_len = ptr.get_u32() as usize;
+                        let key = &ptr[..key_len];
+                        ptr.advance(key_len);
+                        let val_len = ptr.get_u32() as usize;
+                        let content = &ptr[..val_len];
+                        ptr.advance(val_len);
+
+                        let path = std::str::from_utf8(key)?;
+                        if path.starts_with("pg_replslot") {
+                            let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
+                            let restart_lsn = Lsn(u64::from_le_bytes(
+                                content[offs..offs + 8].try_into().unwrap(),
+                            ));
+                            info!("Replication slot {} restart LSN={}", path, restart_lsn);
+                            min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                        }
+                        info!("adding aux file {} to basebackup, length={}", path, val_len);
+                        let header = new_tar_header(&path, content.len() as u64)?;
+                        self.ar
+                            .append(&header, &*content)
+                            .await
+                            .context("could not add aux file to basebackup tarball")?;
+                    }
                 }
-                let header = new_tar_header(&path, content.len() as u64)?;
-                self.ar
-                    .append(&header, &*content)
-                    .await
-                    .context("could not add aux file to basebackup tarball")?;
+            } else {
+                for (path, content) in self.timeline.list_aux_files(self.lsn, self.ctx).await? {
+                    if path.starts_with("pg_replslot") {
+                        let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
+                        let restart_lsn = Lsn(u64::from_le_bytes(
+                            content[offs..offs + 8].try_into().unwrap(),
+                        ));
+                        info!("Replication slot {} restart LSN={}", path, restart_lsn);
+                        min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                    }
+                    let header = new_tar_header(&path, content.len() as u64)?;
+                    self.ar
+                        .append(&header, &*content)
+                        .await
+                        .context("could not add aux file to basebackup tarball")?;
+                }
             }
         }
         if min_restart_lsn != Lsn::MAX {

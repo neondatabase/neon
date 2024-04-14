@@ -15,6 +15,11 @@ pub struct KeySpace {
 }
 
 impl KeySpace {
+    /// Create a key space with a single range
+    pub fn single(key_range: Range<Key>) -> Self {
+        Self { ranges: vec![key_range] }
+    }
+
     ///
     /// Partition a key space into roughly chunks of roughly 'target_size' bytes
     /// in each partition.

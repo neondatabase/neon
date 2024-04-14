@@ -680,6 +680,7 @@ impl Timeline {
         self.timeline_get_throttle.throttle(ctx, 1).await;
         self.get_impl(key, lsn, ctx).await
     }
+
     /// Not subject to [`Self::timeline_get_throttle`].
     async fn get_impl(
         &self,
@@ -853,6 +854,20 @@ impl Timeline {
 
         res
     }
+
+    pub(crate) async fn get_vectored_alternative(
+        &self,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        if !lsn.is_valid() {
+            return Err(GetVectoredError::InvalidLsn(lsn));
+        }
+        let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
+        vectored_res
+    }
+
 
     /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn get_vectored_sequential_impl(
@@ -2976,9 +2991,9 @@ impl Timeline {
             timeline = &*timeline_owned;
         }
 
-        if keyspace.total_size() != 0 {
-            return Err(GetVectoredError::MissingKey(keyspace.start().unwrap()));
-        }
+        // if keyspace.total_size() != 0 {
+        //     return Err(GetVectoredError::MissingKey(keyspace.start().unwrap()));
+        // }
 
         Ok(())
     }
@@ -3078,7 +3093,6 @@ impl Timeline {
                         ctx,
                     )
                     .await?;
-
                 unmapped_keyspace = keyspace_to_read;
                 cont_lsn = next_cont_lsn;
             } else {

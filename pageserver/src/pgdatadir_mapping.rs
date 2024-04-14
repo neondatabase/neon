@@ -13,14 +13,14 @@ use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_map::Enum;
 use itertools::Itertools;
 use pageserver_api::key::{
     dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
-    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
+    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, RAW_KEY_SIZE, TWOPHASEDIR_KEY,
 };
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
@@ -32,7 +32,7 @@ use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -854,6 +854,46 @@ impl Timeline {
     }
 }
 
+pub const AUX_FILES_V2: bool = true;
+
+fn split_prefix<'a, 'b>(path: &'a str, prefix: &'b str) -> Option<&'a str> {
+    if path.starts_with(prefix) {
+        Some(&path[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn hash_to_raw_key(prefix: u16, data: &[u8]) -> [u8; RAW_KEY_SIZE] {
+    let mut key = [0; RAW_KEY_SIZE];
+    let hash = crc32c::crc32c(data).to_be_bytes();
+    let prefix = prefix.to_be_bytes();
+    key[0] = prefix[0];
+    key[1] = prefix[1];
+    key[2] = hash[0];
+    key[3] = hash[1];
+    key[4] = hash[2];
+    key[5] = hash[3];
+    key
+}
+
+pub fn encode_aux_file_key(path: &str) -> anyhow::Result<Key> {
+    if let Some(fname) = split_prefix(path, "pg_logical/") {
+        let key = hash_to_raw_key(0x0101, fname.as_bytes());
+        Ok(Key::from_raw_key_fixed(&key))
+    } else if let Some(fname) = split_prefix(path, "pg_replslot/") {
+        let key = hash_to_raw_key(0x0102, fname.as_bytes());
+        Ok(Key::from_raw_key_fixed(&key))
+    } else {
+        let key = hash_to_raw_key(0x01FF, path.as_bytes());
+        warn!(
+            "unsupported aux file type: {}, putting to other files, non-scan-able by prefix",
+            path
+        );
+        Ok(Key::from_raw_key_fixed(&key))
+    }
+}
+
 /// DatadirModification represents an operation to ingest an atomic set of
 /// updates to the repository. It is created by the 'begin_record'
 /// function. It is called for each WAL record, so that all the modifications
@@ -1391,6 +1431,83 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        if AUX_FILES_V2 {
+            fn filter_path_from(val: &[u8], path: &str) -> Bytes {
+                let mut new_val = BytesMut::new();
+                let mut ptr = val;
+                while ptr.has_remaining() {
+                    let key_len = ptr.get_u32() as usize;
+                    let key = &ptr[..key_len];
+                    ptr.advance(key_len);
+                    let val_len = ptr.get_u32() as usize;
+                    let value = &ptr[..val_len];
+                    ptr.advance(val_len);
+                    if key != path.as_bytes() {
+                        new_val.put_u32(key_len as u32);
+                        new_val.put_slice(key);
+                        new_val.put_u32(val_len as u32);
+                        new_val.put_slice(value);
+                    }
+                }
+                new_val.freeze()
+            }
+
+            fn update_path_to(val: &[u8], path: &str, content: &[u8]) -> Bytes {
+                let mut new_val = BytesMut::new();
+                let mut ptr = val;
+                let mut replaced = false;
+                while ptr.has_remaining() {
+                    let key_len = ptr.get_u32() as usize;
+                    let key = &ptr[..key_len];
+                    ptr.advance(key_len);
+                    let val_len = ptr.get_u32() as usize;
+                    let value = &ptr[..val_len];
+                    ptr.advance(val_len);
+                    if key != path.as_bytes() {
+                        new_val.put_u32(key_len as u32);
+                        new_val.put_slice(key);
+                        new_val.put_u32(val_len as u32);
+                        new_val.put_slice(value);
+                    } else {
+                        new_val.put_u32(path.len() as u32);
+                        new_val.put_slice(path.as_bytes());
+                        new_val.put_u32(content.len() as u32);
+                        new_val.put_slice(content);
+                        replaced = true;
+                    }
+                }
+                if !replaced {
+                    new_val.put_u32(path.len() as u32);
+                    new_val.put_slice(path.as_bytes());
+                    new_val.put_u32(content.len() as u32);
+                    new_val.put_slice(content);
+                }
+                new_val.freeze()
+            }
+
+            let key = encode_aux_file_key(path)?;
+            // retrieve the key from the engine
+            let old_val = match self.get(key, ctx).await {
+                Ok(val) => val,
+                Err(PageReconstructError::Other(err))
+                    if err.to_string().contains("could not find data for key") =>
+                {
+                    // TODO: make could not found a separate error type, avoid anyhow wrapping
+                    Bytes::new()
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let new_val = if content.is_empty() {
+                info!("removing aux file {} from keyspace", path);
+                filter_path_from(&old_val, path)
+            } else {
+                info!("adding aux file {} to keyspace, length={}", path, content.len());
+                update_path_to(&old_val, path, content)
+            };
+            self.put(key, Value::Image(new_val));
+            return Ok(());
+        }
+
         let file_path = path.to_string();
         let content = if content.is_empty() {
             None
@@ -1586,8 +1703,6 @@ impl<'a> DatadirModification<'a> {
     pub(crate) fn len(&self) -> usize {
         self.pending_updates.len() + self.pending_deletions.len()
     }
-
-    // Internal helper functions to batch the modifications
 
     async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
         // Have we already updated the same key? Read the latest pending updated

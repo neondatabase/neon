@@ -371,26 +371,23 @@ impl InMemoryLayer {
 
         let mut planned_block_reads = BinaryHeap::new();
 
-        for range in keyspace.ranges.iter() {
-            let mut key = range.start;
-            while key < range.end {
-                if let Some(vec_map) = inner.index.get(&key) {
-                    let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
-                        Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
-                        None => self.start_lsn..end_lsn,
-                    };
+        for (key, vec_map) in inner.index.iter() {
+            let key = key.clone();
+            if !keyspace.overlaps(&(key.clone()..key.next())) {
+                continue;
+            }
+            let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
+                Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
+                None => self.start_lsn..end_lsn,
+            };
 
-                    let slice = vec_map.slice_range(lsn_range);
-                    for (entry_lsn, pos) in slice.iter().rev() {
-                        planned_block_reads.push(BlockRead {
-                            key,
-                            lsn: *entry_lsn,
-                            block_offset: *pos,
-                        });
-                    }
-                }
-
-                key = key.next();
+            let slice = vec_map.slice_range(lsn_range);
+            for (entry_lsn, pos) in slice.iter().rev() {
+                planned_block_reads.push(BlockRead {
+                    key,
+                    lsn: *entry_lsn,
+                    block_offset: *pos,
+                });
             }
         }
 

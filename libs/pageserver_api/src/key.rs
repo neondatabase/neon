@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
+use bytes::BufMut;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,60 @@ pub struct Key {
 pub const KEY_SIZE: usize = 18;
 
 impl Key {
+    /// Transform a raw key to a storage key
+    pub fn from_raw_key_fixed(key: &[u8; RAW_KEY_SIZE]) -> Self {
+        Key {
+            field1: RAW_VALUE_KEY_PREFIX,
+            field2: u16::from_be_bytes(key[0..2].try_into().unwrap()) as u32,
+            field3: u32::from_be_bytes(key[2..6].try_into().unwrap()),
+            field4: u32::from_be_bytes(key[6..10].try_into().unwrap()),
+            field5: key[10],
+            field6: u32::from_be_bytes(key[11..15].try_into().unwrap()),
+        }
+    }
+
+    pub fn extract_raw_key_to_writer(&self, mut writer: impl BufMut) {
+        assert_eq!(self.field1, RAW_VALUE_KEY_PREFIX, "prefix mismatched");
+        assert!(self.field2 < 0xFFFF);
+        writer.put_u16(self.field2 as u16);
+        writer.put_u32(self.field3);
+        writer.put_u32(self.field4);
+        writer.put_u8(self.field5);
+        writer.put_u32(self.field6);
+    }
+
+    pub fn raw_key_range() -> Range<Self> {
+        Key {
+            field1: RAW_VALUE_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: RAW_VALUE_KEY_PREFIX + 1,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
+    /// Transform a raw key to a storage key
+    pub fn from_raw_key(key: &[u8]) -> Self {
+        Self::from_raw_key_fixed(
+            key.try_into()
+                .expect("raw key must has a length of pre-determined fixed-size"),
+        )
+    }
+
+    pub fn extract_raw_key(&self) -> Vec<u8> {
+        let mut key = Vec::with_capacity(RAW_KEY_SIZE);
+        self.extract_raw_key_to_writer(&mut key);
+        key
+    }
+
     /// 'field2' is used to store tablespaceid for relations and small enum numbers for other relish.
     /// As long as Neon does not support tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
@@ -471,6 +526,9 @@ pub const AUX_FILES_KEY: Key = Key {
     field5: 0,
     field6: 2,
 };
+
+pub const RAW_VALUE_KEY_PREFIX: u8 = 0x04;
+pub const RAW_KEY_SIZE: usize = 15;
 
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
