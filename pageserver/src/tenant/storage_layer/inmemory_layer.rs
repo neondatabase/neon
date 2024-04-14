@@ -539,7 +539,7 @@ impl InMemoryLayer {
         inner.resource_units.publish_size(size)
     }
 
-    pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
+    pub(crate) async fn put_tombstones(&self, _ranges: Range<Key>, _lsn: Lsn) -> Result<()> {
         // TODO: Currently, we just leak the storage for any deleted keys
 
         Ok(())

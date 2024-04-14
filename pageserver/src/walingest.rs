@@ -33,7 +33,7 @@ use utils::failpoint_support;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
-use crate::pgdatadir_mapping::{DatadirModification, Version};
+use crate::pgdatadir_mapping::DatadirModification;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::walrecord::*;

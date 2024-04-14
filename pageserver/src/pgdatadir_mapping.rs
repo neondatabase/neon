@@ -333,7 +333,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let n_blocks = self
-            .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
+            .get_slru_segment_size(kind, segno, lsn, ctx)
             .await?;
         let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
         for blkno in 0..n_blocks {
@@ -567,14 +567,14 @@ impl Timeline {
 
         for kind in SlruKind::iter() {
             let mut segments: Vec<u32> = self
-                .list_slru_segments(kind, version, ctx)
+                .list_slru_segments(kind, lsn, ctx)
                 .await?
                 .into_iter()
                 .collect();
             segments.sort_unstable();
 
             for seg in segments {
-                let block_count = self.get_slru_segment_size(kind, seg, version, ctx).await?;
+                let block_count = self.get_slru_segment_size(kind, seg, lsn, ctx).await?;
 
                 accum.add_range(
                     slru_block_to_key(kind, seg, 0)..slru_block_to_key(kind, seg, block_count),

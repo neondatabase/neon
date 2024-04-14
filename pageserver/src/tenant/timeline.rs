@@ -4747,12 +4747,10 @@ impl<'a> TimelineWriter<'a> {
         Ok(())
     }
 
-    pub(crate) async fn delete_batch(&mut self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
-        if let Some((_, lsn)) = batch.first() {
-            let action = self.get_open_layer_action(*lsn, 0).await;
-            let layer = self.handle_open_layer_action(*lsn, action).await?;
-            layer.put_tombstones(batch).await?;
-        }
+    pub(crate) async fn delete(&mut self, range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
+        let action = self.get_open_layer_action(lsn, 0).await;
+        let layer = self.handle_open_layer_action(lsn, action).await?;
+        layer.put_tombstones(range, lsn).await?;
 
         Ok(())
     }

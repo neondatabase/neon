@@ -400,42 +400,6 @@ where
     }
 
     //
-<<<<<<< HEAD
-=======
-    // Generate SLRU segment files from repository.
-    //
-    async fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let nblocks = self
-            .timeline
-            .get_slru_segment_size(slru, segno, self.lsn, self.ctx)
-            .await?;
-
-        let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
-        for blknum in 0..nblocks {
-            let img = self
-                .timeline
-                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn, self.ctx)
-                .await?;
-
-            if slru == SlruKind::Clog {
-                ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
-            } else {
-                ensure!(img.len() == BLCKSZ as usize);
-            }
-
-            slru_buf.extend_from_slice(&img[..BLCKSZ as usize]);
-        }
-
-        let segname = format!("{}/{:>04X}", slru.to_str(), segno);
-        let header = new_tar_header(&segname, slru_buf.len() as u64)?;
-        self.ar.append(&header, slru_buf.as_slice()).await?;
-
-        trace!("Added to basebackup slru {} relsize {}", segname, nblocks);
-        Ok(())
-    }
-
-    //
->>>>>>> parent of fb518aea0 (Add batch ingestion mechanism to avoid high contention (#5886))
     // Include database/tablespace directories.
     //
     // Each directory contains a PG_VERSION file, and the default database
