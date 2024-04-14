@@ -4670,6 +4670,7 @@ impl<'a> TimelineWriter<'a> {
         action: OpenLayerAction,
     ) -> anyhow::Result<&Arc<InMemoryLayer>> {
         match action {
+            // TODO: Move this into InMemoryLayer
             OpenLayerAction::Roll => {
                 let freeze_at = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
                 self.roll_layer(freeze_at).await?;
