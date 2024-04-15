@@ -3,7 +3,6 @@
 //!
 //! All the heavy lifting is done by the create_image and create_delta
 //! functions that the implementor provides.
-use async_trait::async_trait;
 use futures::Future;
 use pageserver_api::{key::Key, keyspace::key_range_size};
 use std::ops::Range;
@@ -141,18 +140,16 @@ pub trait CompactionLayer<K: CompactionKey + ?Sized> {
 
     fn is_delta(&self) -> bool;
 }
-
-#[async_trait]
 pub trait CompactionDeltaLayer<E: CompactionJobExecutor + ?Sized>: CompactionLayer<E::Key> {
     type DeltaEntry<'a>: CompactionDeltaEntry<'a, E::Key>
     where
         Self: 'a;
 
     /// Return all keys in this delta layer.
-    async fn load_keys<'a>(
+    fn load_keys<'a>(
         &self,
         ctx: &E::RequestContext,
-    ) -> anyhow::Result<Vec<Self::DeltaEntry<'_>>>;
+    ) -> impl Future<Output = anyhow::Result<Vec<Self::DeltaEntry<'_>>>> + Send;
 }
 
 pub trait CompactionImageLayer<E: CompactionJobExecutor + ?Sized>: CompactionLayer<E::Key> {}

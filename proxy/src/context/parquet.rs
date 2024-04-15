@@ -111,7 +111,7 @@ impl From<&RequestMonitoring> for RequestData {
                 super::AuthMethod::ScramSha256Plus => "scram_sha_256_plus",
                 super::AuthMethod::Cleartext => "cleartext",
             }),
-            protocol: value.protocol,
+            protocol: value.protocol.as_str(),
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,

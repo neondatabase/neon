@@ -41,7 +41,7 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
         //
         // note that u64::MAX will be output as i64::MAX as u64, but that should not matter
         utilization_score: u64::MAX,
-        captured_at,
+        captured_at: utils::serde_system_time::SystemTime(captured_at),
     };
 
     // TODO: make utilization_score into a metric

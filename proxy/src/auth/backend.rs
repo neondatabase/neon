@@ -13,7 +13,7 @@ use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::{AuthSecret, NodeInfo};
 use crate::context::RequestMonitoring;
 use crate::intern::EndpointIdInt;
-use crate::metrics::{AUTH_RATE_LIMIT_HITS, ENDPOINTS_AUTH_RATE_LIMITED};
+use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
 use crate::stream::Stream;
@@ -27,7 +27,7 @@ use crate::{
     },
     stream, url,
 };
-use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
+use crate::{scram, EndpointCacheKey, EndpointId, Normalize, RoleName};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -186,7 +186,7 @@ impl AuthenticationConfig {
         is_cleartext: bool,
     ) -> auth::Result<AuthSecret> {
         // we have validated the endpoint exists, so let's intern it.
-        let endpoint_int = EndpointIdInt::from(endpoint);
+        let endpoint_int = EndpointIdInt::from(endpoint.normalize());
 
         // only count the full hash count if password hack or websocket flow.
         // in other words, if proxy needs to run the hashing
@@ -210,8 +210,12 @@ impl AuthenticationConfig {
                 enabled = self.rate_limiter_enabled,
                 "rate limiting authentication"
             );
-            AUTH_RATE_LIMIT_HITS.inc();
-            ENDPOINTS_AUTH_RATE_LIMITED.measure(endpoint);
+            Metrics::get().proxy.requests_auth_rate_limits_total.inc();
+            Metrics::get()
+                .proxy
+                .endpoints_auth_rate_limits
+                .get_metric()
+                .measure(endpoint);
 
             if self.rate_limiter_enabled {
                 return Err(auth::AuthError::too_many_connections());
