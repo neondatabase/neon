@@ -62,7 +62,6 @@
 //! sync-medium/32          time:   [2.4456 ms 2.4595 ms 2.4731 ms]
 //! sync-medium/64          time:   [4.6523 ms 4.6890 ms 4.7256 ms]
 //! sync-medium/128         time:   [8.7215 ms 8.8323 ms 8.9344 ms]
-
 //! ```
 
 use bytes::{Buf, Bytes};
