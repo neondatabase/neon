@@ -469,7 +469,8 @@ def test_tenant_delete_concurrent(
 ):
     """
     Validate that concurrent delete requests to the same tenant behave correctly:
-    exactly one should succeed.
+    exactly one should execute: the rest should give 202 responses but not start
+    another deletion.
 
     This is a reproducer for https://github.com/neondatabase/neon/issues/5936
     """
