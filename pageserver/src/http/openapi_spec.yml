@@ -58,24 +58,6 @@ paths:
       responses:
         "200":
           description: The reload completed successfully.
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error (also hits if no keys were found)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
 
   /v1/tenant/{tenant_id}:
     parameters:

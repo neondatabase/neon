@@ -457,8 +457,12 @@ async fn reload_auth_validation_keys_handler(
             json_response(StatusCode::OK, ())
         }
         Err(e) => {
+            let err_msg = "Error reloading public keys";
             warn!("Error reloading public keys from {key_path:?}: {e:}");
-            json_response(StatusCode::INTERNAL_SERVER_ERROR, ())
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HttpErrorBody::from_msg(err_msg.to_string()),
+            )
         }
     }
 }
