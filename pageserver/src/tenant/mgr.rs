@@ -1410,9 +1410,15 @@ impl TenantManager {
 
         match tenant.current_state() {
             TenantState::Broken { .. } | TenantState::Stopping { .. } => {
-                // If a tenant is broken or stopping, DeleteTenantFlow can
-                // handle it: broken tenants proceed to delete, stopping tenants
-                // are checked for deletion already in progress.
+                // If deletion is already in progress, return success (the semantics of this
+                // function are to rerturn success afterr deletion is spawned in background).
+                // Otherwise fall through and let [`DeleteTenantFlow`] handle this state.
+                if tenant.delete_progress.try_lock().is_err() {
+                    // The `delete_progress` lock is held: deletion is already happening
+                    // in the bacckground
+                    slot_guard.revert();
+                    return Ok(());
+                }
             }
             _ => {
                 tenant
