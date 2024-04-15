@@ -503,10 +503,10 @@ def test_tenant_delete_concurrent(
         return ps_http.tenant_delete(tenant_id)
 
     def hit_remove_failpoint():
-        env.pageserver.assert_log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}")
+        return env.pageserver.assert_log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}")[1]
 
-    def hit_run_failpoint(cursor=None):
-        env.pageserver.assert_log_contains(f"at failpoint {BEFORE_RUN_FAILPOINT}", offset=cursor)
+    def hit_run_failpoint():
+        env.pageserver.assert_log_contains(f"at failpoint {BEFORE_RUN_FAILPOINT}")
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         background_200_req = executor.submit(delete_tenant)
@@ -515,10 +515,13 @@ def test_tenant_delete_concurrent(
         # Wait until the first request completes its work and is blocked on removing
         # the TenantSlot from tenant manager.
         log_cursor = wait_until(100, 0.1, hit_remove_failpoint)
+        assert log_cursor is not None
 
         # Start another request: this should succeed without actually entering the deletion code
         ps_http.tenant_delete(tenant_id)
-        assert not hit_run_failpoint(log_cursor)
+        assert not env.pageserver.log_contains(
+            f"at failpoint {BEFORE_RUN_FAILPOINT}", offset=log_cursor
+        )
 
         # Start another background request, which will pause after acquiring a TenantSlotGuard
         # but before completing.
@@ -536,7 +539,9 @@ def test_tenant_delete_concurrent(
         # Permit the duplicate background request to run to completion and fail.
         ps_http.configure_failpoints((BEFORE_RUN_FAILPOINT, "off"))
         background_4xx_req.result(timeout=10)
-        assert not hit_run_failpoint(log_cursor)
+        assert not env.pageserver.log_contains(
+            f"at failpoint {BEFORE_RUN_FAILPOINT}", offset=log_cursor
+        )
 
     # Physical deletion should have happened
     assert_prefix_empty(
