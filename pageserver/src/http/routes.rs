@@ -696,7 +696,7 @@ async fn get_lsn_by_timestamp_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -747,7 +747,7 @@ async fn get_timestamp_of_lsn_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -1086,7 +1086,7 @@ async fn tenant_size_handler(
     let headers = request.headers();
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
         )));

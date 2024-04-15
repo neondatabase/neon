@@ -20,6 +20,7 @@ use utils::{
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
+    serde_system_time,
 };
 
 use crate::controller_api::PlacementPolicy;
@@ -766,11 +767,7 @@ pub struct WalRedoManagerStatus {
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct SecondaryProgress {
     /// The remote storage LastModified time of the heatmap object we last downloaded.
-    #[serde(
-        serialize_with = "opt_ser_rfc3339_millis",
-        deserialize_with = "opt_deser_rfc3339_millis"
-    )]
-    pub heatmap_mtime: Option<SystemTime>,
+    pub heatmap_mtime: Option<serde_system_time::SystemTime>,
 
     /// The number of layers currently on-disk
     pub layers_downloaded: usize,
@@ -781,29 +778,6 @@ pub struct SecondaryProgress {
     pub bytes_downloaded: u64,
     /// The number of layer bytes in the most recently seen heatmap
     pub bytes_total: u64,
-}
-
-fn opt_ser_rfc3339_millis<S: serde::Serializer>(
-    ts: &Option<SystemTime>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    match ts {
-        Some(ts) => serializer.collect_str(&humantime::format_rfc3339_millis(*ts)),
-        None => serializer.serialize_none(),
-    }
-}
-
-fn opt_deser_rfc3339_millis<'de, D>(deserializer: D) -> Result<Option<SystemTime>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    let s: Option<String> = serde::de::Deserialize::deserialize(deserializer)?;
-    match s {
-        None => Ok(None),
-        Some(s) => humantime::parse_rfc3339(&s)
-            .map_err(serde::de::Error::custom)
-            .map(Some),
-    }
 }
 
 pub mod virtual_file {

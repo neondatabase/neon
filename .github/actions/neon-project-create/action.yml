@@ -13,7 +13,7 @@ inputs:
     default: 15
   api_host:
     desctiption: 'Neon API host'
-    default: console.stage.neon.tech
+    default: console-stage.neon.build
   provisioner:
     desctiption: 'k8s-pod or k8s-neonvm'
     default: 'k8s-pod'

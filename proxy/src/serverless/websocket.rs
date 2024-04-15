@@ -3,7 +3,7 @@ use crate::{
     config::ProxyConfig,
     context::RequestMonitoring,
     error::{io_error, ReportableError},
-    metrics::NUM_CLIENT_CONNECTION_GAUGE,
+    metrics::Metrics,
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
 };
@@ -139,9 +139,10 @@ pub async fn serve_websocket(
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    let conn_gauge = NUM_CLIENT_CONNECTION_GAUGE
-        .with_label_values(&["ws"])
-        .guard();
+    let conn_gauge = Metrics::get()
+        .proxy
+        .client_connections
+        .guard(crate::metrics::Protocol::Ws);
 
     let res = handle_client(
         config,

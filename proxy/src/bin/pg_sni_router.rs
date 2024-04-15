@@ -9,15 +9,13 @@ use futures::future::Either;
 use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
-use proxy::proxy::run_until_cancelled;
-use proxy::{BranchId, EndpointId, ProjectId};
+use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
 use clap::Arg;
 use futures::TryFutureExt;
-use proxy::console::messages::MetricsAuxInfo;
 use proxy::stream::{PqStream, Stream};
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -176,7 +174,12 @@ async fn task_main(
                     .context("failed to set socket option")?;
 
                 info!(%peer_addr, "serving");
-                let ctx = RequestMonitoring::new(session_id, peer_addr.ip(), "sni_router", "sni");
+                let ctx = RequestMonitoring::new(
+                    session_id,
+                    peer_addr.ip(),
+                    proxy::metrics::Protocol::SniRouter,
+                    "sni",
+                );
                 handle_client(ctx, dest_suffix, tls_config, tls_server_end_point, socket).await
             }
             .unwrap_or_else(|e| {
@@ -199,6 +202,7 @@ async fn task_main(
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    ctx: &mut RequestMonitoring,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
@@ -228,7 +232,10 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             }
 
             Ok(Stream::Tls {
-                tls: Box::new(raw.upgrade(tls_config).await?),
+                tls: Box::new(
+                    raw.upgrade(tls_config, !ctx.has_private_peer_addr())
+                        .await?,
+                ),
                 tls_server_end_point,
             })
         }
@@ -251,7 +258,7 @@ async fn handle_client(
     tls_server_end_point: TlsServerEndPoint,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
-    let tls_stream = ssl_handshake(stream, tls_config, tls_server_end_point).await?;
+    let mut tls_stream = ssl_handshake(&mut ctx, stream, tls_config, tls_server_end_point).await?;
 
     // Cut off first part of the SNI domain
     // We receive required destination details in the format of
@@ -268,18 +275,15 @@ async fn handle_client(
 
     info!("destination: {}", destination);
 
-    let client = tokio::net::TcpStream::connect(destination).await?;
-
-    let metrics_aux: MetricsAuxInfo = MetricsAuxInfo {
-        endpoint_id: (&EndpointId::from("")).into(),
-        project_id: (&ProjectId::from("")).into(),
-        branch_id: (&BranchId::from("")).into(),
-        cold_start_info: proxy::console::messages::ColdStartInfo::Unknown,
-    };
+    let mut client = tokio::net::TcpStream::connect(destination).await?;
 
     // doesn't yet matter as pg-sni-router doesn't report analytics logs
     ctx.set_success();
     ctx.log();
 
-    proxy::proxy::passthrough::proxy_pass(tls_stream, client, metrics_aux).await
+    // Starting from here we only proxy the client's traffic.
+    info!("performing the proxy pass...");
+    let _ = copy_bidirectional_client_compute(&mut tls_stream, &mut client).await?;
+
+    Ok(())
 }

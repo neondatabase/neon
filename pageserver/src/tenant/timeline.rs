@@ -1257,7 +1257,7 @@ impl Timeline {
             checkpoint_distance,
             self.get_last_record_lsn(),
             self.last_freeze_at.load(),
-            *self.last_freeze_ts.read().unwrap(),
+            open_layer.get_opened_at(),
         ) {
             match open_layer.info() {
                 InMemoryLayerInfo::Frozen { lsn_start, lsn_end } => {
@@ -1344,7 +1344,7 @@ impl Timeline {
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
-        if self.tenant_shard_id.is_zero() {
+        if self.tenant_shard_id.is_shard_zero() {
             // Logical size is only maintained accurately on shard zero.
             self.spawn_initial_logical_size_computation_task(ctx);
         }
@@ -1622,7 +1622,7 @@ impl Timeline {
         checkpoint_distance: u64,
         projected_lsn: Lsn,
         last_freeze_at: Lsn,
-        last_freeze_ts: Instant,
+        opened_at: Instant,
     ) -> bool {
         let distance = projected_lsn.widening_sub(last_freeze_at);
 
@@ -1648,13 +1648,13 @@ impl Timeline {
             );
 
             true
-        } else if distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
+        } else if distance > 0 && opened_at.elapsed() >= self.get_checkpoint_timeout() {
             info!(
-                "Will roll layer at {} with layer size {} due to time since last flush ({:?})",
-                projected_lsn,
-                layer_size,
-                last_freeze_ts.elapsed()
-            );
+                    "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
+                    projected_lsn,
+                    layer_size,
+                    opened_at.elapsed()
+                );
 
             true
         } else {
@@ -2237,7 +2237,7 @@ impl Timeline {
         priority: GetLogicalSizePriority,
         ctx: &RequestContext,
     ) -> logical_size::CurrentLogicalSize {
-        if !self.tenant_shard_id.is_zero() {
+        if !self.tenant_shard_id.is_shard_zero() {
             // Logical size is only accurately maintained on shard zero: when called elsewhere, for example
             // when HTTP API is serving a GET for timeline zero, return zero
             return logical_size::CurrentLogicalSize::Approximate(logical_size::Approximate::zero());
@@ -2533,7 +2533,7 @@ impl Timeline {
         crate::span::debug_assert_current_span_has_tenant_and_timeline_id();
         // We should never be calculating logical sizes on shard !=0, because these shards do not have
         // accurate relation sizes, and they do not emit consumption metrics.
-        debug_assert!(self.tenant_shard_id.is_zero());
+        debug_assert!(self.tenant_shard_id.is_shard_zero());
 
         let guard = self
             .gate
@@ -4703,23 +4703,16 @@ struct TimelineWriterState {
     max_lsn: Option<Lsn>,
     // Cached details of the last freeze. Avoids going trough the atomic/lock on every put.
     cached_last_freeze_at: Lsn,
-    cached_last_freeze_ts: Instant,
 }
 
 impl TimelineWriterState {
-    fn new(
-        open_layer: Arc<InMemoryLayer>,
-        current_size: u64,
-        last_freeze_at: Lsn,
-        last_freeze_ts: Instant,
-    ) -> Self {
+    fn new(open_layer: Arc<InMemoryLayer>, current_size: u64, last_freeze_at: Lsn) -> Self {
         Self {
             open_layer,
             current_size,
             prev_lsn: None,
             max_lsn: None,
             cached_last_freeze_at: last_freeze_at,
-            cached_last_freeze_ts: last_freeze_ts,
         }
     }
 }
@@ -4818,12 +4811,10 @@ impl<'a> TimelineWriter<'a> {
         let initial_size = layer.size().await?;
 
         let last_freeze_at = self.last_freeze_at.load();
-        let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
         self.write_guard.replace(TimelineWriterState::new(
             layer,
             initial_size,
             last_freeze_at,
-            last_freeze_ts,
         ));
 
         Ok(())
@@ -4870,7 +4861,7 @@ impl<'a> TimelineWriter<'a> {
             self.get_checkpoint_distance(),
             lsn,
             state.cached_last_freeze_at,
-            state.cached_last_freeze_ts,
+            state.open_layer.get_opened_at(),
         ) {
             OpenLayerAction::Roll
         } else {

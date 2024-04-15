@@ -403,7 +403,7 @@ impl WalIngest {
             );
 
             if !key_is_local {
-                if self.shard.is_zero() {
+                if self.shard.is_shard_zero() {
                     // Shard 0 tracks relation sizes.  Although we will not store this block, we will observe
                     // its blkno in case it implicitly extends a relation.
                     self.observe_decoded_block(modification, blk, ctx).await?;

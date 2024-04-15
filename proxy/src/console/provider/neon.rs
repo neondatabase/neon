@@ -7,13 +7,14 @@ use super::{
     NodeInfo,
 };
 use crate::{
-    auth::backend::ComputeUserInfo, compute, console::messages::ColdStartInfo, http, scram,
+    auth::backend::ComputeUserInfo,
+    compute,
+    console::messages::ColdStartInfo,
+    http,
+    metrics::{CacheOutcome, Metrics},
+    scram, Normalize,
 };
-use crate::{
-    cache::Cached,
-    context::RequestMonitoring,
-    metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
-};
+use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -23,7 +24,7 @@ use tracing::{error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
-    locks: &'static ApiLocks,
+    pub locks: &'static ApiLocks,
     jwt: String,
 }
 
@@ -55,6 +56,15 @@ impl Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
+        if !self
+            .caches
+            .endpoints_cache
+            .is_valid(ctx, &user_info.endpoint.normalize())
+            .await
+        {
+            info!("endpoint is not valid, skipping the request");
+            return Ok(AuthInfo::default());
+        }
         let request_id = ctx.session_id.to_string();
         let application_name = ctx.console_application_name();
         async {
@@ -81,7 +91,9 @@ impl Api {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
                 Err(e) => match e.http_status_code() {
-                    Some(http::StatusCode::NOT_FOUND) => return Ok(AuthInfo::default()),
+                    Some(http::StatusCode::NOT_FOUND) => {
+                        return Ok(AuthInfo::default());
+                    }
                     _otherwise => return Err(e.into()),
                 },
             };
@@ -95,7 +107,10 @@ impl Api {
                 Some(secret)
             };
             let allowed_ips = body.allowed_ips.unwrap_or_default();
-            ALLOWED_IPS_NUMBER.observe(allowed_ips.len() as f64);
+            Metrics::get()
+                .proxy
+                .allowed_ips_number
+                .observe(allowed_ips.len() as f64);
             Ok(AuthInfo {
                 secret,
                 allowed_ips,
@@ -174,23 +189,27 @@ impl super::Api for Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        let ep = &user_info.endpoint;
+        let normalized_ep = &user_info.endpoint.normalize();
         let user = &user_info.user;
-        if let Some(role_secret) = self.caches.project_info.get_role_secret(ep, user) {
+        if let Some(role_secret) = self
+            .caches
+            .project_info
+            .get_role_secret(normalized_ep, user)
+        {
             return Ok(role_secret);
         }
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         if let Some(project_id) = auth_info.project_id {
-            let ep_int = ep.into();
+            let normalized_ep_int = normalized_ep.into();
             self.caches.project_info.insert_role_secret(
                 project_id,
-                ep_int,
+                normalized_ep_int,
                 user.into(),
                 auth_info.secret.clone(),
             );
             self.caches.project_info.insert_allowed_ips(
                 project_id,
-                ep_int,
+                normalized_ep_int,
                 Arc::new(auth_info.allowed_ips),
             );
             ctx.set_project_id(project_id);
@@ -204,30 +223,34 @@ impl super::Api for Api {
         ctx: &mut RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
-        let ep = &user_info.endpoint;
-        if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(ep) {
-            ALLOWED_IPS_BY_CACHE_OUTCOME
-                .with_label_values(&["hit"])
-                .inc();
+        let normalized_ep = &user_info.endpoint.normalize();
+        if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(normalized_ep) {
+            Metrics::get()
+                .proxy
+                .allowed_ips_cache_misses
+                .inc(CacheOutcome::Hit);
             return Ok((allowed_ips, None));
         }
-        ALLOWED_IPS_BY_CACHE_OUTCOME
-            .with_label_values(&["miss"])
-            .inc();
+        Metrics::get()
+            .proxy
+            .allowed_ips_cache_misses
+            .inc(CacheOutcome::Miss);
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         let allowed_ips = Arc::new(auth_info.allowed_ips);
         let user = &user_info.user;
         if let Some(project_id) = auth_info.project_id {
-            let ep_int = ep.into();
+            let normalized_ep_int = normalized_ep.into();
             self.caches.project_info.insert_role_secret(
                 project_id,
-                ep_int,
+                normalized_ep_int,
                 user.into(),
                 auth_info.secret.clone(),
             );
-            self.caches
-                .project_info
-                .insert_allowed_ips(project_id, ep_int, allowed_ips.clone());
+            self.caches.project_info.insert_allowed_ips(
+                project_id,
+                normalized_ep_int,
+                allowed_ips.clone(),
+            );
             ctx.set_project_id(project_id);
         }
         Ok((

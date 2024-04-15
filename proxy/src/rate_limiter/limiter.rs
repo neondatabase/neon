@@ -17,20 +17,26 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Duration, Instant};
 use tracing::info;
 
-use crate::{intern::EndpointIdInt, EndpointId};
+use crate::{
+    intern::EndpointIdInt,
+    {
+        metrics::{Metrics, RateLimit},
+        EndpointId,
+    },
+};
 
 use super::{
     limit_algorithm::{LimitAlgorithm, Sample},
     RateLimiterConfig,
 };
 
-pub struct RedisRateLimiter {
+pub struct GlobalRateLimiter {
     data: Vec<RateBucket>,
-    info: &'static [RateBucketInfo],
+    info: Vec<RateBucketInfo>,
 }
 
-impl RedisRateLimiter {
-    pub fn new(info: &'static [RateBucketInfo]) -> Self {
+impl GlobalRateLimiter {
+    pub fn new(info: Vec<RateBucketInfo>) -> Self {
         Self {
             data: vec![
                 RateBucket {
@@ -50,7 +56,7 @@ impl RedisRateLimiter {
         let should_allow_request = self
             .data
             .iter_mut()
-            .zip(self.info)
+            .zip(&self.info)
             .all(|(bucket, info)| bucket.should_allow_request(info, now, 1));
 
         if should_allow_request {
@@ -457,12 +463,9 @@ impl Limiter {
             }
             new_limit
         };
-        crate::metrics::RATE_LIMITER_LIMIT
-            .with_label_values(&["expected"])
-            .set(new_limit as i64);
-        crate::metrics::RATE_LIMITER_LIMIT
-            .with_label_values(&["actual"])
-            .set(actual_limit as i64);
+        let metric = &Metrics::get().semaphore_control_plane_limit;
+        metric.set(RateLimit::Expected, new_limit as i64);
+        metric.set(RateLimit::Actual, actual_limit as i64);
         self.limits.store(new_limit, Ordering::Release);
         #[cfg(test)]
         if let Some(n) = &self.notifier {
@@ -519,7 +522,10 @@ impl reqwest_middleware::Middleware for Limiter {
         extensions: &mut task_local_extensions::Extensions,
         next: reqwest_middleware::Next<'_>,
     ) -> reqwest_middleware::Result<reqwest::Response> {
-        let start = Instant::now();
+        let timer = Metrics::get()
+            .proxy
+            .control_plane_token_acquire_seconds
+            .start_timer();
         let token = self
             .acquire_timeout(self.config.timeout)
             .await
@@ -533,8 +539,12 @@ impl reqwest_middleware::Middleware for Limiter {
                     .into(),
                 )
             })?;
-        info!(duration = ?start.elapsed(), "waiting for token to connect to the control plane");
-        crate::metrics::RATE_LIMITER_ACQUIRE_LATENCY.observe(start.elapsed().as_secs_f64());
+        let duration = timer.observe();
+        info!(
+            ?duration,
+            "waiting for token to connect to the control plane"
+        );
+
         match next.run(req, extensions).await {
             Ok(response) => {
                 self.release(token, Some(Outcome::from_reqwest_response(&response)))
