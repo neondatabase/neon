@@ -32,4 +32,4 @@ def test_walredo_process_kind_config(neon_env_builder: NeonEnvBuilder, kind: str
             assert count == 100
 
     status = ps_http.tenant_status(env.initial_tenant)
-    assert status["walredo"]["process_kind"] == kind
+    assert status["walredo"]["process"]["kind"] == kind

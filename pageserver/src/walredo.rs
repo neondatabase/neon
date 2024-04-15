@@ -35,7 +35,7 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::key::key_to_rel_block;
-use pageserver_api::models::WalRedoManagerStatus;
+use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
 use pageserver_api::shard::TenantShardId;
 use std::sync::Arc;
 use std::time::Duration;
@@ -150,11 +150,13 @@ impl PostgresRedoManager {
                     chrono::Utc::now().checked_sub_signed(chrono::Duration::from_std(age).ok()?)
                 })
             },
-            pid: self.redo_process.get().map(|p| p.id()),
-            process_kind: self
+            process: self
                 .redo_process
                 .get()
-                .map(|p| std::borrow::Cow::Borrowed(p.kind().into())),
+                .map(|p| WalRedoManagerProcessStatus {
+                    pid: p.id(),
+                    kind: std::borrow::Cow::Borrowed(p.kind().into()),
+                }),
         }
     }
 }

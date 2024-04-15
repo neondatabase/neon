@@ -747,10 +747,17 @@ pub struct TimelineGcRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalRedoManagerProcessStatus {
+    pub pid: u32,
+    /// The strum-generated `into::<&'static str>()` for `pageserver::walredo::ProcessKind`.
+    /// `ProcessKind` are a transitory thing, so, they have no enum representation in `pageserver_api`.
+    pub kind: Cow<'static, str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRedoManagerStatus {
     pub last_redo_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub pid: Option<u32>,
-    pub process_kind: Option<Cow<'static, str>>,
+    pub process: Option<WalRedoManagerProcessStatus>,
 }
 
 /// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating
