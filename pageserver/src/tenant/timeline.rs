@@ -2978,7 +2978,10 @@ impl Timeline {
             .await?;
 
             keyspace.remove_overlapping_with(&completed);
-            if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
+            if keyspace.total_size() == 0
+                || timeline.ancestor_timeline.is_none()
+                || keyspace.overlaps(&Key::raw_key_range())
+            {
                 break;
             }
 
