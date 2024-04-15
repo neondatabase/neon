@@ -113,40 +113,40 @@ impl WalRedoProcess {
         let child = scopeguard::ScopeGuard::into_inner(child);
 
         tokio::spawn(
-        async move {
-            scopeguard::defer! {
-                debug!("wal-redo-postgres stderr_logger_task finished");
-                crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_finished.inc();
-            }
-            debug!("wal-redo-postgres stderr_logger_task started");
-            crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_started.inc();
+            async move {
+                scopeguard::defer! {
+                    debug!("wal-redo-postgres stderr_logger_task finished");
+                    crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_finished.inc();
+                }
+                debug!("wal-redo-postgres stderr_logger_task started");
+                crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_started.inc();
 
-            use tokio::io::AsyncBufReadExt;
-            let mut stderr_lines = tokio::io::BufReader::new(stderr);
-            let mut buf = Vec::new();
-            let res = loop {
-                buf.clear();
-                // TODO we don't trust the process to cap its stderr length.
-                // Currently it can do unbounded Vec allocation.
-                match stderr_lines.read_until(b'\n', &mut buf).await {
-                    Ok(0) => break Ok(()), // eof
-                    Ok(num_bytes) => {
-                        let output = String::from_utf8_lossy(&buf[..num_bytes]);
-                        error!(%output, "received output");
+                use tokio::io::AsyncBufReadExt;
+                let mut stderr_lines = tokio::io::BufReader::new(stderr);
+                let mut buf = Vec::new();
+                let res = loop {
+                    buf.clear();
+                    // TODO we don't trust the process to cap its stderr length.
+                    // Currently it can do unbounded Vec allocation.
+                    match stderr_lines.read_until(b'\n', &mut buf).await {
+                        Ok(0) => break Ok(()), // eof
+                        Ok(num_bytes) => {
+                            let output = String::from_utf8_lossy(&buf[..num_bytes]);
+                            error!(%output, "received output");
+                        }
+                        Err(e) => {
+                            break Err(e);
+                        }
                     }
+                };
+                match res {
+                    Ok(()) => (),
                     Err(e) => {
-                        break Err(e);
+                        error!(error=?e, "failed to read from walredo stderr");
                     }
                 }
-            };
-            match res {
-                Ok(()) => (),
-                Err(e) => {
-                    error!(error=?e, "failed to read from walredo stderr");
-                }
-            }
-        }.instrument(tracing::info_span!(parent: None, "wal-redo-postgres-stderr", pid = child.id(), tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %pg_version))
-    );
+            }.instrument(tracing::info_span!(parent: None, "wal-redo-postgres-stderr", pid = child.id(), tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %pg_version))
+        );
 
         Ok(Self {
             conf,
