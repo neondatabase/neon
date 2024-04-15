@@ -659,42 +659,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TenantConfigResponse"
-        "400":
-          description: Malformed get tenanant config request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "404":
-          description: Tenand or timeline were not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/utilization:
     get:
