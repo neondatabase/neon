@@ -776,7 +776,9 @@ async fn get_timestamp_of_lsn_handler(
             let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
             json_response(StatusCode::OK, time)
         }
-        None => json_response(StatusCode::NOT_FOUND, ()),
+        None => Err(ApiError::NotFound(
+            anyhow::anyhow!("Timestamp for lsn {} not found", lsn).into(),
+        )),
     }
 }
 
