@@ -145,14 +145,15 @@ fn bench_impl(
     let manager = PostgresRedoManager::new(conf, tenant_shard_id);
     let manager = Arc::new(manager);
 
+    // divide the amount of work equally among the clients.
+    let nredos_per_client = n_redos / nclients;
     for _ in 0..nclients {
         rt.block_on(async {
             tasks.spawn(client(
                 Arc::clone(&manager),
                 Arc::clone(&start),
                 Arc::clone(&redo_work),
-                // divide the amount of work equally among the clients
-                n_redos / nclients,
+                nredos_per_client,
             ))
         });
     }
@@ -166,14 +167,16 @@ fn bench_impl(
     });
 
     // consistency check to ensure process kind setting worked
-    assert_eq!(
-        manager
-            .status()
-            .process
-            .map(|p| p.kind)
-            .expect("the benchmark work causes a walredo process to be spawned"),
-        std::borrow::Cow::Borrowed(process_kind.into())
-    );
+    if nredos_per_client > 0 {
+        assert_eq!(
+            manager
+                .status()
+                .process
+                .map(|p| p.kind)
+                .expect("the benchmark work causes a walredo process to be spawned"),
+            std::borrow::Cow::Borrowed(process_kind.into())
+        );
+    }
 
     elapsed
 }
