@@ -164,8 +164,18 @@ impl RequestMonitoring {
         self.auth_method = Some(auth_method);
     }
 
+    pub fn has_private_peer_addr(&self) -> bool {
+        match self.peer_addr {
+            IpAddr::V4(ip) => ip.is_private(),
+            _ => false,
+        }
+    }
+
     pub fn set_error_kind(&mut self, kind: ErrorKind) {
-        Metrics::get().proxy.errors_total.inc(kind);
+        // Do not record errors from the private address to metrics.
+        if !self.has_private_peer_addr() {
+            Metrics::get().proxy.errors_total.inc(kind);
+        }
         if let Some(ep) = &self.endpoint_id {
             let metric = &Metrics::get().proxy.endpoints_affected_by_errors;
             let label = metric.with_labels(kind);
