@@ -672,12 +672,6 @@ paths:
               application/json:
                 schema:
                   $ref: "#/components/schemas/PageserverUtilization"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
 
 components:
   securitySchemes:
