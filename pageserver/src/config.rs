@@ -97,7 +97,7 @@ pub mod defaults {
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
-    pub const DEFAULT_WALREDO_PROCESS_KIND: &str = crate::walredo::ProcessKind::DEFAULT_TOML;
+    pub const DEFAULT_WALREDO_PROCESS_KIND: &str = "sync";
 
     ///
     /// Default built-in configuration file.

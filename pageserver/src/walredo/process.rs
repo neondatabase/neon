@@ -34,24 +34,6 @@ pub enum Kind {
     Async,
 }
 
-impl TryFrom<u8> for Kind {
-    type Error = u8;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        Ok(match value {
-            v if v == (Kind::Sync as u8) => Kind::Sync,
-            v if v == (Kind::Async as u8) => Kind::Async,
-            x => return Err(x),
-        })
-    }
-}
-
-impl Kind {
-    // TODO: remove
-    pub const DEFAULT: Kind = Kind::Sync;
-    pub const DEFAULT_TOML: &'static str = "sync";
-}
-
 pub(crate) enum Process {
     Sync(process_impl::process_std::WalRedoProcess),
     Async(process_impl::process_async::WalRedoProcess),
@@ -111,26 +93,5 @@ impl Process {
             Process::Sync(_) => Kind::Sync,
             Process::Async(_) => Kind::Async,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ensure_defaults_are_eq() {
-        #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-        struct Doc {
-            val: Kind,
-        }
-        let de = Doc { val: Kind::DEFAULT };
-        let default_toml = Kind::DEFAULT_TOML;
-        let ser = format!(
-            r#"
-        val = '{default_toml}'
-        "#
-        );
-        assert_eq!(de, toml_edit::de::from_str(&ser).unwrap(),);
     }
 }
