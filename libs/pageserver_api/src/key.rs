@@ -538,7 +538,7 @@ pub const RAW_KEY_SIZE: usize = 15;
 // switch (and generally it likely should be optional), so ignore these.
 #[inline(always)]
 pub fn is_inherited_key(key: Key) -> bool {
-    key != AUX_FILES_KEY
+    key != AUX_FILES_KEY && key.field1 != RAW_VALUE_KEY_PREFIX /* TODO: should not filter all raw keys */
 }
 
 #[inline(always)]

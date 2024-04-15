@@ -868,7 +868,6 @@ impl Timeline {
         vectored_res
     }
 
-
     /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn get_vectored_sequential_impl(
         &self,

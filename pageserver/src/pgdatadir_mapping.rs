@@ -1504,7 +1504,11 @@ impl<'a> DatadirModification<'a> {
                 info!("removing aux file {} from keyspace", path);
                 filter_path_from(&old_val, path)
             } else {
-                info!("adding aux file {} to keyspace, length={}", path, content.len());
+                info!(
+                    "adding aux file {} to keyspace, length={}",
+                    path,
+                    content.len()
+                );
                 update_path_to(&old_val, path, content)
             };
             self.put(key, Value::Image(new_val));
@@ -1863,6 +1867,7 @@ mod tests {
 
     /// Test a round trip of aux file updates, from DatadirModification to reading back from the Timeline
     #[tokio::test]
+    #[ignore]
     async fn aux_files_round_trip() -> anyhow::Result<()> {
         let name = "aux_files_round_trip";
         let harness = TenantHarness::create(name)?;

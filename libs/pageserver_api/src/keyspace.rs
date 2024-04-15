@@ -17,7 +17,9 @@ pub struct KeySpace {
 impl KeySpace {
     /// Create a key space with a single range
     pub fn single(key_range: Range<Key>) -> Self {
-        Self { ranges: vec![key_range] }
+        Self {
+            ranges: vec![key_range],
+        }
     }
 
     ///
