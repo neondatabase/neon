@@ -163,54 +163,12 @@ paths:
     delete:
       description: "Attempts to delete specified timeline. 500 and 409 errors should be retried"
       responses:
-        "400":
-          description: Error when no tenant id found in path or no timeline id
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
         "404":
-          description: Timeline not found
+          description: Timeline not found. This is the success path.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
-        "409":
-          description: Deletion is already in progress, continue polling
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ConflictError"
-        "412":
-          description: Tenant is missing, or timeline has children
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PreconditionFailedError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_timestamp_of_lsn:
     parameters:
