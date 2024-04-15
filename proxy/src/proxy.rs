@@ -7,6 +7,7 @@ pub mod handshake;
 pub mod passthrough;
 pub mod retry;
 pub mod wake_compute;
+pub use copy_bidirectional::copy_bidirectional_client_compute;
 
 use crate::{
     auth,
@@ -256,8 +257,9 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let tls = config.tls_config.as_ref();
 
+    let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(stream, mode.handshake_tls(tls));
+    let do_handshake = handshake(stream, mode.handshake_tls(tls), record_handshake_error);
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
