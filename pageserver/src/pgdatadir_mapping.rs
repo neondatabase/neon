@@ -1493,7 +1493,10 @@ impl<'a> DatadirModification<'a> {
             let old_val = match self.get(key, ctx).await {
                 Ok(val) => val,
                 Err(PageReconstructError::Other(err))
-                    if err.to_string().contains("could not find data for key") =>
+                    if err.to_string().contains("could not find data for key")
+                        || err
+                            .to_string()
+                            .contains("could not find layer with more data for key") =>
                 {
                     // TODO: make could not found a separate error type, avoid anyhow wrapping
                     Bytes::new()
