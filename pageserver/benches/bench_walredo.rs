@@ -169,7 +169,8 @@ fn bench_impl(
     assert_eq!(
         manager
             .status()
-            .process_kind
+            .process
+            .map(|p| p.kind)
             .expect("the benchmark work causes a walredo process to be spawned"),
         std::borrow::Cow::Borrowed(process_kind.into())
     );
