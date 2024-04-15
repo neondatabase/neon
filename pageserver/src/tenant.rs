@@ -386,7 +386,7 @@ impl WalRedoManager {
 
     pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
         match self {
-            WalRedoManager::Prod(m) => m.status(),
+            WalRedoManager::Prod(m) => Some(m.status()),
             #[cfg(test)]
             WalRedoManager::Test(_) => None,
         }
