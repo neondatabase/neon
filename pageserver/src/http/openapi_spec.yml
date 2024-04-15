@@ -316,24 +316,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TenantLocationConfigResponse"
-        "503":
-          description: Tenant's state cannot be changed right now.  Wait a few seconds and retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
         "409":
           description: |
             The tenant is already known to Pageserver in some way,
@@ -350,12 +332,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
   /v1/tenant/{tenant_id}/ignore:
     parameters:
       - name: tenant_id
