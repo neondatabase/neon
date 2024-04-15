@@ -413,6 +413,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SyntheticSizeResponse"
 
+  # This route has no handler. TODO: remove?
   /v1/tenant/{tenant_id}/size:
     parameters:
       - name: tenant_id
@@ -494,18 +495,6 @@ paths:
       responses:
         "200":
           description: Success
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_shard_id}/secondary/download:
     parameters:
