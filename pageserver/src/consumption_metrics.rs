@@ -304,7 +304,7 @@ async fn calculate_synthetic_size_worker(
                 continue;
             }
 
-            if !tenant_shard_id.is_zero() {
+            if !tenant_shard_id.is_shard_zero() {
                 // We only send consumption metrics from shard 0, so don't waste time calculating
                 // synthetic size on other shards.
                 continue;
