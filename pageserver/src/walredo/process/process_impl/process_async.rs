@@ -175,7 +175,7 @@ impl WalRedoProcess {
     /// # Cancel-Safety
     ///
     /// Cancellation safe.
-    #[instrument(skip_all, level = tracing::Level::DEBUG, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
     pub(crate) async fn apply_wal_records(
         &self,
         rel: RelTag,
