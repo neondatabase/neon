@@ -427,7 +427,7 @@ pub(super) async fn handle_walreceiver_connection(
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
-            let current_timeline_size = if timeline.tenant_shard_id.is_zero() {
+            let current_timeline_size = if timeline.tenant_shard_id.is_shard_zero() {
                 timeline
                     .get_current_logical_size(
                         crate::tenant::timeline::GetLogicalSizePriority::User,

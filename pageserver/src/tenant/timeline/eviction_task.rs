@@ -378,7 +378,7 @@ impl Timeline {
         gate: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
-        if !self.tenant_shard_id.is_zero() {
+        if !self.tenant_shard_id.is_shard_zero() {
             // Shards !=0 do not maintain accurate relation sizes, and do not need to calculate logical size
             // for consumption metrics (consumption metrics are only sent from shard 0).  We may therefore
             // skip imitating logical size accesses for eviction purposes.

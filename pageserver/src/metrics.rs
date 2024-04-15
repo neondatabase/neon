@@ -2089,7 +2089,7 @@ impl TimelineMetrics {
 
 pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
     // Only shard zero deals in synthetic sizes
-    if tenant_shard_id.is_zero() {
+    if tenant_shard_id.is_shard_zero() {
         let tid = tenant_shard_id.tenant_id.to_string();
         let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
     }
