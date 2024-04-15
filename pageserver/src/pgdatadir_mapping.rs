@@ -881,14 +881,19 @@ pub fn encode_aux_file_key(path: &str) -> anyhow::Result<Key> {
     if let Some(fname) = split_prefix(path, "pg_logical/mappings/") {
         let key = hash_to_raw_key(0x0101, fname.as_bytes());
         Ok(Key::from_raw_key_fixed(&key))
-    } else if let Some(fname) = split_prefix(path, "pg_replslot/") {
+    } else if let Some(fname) = split_prefix(path, "pg_logical/snapshots/") {
         let key = hash_to_raw_key(0x0102, fname.as_bytes());
         Ok(Key::from_raw_key_fixed(&key))
-    } else if let Some(fname) = split_prefix(path, "pg_logical/snapshots/") {
-        let key = hash_to_raw_key(0x0103, fname.as_bytes());
+    } else if path == "pg_logical/replorigin_checkpoint" {
+        let mut key = [0; RAW_KEY_SIZE];
+        key[0] = 0x01;
+        key[1] = 0x03;
+        Ok(Key::from_raw_key_fixed(&key))
+    } else if let Some(fname) = split_prefix(path, "pg_replslot/") {
+        let key = hash_to_raw_key(0x0201, fname.as_bytes());
         Ok(Key::from_raw_key_fixed(&key))
     } else {
-        let key = hash_to_raw_key(0x01FF, path.as_bytes());
+        let key = hash_to_raw_key(0xFFFF, path.as_bytes());
         warn!(
             "unsupported aux file type: {}, putting to other files, non-scan-able by prefix",
             path
