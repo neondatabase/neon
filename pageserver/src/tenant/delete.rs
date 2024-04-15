@@ -436,6 +436,11 @@ impl DeleteTenantFlow {
         .await
     }
 
+    /// Check whether background deletion of this tenant is currently in progress
+    pub(crate) fn is_in_progress(tenant: &Tenant) -> bool {
+        tenant.delete_progress.try_lock().is_err()
+    }
+
     async fn prepare(
         tenant: &Arc<Tenant>,
     ) -> Result<tokio::sync::OwnedMutexGuard<Self>, DeleteTenantError> {

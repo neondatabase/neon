@@ -1413,7 +1413,7 @@ impl TenantManager {
                 // If deletion is already in progress, return success (the semantics of this
                 // function are to rerturn success afterr deletion is spawned in background).
                 // Otherwise fall through and let [`DeleteTenantFlow`] handle this state.
-                if tenant.delete_progress.try_lock().is_err() {
+                if DeleteTenantFlow::is_in_progress(&tenant) {
                     // The `delete_progress` lock is held: deletion is already happening
                     // in the bacckground
                     slot_guard.revert();
