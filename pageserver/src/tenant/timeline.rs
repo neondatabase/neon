@@ -682,6 +682,23 @@ pub enum GetVectoredImpl {
     Vectored,
 }
 
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum GetImpl {
+    Legacy,
+    Vectored,
+}
+
 pub(crate) enum WaitLsnWaiter<'a> {
     Timeline(&'a Timeline),
     Tenant,
