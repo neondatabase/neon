@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    id_lock_map::{IdLockMap, WrappedWriteGuard},
+    id_lock_map::{request_write_lock_timeout, IdLockMap, WrappedWriteGuard},
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::ReconcileError,
     scheduler::ScheduleContext,
@@ -70,6 +70,9 @@ use crate::{
         ReconcilerWaiter, TenantShard,
     },
 };
+
+// For operations that should be quick, like attaching a new tenant
+const SHORT_LOCK_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(1);
 
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -263,6 +266,54 @@ struct ShardUpdate {
 impl Service {
     pub fn get_config(&self) -> &Config {
         &self.config
+    }
+
+    async fn request_tenant_lock_with_timeout(
+        &self,
+        key: TenantId,
+        operation: &'static str,
+    ) -> Result<WrappedWriteGuard<()>, ApiError> {
+        let current_holder = self.tenant_op_locks.get_operation(key).unwrap_or("None");
+        request_write_lock_timeout(
+            &self.tenant_op_locks,
+            key,
+            operation,
+            SHORT_LOCK_ACQUISITION_TIMEOUT,
+        )
+        .await
+        .map_err(|_| {
+            ApiError::Timeout(
+                format!(
+                    "Cannot grab ex lock on {}, currently holding {}",
+                    key, current_holder
+                )
+                .into(),
+            )
+        })
+    }
+
+    async fn request_node_lock_with_timeout(
+        &self,
+        key: NodeId,
+        operation: &'static str,
+    ) -> Result<WrappedWriteGuard<()>, ApiError> {
+        let current_holder = self.node_op_locks.get_operation(key).unwrap_or("None");
+        request_write_lock_timeout(
+            &self.node_op_locks,
+            key,
+            operation,
+            SHORT_LOCK_ACQUISITION_TIMEOUT,
+        )
+        .await
+        .map_err(|_| {
+            ApiError::Timeout(
+                format!(
+                    "Cannot grab ex lock on {}, currently holding {}",
+                    key, current_holder
+                )
+                .into(),
+            )
+        })
     }
 
     /// Called once on startup, this function attempts to contact all pageservers to build an up-to-date
@@ -1528,10 +1579,8 @@ impl Service {
 
         // Exclude any concurrent attempts to create/access the same tenant ID
         let _tenant_lock = self
-            .tenant_op_locks
-            .exclusive(create_req.new_tenant_id.tenant_id, "tenant_create")
-            .await;
-
+            .request_tenant_lock_with_timeout(create_req.new_tenant_id.tenant_id, "tenant_create")
+            .await?;
         let (response, waiters) = self.do_tenant_create(create_req).await?;
 
         if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
@@ -1871,9 +1920,8 @@ impl Service {
     ) -> Result<TenantLocationConfigResponse, ApiError> {
         // We require an exclusive lock, because we are updating both persistent and in-memory state
         let _tenant_lock = self
-            .tenant_op_locks
-            .exclusive(tenant_shard_id.tenant_id, "tenant_location_config")
-            .await;
+            .request_tenant_lock_with_timeout(tenant_shard_id.tenant_id, "tenant_location_config")
+            .await?;
 
         if !tenant_shard_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
@@ -1992,9 +2040,8 @@ impl Service {
     pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
         let _tenant_lock = self
-            .tenant_op_locks
-            .exclusive(req.tenant_id, "tenant_config_set")
-            .await;
+            .request_tenant_lock_with_timeout(req.tenant_id, "tenant_config_set")
+            .await?;
 
         let tenant_id = req.tenant_id;
         let config = req.config;
@@ -2084,9 +2131,8 @@ impl Service {
         done_if_after: Cow<'_, str>,
     ) -> Result<(), ApiError> {
         let _tenant_lock = self
-            .tenant_op_locks
-            .exclusive(tenant_id, "tenant_time_travel_remote_storage")
-            .await;
+            .request_tenant_lock_with_timeout(tenant_id, "tenant_time_travel_remote_storage")
+            .await?;
 
         let node = {
             let locked = self.inner.read().unwrap();
@@ -2272,9 +2318,8 @@ impl Service {
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
         let _tenant_lock = self
-            .tenant_op_locks
-            .exclusive(tenant_id, "tenant_delete")
-            .await;
+            .request_tenant_lock_with_timeout(tenant_id, "tenant_delete")
+            .await?;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -2375,9 +2420,8 @@ impl Service {
     ) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
         let _tenant_lock = self
-            .tenant_op_locks
-            .exclusive(tenant_id, "tenant_update_policy")
-            .await;
+            .request_tenant_lock_with_timeout(tenant_id, "tenant_update_policy")
+            .await?;
 
         let TenantPolicyRequest {
             placement,
@@ -3089,9 +3133,8 @@ impl Service {
         // TODO: return 503 if we get stuck waiting for this lock
         // (issue https://github.com/neondatabase/neon/issues/7108)
         let _tenant_lock = self
-            .tenant_op_locks
-            .exclusive(tenant_id, "tenant_shard_split")
-            .await;
+            .request_tenant_lock_with_timeout(tenant_id, "tenant_shard_split")
+            .await?;
 
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
@@ -3771,9 +3814,8 @@ impl Service {
         register_req: NodeRegisterRequest,
     ) -> Result<(), ApiError> {
         let _node_lock = self
-            .node_op_locks
-            .exclusive(register_req.node_id, "node_register")
-            .await;
+            .request_node_lock_with_timeout(register_req.node_id, "node_register")
+            .await?;
 
         // Pre-check for an already-existing node
         {
@@ -3863,9 +3905,8 @@ impl Service {
         scheduling: Option<NodeSchedulingPolicy>,
     ) -> Result<(), ApiError> {
         let _node_lock = self
-            .node_op_locks
-            .exclusive(node_id, "node_configure")
-            .await;
+            .request_node_lock_with_timeout(node_id, "node_configure")
+            .await?;
 
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
