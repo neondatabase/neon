@@ -447,14 +447,6 @@ pub struct MissingKeyError {
 
 impl std::fmt::Display for MissingKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (r, c, l) in &self.traversal_path {
-            writeln!(
-                f,
-                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r, c, l,
-            )?;
-        }
-
         if self.no_initial_image {
             // Records are found in this timeline but no image layer or initial delta record was found.
             write!(
@@ -471,6 +463,18 @@ impl std::fmt::Display for MissingKeyError {
                 f,
                 "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}",
                 self.key, self.shard, self.cont_lsn, self.request_lsn
+            )?;
+        }
+
+        if !self.traversal_path.is_empty() {
+            writeln!(f)?;
+        }
+
+        for (r, c, l) in &self.traversal_path {
+            writeln!(
+                f,
+                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
+                r, c, l,
             )?;
         }
 
