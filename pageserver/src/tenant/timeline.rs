@@ -797,7 +797,9 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
+        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(crate::metrics::GetKind::Singular)
+            .start_timer();
         let path = self
             .get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
