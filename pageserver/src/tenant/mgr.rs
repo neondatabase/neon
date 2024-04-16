@@ -678,12 +678,19 @@ pub async fn init_tenant_mgr(
                     }
                 }
             }
-            LocationMode::Secondary(secondary_conf) => TenantSlot::Secondary(SecondaryTenant::new(
-                tenant_shard_id,
-                shard_identity,
-                location_conf.tenant_conf,
-                &secondary_conf,
-            )),
+            LocationMode::Secondary(secondary_conf) => {
+                info!(
+                    tenant_id = %tenant_shard_id.tenant_id,
+                    shard_id = %tenant_shard_id.shard_slug(),
+                    "Starting secondary tenant"
+                );
+                TenantSlot::Secondary(SecondaryTenant::new(
+                    tenant_shard_id,
+                    shard_identity,
+                    location_conf.tenant_conf,
+                    &secondary_conf,
+                ))
+            }
         };
 
         tenants.insert(tenant_shard_id, slot);
