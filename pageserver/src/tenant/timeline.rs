@@ -740,7 +740,7 @@ impl Timeline {
         let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
         let elapsed = start.elapsed();
         crate::metrics::RECONSTRUCT_TIME
-            .for_result(&res)
+            .for_get_kind(crate::metrics::GetKind::Singular)
             .observe(elapsed.as_secs_f64());
 
         if cfg!(feature = "testing") && res.is_err() {
