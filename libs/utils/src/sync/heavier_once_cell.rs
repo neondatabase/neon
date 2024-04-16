@@ -262,13 +262,17 @@ impl<'a, T> Guard<'a, T> {
 
 impl<T> Inner<T> {
     pub fn take_and_deinit(&mut self) -> Option<(T, InitPermit)> {
+        let Some(value) = self.value.take() else {
+            return None;
+        };
+
         let mut swapped = Inner::default();
         let sem = swapped.init_semaphore.clone();
         // acquire and forget right away, moving the control over to InitPermit
         sem.try_acquire().expect("we just created this").forget();
-        std::mem::swap(self, &mut swapped);
         let permit = InitPermit(sem);
-        swapped.value.map(|v| (v, permit))
+        std::mem::swap(self, &mut swapped);
+        Some((value, permit))
     }
 }
 
