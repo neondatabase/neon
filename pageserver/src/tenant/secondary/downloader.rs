@@ -647,6 +647,12 @@ impl<'a> TenantDownloader<'a> {
                 progress.bytes_downloaded += layer_byte_count;
                 progress.layers_downloaded += layer_count;
             }
+
+            for delete_timeline in &delete_timelines {
+                // We haven't removed from disk yet, but optimistically remove from in-memory state: if removal
+                // from disk fails that will be a fatal error.
+                detail.timelines.remove(delete_timeline);
+            }
         }
 
         // Execute accumulated deletions
