@@ -601,8 +601,8 @@ mod tests {
     fn masked_ip() {
         let ip_a = IpAddr::V4([127, 0, 0, 1].into());
         let ip_b = IpAddr::V4([127, 0, 0, 2].into());
-        let ip_c = IpAddr::V4([192,168,1,101].into());
-        let ip_d = IpAddr::V4([192,168,1,102].into());
+        let ip_c = IpAddr::V4([192, 168, 1, 101].into());
+        let ip_d = IpAddr::V4([192, 168, 1, 102].into());
         let ip_e = IpAddr::V6("abcd:abcd:abcd:abcd:abcd:abcd:abcd:abcd".parse().unwrap());
         let ip_f = IpAddr::V6("abcd:abcd:abcd:abcd:1234:abcd:abcd:abcd".parse().unwrap());
 
