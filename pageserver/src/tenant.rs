@@ -4694,7 +4694,12 @@ mod tests {
         let read_lsn = child_timeline.get_last_record_lsn();
 
         let vectored_res = child_timeline
-            .get_vectored_impl(aux_keyspace.clone(), read_lsn, &ctx)
+            .get_vectored_impl(
+                aux_keyspace.clone(),
+                read_lsn,
+                ValuesReconstructState::new(),
+                &ctx,
+            )
             .await;
 
         child_timeline
