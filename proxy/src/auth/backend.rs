@@ -6,7 +6,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ipnet::Ipv6Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 pub use link::LinkAuthError;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
@@ -187,14 +187,11 @@ pub struct MaskedIp(IpAddr);
 impl MaskedIp {
     fn new(value: IpAddr, prefix: u8) -> Self {
         match value {
-            // no masking
-            IpAddr::V4(v4) => Self(IpAddr::V4(v4)),
-            // mask to /64
+            IpAddr::V4(v4) => Self(IpAddr::V4(
+                Ipv4Net::new(v4, prefix).map_or(v4, |x| x.trunc().addr()),
+            )),
             IpAddr::V6(v6) => Self(IpAddr::V6(
-                Ipv6Net::new(v6, prefix)
-                    .expect("64 is a valid prefix length")
-                    .trunc()
-                    .addr(),
+                Ipv6Net::new(v6, prefix).map_or(v6, |x| x.trunc().addr()),
             )),
         }
     }
@@ -520,7 +517,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{net::IpAddr, sync::Arc};
 
     use bytes::BytesMut;
     use fallible_iterator::FallibleIterator;
@@ -533,7 +530,7 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
     use crate::{
-        auth::{ComputeUserInfoMaybeEndpoint, IpPattern},
+        auth::{backend::MaskedIp, ComputeUserInfoMaybeEndpoint, IpPattern},
         config::AuthenticationConfig,
         console::{
             self,
@@ -598,6 +595,24 @@ mod tests {
                 break m;
             }
         }
+    }
+
+    #[test]
+    fn masked_ip() {
+        let ip_a = IpAddr::V4([127, 0, 0, 1].into());
+        let ip_b = IpAddr::V4([127, 0, 0, 2].into());
+        let ip_c = IpAddr::V4([192,168,1,101].into());
+        let ip_d = IpAddr::V4([192,168,1,102].into());
+        let ip_e = IpAddr::V6("abcd:abcd:abcd:abcd:abcd:abcd:abcd:abcd".parse().unwrap());
+        let ip_f = IpAddr::V6("abcd:abcd:abcd:abcd:1234:abcd:abcd:abcd".parse().unwrap());
+
+        assert_ne!(MaskedIp::new(ip_a, 64), MaskedIp::new(ip_b, 64));
+        assert_ne!(MaskedIp::new(ip_a, 32), MaskedIp::new(ip_b, 32));
+        assert_eq!(MaskedIp::new(ip_a, 30), MaskedIp::new(ip_b, 30));
+        assert_eq!(MaskedIp::new(ip_c, 30), MaskedIp::new(ip_d, 30));
+
+        assert_ne!(MaskedIp::new(ip_e, 128), MaskedIp::new(ip_f, 128));
+        assert_eq!(MaskedIp::new(ip_e, 64), MaskedIp::new(ip_f, 64));
     }
 
     #[tokio::test]
