@@ -87,6 +87,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Deletion is already in progress, continue polling
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "412":
+          description: Deletion may not proceed, tenant is not in Active state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreconditionFailedError"
 
   /v1/tenant/{tenant_id}/time_travel_remote_storage:
     parameters:
