@@ -969,11 +969,26 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        use crate::metrics::GetKind;
+
         let mut reconstruct_state = ValuesReconstructState::new();
 
+        let get_kind = if keyspace.total_size() == 1 {
+            GetKind::Singular
+        } else {
+            GetKind::Vectored
+        };
+
+        let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
             .await?;
+        get_data_timer.stop_and_record();
 
+        let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
         for (key, res) in reconstruct_state.keys {
@@ -989,6 +1004,7 @@ impl Timeline {
                 }
             }
         }
+        reconstruct_timer.stop_and_record();
 
         // Note that this is an approximation. Tracking the exact number of layers visited
         // per key requires virtually unbounded memory usage and is inefficient
