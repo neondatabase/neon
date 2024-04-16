@@ -2,7 +2,6 @@ use std::{
     borrow::Cow,
     collections::hash_map::RandomState,
     hash::{BuildHasher, Hash},
-    net::IpAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -18,11 +17,8 @@ use tokio::time::{timeout, Duration, Instant};
 use tracing::info;
 
 use crate::{
-    intern::EndpointIdInt,
-    {
-        metrics::{Metrics, RateLimit},
-        EndpointId,
-    },
+    metrics::{Metrics, RateLimit},
+    EndpointId,
 };
 
 use super::{
@@ -80,9 +76,6 @@ impl GlobalRateLimiter {
 // does not look very nice (`SSL SYSCALL error: Undefined error: 0`), so for now
 // I went with a more expensive way that yields user-friendlier error messages.
 pub type EndpointRateLimiter = BucketRateLimiter<EndpointId, StdRng, RandomState>;
-
-// This can't be just per IP because that would limit some PaaS that share IP addresses
-pub type AuthRateLimiter = BucketRateLimiter<(EndpointIdInt, IpAddr), StdRng, RandomState>;
 
 pub struct BucketRateLimiter<Key, Rand = StdRng, Hasher = RandomState> {
     map: DashMap<Key, Vec<RateBucket>, Hasher>,
@@ -153,19 +146,6 @@ impl RateBucketInfo {
         Self::new(300, Duration::from_secs(1)),
         Self::new(200, Duration::from_secs(60)),
         Self::new(100, Duration::from_secs(600)),
-    ];
-
-    /// All of these are per endpoint-ip pair.
-    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
-    ///
-    /// First bucket: 300mcpus total per endpoint-ip pair
-    /// * 1228800 requests per second with 1 hash rounds. (endpoint rate limiter will catch this first)
-    /// * 300 requests per second with 4096 hash rounds.
-    /// * 2 requests per second with 600000 hash rounds.
-    pub const DEFAULT_AUTH_SET: [Self; 3] = [
-        Self::new(300 * 4096, Duration::from_secs(1)),
-        Self::new(200 * 4096, Duration::from_secs(60)),
-        Self::new(100 * 4096, Duration::from_secs(600)),
     ];
 
     pub fn validate(info: &mut [Self]) -> anyhow::Result<()> {
@@ -782,32 +762,5 @@ mod tests {
             limiter.check(i, 1);
         }
         assert!(limiter.map.len() < 150_000);
-    }
-
-    #[test]
-    fn test_default_auth_set() {
-        // these values used to exceed u32::MAX
-        assert_eq!(
-            RateBucketInfo::DEFAULT_AUTH_SET,
-            [
-                RateBucketInfo {
-                    interval: Duration::from_secs(1),
-                    max_rpi: 300 * 4096,
-                },
-                RateBucketInfo {
-                    interval: Duration::from_secs(60),
-                    max_rpi: 200 * 4096 * 60,
-                },
-                RateBucketInfo {
-                    interval: Duration::from_secs(600),
-                    max_rpi: 100 * 4096 * 600,
-                }
-            ]
-        );
-
-        for x in RateBucketInfo::DEFAULT_AUTH_SET {
-            let y = x.to_string().parse().unwrap();
-            assert_eq!(x, y);
-        }
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
-    auth,
-    rate_limiter::{AuthRateLimiter, RateBucketInfo},
+    auth::{self, backend::AuthRateLimiter},
+    rate_limiter::RateBucketInfo,
     serverless::GlobalConnPoolOptions,
 };
 use anyhow::{bail, ensure, Context, Ok};
@@ -58,6 +58,7 @@ pub struct AuthenticationConfig {
     pub scram_protocol_timeout: tokio::time::Duration,
     pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,
+    pub rate_limit_ip_subnet: u8,
 }
 
 impl TlsConfig {

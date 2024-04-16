@@ -7,6 +7,7 @@ use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use futures::future::Either;
 use proxy::auth;
+use proxy::auth::backend::AuthRateLimiter;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
@@ -20,7 +21,6 @@ use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
-use proxy::rate_limiter::AuthRateLimiter;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
@@ -152,6 +152,9 @@ struct ProxyCliArgs {
     /// Authentication rate limiter max number of hashes per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
     auth_rate_limit: Vec<RateBucketInfo>,
+    /// The IP subnet to use when considering whether two IP addresses are considered the same.
+    #[clap(long, default_value_t = 64)]
+    auth_rate_limit_ip_subnet: u8,
     /// Redis rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
@@ -575,6 +578,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
+        rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
