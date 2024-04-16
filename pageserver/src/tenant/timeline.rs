@@ -2836,7 +2836,7 @@ impl Timeline {
                             // getting stuck in the loop.
                             return Err(PageReconstructError::MissingKey(MissingKeyError {
                                 no_initial_image: true,
-                                key: key,
+                                key,
                                 shard: self.shard_identity.get_shard_number(&key),
                                 cont_lsn: Lsn(cont_lsn.0 - 1),
                                 request_lsn,
@@ -2851,7 +2851,7 @@ impl Timeline {
                 ValueReconstructResult::Missing => {
                     return Err(PageReconstructError::MissingKey(MissingKeyError {
                         no_initial_image: false,
-                        key: key,
+                        key,
                         shard: self.shard_identity.get_shard_number(&key),
                         cont_lsn,
                         request_lsn,
