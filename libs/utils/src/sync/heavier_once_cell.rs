@@ -262,9 +262,7 @@ impl<'a, T> Guard<'a, T> {
 
 impl<T> Inner<T> {
     pub fn take_and_deinit(&mut self) -> Option<(T, InitPermit)> {
-        let Some(value) = self.value.take() else {
-            return None;
-        };
+        let value = self.value.take()?;
 
         let mut swapped = Inner::default();
         let sem = swapped.init_semaphore.clone();
