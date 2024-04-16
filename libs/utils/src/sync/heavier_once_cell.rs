@@ -267,7 +267,8 @@ impl<T> Inner<T> {
         // acquire and forget right away, moving the control over to InitPermit
         sem.try_acquire().expect("we just created this").forget();
         std::mem::swap(self, &mut swapped);
-        swapped.value.map(|v| (v, InitPermit(sem)))
+        let permit = InitPermit(sem);
+        swapped.value.map(|v| (v, permit))
     }
 }
 
