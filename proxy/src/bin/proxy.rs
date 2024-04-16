@@ -152,6 +152,9 @@ struct ProxyCliArgs {
     /// Authentication rate limiter max number of hashes per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
     auth_rate_limit: Vec<RateBucketInfo>,
+    /// The IP subnet to use when considering whether two IP addresses are considered the same.
+    #[clap(long, default_value_t = 64)]
+    auth_rate_limit_ip_subnet: u8,
     /// Redis rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
