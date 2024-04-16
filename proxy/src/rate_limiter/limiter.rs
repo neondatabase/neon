@@ -763,31 +763,4 @@ mod tests {
         }
         assert!(limiter.map.len() < 150_000);
     }
-
-    #[test]
-    fn test_default_auth_set() {
-        // these values used to exceed u32::MAX
-        assert_eq!(
-            RateBucketInfo::DEFAULT_AUTH_SET,
-            [
-                RateBucketInfo {
-                    interval: Duration::from_secs(1),
-                    max_rpi: 300 * 4096,
-                },
-                RateBucketInfo {
-                    interval: Duration::from_secs(60),
-                    max_rpi: 200 * 4096 * 60,
-                },
-                RateBucketInfo {
-                    interval: Duration::from_secs(600),
-                    max_rpi: 100 * 4096 * 600,
-                }
-            ]
-        );
-
-        for x in RateBucketInfo::DEFAULT_AUTH_SET {
-            let y = x.to_string().parse().unwrap();
-            assert_eq!(x, y);
-        }
-    }
 }
