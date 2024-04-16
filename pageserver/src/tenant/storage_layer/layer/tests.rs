@@ -725,7 +725,7 @@ async fn evict_and_wait_does_not_wait_for_download() {
 fn layer_size() {
     assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2040);
     assert_eq!(std::mem::size_of::<PersistentLayerDesc>(), 104);
-    assert_eq!(std::mem::size_of::<LayerInner>(), 2328);
+    assert_eq!(std::mem::size_of::<LayerInner>(), 2344);
     // it also has the utf8 path
 }
 
