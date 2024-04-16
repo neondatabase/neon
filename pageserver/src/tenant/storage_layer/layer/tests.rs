@@ -721,6 +721,8 @@ async fn evict_and_wait_does_not_wait_for_download() {
     layer.evict_and_wait(FOREVER).await.unwrap();
 }
 
+/// A test case to remind you the cost of these structures. You can bump the size limit
+/// below if it is really necessary to add more fields to the structures.
 #[test]
 fn layer_size() {
     assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2040);
