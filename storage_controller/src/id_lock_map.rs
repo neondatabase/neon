@@ -2,6 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::OwnedRwLockWriteGuard;
 
+/// A wrapper around `OwnedRwLockWriteGuard` that holds the identifier of the operation
+/// that is holding the exclusive lock.
 pub struct WrappedWriteGuard<T> {
     _inner: OwnedRwLockWriteGuard<T>,
     operation: Arc<std::sync::RwLock<Option<&'static str>>>,
