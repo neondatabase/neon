@@ -1,8 +1,5 @@
 use std::ffi::CString;
 
-use postgres_ffi::WAL_SEGMENT_SIZE;
-use utils::{id::TenantTimelineId, lsn::Lsn};
-
 use crate::{
     api_bindings::{create_api, take_vec_u8, Level},
     bindings::{
@@ -10,6 +7,8 @@ use crate::{
         WalProposerCreate, WalProposerFree, WalProposerPoll, WalProposerStart,
     },
 };
+use postgres_ffi::WAL_SEGMENT_SIZE;
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 /// Rust high-level wrapper for C walproposer API. Many methods are not required
 /// for simple cases, hence todo!() in default implementations.
@@ -25,6 +24,10 @@ pub trait ApiImpl {
     }
 
     fn get_flush_rec_ptr(&self) -> u64 {
+        todo!()
+    }
+
+    fn update_donor(&self, _donor: &mut Safekeeper, _donor_lsn: u64) {
         todo!()
     }
 
@@ -274,6 +277,7 @@ mod tests {
         sync::{atomic::AtomicUsize, mpsc::sync_channel},
     };
 
+    use std::cell::UnsafeCell;
     use utils::id::TenantTimelineId;
 
     use crate::{api_bindings::Level, bindings::NeonWALReadResult, walproposer::Wrapper};
@@ -297,6 +301,8 @@ mod tests {
         replies_ptr: AtomicUsize,
         // channel to send LSN to the main thread
         sync_channel: std::sync::mpsc::SyncSender<u64>,
+        // Shmem state, used for storing donor info
+        shmem: UnsafeCell<crate::bindings::WalproposerShmemState>,
     }
 
     impl MockImpl {
@@ -327,9 +333,19 @@ mod tests {
     }
 
     impl ApiImpl for MockImpl {
+        fn get_shmem_state(&self) -> *mut crate::bindings::WalproposerShmemState {
+            self.shmem.get()
+        }
+
         fn get_current_timestamp(&self) -> i64 {
             println!("get_current_timestamp");
             0
+        }
+
+        fn update_donor(&self, donor: &mut crate::bindings::Safekeeper, donor_lsn: u64) {
+            let mut shmem = unsafe { *self.get_shmem_state() };
+            shmem.propEpochStartLsn.value = donor_lsn;
+            shmem.donor_conninfo = donor.conninfo;
         }
 
         fn conn_status(
@@ -507,6 +523,7 @@ mod tests {
             ],
             replies_ptr: AtomicUsize::new(0),
             sync_channel: sender,
+            shmem: UnsafeCell::new(crate::api_bindings::empty_shmem()),
         });
         let config = crate::walproposer::Config {
             ttid,

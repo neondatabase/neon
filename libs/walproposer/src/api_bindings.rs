@@ -50,6 +50,14 @@ extern "C" fn get_flush_rec_ptr(wp: *mut WalProposer) -> XLogRecPtr {
     }
 }
 
+extern "C" fn update_donor(wp: *mut WalProposer, donor: *mut Safekeeper, donor_lsn: XLogRecPtr) {
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).update_donor(&mut (*donor), donor_lsn)
+    }
+}
+
 extern "C" fn get_current_timestamp(wp: *mut WalProposer) -> TimestampTz {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
@@ -391,6 +399,7 @@ pub(crate) fn create_api() -> walproposer_api {
         get_shmem_state: Some(get_shmem_state),
         start_streaming: Some(start_streaming),
         get_flush_rec_ptr: Some(get_flush_rec_ptr),
+        update_donor: Some(update_donor),
         get_current_timestamp: Some(get_current_timestamp),
         conn_error_message: Some(conn_error_message),
         conn_status: Some(conn_status),
@@ -418,6 +427,31 @@ pub(crate) fn create_api() -> walproposer_api {
         finish_sync_safekeepers: Some(finish_sync_safekeepers),
         process_safekeeper_feedback: Some(process_safekeeper_feedback),
         log_internal: Some(log_internal),
+    }
+}
+
+pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
+    let empty_feedback = crate::bindings::PageserverFeedback {
+        present: false,
+        currentClusterSize: 0,
+        last_received_lsn: 0,
+        disk_consistent_lsn: 0,
+        remote_consistent_lsn: 0,
+        replytime: 0,
+        shard_number: 0,
+    };
+
+    crate::bindings::WalproposerShmemState {
+        propEpochStartLsn: crate::bindings::pg_atomic_uint64 { value: 0 },
+        donor_name: [0; 64],
+        donor_conninfo: [0; 1024],
+        mutex: 0,
+        mineLastElectedTerm: crate::bindings::pg_atomic_uint64 { value: 0 },
+        backpressureThrottlingTime: crate::bindings::pg_atomic_uint64 { value: 0 },
+        currentClusterSize: crate::bindings::pg_atomic_uint64 { value: 0 },
+        shard_ps_feedback: [empty_feedback; 128],
+        num_shards: 0,
+        min_ps_feedback: empty_feedback,
     }
 }
 

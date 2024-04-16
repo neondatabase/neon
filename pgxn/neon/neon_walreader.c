@@ -36,10 +36,7 @@
 
 static NeonWALReadResult NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, TimeLineID tli);
 static NeonWALReadResult NeonWALReaderReadMsg(NeonWALReader *state);
-static void NeonWALReaderResetRemote(NeonWALReader *state);
 static bool NeonWALReadLocal(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, TimeLineID tli);
-static bool neon_wal_segment_open(NeonWALReader *state, XLogSegNo nextSegNo, TimeLineID *tli_p);
-static void neon_wal_segment_close(NeonWALReader *state);
 static bool is_wal_segment_exists(XLogSegNo segno, int segsize,
 								  TimeLineID tli);
 
@@ -82,7 +79,7 @@ struct NeonWALReader
 	XLogRecPtr	req_lsn;
 	Size		req_len;
 	Size		req_progress;
-	WalProposer *wp;			/* we learn donor through walproposer */
+	char		donor_conninfo[MAXCONNINFO];
 	char		donor_name[64]; /* saved donor safekeeper name for logging */
 	/* state of connection to safekeeper */
 	NeonWALReaderRemoteState rem_state;
@@ -107,7 +104,7 @@ struct NeonWALReader
 
 /* palloc and initialize NeonWALReader */
 NeonWALReader *
-NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, WalProposer *wp, char *log_prefix)
+NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, char *log_prefix)
 {
 	NeonWALReader *reader;
 
@@ -122,8 +119,6 @@ NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, WalPropose
 	reader->seg.ws_segno = 0;
 	reader->seg.ws_tli = 0;
 	reader->segcxt.ws_segsize = wal_segment_size;
-
-	reader->wp = wp;
 
 	reader->rem_state = RS_NONE;
 
@@ -204,21 +199,16 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 {
 	if (state->rem_state == RS_NONE)
 	{
-		XLogRecPtr	donor_lsn;
-
-		/* no connection yet; start one */
-		Safekeeper *donor = GetDonor(state->wp, &donor_lsn);
-
-		if (donor == NULL)
+		if (!NeonWALReaderUpdateDonor(state))
 		{
 			snprintf(state->err_msg, sizeof(state->err_msg),
 					 "failed to establish remote connection to fetch WAL: no donor available");
 			return NEON_WALREAD_ERROR;
+
 		}
-		snprintf(state->donor_name, sizeof(state->donor_name), "%s:%s", donor->host, donor->port);
-		nwr_log(LOG, "establishing connection to %s, flush_lsn %X/%X to fetch WAL",
-				state->donor_name, LSN_FORMAT_ARGS(donor_lsn));
-		state->wp_conn = libpqwp_connect_start(donor->conninfo);
+		/* no connection yet; start one */
+		nwr_log(LOG, "establishing connection to %s to fetch WAL", state->donor_name);
+		state->wp_conn = libpqwp_connect_start(state->donor_conninfo);
 		if (PQstatus(state->wp_conn->pg_conn) == CONNECTION_BAD)
 		{
 			snprintf(state->err_msg, sizeof(state->err_msg),
@@ -254,7 +244,7 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 
 					snprintf(start_repl_query, sizeof(start_repl_query),
 							 "START_REPLICATION PHYSICAL %X/%X (term='" UINT64_FORMAT "')",
-							 LSN_FORMAT_ARGS(startptr), state->wp->propTerm);
+							 LSN_FORMAT_ARGS(startptr), pg_atomic_read_u64(&GetWalpropShmemState()->mineLastElectedTerm));
 					nwr_log(LOG, "connection to %s to fetch WAL succeeded, running %s",
 							state->donor_name, start_repl_query);
 					if (!libpqwp_send_query(state->wp_conn, start_repl_query))
@@ -526,7 +516,7 @@ err:
 }
 
 /* reset remote connection and request in progress */
-static void
+void
 NeonWALReaderResetRemote(NeonWALReader *state)
 {
 	state->req_lsn = InvalidXLogRecPtr;
@@ -691,13 +681,25 @@ NeonWALReadLocal(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size coun
 	return true;
 }
 
+XLogRecPtr
+NeonWALReaderGetRemLsn(NeonWALReader *state)
+{
+	return state->rem_lsn;
+}
+
+const WALOpenSegment *
+NeonWALReaderGetSegment(NeonWALReader *state)
+{
+	return &state->seg;
+}
+
 /*
  * Copy of vanilla wal_segment_open, but returns false in case of error instead
  * of ERROR, with errno set.
  *
  * XLogReaderRoutine->segment_open callback for local pg_wal files
  */
-static bool
+bool
 neon_wal_segment_open(NeonWALReader *state, XLogSegNo nextSegNo,
 					  TimeLineID *tli_p)
 {
@@ -724,7 +726,7 @@ is_wal_segment_exists(XLogSegNo segno, int segsize, TimeLineID tli)
 }
 
 /* copy of vanilla wal_segment_close with NeonWALReader */
-static void
+void
 neon_wal_segment_close(NeonWALReader *state)
 {
 	if (state->seg.ws_file >= 0)
@@ -739,4 +741,19 @@ char *
 NeonWALReaderErrMsg(NeonWALReader *state)
 {
 	return state->err_msg;
+}
+
+/*
+ * Returns true if there is a donor, and false otherwise
+ */
+bool
+NeonWALReaderUpdateDonor(NeonWALReader *state)
+{
+	WalproposerShmemState *wps = GetWalpropShmemState();
+
+	SpinLockAcquire(&wps->mutex);
+	memcpy(state->donor_name, wps->donor_name, sizeof(state->donor_name));
+	memcpy(state->donor_conninfo, wps->donor_conninfo, sizeof(state->donor_conninfo));
+	SpinLockRelease(&wps->mutex);
+	return state->donor_name[0] != '\0';
 }
