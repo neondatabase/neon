@@ -72,7 +72,7 @@ use crate::{
     },
 };
 
-// For operations that should be quick, like attaching a new tenant
+// For acquiring lock on operations
 const SHORT_LOCK_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(1);
 
 // For operations that should be quick, like attaching a new tenant

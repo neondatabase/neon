@@ -16,7 +16,7 @@ impl<T> Drop for WrappedWriteGuard<T> {
 }
 
 #[derive(Default, Clone)]
-struct TrackedOperationLock {
+struct IdentifierLock {
     lock: Arc<tokio::sync::RwLock<()>>,
     operation: Arc<std::sync::RwLock<Option<&'static str>>>,
 }
@@ -30,7 +30,7 @@ where
     T: Eq + PartialEq + std::hash::Hash,
 {
     /// A synchronous lock for getting/setting the async locks that our callers will wait on.
-    entities: std::sync::Mutex<std::collections::HashMap<T, TrackedOperationLock>>,
+    entities: std::sync::Mutex<std::collections::HashMap<T, IdentifierLock>>,
 }
 
 impl<T> IdLockMap<T>
