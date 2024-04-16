@@ -94,12 +94,13 @@ impl KeySpace {
 
     /// Remove all keys in `other` from `self`.
     /// This can involve splitting or removing of existing ranges.
-    pub fn remove_overlapping_with(&mut self, other: &KeySpace) {
+    /// Returns the removed keyspace
+    pub fn remove_overlapping_with(&mut self, other: &KeySpace) -> KeySpace {
         let (self_start, self_end) = match (self.start(), self.end()) {
             (Some(start), Some(end)) => (start, end),
             _ => {
                 // self is empty
-                return;
+                return KeySpace::default();
             }
         };
 
@@ -112,30 +113,37 @@ impl KeySpace {
             .skip_while(|range| self_start >= range.end)
             .take_while(|range| self_end > range.start);
 
+        let mut removed_accum = KeySpaceRandomAccum::new();
         for range in other_ranges {
             while let Some(overlap_at) = self.overlaps_at(range) {
                 let overlapped = self.ranges[overlap_at].clone();
 
                 if overlapped.start < range.start && overlapped.end <= range.end {
                     // Higher part of the range is completely overlapped.
+                    removed_accum.add_range(range.start..self.ranges[overlap_at].end);
                     self.ranges[overlap_at].end = range.start;
                 }
                 if overlapped.start >= range.start && overlapped.end > range.end {
                     // Lower part of the range is completely overlapped.
+                    removed_accum.add_range(self.ranges[overlap_at].start..range.end);
                     self.ranges[overlap_at].start = range.end;
                 }
                 if overlapped.start < range.start && overlapped.end > range.end {
                     // Middle part of the range is overlapped.
+                    removed_accum.add_range(range.clone());
                     self.ranges[overlap_at].end = range.start;
                     self.ranges
                         .insert(overlap_at + 1, range.end..overlapped.end);
                 }
                 if overlapped.start >= range.start && overlapped.end <= range.end {
                     // Whole range is overlapped
+                    removed_accum.add_range(self.ranges[overlap_at].clone());
                     self.ranges.remove(overlap_at);
                 }
             }
         }
+
+        removed_accum.to_keyspace()
     }
 
     pub fn start(&self) -> Option<Key> {
@@ -553,7 +561,16 @@ mod tests {
                 Key::from_i128(11)..Key::from_i128(13),
             ],
         };
-        key_space1.remove_overlapping_with(&key_space2);
+        let removed = key_space1.remove_overlapping_with(&key_space2);
+        let removed_expected = KeySpace {
+            ranges: vec![
+                Key::from_i128(2)..Key::from_i128(3),
+                Key::from_i128(6)..Key::from_i128(7),
+                Key::from_i128(11)..Key::from_i128(12),
+            ],
+        };
+        assert_eq!(removed, removed_expected);
+
         assert_eq!(
             key_space1.ranges,
             vec![
@@ -583,7 +600,17 @@ mod tests {
                 Key::from_i128(14)..Key::from_i128(17),
             ],
         };
-        key_space1.remove_overlapping_with(&key_space2);
+
+        let removed = key_space1.remove_overlapping_with(&key_space2);
+        let removed_expected = KeySpace {
+            ranges: vec![
+                Key::from_i128(3)..Key::from_i128(5),
+                Key::from_i128(8)..Key::from_i128(10),
+                Key::from_i128(14)..Key::from_i128(15),
+            ],
+        };
+        assert_eq!(removed, removed_expected);
+
         assert_eq!(
             key_space1.ranges,
             vec![
@@ -610,7 +637,11 @@ mod tests {
                 Key::from_i128(15)..Key::from_i128(17),
             ],
         };
-        key_space1.remove_overlapping_with(&key_space2);
+
+        let removed = key_space1.remove_overlapping_with(&key_space2);
+        let removed_expected = KeySpace::default();
+        assert_eq!(removed, removed_expected);
+
         assert_eq!(
             key_space1.ranges,
             vec![
@@ -637,7 +668,17 @@ mod tests {
         let key_space2 = KeySpace {
             ranges: vec![Key::from_i128(9)..Key::from_i128(19)],
         };
-        key_space1.remove_overlapping_with(&key_space2);
+
+        let removed = key_space1.remove_overlapping_with(&key_space2);
+        let removed_expected = KeySpace {
+            ranges: vec![
+                Key::from_i128(9)..Key::from_i128(10),
+                Key::from_i128(12)..Key::from_i128(15),
+                Key::from_i128(17)..Key::from_i128(19),
+            ],
+        };
+        assert_eq!(removed, removed_expected);
+
         assert_eq!(
             key_space1.ranges,
             vec![
