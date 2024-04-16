@@ -3595,6 +3595,39 @@ impl Service {
         Ok(())
     }
 
+    /// This is for debug/support only: assuming tenant data is already present in S3, we "create" a
+    /// tenant with a very high generation number so that it will see the existing data.
+    pub(crate) async fn tenant_import(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantCreateResponse, ApiError> {
+        let (response, waiters) = self
+            .do_tenant_create(TenantCreateRequest {
+                new_tenant_id: TenantShardId::unsharded(tenant_id),
+                // A sufficiently high generation is de-facto guaranteed to be high enough to see any
+                // indices in S3 (unless this tenant was at some point in the past recovered via this path).
+                // TODO: we should really probe remote storage to learn the generation, so that we don't
+                // eat a large swath of the generation number space in an irreversible way.
+                generation: Some(0x3fffffff),
+
+                shard_parameters: ShardParameters::default(),
+                placement_policy: Some(PlacementPolicy::Attached(0)), // No secondaries, for convenient debug/hacking
+
+                // There is no way to know what the tenant's config was: revert to defaults
+                config: TenantConfig::default(),
+            })
+            .await?;
+
+        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+            // Since this is a debug/support operation, all kinds of weird issues are possible (e.g. this
+            // tenant doesn't exist in the control plane), so don't fail the request if it can't fully
+            // reconcile, as reconciliation includes notifying compute.
+            tracing::warn!(%tenant_id, "Reconcile not done yet while importing tenant ({e})");
+        }
+
+        Ok(response)
+    }
+
     /// For debug/support: a full JSON dump of TenantShards.  Returns a response so that
     /// we don't have to make TenantShard clonable in the return path.
     pub(crate) fn tenants_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
