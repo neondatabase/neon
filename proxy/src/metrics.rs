@@ -4,8 +4,8 @@ use lasso::ThreadedRodeo;
 use measured::{
     label::StaticLabelSet,
     metric::{histogram::Thresholds, name::MetricName},
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
-    LabelGroup, MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
+    MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 
@@ -20,9 +20,6 @@ pub struct Metrics {
 
     #[metric(namespace = "wake_compute_lock")]
     pub wake_compute_lock: ApiLockMetrics,
-
-    // the one metric not called proxy_....
-    pub semaphore_control_plane_limit: GaugeVec<StaticLabelSet<RateLimit>>,
 }
 
 impl Metrics {
@@ -31,7 +28,6 @@ impl Metrics {
         SELF.get_or_init(|| Metrics {
             proxy: ProxyMetrics::default(),
             wake_compute_lock: ApiLockMetrics::new(),
-            semaphore_control_plane_limit: GaugeVec::default(),
         })
     }
 }
@@ -284,13 +280,6 @@ pub struct ComputeConnectionLatencyGroup {
 pub enum LatencyExclusions {
     Client,
     ClientAndCplane,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "limit")]
-pub enum RateLimit {
-    Actual,
-    Expected,
 }
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]

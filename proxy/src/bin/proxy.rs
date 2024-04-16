@@ -23,7 +23,6 @@ use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
-use proxy::rate_limiter::RateLimiterConfig;
 use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
@@ -132,14 +131,8 @@ struct ProxyCliArgs {
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
     /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_dynamic_rate_limiter: bool,
-    /// Rate limit algorithm. Makes sense only if `disable_rate_limiter` is `false`.
-    #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::Aimd)]
-    rate_limit_algorithm: proxy::rate_limiter::RateLimitAlgorithm,
-    /// Timeout for rate limiter. If it didn't manage to aquire a permit in this time, it will return an error.
-    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
-    rate_limiter_timeout: tokio::time::Duration,
     /// Endpoint rate limiter max number of requests per second.
     ///
     /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
@@ -158,11 +151,6 @@ struct ProxyCliArgs {
     /// Redis rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
-    /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
-    #[clap(long, default_value_t = 100)]
-    initial_limit: usize,
-    #[clap(flatten)]
-    aimd_config: proxy::rate_limiter::AimdConfig,
     /// cache for `allowed_ips` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     allowed_ips_cache: String,
