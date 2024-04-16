@@ -716,13 +716,14 @@ impl<'a> TenantDownloader<'a> {
                     .await
                     .map_err(UpdateError::from)?;
 
+                SECONDARY_MODE.download_heatmap.inc();
+
                 if Some(&download.etag) == prev_etag {
                     Ok(HeatMapDownload::Unmodified)
                 } else {
                     let mut heatmap_bytes = Vec::new();
                     let mut body = tokio_util::io::StreamReader::new(download.download_stream);
                     let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
-                    SECONDARY_MODE.download_heatmap.inc();
                     Ok(HeatMapDownload::Modified(HeatMapModified {
                         etag: download.etag,
                         last_modified: download.last_modified,
