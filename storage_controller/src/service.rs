@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    id_lock_map::IdLockMap,
+    id_lock_map::{IdLockMap, WrappedWriteGuard},
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::ReconcileError,
     scheduler::ScheduleContext,
@@ -48,7 +48,6 @@ use pageserver_api::{
     },
 };
 use pageserver_client::mgmt_api;
-use tokio::sync::OwnedRwLockWriteGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use utils::{
@@ -239,7 +238,7 @@ struct TenantShardSplitAbort {
     new_shard_count: ShardCount,
     new_stripe_size: Option<ShardStripeSize>,
     /// Until this abort op is complete, no other operations may be done on the tenant
-    _tenant_lock: tokio::sync::OwnedRwLockWriteGuard<()>,
+    _tenant_lock: WrappedWriteGuard<()>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1282,7 +1281,7 @@ impl Service {
     async fn node_activate_reconcile(
         &self,
         mut node: Node,
-        _lock: &OwnedRwLockWriteGuard<()>,
+        _lock: &WrappedWriteGuard<()>,
     ) -> Result<(), ApiError> {
         // This Node is a mutable local copy: we will set it active so that we can use its
         // API client to reconcile with the node.  The Node in [`Self::nodes`] will get updated
@@ -1530,7 +1529,7 @@ impl Service {
         // Exclude any concurrent attempts to create/access the same tenant ID
         let _tenant_lock = self
             .tenant_op_locks
-            .exclusive(create_req.new_tenant_id.tenant_id)
+            .exclusive(create_req.new_tenant_id.tenant_id, "tenant_create")
             .await;
 
         let (response, waiters) = self.do_tenant_create(create_req).await?;
@@ -1873,7 +1872,7 @@ impl Service {
         // We require an exclusive lock, because we are updating both persistent and in-memory state
         let _tenant_lock = self
             .tenant_op_locks
-            .exclusive(tenant_shard_id.tenant_id)
+            .exclusive(tenant_shard_id.tenant_id, "tenant_location_config")
             .await;
 
         if !tenant_shard_id.is_unsharded() {
@@ -1992,7 +1991,10 @@ impl Service {
 
     pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
-        let _tenant_lock = self.tenant_op_locks.exclusive(req.tenant_id).await;
+        let _tenant_lock = self
+            .tenant_op_locks
+            .exclusive(req.tenant_id, "tenant_config_set")
+            .await;
 
         let tenant_id = req.tenant_id;
         let config = req.config;
@@ -2081,7 +2083,10 @@ impl Service {
         timestamp: Cow<'_, str>,
         done_if_after: Cow<'_, str>,
     ) -> Result<(), ApiError> {
-        let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
+        let _tenant_lock = self
+            .tenant_op_locks
+            .exclusive(tenant_id, "tenant_time_travel_remote_storage")
+            .await;
 
         let node = {
             let locked = self.inner.read().unwrap();
@@ -2266,7 +2271,10 @@ impl Service {
     }
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
-        let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
+        let _tenant_lock = self
+            .tenant_op_locks
+            .exclusive(tenant_id, "tenant_delete")
+            .await;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -2366,7 +2374,10 @@ impl Service {
         req: TenantPolicyRequest,
     ) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
-        let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
+        let _tenant_lock = self
+            .tenant_op_locks
+            .exclusive(tenant_id, "tenant_update_policy")
+            .await;
 
         let TenantPolicyRequest {
             placement,
@@ -3077,7 +3088,10 @@ impl Service {
     ) -> Result<TenantShardSplitResponse, ApiError> {
         // TODO: return 503 if we get stuck waiting for this lock
         // (issue https://github.com/neondatabase/neon/issues/7108)
-        let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
+        let _tenant_lock = self
+            .tenant_op_locks
+            .exclusive(tenant_id, "tenant_shard_split")
+            .await;
 
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
@@ -3756,7 +3770,10 @@ impl Service {
         &self,
         register_req: NodeRegisterRequest,
     ) -> Result<(), ApiError> {
-        let _node_lock = self.node_op_locks.exclusive(register_req.node_id).await;
+        let _node_lock = self
+            .node_op_locks
+            .exclusive(register_req.node_id, "node_register")
+            .await;
 
         // Pre-check for an already-existing node
         {
@@ -3845,7 +3862,10 @@ impl Service {
         availability: Option<NodeAvailability>,
         scheduling: Option<NodeSchedulingPolicy>,
     ) -> Result<(), ApiError> {
-        let _node_lock = self.node_op_locks.exclusive(node_id).await;
+        let _node_lock = self
+            .node_op_locks
+            .exclusive(node_id, "node_configure")
+            .await;
 
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
