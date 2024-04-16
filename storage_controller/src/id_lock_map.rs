@@ -9,6 +9,18 @@ pub struct WrappedWriteGuard<T> {
     operation: Arc<std::sync::RwLock<Option<&'static str>>>,
 }
 
+impl<T> WrappedWriteGuard<T> {
+    pub fn new(
+        lock: OwnedRwLockWriteGuard<T>,
+        operation: Arc<std::sync::RwLock<Option<&'static str>>>,
+    ) -> Self {
+        Self {
+            _inner: lock,
+            operation,
+        }
+    }
+}
+
 impl<T> Drop for WrappedWriteGuard<T> {
     fn drop(&mut self) {
         *self.operation.write().unwrap() = None;
@@ -53,12 +65,13 @@ where
     ) -> impl std::future::Future<Output = WrappedWriteGuard<()>> {
         let mut locked = self.entities.lock().unwrap();
         let entry = locked.entry(key).or_default().clone();
-        *entry.operation.write().unwrap() = Some(operation);
         async move {
-            WrappedWriteGuard {
-                _inner: entry.lock.clone().write_owned().await,
-                operation: entry.operation.clone(),
-            }
+            let guard = WrappedWriteGuard::new(
+                entry.lock.clone().write_owned().await,
+                entry.operation.clone(),
+            );
+            *guard.operation.write().unwrap() = Some(operation);
+            guard
         }
     }
 
@@ -108,6 +121,14 @@ mod tests {
         {
             assert_eq!(id_lock_map.get_operation(1), None);
             let _ex_lock = id_lock_map.exclusive(1, "op").await;
+
+            let _ex_lock_2 = tokio::time::timeout(
+                tokio::time::Duration::from_millis(1),
+                id_lock_map.exclusive(1, "op_2"),
+            )
+            .await;
+            assert!(_ex_lock_2.is_err());
+            // Test that trying t acquire the new ex lock does not change the operation
             assert_eq!(id_lock_map.get_operation(1), Some("op"));
         }
         assert_eq!(id_lock_map.get_operation(1), None);
