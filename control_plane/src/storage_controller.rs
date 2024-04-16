@@ -473,6 +473,16 @@ impl StorageController {
     }
 
     #[instrument(skip(self))]
+    pub async fn tenant_import(&self, tenant_id: TenantId) -> anyhow::Result<TenantCreateResponse> {
+        self.dispatch::<(), TenantCreateResponse>(
+            Method::POST,
+            format!("debug/v1/tenant/{tenant_id}/import"),
+            None,
+        )
+        .await
+    }
+
+    #[instrument(skip(self))]
     pub async fn tenant_locate(&self, tenant_id: TenantId) -> anyhow::Result<TenantLocateResponse> {
         self.dispatch::<(), _>(
             Method::GET,

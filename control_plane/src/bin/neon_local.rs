@@ -417,6 +417,44 @@ async fn handle_tenant(
                 println!("{} {:?}", t.id, t.state);
             }
         }
+        Some(("import", import_match)) => {
+            let tenant_id = parse_tenant_id(import_match)?.unwrap_or_else(TenantId::generate);
+
+            let storage_controller = StorageController::from_env(env);
+            let create_response = storage_controller.tenant_import(tenant_id).await?;
+            let attached_pageserver_id = create_response
+                .shards
+                .first()
+                .expect("Import response omitted shards")
+                .node_id;
+
+            println!(
+                "Imported tenant {tenant_id}, attached to pageserver {attached_pageserver_id}"
+            );
+
+            let pageserver =
+                PageServerNode::from_env(env, env.get_pageserver_conf(attached_pageserver_id)?);
+
+            let timelines = pageserver
+                .http_client
+                .list_timelines(TenantShardId::unsharded(tenant_id))
+                .await?;
+
+            for (i, timeline) in timelines.iter().enumerate() {
+                let branch_name = if i == 0 {
+                    "main".to_string()
+                } else {
+                    format!("branch_{i}")
+                };
+
+                println!(
+                    "Importing timeline {tenant_id}/{} as branch {branch_name}",
+                    timeline.timeline_id
+                );
+
+                env.register_branch_mapping(branch_name, tenant_id, timeline.timeline_id)?;
+            }
+        }
         Some(("create", create_match)) => {
             let tenant_conf: HashMap<_, _> = create_match
                 .get_many::<String>("config")
@@ -1479,6 +1517,8 @@ fn cli() -> Command {
             .subcommand(Command::new("config")
                 .arg(tenant_id_arg.clone())
                 .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false)))
+            .subcommand(Command::new("import").arg(tenant_id_arg.clone().required(true))
+                .about("Import a tenant that is present in remote storage, and create branches for its timelines"))
         )
         .subcommand(
             Command::new("pageserver")
