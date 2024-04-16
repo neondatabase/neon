@@ -181,6 +181,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Deletion is already in progress, continue polling
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "412":
+          description: Tenant is missing, or timeline has children
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreconditionFailedError"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_timestamp_of_lsn:
     parameters:
