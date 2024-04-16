@@ -1,5 +1,19 @@
 use std::{collections::HashMap, sync::Arc};
 
+use tokio::sync::OwnedRwLockWriteGuard;
+
+pub struct WrappedWriteGuard<T> {
+    _inner: OwnedRwLockWriteGuard<T>,
+    operation: Arc<std::sync::RwLock<Option<&'static str>>>,
+}
+
+impl<T> Drop for WrappedWriteGuard<T> {
+    fn drop(&mut self) {
+        let mut guard = self.operation.write().unwrap();
+        *guard = None;
+    }
+}
+
 /// A map of locks covering some arbitrary identifiers. Useful if you have a collection of objects but don't
 /// want to embed a lock in each one, or if your locking granularity is different to your object granularity.
 /// For example, used in the storage controller where the objects are tenant shards, but sometimes locking
@@ -9,7 +23,15 @@ where
     T: Eq + PartialEq + std::hash::Hash,
 {
     /// A synchronous lock for getting/setting the async locks that our callers will wait on.
-    entities: std::sync::Mutex<std::collections::HashMap<T, Arc<tokio::sync::RwLock<()>>>>,
+    entities: std::sync::Mutex<
+        std::collections::HashMap<
+            T,
+            (
+                Arc<tokio::sync::RwLock<()>>,
+                Arc<std::sync::RwLock<Option<&'static str>>>,
+            ),
+        >,
+    >,
 }
 
 impl<T> IdLockMap<T>
@@ -22,23 +44,36 @@ where
     ) -> impl std::future::Future<Output = tokio::sync::OwnedRwLockReadGuard<()>> {
         let mut locked = self.entities.lock().unwrap();
         let entry = locked.entry(key).or_default();
-        entry.clone().read_owned()
+        entry.clone().0.read_owned()
     }
 
     pub(crate) fn exclusive(
         &self,
         key: T,
-    ) -> impl std::future::Future<Output = tokio::sync::OwnedRwLockWriteGuard<()>> {
+        operation: &'static str,
+    ) -> impl std::future::Future<Output = WrappedWriteGuard<()>> {
+        let mut locked = self.entities.lock().unwrap();
+        let entry = locked.entry(key).or_default().clone();
+        *entry.1.write().unwrap() = Some(operation);
+        async move {
+            WrappedWriteGuard {
+                _inner: entry.0.clone().write_owned().await,
+                operation: entry.1.clone(),
+            }
+        }
+    }
+
+    pub(crate) fn get_operation(&self, key: T) -> Option<&str> {
         let mut locked = self.entities.lock().unwrap();
         let entry = locked.entry(key).or_default();
-        entry.clone().write_owned()
+        *entry.clone().1.read().unwrap()
     }
 
     /// Rather than building a lock guard that re-takes the [`Self::entities`] lock, we just do
     /// periodic housekeeping to avoid the map growing indefinitely
     pub(crate) fn housekeeping(&self) {
         let mut locked = self.entities.lock().unwrap();
-        locked.retain(|_k, lock| lock.try_write().is_err())
+        locked.retain(|_k, lock| lock.0.try_write().is_err())
     }
 }
 
@@ -50,5 +85,32 @@ where
         Self {
             entities: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IdLockMap;
+
+    #[tokio::test]
+    async fn multiple_shared_locks() {
+        let id_lock_map = IdLockMap::default();
+
+        assert_eq!(id_lock_map.get_operation(1), None);
+        id_lock_map.shared(1).await;
+        id_lock_map.shared(1).await;
+        assert_eq!(id_lock_map.get_operation(1), None);
+    }
+
+    #[tokio::test]
+    async fn single_exclusive() {
+        let id_lock_map = IdLockMap::default();
+
+        {
+            assert_eq!(id_lock_map.get_operation(1), None);
+            let _ex_lock = id_lock_map.exclusive(1, "op").await;
+            assert_eq!(id_lock_map.get_operation(1), Some("op"));
+        }
+        assert_eq!(id_lock_map.get_operation(1), None);
     }
 }
