@@ -277,6 +277,13 @@ impl<T> Inner<T> {
 /// On drop, this type will return the permit.
 pub struct InitPermit(Arc<tokio::sync::Semaphore>);
 
+impl std::fmt::Debug for InitPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ptr = Arc::as_ptr(&self.0) as *const ();
+        f.debug_tuple("InitPermit").field(&ptr).finish()
+    }
+}
+
 impl Drop for InitPermit {
     fn drop(&mut self) {
         assert_eq!(
@@ -572,5 +579,23 @@ mod tests {
         target.set(11, permit);
 
         assert_eq!(*target.get().unwrap(), 11);
+    }
+
+    #[tokio::test]
+    async fn take_and_deinit_on_mut() {
+        use std::convert::Infallible;
+
+        let mut target = OnceCell::<u32>::default();
+        assert!(target.take_and_deinit().is_none());
+
+        target
+            .get_or_init(|permit| async move { Ok::<_, Infallible>((42, permit)) })
+            .await
+            .unwrap();
+
+        let again = target.take_and_deinit();
+        assert!(matches!(again, Some((42, _))), "{again:?}");
+
+        assert!(target.take_and_deinit().is_none());
     }
 }
