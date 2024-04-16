@@ -485,13 +485,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
-    let rate_limiter_config = RateLimiterConfig {
-        disable: args.disable_dynamic_rate_limiter,
-        algorithm: args.rate_limit_algorithm,
-        timeout: args.rate_limiter_timeout,
-        initial_limit: args.initial_limit,
-        aimd_config: Some(args.aimd_config),
-    };
 
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
@@ -533,7 +526,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             tokio::spawn(locks.garbage_collect_worker());
 
             let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));
+            let endpoint = http::Endpoint::new(url, http::new_client());
 
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
             let api = console::provider::ConsoleBackend::Console(api);
