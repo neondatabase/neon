@@ -2841,7 +2841,7 @@ impl Timeline {
                                 cont_lsn: Lsn(cont_lsn.0 - 1),
                                 request_lsn,
                                 ancestor_lsn: Some(timeline.ancestor_lsn),
-                                traversal_path: traversal_path.clone(),
+                                traversal_path,
                                 backtrace: None,
                             }));
                         }
@@ -2856,7 +2856,7 @@ impl Timeline {
                         cont_lsn,
                         request_lsn,
                         ancestor_lsn: None,
-                        traversal_path: traversal_path.clone(),
+                        traversal_path,
                         backtrace: if cfg!(test) {
                             Some(std::backtrace::Backtrace::force_capture())
                         } else {
