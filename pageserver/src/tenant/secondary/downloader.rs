@@ -312,7 +312,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                     (detail.last_download, detail.next_download.unwrap())
                 };
 
-                if now < next_download {
+                if now > next_download {
                     Some(PendingDownload {
                         secondary_state: secondary_tenant,
                         last_download,
