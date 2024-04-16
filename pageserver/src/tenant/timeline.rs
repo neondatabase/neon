@@ -751,10 +751,16 @@ impl Timeline {
                 key_state.img = cached_page_img;
                 reconstruct_state.keys.insert(key, Ok(key_state));
 
-                let mut key_values = self
-                    .get_vectored_impl(keyspace, lsn, reconstruct_state, ctx)
-                    .await?;
-                let key_value = key_values.pop_first();
+                let vectored_res = self
+                    .get_vectored_impl(keyspace.clone(), lsn, reconstruct_state, ctx)
+                    .await;
+
+                if self.conf.validate_vectored_get {
+                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
+                        .await;
+                }
+
+                let key_value = vectored_res?.pop_first();
                 match key_value {
                     Some((got_key, value)) => {
                         if got_key != key {

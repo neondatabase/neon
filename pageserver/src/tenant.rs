@@ -3862,6 +3862,7 @@ mod tests {
     use pageserver_api::keyspace::KeySpace;
     use rand::{thread_rng, Rng};
     use tests::timeline::{GetVectoredError, ShutdownMode};
+    use tests::storage_layer::ValuesReconstructState;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -4649,7 +4650,9 @@ mod tests {
         for read in reads {
             info!("Doing vectored read on {:?}", read);
 
-            let vectored_res = tline.get_vectored_impl(read.clone(), reads_lsn, &ctx).await;
+            let vectored_res = tline
+                .get_vectored_impl(read.clone(), reads_lsn, ValuesReconstructState::new(), &ctx)
+                .await;
             tline
                 .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
                 .await;
@@ -4844,7 +4847,12 @@ mod tests {
             ranges: vec![key_near_gap..gap_at_key.next(), key_near_end..current_key],
         };
         let results = child_timeline
-            .get_vectored_impl(read.clone(), current_lsn, &ctx)
+            .get_vectored_impl(
+                read.clone(),
+                current_lsn,
+                ValuesReconstructState::new(),
+                &ctx,
+            )
             .await?;
 
         for (key, img_res) in results {
