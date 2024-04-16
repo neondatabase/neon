@@ -575,6 +575,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
+        rate_limit_ip_subnet: 64,
     };
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();

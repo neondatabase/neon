@@ -184,14 +184,14 @@ impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
 #[derive(PartialEq, PartialOrd, Hash, Eq, Ord, Debug, Copy, Clone)]
 pub struct MaskedIp(IpAddr);
 
-impl From<IpAddr> for MaskedIp {
-    fn from(value: IpAddr) -> Self {
+impl MaskedIp {
+    fn new(value: IpAddr, prefix: u8) -> Self {
         match value {
             // no masking
             IpAddr::V4(v4) => Self(IpAddr::V4(v4)),
             // mask to /64
             IpAddr::V6(v6) => Self(IpAddr::V6(
-                Ipv6Net::new(v6, 64)
+                Ipv6Net::new(v6, prefix)
                     .expect("64 is a valid prefix length")
                     .trunc()
                     .addr(),
@@ -221,8 +221,8 @@ impl RateBucketInfo {
 impl AuthenticationConfig {
     pub fn check_rate_limit(
         &self,
-
         ctx: &mut RequestMonitoring,
+        config: &AuthenticationConfig,
         secret: AuthSecret,
         endpoint: &EndpointId,
         is_cleartext: bool,
@@ -243,9 +243,13 @@ impl AuthenticationConfig {
             1
         };
 
-        let limit_not_exceeded = self
-            .rate_limiter
-            .check((endpoint_int, ctx.peer_addr.into()), password_weight);
+        let limit_not_exceeded = self.rate_limiter.check(
+            (
+                endpoint_int,
+                MaskedIp::new(ctx.peer_addr, config.rate_limit_ip_subnet),
+            ),
+            password_weight,
+        );
 
         if !limit_not_exceeded {
             warn!(
@@ -313,6 +317,7 @@ async fn auth_quirks(
     let secret = match secret {
         Some(secret) => config.check_rate_limit(
             ctx,
+            config,
             secret,
             &info.endpoint,
             unauthenticated_password.is_some() || allow_cleartext,
@@ -583,6 +588,7 @@ mod tests {
         scram_protocol_timeout: std::time::Duration::from_secs(5),
         rate_limiter_enabled: true,
         rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
+        rate_limit_ip_subnet: 64,
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {
