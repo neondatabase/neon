@@ -11,8 +11,7 @@ pub struct WrappedWriteGuard<T> {
 
 impl<T> Drop for WrappedWriteGuard<T> {
     fn drop(&mut self) {
-        let mut guard = self.operation.write().unwrap();
-        *guard = None;
+        *self.operation.write().unwrap() = None;
     }
 }
 
