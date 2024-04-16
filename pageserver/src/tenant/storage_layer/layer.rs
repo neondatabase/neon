@@ -389,6 +389,10 @@ impl Layer {
         &self.0.path
     }
 
+    pub(crate) fn local_path_str(&self) -> &Arc<str> {
+        &self.0.path_str
+    }
+
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.0.metadata()
     }
@@ -510,6 +514,9 @@ struct LayerInner {
 
     /// Full path to the file; unclear if this should exist anymore.
     path: Utf8PathBuf,
+
+    /// String representation of the full path, used for traversal id.
+    path_str: Arc<str>,
 
     desc: PersistentLayerDesc,
 
@@ -708,6 +715,7 @@ impl LayerInner {
 
         LayerInner {
             conf,
+            path_str: path.to_string().into(),
             path,
             desc,
             timeline: Arc::downgrade(timeline),

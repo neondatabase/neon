@@ -23,7 +23,7 @@ use pageserver_api::{
         EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
     },
     reltag::BlockNumber,
-    shard::{ShardIdentity, TenantShardId},
+    shard::{ShardIdentity, ShardNumber, TenantShardId},
 };
 use rand::Rng;
 use serde_with::serde_as;
@@ -428,6 +428,58 @@ pub(crate) enum PageReconstructError {
     /// An error happened replaying WAL records
     #[error(transparent)]
     WalRedo(anyhow::Error),
+
+    #[error("{0}")]
+    MissingKey(MissingKeyError),
+}
+
+#[derive(Debug)]
+pub struct MissingKeyError {
+    no_initial_image: bool,
+    key: Key,
+    shard: ShardNumber,
+    cont_lsn: Lsn,
+    request_lsn: Lsn,
+    ancestor_lsn: Option<Lsn>,
+    traversal_path: Vec<TraversalPathItem>,
+    backtrace: Option<std::backtrace::Backtrace>,
+}
+
+impl std::fmt::Display for MissingKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (r, c, l) in &self.traversal_path {
+            writeln!(
+                f,
+                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
+                r, c, l,
+            )?;
+        }
+
+        if self.no_initial_image {
+            // Records are found in this timeline but no image layer or initial delta record was found.
+            write!(
+                f,
+                "could not find layer with more data for key {} (shard {:?}) at LSN {}, request LSN {}",
+                self.key, self.shard, self.cont_lsn, self.request_lsn
+            )?;
+            if let Some(ref ancestor_lsn) = self.ancestor_lsn {
+                write!(f, ", ancestor {}", ancestor_lsn)?;
+            }
+        } else {
+            // No records in this timeline.
+            write!(
+                f,
+                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}",
+                self.key, self.shard, self.cont_lsn, self.request_lsn
+            )?;
+        }
+
+        if let Some(ref backtrace) = self.backtrace {
+            write!(f, "\n{}", backtrace)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl PageReconstructError {
@@ -439,6 +491,7 @@ impl PageReconstructError {
             AncestorLsnTimeout(_) => false,
             Cancelled | AncestorStopping(_) => true,
             WalRedo(_) => false,
+            MissingKey { .. } => false,
         }
     }
 }
@@ -753,7 +806,7 @@ impl Timeline {
                 writeln!(
                     msg,
                     "- layer traversal: result {res:?}, cont_lsn {cont_lsn}, layer: {}",
-                    layer(),
+                    layer,
                 )
                 .expect("string grows")
             });
@@ -872,9 +925,11 @@ impl Timeline {
                     Err(Cancelled | AncestorStopping(_)) => {
                         return Err(GetVectoredError::Cancelled)
                     }
-                    Err(Other(err)) if err.to_string().contains("could not find data for key") => {
-                        return Err(GetVectoredError::MissingKey(key))
-                    }
+                    // we only capture no_initial_image=false now until we figure out https://github.com/neondatabase/neon/issues/7380
+                    Err(MissingKey(MissingKeyError {
+                        no_initial_image: false,
+                        ..
+                    })) => return Err(GetVectoredError::MissingKey(key)),
                     _ => {
                         values.insert(key, block);
                         key = key.next();
@@ -2692,7 +2747,7 @@ impl Timeline {
     }
 }
 
-type TraversalId = String;
+type TraversalId = Arc<str>;
 
 trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
@@ -2700,13 +2755,13 @@ trait TraversalLayerExt {
 
 impl TraversalLayerExt for Layer {
     fn traversal_id(&self) -> TraversalId {
-        self.local_path().to_string()
+        Arc::clone(self.local_path_str())
     }
 }
 
 impl TraversalLayerExt for Arc<InMemoryLayer> {
     fn traversal_id(&self) -> TraversalId {
-        format!("timeline {} in-memory {self}", self.get_timeline_id())
+        Arc::clone(self.local_path_str())
     }
 }
 
@@ -2775,32 +2830,35 @@ impl Timeline {
                         if prev <= cont_lsn {
                             // Didn't make any progress in last iteration. Error out to avoid
                             // getting stuck in the loop.
-                            return Err(layer_traversal_error(format!(
-                                "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
-                                key,
-                                Lsn(cont_lsn.0 - 1),
+                            return Err(PageReconstructError::MissingKey(MissingKeyError {
+                                no_initial_image: true,
+                                key: key,
+                                shard: self.shard_identity.get_shard_number(&key),
+                                cont_lsn: Lsn(cont_lsn.0 - 1),
                                 request_lsn,
-                                timeline.ancestor_lsn
-                            ), traversal_path));
+                                ancestor_lsn: Some(timeline.ancestor_lsn),
+                                traversal_path: traversal_path.clone(),
+                                backtrace: None,
+                            }));
                         }
                     }
                     prev_lsn = Some(cont_lsn);
                 }
                 ValueReconstructResult::Missing => {
-                    return Err(layer_traversal_error(
-                        if cfg!(test) {
-                            format!(
-                                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}\n{}",
-                                key, self.shard_identity.get_shard_number(&key), cont_lsn, request_lsn, std::backtrace::Backtrace::force_capture(),
-                            )
+                    return Err(PageReconstructError::MissingKey(MissingKeyError {
+                        no_initial_image: false,
+                        key: key,
+                        shard: self.shard_identity.get_shard_number(&key),
+                        cont_lsn,
+                        request_lsn,
+                        ancestor_lsn: None,
+                        traversal_path: traversal_path.clone(),
+                        backtrace: if cfg!(test) {
+                            Some(std::backtrace::Backtrace::force_capture())
                         } else {
-                            format!(
-                                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}",
-                                key, self.shard_identity.get_shard_number(&key), cont_lsn, request_lsn
-                            )
+                            None
                         },
-                        traversal_path,
-                    ));
+                    }));
                 }
             }
 
@@ -2848,11 +2906,7 @@ impl Timeline {
                     };
                     cont_lsn = lsn_floor;
                     // metrics: open_layer does not count as fs access, so we are not updating `read_count`
-                    traversal_path.push((
-                        result,
-                        cont_lsn,
-                        Box::new(move || open_layer.traversal_id()),
-                    ));
+                    traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
                     continue 'outer;
                 }
             }
@@ -2879,11 +2933,7 @@ impl Timeline {
                     };
                     cont_lsn = lsn_floor;
                     // metrics: open_layer does not count as fs access, so we are not updating `read_count`
-                    traversal_path.push((
-                        result,
-                        cont_lsn,
-                        Box::new(move || frozen_layer.traversal_id()),
-                    ));
+                    traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
                     continue 'outer;
                 }
             }
@@ -2904,14 +2954,7 @@ impl Timeline {
                 };
                 cont_lsn = lsn_floor;
                 *read_count += 1;
-                traversal_path.push((
-                    result,
-                    cont_lsn,
-                    Box::new({
-                        let layer = layer.to_owned();
-                        move || layer.traversal_id()
-                    }),
-                ));
+                traversal_path.push((result, cont_lsn, layer.traversal_id()));
                 continue 'outer;
             } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
@@ -4664,35 +4707,7 @@ impl Timeline {
     }
 }
 
-type TraversalPathItem = (
-    ValueReconstructResult,
-    Lsn,
-    Box<dyn Send + FnOnce() -> TraversalId>,
-);
-
-/// Helper function for get_reconstruct_data() to add the path of layers traversed
-/// to an error, as anyhow context information.
-fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageReconstructError {
-    // We want the original 'msg' to be the outermost context. The outermost context
-    // is the most high-level information, which also gets propagated to the client.
-    let mut msg_iter = path
-        .into_iter()
-        .map(|(r, c, l)| {
-            format!(
-                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r,
-                c,
-                l(),
-            )
-        })
-        .chain(std::iter::once(msg));
-    // Construct initial message from the first traversed layer
-    let err = anyhow!(msg_iter.next().unwrap());
-
-    // Append all subsequent traversals, and the error message 'msg', as contexts.
-    let msg = msg_iter.fold(err, |err, msg| err.context(msg));
-    PageReconstructError::from(msg)
-}
+type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
 
 struct TimelineWriterState {
     open_layer: Arc<InMemoryLayer>,
