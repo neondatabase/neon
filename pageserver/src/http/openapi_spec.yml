@@ -642,7 +642,12 @@ paths:
             application/json:
               schema:
                 type: string
-
+        "409":
+          description: Tenant already exists, creation skipped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
 
   /v1/tenant/config:
     put:
