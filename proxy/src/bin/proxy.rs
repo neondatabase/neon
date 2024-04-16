@@ -485,6 +485,9 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
+    if !args.disable_dynamic_rate_limiter {
+        bail!("dynamic rate limiter should be disabled");
+    }
 
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
