@@ -16,7 +16,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
-    key::AUX_FILES_KEY,
+    key::{AUX_FILES_KEY, NON_INHERITED_RANGE},
     keyspace::KeySpaceAccum,
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
@@ -872,7 +872,10 @@ impl Timeline {
                     Err(Cancelled | AncestorStopping(_)) => {
                         return Err(GetVectoredError::Cancelled)
                     }
-                    Err(Other(err)) if err.to_string().contains("could not find data for key") => {
+                    Err(Other(err))
+                        if err.to_string().contains("could not find data for key")
+                            && !NON_INHERITED_RANGE.contains(&key) =>
+                    {
                         return Err(GetVectoredError::MissingKey(key))
                     }
                     _ => {
@@ -2964,6 +2967,29 @@ impl Timeline {
             .await?;
 
             keyspace.remove_overlapping_with(&completed);
+
+            // Do not descend into the ancestor timeline for aux files.
+            // We don't return a blanket [`GetVectoredError::MissingKey`] to avoid
+            // stalling compaction.
+            // TODO(chi): this will need to be updated for aux files v2 storage
+            if keyspace.overlaps(&NON_INHERITED_RANGE) {
+                let removed = keyspace.remove_overlapping_with(&KeySpace {
+                    ranges: vec![NON_INHERITED_RANGE],
+                });
+
+                for range in removed.ranges {
+                    let mut key = range.start;
+                    while key < range.end {
+                        reconstruct_state.on_key_error(
+                            key,
+                            // TODO: use PageReconstructError::Missing once #7393 merges
+                            PageReconstructError::Other(anyhow!("Value for {} not found", key)),
+                        );
+                        key = key.next();
+                    }
+                }
+            }
+
             if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
                 break;
             }
@@ -3842,6 +3868,15 @@ impl Timeline {
                                     {
                                         warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
                                         ZERO_PAGE.clone()
+                                    } else if NON_INHERITED_RANGE.contains(&img_key)
+                                        && matches!(err, PageReconstructError::Other(_))
+                                    {
+                                        // Non inherited keys (i.e. aux files) are special. We
+                                        // might fail to reconstruct the image since we are
+                                        // prohibited from visiting the ancestor timelines.
+                                        // We don't want to stall compaction, so we simply ignore
+                                        // these failures.
+                                        continue;
                                     } else {
                                         return Err(CreateImageLayersError::PageReconstructError(
                                             err,
