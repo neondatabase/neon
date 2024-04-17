@@ -1,16 +1,14 @@
 //! [`hyper-util`] offers an 'auto' connection to detect whether the connection should be HTTP1 or HTTP2.
-//! There's a bug in this implementation where graceful shutdowns are not properly respected.
 
 use futures::ready;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use std::future::Future;
-use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::{io, marker::Unpin};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 
 use hyper1::server::conn::http1;
 use hyper1::server::conn::http2;
@@ -56,7 +54,6 @@ where
         buf: [0; 24],
         filled: 0,
         version: Version::H2,
-        _pin: PhantomPinned,
     }
 }
 
@@ -67,9 +64,6 @@ pin_project! {
         // the amount of `buf` thats been filled
         filled: usize,
         version: Version,
-        // Make this future `!Unpin` for compatibility with async trait methods.
-        #[pin]
-        _pin: PhantomPinned,
     }
 }
 
@@ -138,11 +132,12 @@ where
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if let Some(prefix) = self.pre.take() {
+        if let Some(mut prefix) = self.pre.take() {
             // If there are no remaining bytes, let the bytes get dropped.
             if !prefix.is_empty() {
                 let copy_len = std::cmp::min(prefix.len(), buf.remaining());
                 buf.put_slice(&prefix[..copy_len]);
+                prefix.advance(copy_len);
                 // Put back what's left
                 if !prefix.is_empty() {
                     self.pre = Some(prefix);
