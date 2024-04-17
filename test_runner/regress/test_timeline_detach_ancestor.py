@@ -133,8 +133,8 @@ def test_ancestor_detach_branched_from(neon_env_builder: NeonEnvBuilder, branchp
     else:
         branch_layers = set()
 
-    # TODO: return value from this
-    client.detach_ancestor(env.initial_tenant, timeline_id)
+    all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
+    assert all_reparented == set()
 
     if restart_after:
         env.pageserver.stop()
@@ -246,8 +246,8 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
 
         client.timeline_checkpoint(env.initial_tenant, timeline_id)
 
-    # TODO: return value from this should say that reparented and same_branchpoint were reparented
-    client.detach_ancestor(env.initial_tenant, timeline_id)
+    all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
+    assert all_reparented == set([reparented, same_branchpoint])
 
     if restart_after:
         env.pageserver.stop()

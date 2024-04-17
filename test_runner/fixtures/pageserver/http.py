@@ -819,11 +819,15 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
                 continue
             self.download_layer(tenant_id, timeline_id, layer.layer_file_name)
 
-    def detach_ancestor(self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId):
+    def detach_ancestor(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ) -> Set[TimelineId]:
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
         )
         self.verbose_error(res)
+        json = res.json()
+        return set(map(TimelineId, json["reparented_timelines"]))
 
     def evict_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str

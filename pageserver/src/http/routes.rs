@@ -1850,7 +1850,7 @@ async fn timeline_detach_ancestor_handler(
         .map_err(|e| ApiError::NotFound(e.into()))?;
 
     match timeline.detach_from_ancestor(&tenant, &ctx).await {
-        Ok(()) => json_response(StatusCode::OK, ()),
+        Ok(res) => json_response(StatusCode::OK, res),
         Err(e) => Err(ApiError::InternalServerError(e.into())),
     }
 }

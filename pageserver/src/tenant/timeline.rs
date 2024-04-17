@@ -23,8 +23,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
-        CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-        EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
+        detach_ancestor::AncestorDetached, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
+        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
+        TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -4353,7 +4354,7 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         ctx: &RequestContext,
-    ) -> Result<(), DetachFromAncestorError> {
+    ) -> Result<AncestorDetached, DetachFromAncestorError> {
         use DetachFromAncestorError::*;
 
         let Some(rtc) = self.remote_client.as_ref() else {
@@ -4466,9 +4467,12 @@ impl Timeline {
 
         const BATCH_SIZE: usize = 10;
 
+        // FIXME: as we have the gc blocking, remote copies and delta lsn prefix copying could be
+        // done at the same time.
         if straddling_branchpoint.is_empty() {
             // as we flushed the inmem layer to disk, only reason:
             // this branch has been created from a L1 layer LSN boundary, or checkpoint.
+            // TODO: hit this in tests
             todo!("is there anything to do here? -- tests are not hitting this");
         } else {
             tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
@@ -4626,7 +4630,7 @@ impl Timeline {
             match res {
                 Ok(Some(timeline)) => {
                     tracing::info!(reparented=%timeline.timeline_id, "reparenting done");
-                    reparented.push(timeline);
+                    reparented.push(timeline.timeline_id);
                 }
                 Ok(None) => {
                     // lets just ignore this for now. one or all reparented timelines could had
@@ -4658,9 +4662,20 @@ impl Timeline {
         //
         // FIXME: unmark the parent timeline as being detached (in-memory only)
 
-        tracing::info!(reparenting_candidates, reparented=%reparented.len(), "successfully detached");
+        if reparenting_candidates != reparented.len() {
+            // FIXME: this does seem quite naive as well
+            return Err(ReparetingsFailed);
+        }
 
-        Ok(())
+        // IDEMPOTENCY: we should look at our own timelines to find timelines which were previously
+        // reparented to us. we should also look at other ancestorless timelines here to find other
+        // but later detached timelines. OR document that those will never be returned here.
+
+        tracing::info!(reparenting_candidates, reparented=%reparented.len(), "successfully detached and reparented");
+
+        Ok(AncestorDetached {
+            reparented_timelines: reparented,
+        })
     }
 }
 
@@ -4678,6 +4693,8 @@ pub(crate) enum DetachFromAncestorError {
     RewrittenDeltaDownloadFailed(#[source] anyhow::Error),
     #[error("copying LSN prefix locally failed")]
     CopyDeltaPrefix(#[source] anyhow::Error),
+    #[error("some reparentings failed, please retry")]
+    ReparetingsFailed,
 }
 
 /// Top-level failure to compact.
