@@ -4573,48 +4573,53 @@ impl Timeline {
                     return None;
                 }
 
-                tl.ancestor_timeline
-                    .as_ref()
-                    .map(|ancestor| (ancestor, tl.ancestor_lsn))
-                    .filter(|(tl_ancestor, _)| Arc::ptr_eq(&ancestor, tl_ancestor))
-                    .filter(|(_, tl_ancestor_lsn)| *tl_ancestor_lsn <= ancestor_lsn)
-                    .map(|_| tl.clone())
+                let Some(tl_ancestor) = tl.ancestor_timeline.as_ref() else {
+                    return None;
+                };
+
+                let is_same = Arc::ptr_eq(&ancestor, tl_ancestor);
+                let is_earlier = tl.ancestor_lsn <= ancestor_lsn;
+
+                if is_same && is_earlier {
+                    Some(tl.clone())
+                } else {
+                    None
+                }
             })
             .for_each(|timeline| {
-                let fut = timeline
-                    .remote_client
-                    .as_ref()
-                    .expect("sibling has to have remote client because we have one")
-                    .schedule_reparenting_and_wait(&self.timeline_id)
-                    .map_err(|_| ShuttingDown);
-
                 let span = tracing::info_span!("reparent", reparented=%timeline.timeline_id);
 
-                match fut {
-                    Ok(fut) => {
-                        tasks.spawn(
-                            async move {
-                                let res = fut.await;
+                let new_parent = self.timeline_id;
 
-                                match res {
-                                    Ok(()) => Some(timeline),
-                                    Err(e) => {
-                                        tracing::info!("reparenting failed: {e:#}");
-                                        None
-                                    }
-                                }
+                tasks.spawn(
+                    async move {
+                        let fut = timeline
+                            .remote_client
+                            .as_ref()
+                            .expect("sibling has to have remote client because we have one")
+                            .schedule_reparenting_and_wait(&new_parent);
+
+                        let res = match fut {
+                            Ok(fut) => fut.await,
+                            Err(e) => Err(e),
+                        };
+
+                        match res {
+                            Ok(()) => Some(timeline),
+                            Err(e) => {
+                                // some uploads may have already been started, go with the same assumption as
+                                // with waiting out the upload: single timeline deletion (or shutdown) should
+                                // not stop us.
+                                tracing::info!("reparenting failed: {e:#}");
+                                None
                             }
-                            .instrument(span),
-                        );
+                        }
                     }
-                    Err(e) => {
-                        // some uploads may have already been started, go with the same assumption as
-                        // with waiting out the upload: single timeline deletion (or shutdown) should
-                        // not stop us.
-                        span.in_scope(|| tracing::info!("reparenting failed: {e:#}"));
-                    }
-                }
+                    .instrument(span),
+                );
             });
+
+        let reparenting_candidates = tasks.len();
 
         let mut reparented = Vec::with_capacity(tasks.len());
 
@@ -4654,7 +4659,7 @@ impl Timeline {
         //
         // FIXME: unmark the parent timeline as being detached (in-memory only)
 
-        tracing::info!("successfully detached");
+        tracing::info!(reparenting_candidates, reparented=%reparented.len(), "successfully detached");
 
         Ok(())
     }
