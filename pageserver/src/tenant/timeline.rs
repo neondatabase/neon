@@ -16,7 +16,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
-    key::AUX_FILES_KEY,
+    key::{AUX_FILES_KEY, NON_INHERITED_RANGE},
     keyspace::KeySpaceAccum,
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
@@ -943,7 +943,13 @@ impl Timeline {
                     Err(MissingKey(MissingKeyError {
                         stuck_at_lsn: false,
                         ..
-                    })) => return Err(GetVectoredError::MissingKey(key)),
+                    })) if !NON_INHERITED_RANGE.contains(&key) => {
+                        // The vectored read path handles non inherited keys specially.
+                        // If such a a key cannot be reconstructed from the current timeline,
+                        // the vectored read path returns a key level error as opposed to a top
+                        // level error.
+                        return Err(GetVectoredError::MissingKey(key));
+                    }
                     _ => {
                         values.insert(key, block);
                         key = key.next();
@@ -3024,6 +3030,41 @@ impl Timeline {
             .await?;
 
             keyspace.remove_overlapping_with(&completed);
+
+            // Do not descend into the ancestor timeline for aux files.
+            // We don't return a blanket [`GetVectoredError::MissingKey`] to avoid
+            // stalling compaction.
+            // TODO(chi): this will need to be updated for aux files v2 storage
+            if keyspace.overlaps(&NON_INHERITED_RANGE) {
+                let removed = keyspace.remove_overlapping_with(&KeySpace {
+                    ranges: vec![NON_INHERITED_RANGE],
+                });
+
+                for range in removed.ranges {
+                    let mut key = range.start;
+                    while key < range.end {
+                        reconstruct_state.on_key_error(
+                            key,
+                            PageReconstructError::MissingKey(MissingKeyError {
+                                stuck_at_lsn: false,
+                                key,
+                                shard: self.shard_identity.get_shard_number(&key),
+                                cont_lsn,
+                                request_lsn,
+                                ancestor_lsn: None,
+                                traversal_path: Vec::default(),
+                                backtrace: if cfg!(test) {
+                                    Some(std::backtrace::Backtrace::force_capture())
+                                } else {
+                                    None
+                                },
+                            }),
+                        );
+                        key = key.next();
+                    }
+                }
+            }
+
             if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
                 break;
             }
