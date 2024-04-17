@@ -269,6 +269,11 @@ jobs:
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [ debug, release ]
+
     steps:
       - name: Fix git ownership
         run: |
@@ -306,9 +311,25 @@ jobs:
           fi
           echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
       - name: Run cargo clippy (debug)
+        if: matrix.build_type == 'debug'
         run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
       - name: Run cargo clippy (release)
+        if: matrix.build_type == 'release'
         run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
+
+  check-codestyle-misc-arm:
+    needs: [ check-permissions, build-build-tools-image ]
+    timeout-minutes: 90
+    runs-on: [ self-hosted, large-arm64 ]
+
+    container:
+      image: ${{ needs.build-build-tools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      options: --init
+
+    steps:
 
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items -j$(nproc)
