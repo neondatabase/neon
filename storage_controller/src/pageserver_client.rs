@@ -1,13 +1,14 @@
 use pageserver_api::{
     models::{
         LocationConfig, LocationConfigListResponse, PageserverUtilization, SecondaryProgress,
-        TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
+        TenantScanRemoteStorageResponse, TenantShardSplitRequest, TenantShardSplitResponse,
+        TimelineCreateRequest, TimelineInfo,
     },
     shard::TenantShardId,
 };
 use pageserver_client::mgmt_api::{Client, Result};
 use reqwest::StatusCode;
-use utils::id::{NodeId, TimelineId};
+use utils::id::{NodeId, TenantId, TimelineId};
 
 /// Thin wrapper around [`pageserver_client::mgmt_api::Client`]. It allows the storage
 /// controller to collect metrics in a non-intrusive manner.
@@ -85,6 +86,18 @@ impl PageserverClient {
             self.inner
                 .tenant_time_travel_remote_storage(tenant_shard_id, timestamp, done_if_after)
                 .await
+        )
+    }
+
+    pub(crate) async fn tenant_scan_remote_storage(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantScanRemoteStorageResponse> {
+        measured_request!(
+            "tenant_scan_remote_storage",
+            crate::metrics::Method::Get,
+            &self.node_id_label,
+            self.inner.tenant_scan_remote_storage(tenant_id).await
         )
     }
 

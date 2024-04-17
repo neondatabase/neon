@@ -441,11 +441,20 @@ async fn handle_tenant(
                 .list_timelines(shard_zero.shard_id)
                 .await?;
 
-            for (i, timeline) in timelines.iter().enumerate() {
-                let branch_name = if i == 0 {
+            // Pick a 'main' timeline that has no ancestors, the rest will get arbitrary names
+            let main_timeline = timelines
+                .iter()
+                .find(|t| t.ancestor_timeline_id.is_none())
+                .expect("No timelines found")
+                .timeline_id;
+
+            let mut branch_i = 0;
+            for timeline in timelines.iter() {
+                let branch_name = if timeline.timeline_id == main_timeline {
                     "main".to_string()
                 } else {
-                    format!("branch_{i}")
+                    branch_i += 1;
+                    format!("branch_{branch_i}")
                 };
 
                 println!(
