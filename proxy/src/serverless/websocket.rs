@@ -4,30 +4,23 @@ use crate::{
     context::RequestMonitoring,
     error::{io_error, ReportableError},
     metrics::Metrics,
-    protocol2::ChainRW,
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
 use hyper1::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
-use tokio_rustls::server::TlsStream;
 
 use std::{
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
 };
-use tokio::{
-    io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf},
-    net::TcpStream,
-};
+use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tracing::warn;
-
-use super::http_auto::Rewind;
 
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
@@ -139,17 +132,7 @@ pub async fn serve_websocket(
     hostname: Option<String>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    let websocket = websocket
-        .downcast::<TokioIo<Rewind<TlsStream<ChainRW<TcpStream>>>>>()
-        .expect("downcast error");
-
-    let pre0 = websocket.read_buf;
-    let (pre1, inner) = websocket.io.into_inner().into_inner();
-
-    let mut buf = BytesMut::with_capacity(8192);
-    buf.put(pre0);
-    buf.put(pre1);
-    let websocket = WebSocketServer::after_handshake_with_bytes(inner, buf);
+    let websocket = WebSocketServer::after_handshake(TokioIo::new(websocket));
 
     let conn_gauge = Metrics::get()
         .proxy
