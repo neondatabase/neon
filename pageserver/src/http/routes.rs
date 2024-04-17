@@ -692,6 +692,7 @@ async fn timeline_detail_handler(
     json_response(StatusCode::OK, timeline_info)
 }
 
+#[instrument(skip_all, fields(tenant_id, shard_id, timeline_id))]
 async fn get_lsn_by_timestamp_handler(
     request: Request<Body>,
     cancel: CancellationToken,
@@ -713,6 +714,17 @@ async fn get_lsn_by_timestamp_handler(
         .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
+
+    tracing::Span::current()
+        .record(
+            "tenant_id",
+            tracing::field::display(&tenant_shard_id.tenant_id),
+        )
+        .record(
+            "shard_id",
+            tracing::field::display(tenant_shard_id.shard_slug()),
+        )
+        .record("timeline_id", tracing::field::display(&timeline_id));
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
