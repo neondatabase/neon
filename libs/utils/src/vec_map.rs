@@ -1,10 +1,14 @@
 use std::{alloc::Layout, cmp::Ordering, ops::RangeBounds};
 
+use smallvec::SmallVec;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VecMapOrdering {
     Greater,
     GreaterOrEqual,
 }
+
+const INLINE_ELEMENTS: usize = 1;
 
 /// Ordered map datastructure implemented in a Vec.
 /// Append only - can only add keys that are larger than the
@@ -13,7 +17,7 @@ pub enum VecMapOrdering {
 /// during `VecMap` construction.
 #[derive(Clone, Debug)]
 pub struct VecMap<K, V> {
-    data: Vec<(K, V)>,
+    data: SmallVec<[(K, V); INLINE_ELEMENTS]>,
     ordering: VecMapOrdering,
 }
 
@@ -37,14 +41,14 @@ pub enum VecMapError {
 impl<K: Ord, V> VecMap<K, V> {
     pub fn new(ordering: VecMapOrdering) -> Self {
         Self {
-            data: Vec::new(),
+            data: Default::default(),
             ordering,
         }
     }
 
     pub fn with_capacity(capacity: usize, ordering: VecMapOrdering) -> Self {
         Self {
-            data: Vec::with_capacity(capacity),
+            data: SmallVec::with_capacity(capacity),
             ordering,
         }
     }
@@ -135,11 +139,11 @@ impl<K: Ord, V> VecMap<K, V> {
 
         (
             VecMap {
-                data: self.data[..split_idx].to_vec(),
+                data: SmallVec::from(&self.data[..split_idx]),
                 ordering: self.ordering,
             },
             VecMap {
-                data: self.data[split_idx..].to_vec(),
+                data: SmallVec::from(&self.data[split_idx..]),
                 ordering: self.ordering,
             },
         )
@@ -186,7 +190,10 @@ impl<K: Ord, V> VecMap<K, V> {
     /// Instrument an operation on the underlying [`Vec`].
     /// Will panic if the operation decreases capacity.
     /// Returns the increase in memory usage caused by the op.
-    fn instrument_vec_op(&mut self, op: impl FnOnce(&mut Vec<(K, V)>)) -> usize {
+    fn instrument_vec_op(
+        &mut self,
+        op: impl FnOnce(&mut SmallVec<[(K, V); INLINE_ELEMENTS]>),
+    ) -> usize {
         let old_cap = self.data.capacity();
         op(&mut self.data);
         let new_cap = self.data.capacity();
@@ -226,7 +233,7 @@ impl<K: Ord, V> VecMap<K, V> {
 
 impl<K: Ord, V> IntoIterator for VecMap<K, V> {
     type Item = (K, V);
-    type IntoIter = std::vec::IntoIter<(K, V)>;
+    type IntoIter = smallvec::IntoIter<[(K, V); INLINE_ELEMENTS]>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.data.into_iter()
