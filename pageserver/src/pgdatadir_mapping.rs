@@ -32,7 +32,7 @@ use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, debug_span, instrument, trace, warn, Instrument};
 use utils::bin_ser::DeserializeError;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -403,6 +403,7 @@ impl Timeline {
     /// so it's not well defined which LSN you get if there were multiple commits
     /// "in flight" at that point in time.
     ///
+    #[instrument(skip_all, level = tracing::Level::DEBUG)]
     pub(crate) async fn find_lsn_for_timestamp(
         &self,
         search_timestamp: TimestampTz,
@@ -424,21 +425,26 @@ impl Timeline {
 
         let mut found_smaller = false;
         let mut found_larger = false;
+        let mut iters = 0;
         while low < high {
+            debug!(iters, "iteration");
+            iters += 1;
             if cancel.is_cancelled() {
                 return Err(PageReconstructError::Cancelled);
             }
             // cannot overflow, high and low are both smaller than u64::MAX / 2
             let mid = (high + low) / 2;
 
+            let lsn = Lsn(mid * 8);
             let cmp = self
                 .is_latest_commit_timestamp_ge_than(
                     search_timestamp,
-                    Lsn(mid * 8),
+                    lsn,
                     &mut found_smaller,
                     &mut found_larger,
                     ctx,
                 )
+                .instrument(debug_span!("is_latest_commit_timestamp_ge_than", %iters, %lsn))
                 .await?;
 
             if cmp {
@@ -491,7 +497,10 @@ impl Timeline {
         found_larger: &mut bool,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
+        let mut call = 0;
         self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            debug!(%call, %probe_lsn, "map_all_timestamps callback called");
+            call += 1;
             if timestamp >= search_timestamp {
                 *found_larger = true;
                 return ControlFlow::Break(true);
@@ -529,6 +538,7 @@ impl Timeline {
     ///
     /// The return value is either given by the closure, or set to the `Default`
     /// impl's output.
+    #[instrument(skip_all, level = tracing::Level::DEBUG, fields(%probe_lsn, segno, blknum))]
     async fn map_all_timestamps<T: Default>(
         &self,
         probe_lsn: Lsn,
@@ -539,10 +549,12 @@ impl Timeline {
             .list_slru_segments(SlruKind::Clog, Version::Lsn(probe_lsn), ctx)
             .await?
         {
+            tracing::Span::current().record("segno", tracing::field::display(segno));
             let nblocks = self
                 .get_slru_segment_size(SlruKind::Clog, segno, Version::Lsn(probe_lsn), ctx)
                 .await?;
             for blknum in (0..nblocks).rev() {
+                tracing::Span::current().record("blknum", tracing::field::display(blknum));
                 let clog_page = self
                     .get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn, ctx)
                     .await?;
