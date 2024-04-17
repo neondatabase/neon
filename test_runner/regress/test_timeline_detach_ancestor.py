@@ -285,6 +285,8 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
 
 # TODO:
 # - after starting the operation, tenant is deleted
-# - after starting the operation, pageserver is shutdown
+# - after starting the operation, pageserver is shutdown, restarted
+# - after starting the operation, bottom-most timeline is deleted, pageserver is restarted, gc is inhibited
+# - detach while receiving writes and *layer flushes*
 # - branch near existing L1 boundary, image layers?
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
