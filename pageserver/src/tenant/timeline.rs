@@ -657,8 +657,8 @@ impl From<GetVectoredError> for PageReconstructError {
     fn from(e: GetVectoredError) -> Self {
         match e {
             GetVectoredError::Cancelled => PageReconstructError::Cancelled,
+            GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(anyhow!("Invalid LSN")),
             err @ GetVectoredError::Oversized(_) => PageReconstructError::Other(err.into()),
-            err @ GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(err.into()),
             err @ GetVectoredError::MissingKey(_) => PageReconstructError::Other(err.into()),
             GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
             GetVectoredError::Other(err) => PageReconstructError::Other(err),
@@ -774,6 +774,15 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
+        if !lsn.is_valid() {
+            return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
+        }
+
+        // This check is debug-only because of the cost of hashing, and because it's a double-check: we
+        // already checked the key against the shard_identity when looking up the Timeline from
+        // page_service.
+        debug_assert!(!self.shard_identity.is_key_disposable(&key));
+
         self.timeline_get_throttle.throttle(ctx, 1).await;
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
@@ -865,15 +874,6 @@ impl Timeline {
         mut reconstruct_state: ValueReconstructState,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
-        if !lsn.is_valid() {
-            return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
-        }
-
-        // This check is debug-only because of the cost of hashing, and because it's a double-check: we
-        // already checked the key against the shard_identity when looking up the Timeline from
-        // page_service.
-        debug_assert!(!self.shard_identity.is_key_disposable(&key));
-
         // XXX: structured stats collection for layer eviction here.
         trace!(
             "get page request for {}@{} from task kind {:?}",
@@ -1040,6 +1040,23 @@ impl Timeline {
                         // the vectored read path returns a key level error as opposed to a top
                         // level error.
                         return Err(GetVectoredError::MissingKey(key));
+                    }
+                    Err(Other(err))
+                        if err
+                            .to_string()
+                            .contains("downloading evicted layer file failed") =>
+                    {
+                        return Err(GetVectoredError::Other(err))
+                    }
+                    Err(Other(err))
+                        if err
+                            .chain()
+                            .any(|cause| cause.to_string().contains("layer loading failed")) =>
+                    {
+                        // The intent here is to achieve error parity with the vectored read path.
+                        // When vectored read fails to load a layer it fails the whole read, hence
+                        // we mimic this behaviour here to keep the validation happy.
+                        return Err(GetVectoredError::Other(err));
                     }
                     _ => {
                         values.insert(key, block);
