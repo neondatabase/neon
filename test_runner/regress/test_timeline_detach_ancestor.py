@@ -7,7 +7,8 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import HistoricLayerInfo
-from fixtures.types import Lsn
+from fixtures.pageserver.utils import wait_timeline_detail_404
+from fixtures.types import Lsn, TimelineId
 
 
 def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
@@ -165,11 +166,142 @@ def test_ancestor_detach_branched_from(neon_env_builder: NeonEnvBuilder, branchp
     # there could be a hole in LSNs between copied from the "old main" and the first branch layer.
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
+    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
+
+
+def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
+    """
+    The case from RFC:
+
+                              +-> another branch with same ancestor_lsn as new main
+                              |
+    old main -------|---------X--------->
+                    |         |         |
+                    |         |         +-> after
+                    |         |
+                    |         +-> new main
+                    |
+                    +-> reparented
+
+    Ends up as:
+
+    old main --------------------------->
+                                        |
+                                        +-> after
+
+                              +-> another branch with same ancestor_lsn as new main
+                              |
+    new main -------|---------|->
+                    |
+                    +-> reparented
+
+    We confirm the end result by being able to delete "old main" after deleting "after".
+    """
+
+    # TODO: support not yet implemented for these
+    restart_after = True
+    write_to_branch_first = True
+
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+        }
+    )
+
+    client = env.pageserver.http_client()
+
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql("CREATE TABLE foo (i BIGINT);")
+        ep.safe_psql("CREATE TABLE audit AS SELECT 1 as starts;")
+
+        branchpoint_pipe = wait_for_last_flush_lsn(
+            env, ep, env.initial_tenant, env.initial_timeline
+        )
+
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(0, 8191) g(i);")
+
+        branchpoint_x = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+        client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
+
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(8192, 16383) g(i);")
+        wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+
+    # as this only gets reparented, we don't need to write to it like new main
+    reparented = env.neon_cli.create_branch(
+        "reparented", "main", env.initial_tenant, ancestor_start_lsn=branchpoint_pipe
+    )
+
+    same_branchpoint = env.neon_cli.create_branch(
+        "same_branchpoint", "main", env.initial_tenant, ancestor_start_lsn=branchpoint_x
+    )
+
+    timeline_id = env.neon_cli.create_branch(
+        "new main", "main", env.initial_tenant, ancestor_start_lsn=branchpoint_x
+    )
+
+    after = env.neon_cli.create_branch("after", "main", env.initial_tenant, ancestor_start_lsn=None)
+
+    if write_to_branch_first:
+        with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
+            assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 8192
+            with ep.cursor() as cur:
+                cur.execute("UPDATE audit SET starts = starts + 1")
+                assert cur.rowcount == 1
+            wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
+
+        client.timeline_checkpoint(env.initial_tenant, timeline_id)
+
+    # TODO: return value from this should say that reparented and same_branchpoint were reparented
+    client.detach_ancestor(env.initial_tenant, timeline_id)
+
+    if restart_after:
+        env.pageserver.stop()
+        env.pageserver.start()
+
+    # checking the ancestor after is much faster than waiting for the endpoint not start
+    expected_ancestry = [
+        (env.initial_timeline, None),
+        (after, env.initial_timeline),
+        (timeline_id, None),
+        (same_branchpoint, timeline_id),
+        (reparented, timeline_id),
+    ]
+
+    for id, expected_ancestor in expected_ancestry:
+        details = client.timeline_detail(env.initial_tenant, id)
+        ancestor_timeline_id = details["ancestor_timeline_id"]
+        if expected_ancestor is None:
+            assert ancestor_timeline_id is None
+        else:
+            assert TimelineId(ancestor_timeline_id) == expected_ancestor
+
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 16384
+
+    with env.endpoints.create_start("after", tenant_id=env.initial_tenant) as ep:
+        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 16384
+
+    with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
+        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 8192
+        assert ep.safe_psql("SELECT count(*) FROM audit WHERE starts = 2")[0][0] == 1
+
+    with env.endpoints.create_start("same_branchpoint", tenant_id=env.initial_tenant) as ep:
+        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 8192
+        assert ep.safe_psql("SELECT count(*) FROM audit WHERE starts = 1")[0][0] == 1
+
+    with env.endpoints.create_start("reparented", tenant_id=env.initial_tenant) as ep:
+        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 0
+
+    client.timeline_delete(env.initial_tenant, after)
+    wait_timeline_detail_404(client, env.initial_tenant, after, 10, 1.0)
+
+    # if this succeeds, the reparenting must've happened
+    client.timeline_delete(env.initial_tenant, env.initial_timeline)
+    wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
 
 
 # TODO:
 # - ancestor gets the checkpoint called at detach if necessary
-# - reparenting is done
 # - after starting the operation, tenant is deleted
 # - after starting the operation, pageserver is shutdown
 # - branch near existing L1 boundary, image layers?
