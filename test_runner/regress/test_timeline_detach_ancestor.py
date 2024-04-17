@@ -254,38 +254,26 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
         env.pageserver.start()
 
     # checking the ancestor after is much faster than waiting for the endpoint not start
-    expected_ancestry = [
-        (env.initial_timeline, None),
-        (after, env.initial_timeline),
-        (timeline_id, None),
-        (same_branchpoint, timeline_id),
-        (reparented, timeline_id),
+    expected_result = [
+        ("main", env.initial_timeline, None, 16384, 1),
+        ("after", after, env.initial_timeline, 16384, 1),
+        ("new main", timeline_id, None, 8192, 2),
+        ("same_branchpoint", same_branchpoint, timeline_id, 8192, 1),
+        ("reparented", reparented, timeline_id, 0, 1),
     ]
 
-    for id, expected_ancestor in expected_ancestry:
-        details = client.timeline_detail(env.initial_tenant, id)
+    for _, timeline_id, expected_ancestor, _, _ in expected_result:
+        details = client.timeline_detail(env.initial_tenant, timeline_id)
         ancestor_timeline_id = details["ancestor_timeline_id"]
         if expected_ancestor is None:
             assert ancestor_timeline_id is None
         else:
             assert TimelineId(ancestor_timeline_id) == expected_ancestor
 
-    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
-        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 16384
-
-    with env.endpoints.create_start("after", tenant_id=env.initial_tenant) as ep:
-        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 16384
-
-    with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
-        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 8192
-        assert ep.safe_psql("SELECT count(*) FROM audit WHERE starts = 2")[0][0] == 1
-
-    with env.endpoints.create_start("same_branchpoint", tenant_id=env.initial_tenant) as ep:
-        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 8192
-        assert ep.safe_psql("SELECT count(*) FROM audit WHERE starts = 1")[0][0] == 1
-
-    with env.endpoints.create_start("reparented", tenant_id=env.initial_tenant) as ep:
-        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 0
+    for name, _, _, rows, starts in expected_result:
+        with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
+            assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
+            assert ep.safe_psql(f"SELECT count(*) FROM audit WHERE starts = {starts}")[0][0] == 1
 
     client.timeline_delete(env.initial_tenant, after)
     wait_timeline_detail_404(client, env.initial_tenant, after, 10, 1.0)
