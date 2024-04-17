@@ -435,7 +435,7 @@ pub(crate) enum PageReconstructError {
 
 #[derive(Debug)]
 pub struct MissingKeyError {
-    no_initial_image: bool,
+    stuck_at_lsn: bool,
     key: Key,
     shard: ShardNumber,
     cont_lsn: Lsn,
@@ -447,7 +447,7 @@ pub struct MissingKeyError {
 
 impl std::fmt::Display for MissingKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.no_initial_image {
+        if self.stuck_at_lsn {
             // Records are found in this timeline but no image layer or initial delta record was found.
             write!(
                 f,
@@ -929,9 +929,9 @@ impl Timeline {
                     Err(Cancelled | AncestorStopping(_)) => {
                         return Err(GetVectoredError::Cancelled)
                     }
-                    // we only capture no_initial_image=false now until we figure out https://github.com/neondatabase/neon/issues/7380
+                    // we only capture stuck_at_lsn=false now until we figure out https://github.com/neondatabase/neon/issues/7380
                     Err(MissingKey(MissingKeyError {
-                        no_initial_image: false,
+                        stuck_at_lsn: false,
                         ..
                     })) => return Err(GetVectoredError::MissingKey(key)),
                     _ => {
@@ -2835,7 +2835,7 @@ impl Timeline {
                             // Didn't make any progress in last iteration. Error out to avoid
                             // getting stuck in the loop.
                             return Err(PageReconstructError::MissingKey(MissingKeyError {
-                                no_initial_image: true,
+                                stuck_at_lsn: true,
                                 key,
                                 shard: self.shard_identity.get_shard_number(&key),
                                 cont_lsn: Lsn(cont_lsn.0 - 1),
@@ -2850,7 +2850,7 @@ impl Timeline {
                 }
                 ValueReconstructResult::Missing => {
                     return Err(PageReconstructError::MissingKey(MissingKeyError {
-                        no_initial_image: false,
+                        stuck_at_lsn: false,
                         key,
                         shard: self.shard_identity.get_shard_number(&key),
                         cont_lsn,
