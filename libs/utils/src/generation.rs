@@ -34,6 +34,8 @@ pub enum Generation {
 /// scenarios where pageservers might otherwise issue conflicting writes to
 /// remote storage
 impl Generation {
+    pub const MAX: Self = Self::Valid(u32::MAX);
+
     /// Create a new Generation that represents a legacy key format with
     /// no generation suffix
     pub fn none() -> Self {
