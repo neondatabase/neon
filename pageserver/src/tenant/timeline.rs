@@ -4524,13 +4524,12 @@ impl Timeline {
                 let owned = detach_ancestor::schedule_remote_copy(&rtc, adopted, self)?;
                 new_owned.push(owned);
             }
-            // after each batch schedule index_part update to be able to resume after a
-            // shutdown without re-copying all of the files.
+
+            // after each batch except the last schedule index_part update to be able to resume
+            // after a shutdown without re-copying all of the files.
             //
             // intentional: we are not publishing the new to LayerMap until the end, because
             // they have better chance of being already downloaded at ancestor
-            //
-            // after a restart any accesses which require download will be unfortunate.
             if chunks.len() > 0 {
                 rtc.schedule_index_upload_for_file_changes()
                     .map_err(|_| ShuttingDown)?;
