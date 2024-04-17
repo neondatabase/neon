@@ -217,6 +217,7 @@ pub struct DeltaLayerInner {
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
+    lsn_range: Range<Lsn>,
 
     file: VirtualFile,
     file_id: FileId,
@@ -742,6 +743,7 @@ impl DeltaLayerInner {
             file_id,
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
+            lsn_range: actual_summary.lsn_range,
             max_vectored_read_bytes,
         }))
     }
@@ -866,7 +868,7 @@ impl DeltaLayerInner {
         let data_end_offset = self.index_start_offset();
 
         let reads = Self::plan_reads(
-            keyspace,
+            &keyspace,
             lsn_range,
             data_end_offset,
             index_reader,
@@ -880,11 +882,13 @@ impl DeltaLayerInner {
         self.do_reads_and_update_state(reads, reconstruct_state)
             .await;
 
+        reconstruct_state.on_lsn_advanced(&keyspace, self.lsn_range.start);
+
         Ok(())
     }
 
     async fn plan_reads<Reader>(
-        keyspace: KeySpace,
+        keyspace: &KeySpace,
         lsn_range: Range<Lsn>,
         data_end_offset: u64,
         index_reader: DiskBtreeReader<Reader, DELTA_KEY_SIZE>,
@@ -1532,7 +1536,7 @@ mod test {
 
         // Plan and validate
         let vectored_reads = DeltaLayerInner::plan_reads(
-            keyspace.clone(),
+            &keyspace,
             lsn_range.clone(),
             disk_offset,
             reader,
@@ -1784,7 +1788,7 @@ mod test {
             let data_end_offset = inner.index_start_blk as u64 * PAGE_SZ as u64;
 
             let vectored_reads = DeltaLayerInner::plan_reads(
-                keyspace.clone(),
+                &keyspace,
                 entries_meta.lsn_range.clone(),
                 data_end_offset,
                 index_reader,

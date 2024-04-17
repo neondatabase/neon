@@ -138,6 +138,29 @@ impl ValuesReconstructState {
         }
     }
 
+    /// This function is called after reading a keyspace from a layer.
+    /// It checks if the read path has now moved past the cached Lsn for any keys.
+    ///
+    /// Implementation note: We intentionally iterate over the keys for which we've
+    /// already collected some reconstruct data. This avoids scaling complexity with
+    /// the size of the search space.
+    pub(crate) fn on_lsn_advanced(&mut self, keyspace: &KeySpace, advanced_to: Lsn) {
+        for (key, value) in self.keys.iter_mut() {
+            if !keyspace.contains(key) {
+                continue;
+            }
+
+            if let Ok(state) = value {
+                if state.situation != ValueReconstructSituation::Complete
+                    && state.get_cached_lsn() >= Some(advanced_to)
+                {
+                    state.situation = ValueReconstructSituation::Complete;
+                    self.keys_done.add_key(*key);
+                }
+            }
+        }
+    }
+
     /// Update the state collected for a given key.
     /// Returns true if this was the last value needed for the key and false otherwise.
     ///
@@ -162,11 +185,18 @@ impl ValuesReconstructState {
                         true
                     }
                     Value::WalRecord(rec) => {
-                        let reached_cache =
-                            state.get_cached_lsn().map(|clsn| clsn + 1) == Some(lsn);
+                        debug_assert!(
+                            Some(lsn) > state.get_cached_lsn(),
+                            "Attempt to collect a record below cached LSN for walredo: {} < {}",
+                            lsn,
+                            state
+                                .get_cached_lsn()
+                                .expect("Assertion can only fire if a cached lsn is present")
+                        );
+
                         let will_init = rec.will_init();
                         state.records.push((lsn, rec));
-                        will_init || reached_cache
+                        will_init
                     }
                 },
             };
@@ -349,11 +379,28 @@ impl ReadableLayer {
     ) -> Result<(), GetVectoredError> {
         match self {
             ReadableLayer::PersistentLayer(layer) => {
+                if keyspace.total_size() == 1 {
+                    tracing::info!(
+                        "Vectored path for {}: {} @ {:?}",
+                        keyspace.start().unwrap(),
+                        layer.local_path(),
+                        lsn_range
+                    );
+                }
+
                 layer
                     .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
                     .await
             }
             ReadableLayer::InMemoryLayer(layer) => {
+                if keyspace.total_size() == 1 {
+                    tracing::info!(
+                        "Vectored path for {}: in mem layer @ {:?}",
+                        keyspace.start().unwrap(),
+                        lsn_range
+                    );
+                }
+
                 layer
                     .get_values_reconstruct_data(keyspace, lsn_range.end, reconstruct_state, ctx)
                     .await
