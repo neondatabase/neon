@@ -52,13 +52,22 @@ impl ValueBytes {
             return Err(InvalidInput::TooShortValue);
         }
 
-        if raw[3] == 0 {
+        let value_discriminator = &raw[0..4];
+
+        if value_discriminator == [0, 0, 0, 0] {
             // Value::Image always initializes
             return Ok(true);
         }
 
-        if raw[3] != 1 {
-            // Only Value::WalRecord(NeonWalRecord::Postgres { .. }) might init
+        if value_discriminator != [0, 0, 0, 1] {
+            // not a Value::WalRecord(..)
+            return Ok(false);
+        }
+
+        let walrecord_discriminator = &raw[4..8];
+
+        if walrecord_discriminator != [0, 0, 0, 0] {
+            // only NeonWalRecord::Postgres can have will_init
             return Ok(false);
         }
 
@@ -171,7 +180,8 @@ mod test {
         #[rustfmt::skip]
         let expected = [
             // flattened discriminator of total 8 bytes
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00,
             // will_init
             0x00,
             // 8 byte length
@@ -194,6 +204,33 @@ mod test {
                 InvalidInput::TooShortValue
             )
         }
+    }
+
+    #[test]
+    fn clear_visibility_map_flags_example() {
+        let rec = NeonWalRecord::ClearVisibilityMapFlags {
+            new_heap_blkno: Some(0x11),
+            old_heap_blkno: None,
+            flags: 0x03,
+        };
+        let rec = Value::WalRecord(rec);
+
+        #[rustfmt::skip]
+        let expected = [
+            // discriminators
+            0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x01,
+            // Some == 1 followed by 4 bytes
+            0x01, 0x00, 0x00, 0x00, 0x11,
+            // None == 0
+            0x00,
+            // flags
+            0x03
+        ];
+
+        roundtrip!(rec, expected);
+
+        assert!(!ValueBytes::will_init(&expected).unwrap());
     }
 }
 
