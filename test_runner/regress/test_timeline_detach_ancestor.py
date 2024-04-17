@@ -104,6 +104,7 @@ def test_ancestor_detach_branched_from(neon_env_builder: NeonEnvBuilder, branchp
         # as there is no 8 byte walrecord, nothing should get copied from the straddling layer
         truncated_layers = 0
     else:
+        # this case also covers the implicit flush of ancestor as the inmemory hasn't been flushed yet
         assert branchpoint == Branchpoint.LAST_RECORD_LSN
         branch_at = None
         rows = 16384
@@ -301,7 +302,6 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
 
 
 # TODO:
-# - ancestor gets the checkpoint called at detach if necessary
 # - after starting the operation, tenant is deleted
 # - after starting the operation, pageserver is shutdown
 # - branch near existing L1 boundary, image layers?
