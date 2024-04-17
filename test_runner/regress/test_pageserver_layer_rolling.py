@@ -1,6 +1,7 @@
 import asyncio
 import os
-from typing import Tuple
+import time
+from typing import Optional, Tuple
 
 import psutil
 import pytest
@@ -20,20 +21,30 @@ ENTRIES_PER_TIMELINE = 10_000
 CHECKPOINT_TIMEOUT_SECONDS = 60
 
 
-async def run_worker(env: NeonEnv, tenant_conf, entries: int) -> Tuple[TenantId, TimelineId, Lsn]:
-    tenant, timeline = env.neon_cli.create_tenant(conf=tenant_conf)
+async def run_worker_for_tenant(
+    env: NeonEnv, entries: int, tenant: TenantId, offset: Optional[int] = None
+) -> Lsn:
+    if offset is None:
+        offset = 0
+
     with env.endpoints.create_start("main", tenant_id=tenant) as ep:
         conn = await ep.connect_async()
         try:
             await conn.execute("CREATE TABLE IF NOT EXISTS t(key serial primary key, value text)")
             await conn.execute(
-                f"INSERT INTO t SELECT i, CONCAT('payload_', i) FROM generate_series(0,{entries}) as i"
+                f"INSERT INTO t SELECT i, CONCAT('payload_', i) FROM generate_series({offset},{entries}) as i"
             )
         finally:
             await conn.close(timeout=10)
 
         last_flush_lsn = Lsn(ep.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
-        return tenant, timeline, last_flush_lsn
+        return last_flush_lsn
+
+
+async def run_worker(env: NeonEnv, tenant_conf, entries: int) -> Tuple[TenantId, TimelineId, Lsn]:
+    tenant, timeline = env.neon_cli.create_tenant(conf=tenant_conf)
+    last_flush_lsn = await run_worker_for_tenant(env, entries, tenant)
+    return tenant, timeline, last_flush_lsn
 
 
 async def workload(
@@ -89,7 +100,9 @@ def assert_dirty_bytes(env, v):
 
 
 def assert_dirty_bytes_nonzero(env):
-    assert get_dirty_bytes(env) > 0
+    dirty_bytes = get_dirty_bytes(env)
+    assert dirty_bytes > 0
+    return dirty_bytes
 
 
 @pytest.mark.parametrize("immediate_shutdown", [True, False])
@@ -181,6 +194,31 @@ def test_idle_checkpoints(neon_env_builder: NeonEnvBuilder):
     # such that there are zero bytes of ephemeral layer left on the pageserver
     log.info("Waiting for background checkpoints...")
     wait_until(CHECKPOINT_TIMEOUT_SECONDS * 2, 1, lambda: assert_dirty_bytes(env, 0))  # type: ignore
+
+    # The code below verifies that we do not flush on the first write
+    # after an idle period longer than the checkpoint timeout.
+
+    # Sit quietly for longer than the checkpoint timeout
+    time.sleep(CHECKPOINT_TIMEOUT_SECONDS + CHECKPOINT_TIMEOUT_SECONDS / 2)
+
+    # Restart the safekeepers and write a bit of extra data into one tenant
+    for sk in env.safekeepers:
+        sk.start()
+
+    tenant_with_extra_writes = last_flush_lsns[0][0]
+    asyncio.run(
+        run_worker_for_tenant(env, 5, tenant_with_extra_writes, offset=ENTRIES_PER_TIMELINE)
+    )
+
+    dirty_after_write = wait_until(10, 1, lambda: assert_dirty_bytes_nonzero(env))  # type: ignore
+
+    # We shouldn't flush since we've just opened a new layer
+    waited_for = 0
+    while waited_for < CHECKPOINT_TIMEOUT_SECONDS // 4:
+        time.sleep(5)
+        waited_for += 5
+
+        assert get_dirty_bytes(env) >= dirty_after_write
 
 
 @pytest.mark.skipif(

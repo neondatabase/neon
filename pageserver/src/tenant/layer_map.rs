@@ -346,35 +346,6 @@ where
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Debug, Clone)]
-pub enum InMemoryLayerHandle {
-    Open {
-        lsn_floor: Lsn,
-        end_lsn: Lsn,
-    },
-    Frozen {
-        idx: usize,
-        lsn_floor: Lsn,
-        end_lsn: Lsn,
-    },
-}
-
-impl InMemoryLayerHandle {
-    pub fn get_lsn_floor(&self) -> Lsn {
-        match self {
-            InMemoryLayerHandle::Open { lsn_floor, .. } => *lsn_floor,
-            InMemoryLayerHandle::Frozen { lsn_floor, .. } => *lsn_floor,
-        }
-    }
-
-    pub fn get_end_lsn(&self) -> Lsn {
-        match self {
-            InMemoryLayerHandle::Open { end_lsn, .. } => *end_lsn,
-            InMemoryLayerHandle::Frozen { end_lsn, .. } => *end_lsn,
-        }
-    }
-}
-
 impl LayerMap {
     ///
     /// Find the latest layer (by lsn.end) that covers the given
@@ -576,41 +547,18 @@ impl LayerMap {
         self.historic.iter()
     }
 
-    /// Get a handle for the first in memory layer that matches the provided predicate.
-    /// The handle should be used with [`Self::get_in_memory_layer`] to retrieve the actual layer.
-    ///
-    /// Note: [`Self::find_in_memory_layer`] and [`Self::get_in_memory_layer`] should be called during
-    /// the same exclusive region established by holding the layer manager lock.
-    pub fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<InMemoryLayerHandle>
+    /// Get a ref counted pointer for the first in memory layer that matches the provided predicate.
+    pub fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<Arc<InMemoryLayer>>
     where
         Pred: FnMut(&Arc<InMemoryLayer>) -> bool,
     {
         if let Some(open) = &self.open_layer {
             if pred(open) {
-                return Some(InMemoryLayerHandle::Open {
-                    lsn_floor: open.get_lsn_range().start,
-                    end_lsn: open.get_lsn_range().end,
-                });
+                return Some(open.clone());
             }
         }
 
-        let pos = self.frozen_layers.iter().rev().position(pred);
-        pos.map(|rev_idx| {
-            let idx = self.frozen_layers.len() - 1 - rev_idx;
-            InMemoryLayerHandle::Frozen {
-                idx,
-                lsn_floor: self.frozen_layers[idx].get_lsn_range().start,
-                end_lsn: self.frozen_layers[idx].get_lsn_range().end,
-            }
-        })
-    }
-
-    /// Get the layer pointed to by the provided handle.
-    pub fn get_in_memory_layer(&self, handle: &InMemoryLayerHandle) -> Option<Arc<InMemoryLayer>> {
-        match handle {
-            InMemoryLayerHandle::Open { .. } => self.open_layer.clone(),
-            InMemoryLayerHandle::Frozen { idx, .. } => self.frozen_layers.get(*idx).cloned(),
-        }
+        self.frozen_layers.iter().rfind(|l| pred(l)).cloned()
     }
 
     ///

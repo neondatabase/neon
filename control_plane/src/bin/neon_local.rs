@@ -14,9 +14,7 @@ use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
 use control_plane::{broker, local_env};
-use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeSchedulingPolicy, PlacementPolicy,
-};
+use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::models::{
     ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
 };
@@ -1060,21 +1058,6 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
             }
         }
 
-        Some(("set-state", subcommand_args)) => {
-            let pageserver = get_pageserver(env, subcommand_args)?;
-            let scheduling = subcommand_args.get_one("scheduling");
-            let availability = subcommand_args.get_one("availability");
-
-            let storage_controller = StorageController::from_env(env);
-            storage_controller
-                .node_configure(NodeConfigureRequest {
-                    node_id: pageserver.conf.id,
-                    scheduling: scheduling.cloned(),
-                    availability: availability.cloned(),
-                })
-                .await?;
-        }
-
         Some(("status", subcommand_args)) => {
             match get_pageserver(env, subcommand_args)?.check_status().await {
                 Ok(_) => println!("Page server is up and running"),
@@ -1248,7 +1231,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
-                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast " }, false) {
+                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast" }, false) {
                     eprintln!("postgres stop failed: {e:#}");
                 }
             }
@@ -1434,6 +1417,7 @@ fn cli() -> Command {
         .subcommand(
             Command::new("timeline")
             .about("Manage timelines")
+            .arg_required_else_help(true)
             .subcommand(Command::new("list")
                 .about("List all timelines, available to this pageserver")
                 .arg(tenant_id_arg.clone()))
@@ -1513,12 +1497,6 @@ fn cli() -> Command {
                 )
                 .subcommand(Command::new("restart")
                     .about("Restart local pageserver")
-                    .arg(pageserver_config_args.clone())
-                )
-                .subcommand(Command::new("set-state")
-                    .arg(Arg::new("availability").value_parser(value_parser!(NodeAvailability)).long("availability").action(ArgAction::Set).help("Availability state: offline,active"))
-                    .arg(Arg::new("scheduling").value_parser(value_parser!(NodeSchedulingPolicy)).long("scheduling").action(ArgAction::Set).help("Scheduling state: draining,pause,filling,active"))
-                    .about("Set scheduling or availability state of pageserver node")
                     .arg(pageserver_config_args.clone())
                 )
         )

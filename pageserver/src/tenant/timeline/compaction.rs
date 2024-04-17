@@ -12,7 +12,6 @@ use super::layer_manager::LayerManager;
 use super::{CompactFlags, DurationRecorder, RecordedDuration, Timeline};
 
 use anyhow::{anyhow, Context};
-use async_trait::async_trait;
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
@@ -125,18 +124,8 @@ impl Timeline {
                     )
                     .await
                     .map_err(anyhow::Error::from)?;
-                if let Some(remote_client) = &self.remote_client {
-                    for layer in layers {
-                        remote_client.schedule_layer_file_upload(layer)?;
-                    }
-                }
 
-                if let Some(remote_client) = &self.remote_client {
-                    // should any new image layer been created, not uploading index_part will
-                    // result in a mismatch between remote_physical_size and layermap calculated
-                    // size, which will fail some tests, but should not be an issue otherwise.
-                    remote_client.schedule_index_upload_for_file_changes()?;
-                }
+                self.upload_new_image_layers(layers)?;
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -818,7 +807,10 @@ impl TimelineAdaptor {
         self.timeline
             .finish_compact_batch(&self.new_deltas, &self.new_images, &layers_to_delete)
             .await?;
-        self.new_images.clear();
+
+        self.timeline
+            .upload_new_image_layers(std::mem::take(&mut self.new_images))?;
+
         self.new_deltas.clear();
         self.layers_to_delete.clear();
         Ok(())
@@ -1129,7 +1121,6 @@ impl CompactionLayer<Key> for ResidentDeltaLayer {
     }
 }
 
-#[async_trait]
 impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 

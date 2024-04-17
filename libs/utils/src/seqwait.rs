@@ -182,6 +182,18 @@ where
         }
     }
 
+    /// Check if [`Self::wait_for`] or [`Self::wait_for_timeout`] would wait if called with `num`.
+    pub fn would_wait_for(&self, num: V) -> Result<(), V> {
+        let internal = self.internal.lock().unwrap();
+        let cnt = internal.current.cnt_value();
+        drop(internal);
+        if cnt >= num {
+            Ok(())
+        } else {
+            Err(cnt)
+        }
+    }
+
     /// Register and return a channel that will be notified when a number arrives,
     /// or None, if it has already arrived.
     fn queue_for_wait(&self, num: V) -> Result<Option<Receiver<()>>, SeqWaitError> {

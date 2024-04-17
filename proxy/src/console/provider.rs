@@ -8,11 +8,13 @@ use crate::{
         backend::{ComputeCredentialKeys, ComputeUserInfo},
         IpPattern,
     },
-    cache::{project_info::ProjectInfoCacheImpl, Cached, TimedLru},
+    cache::{endpoints::EndpointsCache, project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
-    config::{CacheOptions, ProjectInfoCacheOptions},
+    config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
     context::RequestMonitoring,
-    scram, EndpointCacheKey, ProjectId,
+    intern::ProjectIdInt,
+    metrics::ApiLockMetrics,
+    scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
 use std::{sync::Arc, time::Duration};
@@ -271,7 +273,7 @@ pub struct AuthInfo {
     /// List of IP addresses allowed for the autorization.
     pub allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
-    pub project_id: Option<ProjectId>,
+    pub project_id: Option<ProjectIdInt>,
 }
 
 /// Info for establishing a connection to a compute node.
@@ -415,12 +417,15 @@ pub struct ApiCaches {
     pub node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
     pub project_info: Arc<ProjectInfoCacheImpl>,
+    /// List of all valid endpoints.
+    pub endpoints_cache: Arc<EndpointsCache>,
 }
 
 impl ApiCaches {
     pub fn new(
         wake_compute_cache_config: CacheOptions,
         project_info_cache_config: ProjectInfoCacheOptions,
+        endpoint_cache_config: EndpointCacheConfig,
     ) -> Self {
         Self {
             node_info: NodeInfoCache::new(
@@ -430,6 +435,7 @@ impl ApiCaches {
                 true,
             ),
             project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
+            endpoints_cache: Arc::new(EndpointsCache::new(endpoint_cache_config)),
         }
     }
 }
@@ -440,10 +446,8 @@ pub struct ApiLocks {
     node_locks: DashMap<EndpointCacheKey, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
-    registered: prometheus::IntCounter,
-    unregistered: prometheus::IntCounter,
-    reclamation_lag: prometheus::Histogram,
-    lock_acquire_lag: prometheus::Histogram,
+    epoch: std::time::Duration,
+    metrics: &'static ApiLockMetrics,
 }
 
 impl ApiLocks {
@@ -452,54 +456,16 @@ impl ApiLocks {
         permits: usize,
         shards: usize,
         timeout: Duration,
+        epoch: std::time::Duration,
+        metrics: &'static ApiLockMetrics,
     ) -> prometheus::Result<Self> {
-        let registered = prometheus::IntCounter::with_opts(
-            prometheus::Opts::new(
-                "semaphores_registered",
-                "Number of semaphores registered in this api lock",
-            )
-            .namespace(name),
-        )?;
-        prometheus::register(Box::new(registered.clone()))?;
-        let unregistered = prometheus::IntCounter::with_opts(
-            prometheus::Opts::new(
-                "semaphores_unregistered",
-                "Number of semaphores unregistered in this api lock",
-            )
-            .namespace(name),
-        )?;
-        prometheus::register(Box::new(unregistered.clone()))?;
-        let reclamation_lag = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                "reclamation_lag_seconds",
-                "Time it takes to reclaim unused semaphores in the api lock",
-            )
-            .namespace(name)
-            // 1us -> 65ms
-            // benchmarks on my mac indicate it's usually in the range of 256us and 512us
-            .buckets(prometheus::exponential_buckets(1e-6, 2.0, 16)?),
-        )?;
-        prometheus::register(Box::new(reclamation_lag.clone()))?;
-        let lock_acquire_lag = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                "semaphore_acquire_seconds",
-                "Time it takes to reclaim unused semaphores in the api lock",
-            )
-            .namespace(name)
-            // 0.1ms -> 6s
-            .buckets(prometheus::exponential_buckets(1e-4, 2.0, 16)?),
-        )?;
-        prometheus::register(Box::new(lock_acquire_lag.clone()))?;
-
         Ok(Self {
             name,
             node_locks: DashMap::with_shard_amount(shards),
             permits,
             timeout,
-            lock_acquire_lag,
-            registered,
-            unregistered,
-            reclamation_lag,
+            epoch,
+            metrics,
         })
     }
 
@@ -519,7 +485,7 @@ impl ApiLocks {
                 self.node_locks
                     .entry(key.clone())
                     .or_insert_with(|| {
-                        self.registered.inc();
+                        self.metrics.semaphores_registered.inc();
                         Arc::new(Semaphore::new(self.permits))
                     })
                     .clone()
@@ -527,20 +493,21 @@ impl ApiLocks {
         };
         let permit = tokio::time::timeout_at(now + self.timeout, semaphore.acquire_owned()).await;
 
-        self.lock_acquire_lag
-            .observe((Instant::now() - now).as_secs_f64());
+        self.metrics
+            .semaphore_acquire_seconds
+            .observe(now.elapsed().as_secs_f64());
 
         Ok(WakeComputePermit {
             permit: Some(permit??),
         })
     }
 
-    pub async fn garbage_collect_worker(&self, epoch: std::time::Duration) {
+    pub async fn garbage_collect_worker(&self) {
         if self.permits == 0 {
             return;
         }
-
-        let mut interval = tokio::time::interval(epoch / (self.node_locks.shards().len()) as u32);
+        let mut interval =
+            tokio::time::interval(self.epoch / (self.node_locks.shards().len()) as u32);
         loop {
             for (i, shard) in self.node_locks.shards().iter().enumerate() {
                 interval.tick().await;
@@ -553,13 +520,13 @@ impl ApiLocks {
                     "performing epoch reclamation on api lock"
                 );
                 let mut lock = shard.write();
-                let timer = self.reclamation_lag.start_timer();
+                let timer = self.metrics.reclamation_lag_seconds.start_timer();
                 let count = lock
                     .extract_if(|_, semaphore| Arc::strong_count(semaphore.get_mut()) == 1)
                     .count();
                 drop(lock);
-                self.unregistered.inc_by(count as u64);
-                timer.observe_duration()
+                self.metrics.semaphores_unregistered.inc_by(count as u64);
+                timer.observe();
             }
         }
     }

@@ -2,7 +2,7 @@ use std::fs::File;
 use std::path::Path;
 use std::str::FromStr;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use postgres::config::Config;
 use postgres::{Client, NoTls};
 use reqwest::StatusCode;
@@ -698,7 +698,8 @@ pub fn handle_grants(
 
         // it is important to run this after all grants
         if enable_anon_extension {
-            handle_extension_anon(spec, &db.owner, &mut db_client, false)?;
+            handle_extension_anon(spec, &db.owner, &mut db_client, false)
+                .context("handle_grants handle_extension_anon")?;
         }
     }
 
@@ -743,21 +744,24 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
     // which may happen in two cases:
     // - extension was just installed
     // - extension was already installed and is up to date
-    // DISABLED due to compute node unpinning epic
-    // let query = "ALTER EXTENSION neon UPDATE";
-    // info!("update neon extension version with query: {}", query);
-    // client.simple_query(query)?;
+    let query = "ALTER EXTENSION neon UPDATE";
+    info!("update neon extension version with query: {}", query);
+    if let Err(e) = client.simple_query(query) {
+        error!(
+            "failed to upgrade neon extension during `handle_extension_neon`: {}",
+            e
+        );
+    }
 
     Ok(())
 }
 
 #[instrument(skip_all)]
-pub fn handle_neon_extension_upgrade(_client: &mut Client) -> Result<()> {
-    info!("handle neon extension upgrade (not really)");
-    // DISABLED due to compute node unpinning epic
-    // let query = "ALTER EXTENSION neon UPDATE";
-    // info!("update neon extension version with query: {}", query);
-    // client.simple_query(query)?;
+pub fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
+    info!("handle neon extension upgrade");
+    let query = "ALTER EXTENSION neon UPDATE";
+    info!("update neon extension version with query: {}", query);
+    client.simple_query(query)?;
 
     Ok(())
 }
@@ -810,28 +814,36 @@ $$;"#,
         // Add new migrations below.
     ];
 
-    let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
-    client.simple_query(query)?;
+    let mut func = || {
+        let query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
+        client.simple_query(query)?;
 
-    query = "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key INT NOT NULL PRIMARY KEY, id bigint NOT NULL DEFAULT 0)";
-    client.simple_query(query)?;
+        let query = "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key INT NOT NULL PRIMARY KEY, id bigint NOT NULL DEFAULT 0)";
+        client.simple_query(query)?;
 
-    query = "INSERT INTO neon_migration.migration_id VALUES (0, 0) ON CONFLICT DO NOTHING";
-    client.simple_query(query)?;
+        let query = "INSERT INTO neon_migration.migration_id VALUES (0, 0) ON CONFLICT DO NOTHING";
+        client.simple_query(query)?;
 
-    query = "ALTER SCHEMA neon_migration OWNER TO cloud_admin";
-    client.simple_query(query)?;
+        let query = "ALTER SCHEMA neon_migration OWNER TO cloud_admin";
+        client.simple_query(query)?;
 
-    query = "REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC";
-    client.simple_query(query)?;
+        let query = "REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC";
+        client.simple_query(query)?;
+        Ok::<_, anyhow::Error>(())
+    };
+    func().context("handle_migrations prepare")?;
 
-    query = "SELECT id FROM neon_migration.migration_id";
-    let row = client.query_one(query, &[])?;
+    let query = "SELECT id FROM neon_migration.migration_id";
+    let row = client
+        .query_one(query, &[])
+        .context("handle_migrations get migration_id")?;
     let mut current_migration: usize = row.get::<&str, i64>("id") as usize;
     let starting_migration_id = current_migration;
 
-    query = "BEGIN";
-    client.simple_query(query)?;
+    let query = "BEGIN";
+    client
+        .simple_query(query)
+        .context("handle_migrations begin")?;
 
     while current_migration < migrations.len() {
         let migration = &migrations[current_migration];
@@ -839,7 +851,9 @@ $$;"#,
             info!("Skip migration id={}", current_migration);
         } else {
             info!("Running migration:\n{}\n", migration);
-            client.simple_query(migration)?;
+            client.simple_query(migration).with_context(|| {
+                format!("handle_migrations current_migration={}", current_migration)
+            })?;
         }
         current_migration += 1;
     }
@@ -847,10 +861,14 @@ $$;"#,
         "UPDATE neon_migration.migration_id SET id={}",
         migrations.len()
     );
-    client.simple_query(&setval)?;
+    client
+        .simple_query(&setval)
+        .context("handle_migrations update id")?;
 
-    query = "COMMIT";
-    client.simple_query(query)?;
+    let query = "COMMIT";
+    client
+        .simple_query(query)
+        .context("handle_migrations commit")?;
 
     info!(
         "Ran {} migrations",

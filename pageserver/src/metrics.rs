@@ -1483,12 +1483,18 @@ pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
 });
 
 pub(crate) struct WalIngestMetrics {
+    pub(crate) bytes_received: IntCounter,
     pub(crate) records_received: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
+    bytes_received: register_int_counter!(
+        "pageserver_wal_ingest_bytes_received",
+        "Bytes of WAL ingested from safekeepers",
+    )
+    .unwrap(),
     records_received: register_int_counter!(
         "pageserver_wal_ingest_records_received",
         "Number of WAL records received from safekeepers"
@@ -1813,6 +1819,29 @@ impl Default for WalRedoProcessCounters {
 pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
     Lazy::new(WalRedoProcessCounters::default);
 
+#[cfg(not(test))]
+pub mod wal_redo {
+    use super::*;
+
+    static PROCESS_KIND: Lazy<std::sync::Mutex<UIntGaugeVec>> = Lazy::new(|| {
+        std::sync::Mutex::new(
+            register_uint_gauge_vec!(
+                "pageserver_wal_redo_process_kind",
+                "The configured process kind for walredo",
+                &["kind"],
+            )
+            .unwrap(),
+        )
+    });
+
+    pub fn set_process_kind_metric(kind: crate::walredo::ProcessKind) {
+        // use guard to avoid races around the next two steps
+        let guard = PROCESS_KIND.lock().unwrap();
+        guard.reset();
+        guard.with_label_values(&[&format!("{kind}")]).set(1);
+    }
+}
+
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
@@ -2083,7 +2112,7 @@ impl TimelineMetrics {
 
 pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
     // Only shard zero deals in synthetic sizes
-    if tenant_shard_id.is_zero() {
+    if tenant_shard_id.is_shard_zero() {
         let tid = tenant_shard_id.tenant_id.to_string();
         let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
     }
@@ -2094,6 +2123,7 @@ pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
 use futures::Future;
 use pin_project_lite::pin_project;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -2661,6 +2691,26 @@ pub(crate) mod disk_usage_based_eviction {
     }
 
     pub(crate) static METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
+}
+
+static TOKIO_EXECUTOR_THREAD_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_tokio_executor_thread_configured_count",
+        "Total number of configued tokio executor threads in the process.
+         The `setup` label denotes whether we're running with multiple runtimes or a single runtime.",
+        &["setup"],
+    )
+    .unwrap()
+});
+
+pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SERIALIZE.lock().unwrap();
+    TOKIO_EXECUTOR_THREAD_COUNT.reset();
+    TOKIO_EXECUTOR_THREAD_COUNT
+        .get_metric_with_label_values(&[setup])
+        .unwrap()
+        .set(u64::try_from(num_threads.get()).unwrap());
 }
 
 pub fn preinitialize_metrics() {

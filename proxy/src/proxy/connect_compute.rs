@@ -4,7 +4,7 @@ use crate::{
     console::{self, errors::WakeComputeError, CachedNodeInfo, NodeInfo},
     context::RequestMonitoring,
     error::ReportableError,
-    metrics::NUM_CONNECTION_FAILURES,
+    metrics::{ConnectionFailureKind, Metrics},
     proxy::{
         retry::{retry_after, ShouldRetry},
         wake_compute::wake_compute,
@@ -27,10 +27,10 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
         warn!("invalidating stalled compute node info cache entry");
     }
     let label = match is_cached {
-        true => "compute_cached",
-        false => "compute_uncached",
+        true => ConnectionFailureKind::ComputeCached,
+        false => ConnectionFailureKind::ComputeUncached,
     };
-    NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+    Metrics::get().proxy.connection_failures_total.inc(label);
 
     node_info.invalidate()
 }
@@ -87,7 +87,6 @@ impl ConnectMechanism for TcpMechanism<'_> {
 }
 
 /// Try to connect to the compute node, retrying if necessary.
-/// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
 pub async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
     ctx: &mut RequestMonitoring,
@@ -132,7 +131,6 @@ where
     } else {
         // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
         info!("compute node's state has likely changed; requesting a wake-up");
-        ctx.latency_timer.cache_miss();
         let old_node_info = invalidate_cache(node_info);
         let mut node_info = wake_compute(&mut num_retries, ctx, user_info).await?;
         node_info.reuse_settings(old_node_info);

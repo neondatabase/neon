@@ -12,13 +12,14 @@ use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::ValueReconstructResult;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{PageReconstructError, Timeline};
-use crate::walrecord;
+use crate::{page_cache, walrecord};
 use anyhow::{anyhow, ensure, Result};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // avoid binding to Write (conflicts with std::io::Write)
@@ -36,10 +37,14 @@ use super::{
     ValuesReconstructState,
 };
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub(crate) struct InMemoryLayerFileId(page_cache::FileId);
+
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
+    file_id: InMemoryLayerFileId,
 
     /// This layer contains all the changes from 'start_lsn'. The
     /// start is inclusive.
@@ -48,6 +53,8 @@ pub struct InMemoryLayer {
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is `None`.
     end_lsn: OnceLock<Lsn>,
+
+    opened_at: Instant,
 
     /// The above fields never change, except for `end_lsn`, which is only set once.
     /// All other changing parts are in `inner`, and protected by a mutex.
@@ -200,6 +207,10 @@ pub(crate) static GLOBAL_RESOURCES: GlobalResources = GlobalResources {
 };
 
 impl InMemoryLayer {
+    pub(crate) fn file_id(&self) -> InMemoryLayerFileId {
+        self.file_id
+    }
+
     pub(crate) fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
@@ -443,13 +454,16 @@ impl InMemoryLayer {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
         let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id).await?;
+        let key = InMemoryLayerFileId(file.id());
 
         Ok(InMemoryLayer {
+            file_id: key,
             conf,
             timeline_id,
             tenant_shard_id,
             start_lsn,
             end_lsn: OnceLock::new(),
+            opened_at: Instant::now(),
             inner: RwLock::new(InMemoryLayerInner {
                 index: HashMap::new(),
                 file,
@@ -508,6 +522,10 @@ impl InMemoryLayer {
         locked_inner.resource_units.maybe_publish_size(size);
 
         Ok(())
+    }
+
+    pub(crate) fn get_opened_at(&self) -> Instant {
+        self.opened_at
     }
 
     pub(crate) async fn tick(&self) -> Option<u64> {

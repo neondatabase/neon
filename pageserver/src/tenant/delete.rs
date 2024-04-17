@@ -14,7 +14,10 @@ use crate::{
     config::PageServerConf,
     context::RequestContext,
     task_mgr::{self, TaskKind},
-    tenant::mgr::{TenantSlot, TenantsMapRemoveResult},
+    tenant::{
+        mgr::{TenantSlot, TenantsMapRemoveResult},
+        timeline::ShutdownMode,
+    },
 };
 
 use super::{
@@ -433,6 +436,11 @@ impl DeleteTenantFlow {
         .await
     }
 
+    /// Check whether background deletion of this tenant is currently in progress
+    pub(crate) fn is_in_progress(tenant: &Tenant) -> bool {
+        tenant.delete_progress.try_lock().is_err()
+    }
+
     async fn prepare(
         tenant: &Arc<Tenant>,
     ) -> Result<tokio::sync::OwnedMutexGuard<Self>, DeleteTenantError> {
@@ -463,7 +471,7 @@ impl DeleteTenantFlow {
         // tenant.shutdown
         // Its also bad that we're holding tenants.read here.
         // TODO relax set_stopping to be idempotent?
-        if tenant.shutdown(progress, false).await.is_err() {
+        if tenant.shutdown(progress, ShutdownMode::Hard).await.is_err() {
             return Err(DeleteTenantError::Other(anyhow::anyhow!(
                 "tenant shutdown is already in progress"
             )));

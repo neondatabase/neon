@@ -457,8 +457,12 @@ async fn reload_auth_validation_keys_handler(
             json_response(StatusCode::OK, ())
         }
         Err(e) => {
+            let err_msg = "Error reloading public keys";
             warn!("Error reloading public keys from {key_path:?}: {e:}");
-            json_response(StatusCode::INTERNAL_SERVER_ERROR, ())
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HttpErrorBody::from_msg(err_msg.to_string()),
+            )
         }
     }
 }
@@ -696,7 +700,7 @@ async fn get_lsn_by_timestamp_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -747,7 +751,7 @@ async fn get_timestamp_of_lsn_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -772,7 +776,9 @@ async fn get_timestamp_of_lsn_handler(
             let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
             json_response(StatusCode::OK, time)
         }
-        None => json_response(StatusCode::NOT_FOUND, ()),
+        None => Err(ApiError::NotFound(
+            anyhow::anyhow!("Timestamp for lsn {} not found", lsn).into(),
+        )),
     }
 }
 
@@ -993,10 +999,25 @@ async fn tenant_status(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
+    // In tests, sometimes we want to query the state of a tenant without auto-activating it if it's currently waiting.
+    let activate = true;
+    #[cfg(feature = "testing")]
+    let activate = parse_query_param(&request, "activate")?.unwrap_or(activate);
+
     let tenant_info = async {
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
+
+        if activate {
+            // This is advisory: we prefer to let the tenant activate on-demand when this function is
+            // called, but it is still valid to return 200 and describe the current state of the tenant
+            // if it doesn't make it into an active state.
+            tenant
+                .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
+                .await
+                .ok();
+        }
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
@@ -1071,7 +1092,7 @@ async fn tenant_size_handler(
     let headers = request.headers();
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
         )));

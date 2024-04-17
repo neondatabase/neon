@@ -51,7 +51,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
-    id::TimelineId,
+    id::TimelineId, serde_system_time,
 };
 
 use super::{
@@ -591,7 +591,7 @@ impl<'a> TenantDownloader<'a> {
         let mut progress = SecondaryProgress {
             layers_total: heatmap_stats.layers,
             bytes_total: heatmap_stats.bytes,
-            heatmap_mtime: Some(heatmap_mtime),
+            heatmap_mtime: Some(serde_system_time::SystemTime(heatmap_mtime)),
             layers_downloaded: 0,
             bytes_downloaded: 0,
         };
@@ -786,6 +786,35 @@ impl<'a> TenantDownloader<'a> {
             // Existing on-disk layers: just update their access time.
             if let Some(on_disk) = timeline_state.on_disk_layers.get(&layer.name) {
                 tracing::debug!("Layer {} is already on disk", layer.name);
+
+                if cfg!(debug_assertions) {
+                    // Debug for https://github.com/neondatabase/neon/issues/6966: check that the files we think
+                    // are already present on disk are really there.
+                    let local_path = self
+                        .conf
+                        .timeline_path(tenant_shard_id, &timeline.timeline_id)
+                        .join(layer.name.file_name());
+                    match tokio::fs::metadata(&local_path).await {
+                        Ok(meta) => {
+                            tracing::debug!(
+                                "Layer {} present at {}, size {}",
+                                layer.name,
+                                local_path,
+                                meta.len(),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Layer {} not found at {} ({})",
+                                layer.name,
+                                local_path,
+                                e
+                            );
+                            debug_assert!(false);
+                        }
+                    }
+                }
+
                 if on_disk.metadata != LayerFileMetadata::from(&layer.metadata)
                     || on_disk.access_time != layer.access_time
                 {

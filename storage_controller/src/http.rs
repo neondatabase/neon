@@ -8,6 +8,7 @@ use futures::Future;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
+use metrics::{BuildInfo, NeonMetrics};
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
@@ -34,7 +35,8 @@ use utils::{
 };
 
 use pageserver_api::controller_api::{
-    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantShardMigrateRequest,
+    NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, TenantPolicyRequest,
+    TenantShardMigrateRequest,
 };
 use pageserver_api::upcall_api::{ReAttachRequest, ValidateRequest};
 
@@ -43,15 +45,19 @@ use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
 use routerify::Middleware;
 
 /// State available to HTTP request handlers
-#[derive(Clone)]
 pub struct HttpState {
     service: Arc<crate::service::Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
+    neon_metrics: NeonMetrics,
     allowlist_routes: Vec<Uri>,
 }
 
 impl HttpState {
-    pub fn new(service: Arc<crate::service::Service>, auth: Option<Arc<SwappableJwtAuth>>) -> Self {
+    pub fn new(
+        service: Arc<crate::service::Service>,
+        auth: Option<Arc<SwappableJwtAuth>>,
+        build_info: BuildInfo,
+    ) -> Self {
         let allowlist_routes = ["/status", "/ready", "/metrics"]
             .iter()
             .map(|v| v.parse().unwrap())
@@ -59,6 +65,7 @@ impl HttpState {
         Self {
             service,
             auth,
+            neon_metrics: NeonMetrics::new(build_info),
             allowlist_routes,
         }
     }
@@ -398,6 +405,15 @@ async fn handle_tenant_describe(
     json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
 }
 
+async fn handle_tenant_list(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    json_response(StatusCode::OK, service.tenant_list())
+}
+
 async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -411,7 +427,10 @@ async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError
     check_permissions(&req, Scope::Admin)?;
 
     let state = get_state(&req);
-    json_response(StatusCode::OK, state.service.node_list().await?)
+    let nodes = state.service.node_list().await?;
+    let api_nodes = nodes.into_iter().map(|n| n.describe()).collect::<Vec<_>>();
+
+    json_response(StatusCode::OK, api_nodes)
 }
 
 async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -478,6 +497,22 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
+async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let update_req = json_request::<TenantPolicyRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state
+            .service
+            .tenant_update_policy(tenant_id, update_req)
+            .await?,
+    )
+}
+
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
@@ -507,6 +542,14 @@ async fn handle_consistency_check(req: Request<Body>) -> Result<Response<Body>, 
     let state = get_state(&req);
 
     json_response(StatusCode::OK, state.service.consistency_check().await?)
+}
+
+async fn handle_reconcile_all(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+
+    json_response(StatusCode::OK, state.service.reconcile_all_now().await?)
 }
 
 /// Status endpoint is just used for checking that our HTTP listener is up
@@ -565,9 +608,17 @@ where
     .await
 }
 
+/// Check if the required scope is held in the request's token, or if the request has
+/// a token with 'admin' scope then always permit it.
 fn check_permissions(request: &Request<Body>, required_scope: Scope) -> Result<(), ApiError> {
     check_permission_with(request, |claims| {
-        crate::auth::check_permission(claims, required_scope)
+        match crate::auth::check_permission(claims, required_scope) {
+            Err(e) => match crate::auth::check_permission(claims, Scope::Admin) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(e),
+            },
+            Ok(()) => Ok(()),
+        }
     })
 }
 
@@ -627,10 +678,11 @@ fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>
     })
 }
 
-pub async fn measured_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+pub async fn measured_metrics_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     pub const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
 
-    let payload = crate::metrics::METRICS_REGISTRY.encode();
+    let state = get_state(&req);
+    let payload = crate::metrics::METRICS_REGISTRY.encode(&state.neon_metrics);
     let response = Response::builder()
         .status(200)
         .header(CONTENT_TYPE, TEXT_FORMAT)
@@ -659,6 +711,7 @@ where
 pub fn make_router(
     service: Arc<Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
+    build_info: BuildInfo,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router()
         .middleware(prologue_metrics_middleware())
@@ -675,7 +728,7 @@ pub fn make_router(
     }
 
     router
-        .data(Arc::new(HttpState::new(service, auth)))
+        .data(Arc::new(HttpState::new(service, auth, build_info)))
         .get("/metrics", |r| {
             named_request_span(r, measured_metrics_handler, RequestName("metrics"))
         })
@@ -726,6 +779,9 @@ pub fn make_router(
                 RequestName("debug_v1_consistency_check"),
             )
         })
+        .post("/debug/v1/reconcile_all", |r| {
+            request_span(r, handle_reconcile_all)
+        })
         .put("/debug/v1/failpoints", |r| {
             request_span(r, |r| failpoints_handler(r, CancellationToken::new()))
         })
@@ -763,6 +819,16 @@ pub fn make_router(
                 r,
                 handle_tenant_describe,
                 RequestName("control_v1_tenant_describe"),
+            )
+        })
+        .get("/control/v1/tenant", |r| {
+            tenant_service_handler(r, handle_tenant_list, RequestName("control_v1_tenant_list"))
+        })
+        .put("/control/v1/tenant/:tenant_id/policy", |r| {
+            named_request_span(
+                r,
+                handle_tenant_update_policy,
+                RequestName("control_v1_tenant_policy"),
             )
         })
         // Tenant operations

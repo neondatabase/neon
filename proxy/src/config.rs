@@ -1,10 +1,11 @@
 use crate::{
-    auth,
-    rate_limiter::{AuthRateLimiter, RateBucketInfo},
+    auth::{self, backend::AuthRateLimiter},
+    rate_limiter::RateBucketInfo,
     serverless::GlobalConnPoolOptions,
 };
 use anyhow::{bail, ensure, Context, Ok};
 use itertools::Itertools;
+use remote_storage::RemoteStorageConfig;
 use rustls::{
     crypto::ring::sign,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -39,6 +40,7 @@ pub struct ProxyConfig {
 pub struct MetricCollectionConfig {
     pub endpoint: reqwest::Url,
     pub interval: Duration,
+    pub backup_metric_collection_config: MetricBackupCollectionConfig,
 }
 
 pub struct TlsConfig {
@@ -56,6 +58,7 @@ pub struct AuthenticationConfig {
     pub scram_protocol_timeout: tokio::time::Duration,
     pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,
+    pub rate_limit_ip_subnet: u8,
 }
 
 impl TlsConfig {
@@ -309,6 +312,95 @@ impl CertResolver {
             self.default.as_ref().cloned()
         }
     }
+}
+
+#[derive(Debug)]
+pub struct EndpointCacheConfig {
+    /// Batch size to receive all endpoints on the startup.
+    pub initial_batch_size: usize,
+    /// Batch size to receive endpoints.
+    pub default_batch_size: usize,
+    /// Timeouts for the stream read operation.
+    pub xread_timeout: Duration,
+    /// Stream name to read from.
+    pub stream_name: String,
+    /// Limiter info (to distinguish when to enable cache).
+    pub limiter_info: Vec<RateBucketInfo>,
+    /// Disable cache.
+    /// If true, cache is ignored, but reports all statistics.
+    pub disable_cache: bool,
+    /// Retry interval for the stream read operation.
+    pub retry_interval: Duration,
+}
+
+impl EndpointCacheConfig {
+    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    /// Notice that by default the limiter is empty, which means that cache is disabled.
+    pub const CACHE_DEFAULT_OPTIONS: &'static str =
+        "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
+
+    /// Parse cache options passed via cmdline.
+    /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
+    fn parse(options: &str) -> anyhow::Result<Self> {
+        let mut initial_batch_size = None;
+        let mut default_batch_size = None;
+        let mut xread_timeout = None;
+        let mut stream_name = None;
+        let mut limiter_info = vec![];
+        let mut disable_cache = false;
+        let mut retry_interval = None;
+
+        for option in options.split(',') {
+            let (key, value) = option
+                .split_once('=')
+                .with_context(|| format!("bad key-value pair: {option}"))?;
+
+            match key {
+                "initial_batch_size" => initial_batch_size = Some(value.parse()?),
+                "default_batch_size" => default_batch_size = Some(value.parse()?),
+                "xread_timeout" => xread_timeout = Some(humantime::parse_duration(value)?),
+                "stream_name" => stream_name = Some(value.to_string()),
+                "limiter_info" => limiter_info.push(RateBucketInfo::from_str(value)?),
+                "disable_cache" => disable_cache = value.parse()?,
+                "retry_interval" => retry_interval = Some(humantime::parse_duration(value)?),
+                unknown => bail!("unknown key: {unknown}"),
+            }
+        }
+        RateBucketInfo::validate(&mut limiter_info)?;
+
+        Ok(Self {
+            initial_batch_size: initial_batch_size.context("missing `initial_batch_size`")?,
+            default_batch_size: default_batch_size.context("missing `default_batch_size`")?,
+            xread_timeout: xread_timeout.context("missing `xread_timeout`")?,
+            stream_name: stream_name.context("missing `stream_name`")?,
+            disable_cache,
+            limiter_info,
+            retry_interval: retry_interval.context("missing `retry_interval`")?,
+        })
+    }
+}
+
+impl FromStr for EndpointCacheConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(options: &str) -> Result<Self, Self::Err> {
+        let error = || format!("failed to parse endpoint cache options '{options}'");
+        Self::parse(options).with_context(error)
+    }
+}
+#[derive(Debug)]
+pub struct MetricBackupCollectionConfig {
+    pub interval: Duration,
+    pub remote_storage_config: OptRemoteStorageConfig,
+    pub chunk_size: usize,
+}
+
+/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
+/// runtime type errors from the value parser we use.
+pub type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
+
+pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
+    RemoteStorageConfig::from_toml(&s.parse()?)
 }
 
 /// Helper for cmdline cache options parsing.

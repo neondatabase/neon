@@ -61,7 +61,7 @@ pub struct VectoredRead {
 }
 
 impl VectoredRead {
-    fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         (self.end - self.start) as usize
     }
 }

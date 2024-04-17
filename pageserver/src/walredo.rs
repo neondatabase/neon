@@ -20,6 +20,7 @@
 
 /// Process lifecycle and abstracction for the IPC protocol.
 mod process;
+pub use process::Kind as ProcessKind;
 
 /// Code to apply [`NeonWalRecord`]s.
 pub(crate) mod apply_neon;
@@ -34,13 +35,14 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::key::key_to_rel_block;
-use pageserver_api::models::WalRedoManagerStatus;
+use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
 use pageserver_api::shard::TenantShardId;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
 use utils::lsn::Lsn;
+use utils::sync::heavier_once_cell;
 
 ///
 /// This is the real implementation that uses a Postgres process to
@@ -53,7 +55,19 @@ pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
-    redo_process: RwLock<Option<Arc<process::WalRedoProcess>>>,
+    /// The current [`process::Process`] that is used by new redo requests.
+    /// We use [`heavier_once_cell`] for coalescing the spawning, but the redo
+    /// requests don't use the [`heavier_once_cell::Guard`] to keep ahold of the
+    /// their process object; we use [`Arc::clone`] for that.
+    /// This is primarily because earlier implementations that didn't  use [`heavier_once_cell`]
+    /// had that behavior; it's probably unnecessary.
+    /// The only merit of it is that if one walredo process encounters an error,
+    /// it can take it out of rotation (= using [`heavier_once_cell::Guard::take_and_deinit`].
+    /// and retry redo, thereby starting the new process, while other redo tasks might
+    /// still be using the old redo process. But, those other tasks will most likely
+    /// encounter an error as well, and errors are an unexpected condition anyway.
+    /// So, probably we could get rid of the `Arc` in the future.
+    redo_process: heavier_once_cell::OnceCell<Arc<process::Process>>,
 }
 
 ///
@@ -101,6 +115,7 @@ impl PostgresRedoManager {
                         self.conf.wal_redo_timeout,
                         pg_version,
                     )
+                    .await
                 };
                 img = Some(result?);
 
@@ -121,11 +136,12 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
             )
+            .await
         }
     }
 
-    pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
-        Some(WalRedoManagerStatus {
+    pub fn status(&self) -> WalRedoManagerStatus {
+        WalRedoManagerStatus {
             last_redo_at: {
                 let at = *self.last_redo_at.lock().unwrap();
                 at.and_then(|at| {
@@ -134,8 +150,14 @@ impl PostgresRedoManager {
                     chrono::Utc::now().checked_sub_signed(chrono::Duration::from_std(age).ok()?)
                 })
             },
-            pid: self.redo_process.read().unwrap().as_ref().map(|p| p.id()),
-        })
+            process: self
+                .redo_process
+                .get()
+                .map(|p| WalRedoManagerProcessStatus {
+                    pid: p.id(),
+                    kind: std::borrow::Cow::Borrowed(p.kind().into()),
+                }),
+        }
     }
 }
 
@@ -152,7 +174,7 @@ impl PostgresRedoManager {
             tenant_shard_id,
             conf,
             last_redo_at: std::sync::Mutex::default(),
-            redo_process: RwLock::new(None),
+            redo_process: heavier_once_cell::OnceCell::default(),
         }
     }
 
@@ -164,8 +186,7 @@ impl PostgresRedoManager {
             if let Some(last_redo_at) = *g {
                 if last_redo_at.elapsed() >= idle_timeout {
                     drop(g);
-                    let mut guard = self.redo_process.write().unwrap();
-                    *guard = None;
+                    drop(self.redo_process.get().map(|guard| guard.take_and_deinit()));
                 }
             }
         }
@@ -174,8 +195,11 @@ impl PostgresRedoManager {
     ///
     /// Process one request for WAL redo using wal-redo postgres
     ///
+    /// # Cancel-Safety
+    ///
+    /// Cancellation safe.
     #[allow(clippy::too_many_arguments)]
-    fn apply_batch_postgres(
+    async fn apply_batch_postgres(
         &self,
         key: Key,
         lsn: Lsn,
@@ -191,40 +215,24 @@ impl PostgresRedoManager {
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
         loop {
-            // launch the WAL redo process on first use
-            let proc: Arc<process::WalRedoProcess> = {
-                let proc_guard = self.redo_process.read().unwrap();
-                match &*proc_guard {
-                    None => {
-                        // "upgrade" to write lock to launch the process
-                        drop(proc_guard);
-                        let mut proc_guard = self.redo_process.write().unwrap();
-                        match &*proc_guard {
-                            None => {
-                                let start = Instant::now();
-                                let proc = Arc::new(
-                                    process::WalRedoProcess::launch(
-                                        self.conf,
-                                        self.tenant_shard_id,
-                                        pg_version,
-                                    )
-                                    .context("launch walredo process")?,
-                                );
-                                let duration = start.elapsed();
-                                WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM
-                                    .observe(duration.as_secs_f64());
-                                info!(
-                                    duration_ms = duration.as_millis(),
-                                    pid = proc.id(),
-                                    "launched walredo process"
-                                );
-                                *proc_guard = Some(Arc::clone(&proc));
-                                proc
-                            }
-                            Some(proc) => Arc::clone(proc),
-                        }
-                    }
-                    Some(proc) => Arc::clone(proc),
+            let proc: Arc<process::Process> = match self.redo_process.get_or_init_detached().await {
+                Ok(guard) => Arc::clone(&guard),
+                Err(permit) => {
+                    // don't hold poison_guard, the launch code can bail
+                    let start = Instant::now();
+                    let proc = Arc::new(
+                        process::Process::launch(self.conf, self.tenant_shard_id, pg_version)
+                            .context("launch walredo process")?,
+                    );
+                    let duration = start.elapsed();
+                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                    info!(
+                        duration_ms = duration.as_millis(),
+                        pid = proc.id(),
+                        "launched walredo process"
+                    );
+                    self.redo_process.set(Arc::clone(&proc), permit);
+                    proc
                 }
             };
 
@@ -233,6 +241,7 @@ impl PostgresRedoManager {
             // Relational WAL records are applied using wal-redo-postgres
             let result = proc
                 .apply_wal_records(rel, blknum, &base_img, records, wal_redo_timeout)
+                .await
                 .context("apply_wal_records");
 
             let duration = started_at.elapsed();
@@ -272,34 +281,34 @@ impl PostgresRedoManager {
                     n_attempts,
                     e,
                 );
-                // Avoid concurrent callers hitting the same issue.
-                // We can't prevent it from happening because we want to enable parallelism.
-                {
-                    let mut guard = self.redo_process.write().unwrap();
-                    match &*guard {
-                        Some(current_field_value) => {
-                            if Arc::ptr_eq(current_field_value, &proc) {
-                                // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
-                                *guard = None;
-                            }
-                        }
-                        None => {
-                            // Another thread was faster to observe the error, and already took the process out of rotation.
-                        }
-                    }
-                }
+                // Avoid concurrent callers hitting the same issue by taking `proc` out of the rotation.
+                // Note that there may be other tasks concurrent with us that also hold `proc`.
+                // We have to deal with that here.
+                // Also read the doc comment on field `self.redo_process`.
+                //
                 // NB: there may still be other concurrent threads using `proc`.
                 // The last one will send SIGKILL when the underlying Arc reaches refcount 0.
-                // NB: it's important to drop(proc) after drop(guard). Otherwise we'd keep
-                // holding the lock while waiting for the process to exit.
-                // NB: the drop impl blocks the current threads with a wait() system call for
-                // the child process. We dropped the `guard` above so that other threads aren't
-                // affected. But, it's good that the current thread _does_ block to wait.
-                // If we instead deferred the waiting into the background / to tokio, it could
-                // happen that if walredo always fails immediately, we spawn processes faster
+                //
+                // NB: the drop impl blocks the dropping thread with a wait() system call for
+                // the child process. In some ways the blocking is actually good: if we
+                // deferred the waiting into the background / to tokio if we used `tokio::process`,
+                // it could happen that if walredo always fails immediately, we spawn processes faster
                 // than we can SIGKILL & `wait` for them to exit. By doing it the way we do here,
                 // we limit this risk of run-away to at most $num_runtimes * $num_executor_threads.
                 // This probably needs revisiting at some later point.
+                match self.redo_process.get() {
+                    None => (),
+                    Some(guard) => {
+                        if Arc::ptr_eq(&proc, &*guard) {
+                            // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
+                            guard.take_and_deinit();
+                        } else {
+                            // Another task already spawned another redo process (further up in this method)
+                            // and put it into `redo_process`. Do nothing, our view of the world is behind.
+                        }
+                    }
+                }
+                // The last task that does this `drop()` of `proc` will do a blocking `wait()` syscall.
                 drop(proc);
             } else if n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");

@@ -4,12 +4,11 @@ use crate::{
     console::{errors::WakeComputeError, messages::MetricsAuxInfo},
     context::RequestMonitoring,
     error::{ReportableError, UserFacingError},
-    metrics::NUM_DB_CONNECTIONS_GAUGE,
+    metrics::{Metrics, NumDbConnectionsGuard},
     proxy::neon_option,
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
-use metrics::IntCounterPairGuard;
 use pq_proto::StartupMessageParams;
 use std::{io, net::SocketAddr, time::Duration};
 use thiserror::Error;
@@ -249,7 +248,7 @@ pub struct PostgresConnection {
     /// Labels for proxy's metrics.
     pub aux: MetricsAuxInfo,
 
-    _guage: IntCounterPairGuard,
+    _guage: NumDbConnectionsGuard<'static>,
 }
 
 impl ConnCfg {
@@ -276,6 +275,7 @@ impl ConnCfg {
         let stream = connection.stream.into_inner();
 
         info!(
+            cold_start_info = ctx.cold_start_info.as_str(),
             "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
             self.0.get_ssl_mode()
         );
@@ -294,9 +294,7 @@ impl ConnCfg {
             params,
             cancel_closure,
             aux,
-            _guage: NUM_DB_CONNECTIONS_GAUGE
-                .with_label_values(&[ctx.protocol])
-                .guard(),
+            _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol),
         };
 
         Ok(connection)

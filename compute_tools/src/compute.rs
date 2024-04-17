@@ -818,9 +818,15 @@ impl ComputeNode {
                         Client::connect(zenith_admin_connstr.as_str(), NoTls)
                             .context("broken cloud_admin credential: tried connecting with cloud_admin but could not authenticate, and zenith_admin does not work either")?;
                     // Disable forwarding so that users don't get a cloud_admin role
-                    client.simple_query("SET neon.forward_ddl = false")?;
-                    client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
-                    client.simple_query("GRANT zenith_admin TO cloud_admin")?;
+
+                    let mut func = || {
+                        client.simple_query("SET neon.forward_ddl = false")?;
+                        client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
+                        client.simple_query("GRANT zenith_admin TO cloud_admin")?;
+                        Ok::<_, anyhow::Error>(())
+                    };
+                    func().context("apply_config setup cloud_admin")?;
+
                     drop(client);
 
                     // reconnect with connstring with expected name
@@ -832,24 +838,29 @@ impl ComputeNode {
         };
 
         // Disable DDL forwarding because control plane already knows about these roles/databases.
-        client.simple_query("SET neon.forward_ddl = false")?;
+        client
+            .simple_query("SET neon.forward_ddl = false")
+            .context("apply_config SET neon.forward_ddl = false")?;
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
         let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
-        create_neon_superuser(spec, &mut client)?;
-        cleanup_instance(&mut client)?;
-        handle_roles(spec, &mut client)?;
-        handle_databases(spec, &mut client)?;
-        handle_role_deletions(spec, connstr.as_str(), &mut client)?;
+        create_neon_superuser(spec, &mut client).context("apply_config create_neon_superuser")?;
+        cleanup_instance(&mut client).context("apply_config cleanup_instance")?;
+        handle_roles(spec, &mut client).context("apply_config handle_roles")?;
+        handle_databases(spec, &mut client).context("apply_config handle_databases")?;
+        handle_role_deletions(spec, connstr.as_str(), &mut client)
+            .context("apply_config handle_role_deletions")?;
         handle_grants(
             spec,
             &mut client,
             connstr.as_str(),
             self.has_feature(ComputeFeature::AnonExtension),
-        )?;
-        handle_extensions(spec, &mut client)?;
-        handle_extension_neon(&mut client)?;
-        create_availability_check_data(&mut client)?;
+        )
+        .context("apply_config handle_grants")?;
+        handle_extensions(spec, &mut client).context("apply_config handle_extensions")?;
+        handle_extension_neon(&mut client).context("apply_config handle_extension_neon")?;
+        create_availability_check_data(&mut client)
+            .context("apply_config create_availability_check_data")?;
 
         // 'Close' connection
         drop(client);
@@ -857,7 +868,7 @@ impl ComputeNode {
         // Run migrations separately to not hold up cold starts
         thread::spawn(move || {
             let mut client = Client::connect(connstr.as_str(), NoTls)?;
-            handle_migrations(&mut client)
+            handle_migrations(&mut client).context("apply_config handle_migrations")
         });
         Ok(())
     }
@@ -1262,10 +1273,12 @@ LIMIT 100",
         .await
         .map_err(DownloadError::Other);
 
-        self.ext_download_progress
-            .write()
-            .expect("bad lock")
-            .insert(ext_archive_name.to_string(), (download_start, true));
+        if download_size.is_ok() {
+            self.ext_download_progress
+                .write()
+                .expect("bad lock")
+                .insert(ext_archive_name.to_string(), (download_start, true));
+        }
 
         download_size
     }

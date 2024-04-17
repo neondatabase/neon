@@ -13,13 +13,16 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::time::Instant;
 use tracing::trace;
 
-use crate::{metrics::CONSOLE_REQUEST_LATENCY, rate_limiter, url::ApiUrl};
+use crate::{
+    metrics::{ConsoleRequest, Metrics},
+    url::ApiUrl,
+};
 use reqwest_middleware::RequestBuilder;
 
 /// This is the preferred way to create new http clients,
 /// because it takes care of observability (OpenTelemetry).
 /// We deliberately don't want to replace this with a public static.
-pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> ClientWithMiddleware {
+pub fn new_client() -> ClientWithMiddleware {
     let client = reqwest::ClientBuilder::new()
         .dns_resolver(Arc::new(GaiResolver::default()))
         .connection_verbose(true)
@@ -28,7 +31,6 @@ pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> Clien
 
     reqwest_middleware::ClientBuilder::new(client)
         .with(reqwest_tracing::TracingMiddleware::default())
-        .with(rate_limiter::Limiter::new(rate_limiter_config))
         .build()
 }
 
@@ -90,13 +92,14 @@ impl Endpoint {
 
     /// Execute a [request](reqwest::Request).
     pub async fn execute(&self, request: Request) -> Result<Response, Error> {
-        let path = request.url().path().to_string();
-        let start = Instant::now();
-        let res = self.client.execute(request).await;
-        CONSOLE_REQUEST_LATENCY
-            .with_label_values(&[&path])
-            .observe(start.elapsed().as_secs_f64());
-        res
+        let _timer = Metrics::get()
+            .proxy
+            .console_request_latency
+            .start_timer(ConsoleRequest {
+                request: request.url().path(),
+            });
+
+        self.client.execute(request).await
     }
 }
 
