@@ -243,6 +243,19 @@ impl Client {
         Ok(())
     }
 
+    pub async fn tenant_scan_remote_storage(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantScanRemoteStorageResponse> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_id}/scan_remote_storage",
+            self.mgmt_api_endpoint
+        );
+        let response = self.request(Method::GET, &uri, ()).await?;
+        let body = response.json().await.map_err(Error::ReceiveBody)?;
+        Ok(body)
+    }
+
     pub async fn tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
         let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
         self.request(Method::PUT, &uri, req).await?;

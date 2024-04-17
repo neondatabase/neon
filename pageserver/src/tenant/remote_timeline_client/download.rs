@@ -31,8 +31,8 @@ use utils::id::{TenantId, TimelineId};
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{
     parse_remote_index_path, remote_index_path, remote_initdb_archive_path,
-    remote_initdb_preserved_archive_path, FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES,
-    INITDB_PATH,
+    remote_initdb_preserved_archive_path, remote_tenant_path, FAILED_DOWNLOAD_WARN_THRESHOLD,
+    FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
 };
 
 ///
@@ -293,13 +293,12 @@ where
 }
 
 /// List shards of given tenant in remote storage
-pub async fn list_remote_tenant_shards(
+pub(crate) async fn list_remote_tenant_shards(
     storage: &GenericRemoteStorage,
     tenant_id: TenantId,
     cancel: CancellationToken,
 ) -> anyhow::Result<(HashSet<TenantShardId>, HashSet<String>)> {
-    // The unsharded tenantId path is a prefix of all shard paths, because they start with the tenant ID.
-    let remote_path = remote_timelines_path(&TenantShardId::unsharded(tenant_id));
+    let remote_path = remote_tenant_path(&TenantShardId::unsharded(tenant_id));
     list_identifiers::<TenantShardId>(storage, remote_path, cancel).await
 }
 
@@ -323,7 +322,7 @@ async fn do_download_index_part(
     timeline_id: &TimelineId,
     index_generation: Generation,
     cancel: &CancellationToken,
-) -> Result<IndexPart, DownloadError> {
+) -> Result<(IndexPart, Generation), DownloadError> {
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
     let index_part_bytes = download_retry_forever(
@@ -348,7 +347,7 @@ async fn do_download_index_part(
         .with_context(|| format!("deserialize index part file at {remote_path:?}"))
         .map_err(DownloadError::Other)?;
 
-    Ok(index_part)
+    Ok((index_part, index_generation))
 }
 
 /// index_part.json objects are suffixed with a generation number, so we cannot
@@ -357,13 +356,13 @@ async fn do_download_index_part(
 /// In this function we probe for the most recent index in a generation <= our current generation.
 /// See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
 #[tracing::instrument(skip_all, fields(generation=?my_generation))]
-pub(super) async fn download_index_part(
+pub(crate) async fn download_index_part(
     storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     my_generation: Generation,
     cancel: &CancellationToken,
-) -> Result<IndexPart, DownloadError> {
+) -> Result<(IndexPart, Generation), DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     if my_generation.is_none() {

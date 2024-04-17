@@ -780,6 +780,17 @@ pub struct SecondaryProgress {
     pub bytes_total: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantScanRemoteStorageShard {
+    pub tenant_shard_id: TenantShardId,
+    pub generation: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct TenantScanRemoteStorageResponse {
+    pub shards: Vec<TenantScanRemoteStorageShard>,
+}
+
 pub mod virtual_file {
     #[derive(
         Copy,

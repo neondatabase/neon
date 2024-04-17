@@ -887,7 +887,7 @@ impl Tenant {
 
     #[instrument(skip_all)]
     pub(crate) async fn preload(
-        self: &Arc<Tenant>,
+        self: &Arc<Self>,
         remote_storage: &GenericRemoteStorage,
         cancel: CancellationToken,
     ) -> anyhow::Result<TenantPreload> {
@@ -917,9 +917,13 @@ impl Tenant {
 
         Ok(TenantPreload {
             deleting,
-            timelines: self
-                .load_timeline_metadata(remote_timeline_ids, remote_storage, cancel)
-                .await?,
+            timelines: Self::load_timeline_metadata(
+                self,
+                remote_timeline_ids,
+                remote_storage,
+                cancel,
+            )
+            .await?,
         })
     }
 
