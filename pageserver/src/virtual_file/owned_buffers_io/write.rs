@@ -108,7 +108,7 @@ where
     }
 
     /// Always goes through the internal buffer.
-    /// Guaranteed to never invoke [`OwnedAsyncWrite::write_all_borrowed`] on the underlying.
+    /// Guaranteed to never invoke [`OwnedAsyncWriter::write_all_borrowed`] on the underlying.
     pub async fn write_all_borrowed(&mut self, mut chunk: &[u8]) -> std::io::Result<usize> {
         let chunk_len = chunk.len();
         while !chunk.is_empty() {
