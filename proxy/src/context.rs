@@ -76,6 +76,7 @@ impl RequestMonitoring {
             ?session_id,
             %peer_addr,
             ep = tracing::field::Empty,
+            role = tracing::field::Empty,
         );
 
         Self {
@@ -157,6 +158,7 @@ impl RequestMonitoring {
     }
 
     pub fn set_user(&mut self, user: RoleName) {
+        self.span.record("role", display(&user));
         self.user = Some(user);
     }
 
