@@ -347,7 +347,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
-    runs-on: [ self-hosted, large, X64 ]
+    runs-on: [ self-hosted, large, x64 ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
