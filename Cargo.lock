@@ -3658,6 +3658,7 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "twox-hash",
  "url",
  "utils",
  "walkdir",

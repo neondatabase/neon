@@ -70,6 +70,7 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
 tracing.workspace = true
+twox-hash.workspace = true
 url.workspace = true
 walkdir.workspace = true
 metrics.workspace = true
