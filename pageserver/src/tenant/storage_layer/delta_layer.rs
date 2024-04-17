@@ -939,7 +939,7 @@ impl DeltaLayerInner {
             }
 
             if !range_end_handled {
-                tracing::info!("Handling range end fallback at {}", data_end_offset);
+                tracing::debug!("Handling range end fallback at {}", data_end_offset);
                 planner.handle_range_end(data_end_offset);
             }
         }
