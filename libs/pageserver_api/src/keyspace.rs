@@ -182,6 +182,11 @@ impl KeySpace {
     pub fn overlaps(&self, range: &Range<Key>) -> bool {
         self.overlaps_at(range).is_some()
     }
+
+    /// Check if the keyspace contains a key
+    pub fn contains(&self, key: &Key) -> bool {
+        self.overlaps(&(*key..key.next()))
+    }
 }
 
 ///
