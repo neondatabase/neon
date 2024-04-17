@@ -331,7 +331,6 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
     let cancellation_token = CancellationToken::new();
 
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
     let cancel_map = CancelMap::default();
 
     let redis_publisher = match &regional_redis_client {
@@ -357,7 +356,6 @@ async fn main() -> anyhow::Result<()> {
         config,
         proxy_listener,
         cancellation_token.clone(),
-        endpoint_rate_limiter.clone(),
         cancellation_handler.clone(),
     ));
 
@@ -372,7 +370,6 @@ async fn main() -> anyhow::Result<()> {
             config,
             serverless_listener,
             cancellation_token.clone(),
-            endpoint_rate_limiter.clone(),
             cancellation_handler.clone(),
         ));
     }
@@ -533,7 +530,11 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let url = args.auth_endpoint.parse()?;
             let endpoint = http::Endpoint::new(url, http::new_client());
 
-            let api = console::provider::neon::Api::new(endpoint, caches, locks);
+            let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
+            RateBucketInfo::validate(&mut endpoint_rps_limit)?;
+            let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(endpoint_rps_limit));
+            let api =
+                console::provider::neon::Api::new(endpoint, caches, locks, endpoint_rate_limiter);
             let api = console::provider::ConsoleBackend::Console(api);
             auth::BackendType::Console(MaybeOwned::Owned(api), ())
         }
@@ -567,8 +568,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
 
-    let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
-    RateBucketInfo::validate(&mut endpoint_rps_limit)?;
     let mut redis_rps_limit = args.redis_rps_limit.clone();
     RateBucketInfo::validate(&mut redis_rps_limit)?;
 
@@ -581,7 +580,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         authentication_config,
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
-        endpoint_rps_limit,
         redis_rps_limit,
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
