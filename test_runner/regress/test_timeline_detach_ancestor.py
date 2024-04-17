@@ -27,9 +27,8 @@ class Branchpoint(str, enum.Enum):
     """
 
     EARLIER = "earlier"
-    BEFORE_L0 = "prev"
     AT_L0 = "at"
-    AFTER_L0 = "next"
+    AFTER_L0 = "after"
     LAST_RECORD_LSN = "head"
 
     def __str__(self) -> str:
@@ -39,7 +38,6 @@ class Branchpoint(str, enum.Enum):
     def all() -> List["Branchpoint"]:
         return [
             Branchpoint.EARLIER,
-            Branchpoint.BEFORE_L0,
             Branchpoint.AT_L0,
             Branchpoint.AFTER_L0,
             Branchpoint.LAST_RECORD_LSN,
@@ -88,10 +86,6 @@ def test_ancestor_detach_branched_from(neon_env_builder: NeonEnvBuilder, branchp
 
     if branchpoint == Branchpoint.EARLIER:
         branch_at = after_first_tx
-        rows = 0
-        truncated_layers = 1
-    elif branchpoint == Branchpoint.BEFORE_L0:
-        branch_at = Lsn(last_lsn - 8)
         rows = 0
         truncated_layers = 1
     elif branchpoint == Branchpoint.AT_L0:
