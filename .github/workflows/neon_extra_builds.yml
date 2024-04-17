@@ -136,7 +136,7 @@ jobs:
   check-linux-arm-build:
     needs: [ check-permissions, build-build-tools-image ]
     timeout-minutes: 90
-    runs-on: [ self-hosted, large-arm64 ]
+    runs-on: [ self-hosted, ubuntu-latest-arm64 ]
 
     env:
       # Use release build only, to have less debug info around
@@ -260,7 +260,7 @@ jobs:
   check-codestyle-rust-arm:
     needs: [ check-permissions, build-build-tools-image ]
     timeout-minutes: 90
-    runs-on: [ self-hosted, large-arm64 ]
+    runs-on: [ self-hosted, ubuntu-latest-arm64 ]
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
@@ -320,7 +320,7 @@ jobs:
   check-codestyle-misc-arm:
     needs: [ check-permissions, build-build-tools-image ]
     timeout-minutes: 90
-    runs-on: [ self-hosted, large-arm64 ]
+    runs-on: [ self-hosted, ubuntu-latest-arm64 ]
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
@@ -330,6 +330,11 @@ jobs:
       options: --init
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 1
 
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items -j$(nproc)
@@ -359,7 +364,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, large, X64 ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
