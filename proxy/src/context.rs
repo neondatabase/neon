@@ -5,7 +5,7 @@ use once_cell::sync::OnceCell;
 use smol_str::SmolStr;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
-use tracing::{field::display, info_span, Span};
+use tracing::{field::display, info, info_span, Span};
 use uuid::Uuid;
 
 use crate::{
@@ -198,12 +198,25 @@ impl Drop for RequestMonitoring {
         } else {
             ConnectOutcome::Failed
         };
+        let rejected = self.rejected;
+        let ep = self
+            .endpoint_id
+            .as_ref()
+            .map(|x| x.as_str())
+            .unwrap_or_default();
+        // This makes sense only if cache is disabled
+        info!(
+            ?ep,
+            ?outcome,
+            ?rejected,
+            "check endpoint is valid with outcome"
+        );
         Metrics::get()
             .proxy
             .invalid_endpoints_total
             .inc(InvalidEndpointsGroup {
                 protocol: self.protocol,
-                rejected: self.rejected.into(),
+                rejected: rejected.into(),
                 outcome,
             });
         if let Some(tx) = self.sender.take() {
