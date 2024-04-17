@@ -175,7 +175,7 @@ async fn dummy_proxy(
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
     let client = WithClientIp::new(client);
-    let mut stream = match handshake(client, tls.as_ref()).await? {
+    let mut stream = match handshake(client, tls.as_ref(), false).await? {
         HandshakeData::Startup(stream, _) => stream,
         HandshakeData::Cancel(_) => bail!("cancellation not supported"),
     };

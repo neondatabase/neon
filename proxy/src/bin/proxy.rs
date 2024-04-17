@@ -7,6 +7,7 @@ use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use futures::future::Either;
 use proxy::auth;
+use proxy::auth::backend::AuthRateLimiter;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
@@ -20,10 +21,8 @@ use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
-use proxy::rate_limiter::AuthRateLimiter;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
-use proxy::rate_limiter::RateLimiterConfig;
 use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
@@ -43,6 +42,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
+use tracing::Instrument;
 use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
@@ -132,14 +132,8 @@ struct ProxyCliArgs {
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
     /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_dynamic_rate_limiter: bool,
-    /// Rate limit algorithm. Makes sense only if `disable_rate_limiter` is `false`.
-    #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::Aimd)]
-    rate_limit_algorithm: proxy::rate_limiter::RateLimitAlgorithm,
-    /// Timeout for rate limiter. If it didn't manage to aquire a permit in this time, it will return an error.
-    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
-    rate_limiter_timeout: tokio::time::Duration,
     /// Endpoint rate limiter max number of requests per second.
     ///
     /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
@@ -152,14 +146,12 @@ struct ProxyCliArgs {
     /// Authentication rate limiter max number of hashes per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
     auth_rate_limit: Vec<RateBucketInfo>,
+    /// The IP subnet to use when considering whether two IP addresses are considered the same.
+    #[clap(long, default_value_t = 64)]
+    auth_rate_limit_ip_subnet: u8,
     /// Redis rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
-    /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
-    #[clap(long, default_value_t = 100)]
-    initial_limit: usize,
-    #[clap(flatten)]
-    aimd_config: proxy::rate_limiter::AimdConfig,
     /// cache for `allowed_ips` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     allowed_ips_cache: String,
@@ -427,7 +419,8 @@ async fn main() -> anyhow::Result<()> {
             if let Some(regional_redis_client) = regional_redis_client {
                 let cache = api.caches.endpoints_cache.clone();
                 let con = regional_redis_client;
-                maintenance_tasks.spawn(async move { cache.do_read(con).await });
+                let span = tracing::info_span!("endpoints_cache");
+                maintenance_tasks.spawn(async move { cache.do_read(con).await }.instrument(span));
             }
         }
     }
@@ -494,13 +487,9 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
-    let rate_limiter_config = RateLimiterConfig {
-        disable: args.disable_dynamic_rate_limiter,
-        algorithm: args.rate_limit_algorithm,
-        timeout: args.rate_limiter_timeout,
-        initial_limit: args.initial_limit,
-        aimd_config: Some(args.aimd_config),
-    };
+    if !args.disable_dynamic_rate_limiter {
+        bail!("dynamic rate limiter should be disabled");
+    }
 
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
@@ -542,7 +531,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             tokio::spawn(locks.garbage_collect_worker());
 
             let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));
+            let endpoint = http::Endpoint::new(url, http::new_client());
 
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
             let api = console::provider::ConsoleBackend::Console(api);
@@ -575,6 +564,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
+        rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();

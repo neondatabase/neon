@@ -2,8 +2,15 @@ mod classic;
 mod hacks;
 mod link;
 
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use ipnet::{Ipv4Net, Ipv6Net};
 pub use link::LinkAuthError;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
+use tracing::{info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::validate_password_and_exchange;
@@ -16,6 +23,7 @@ use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
+use crate::rate_limiter::{BucketRateLimiter, RateBucketInfo};
 use crate::stream::Stream;
 use crate::{
     auth::{self, ComputeUserInfoMaybeEndpoint},
@@ -28,9 +36,6 @@ use crate::{
     stream, url,
 };
 use crate::{scram, EndpointCacheKey, EndpointId, Normalize, RoleName};
-use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, warn};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -176,11 +181,45 @@ impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
     }
 }
 
+#[derive(PartialEq, PartialOrd, Hash, Eq, Ord, Debug, Copy, Clone)]
+pub struct MaskedIp(IpAddr);
+
+impl MaskedIp {
+    fn new(value: IpAddr, prefix: u8) -> Self {
+        match value {
+            IpAddr::V4(v4) => Self(IpAddr::V4(
+                Ipv4Net::new(v4, prefix).map_or(v4, |x| x.trunc().addr()),
+            )),
+            IpAddr::V6(v6) => Self(IpAddr::V6(
+                Ipv6Net::new(v6, prefix).map_or(v6, |x| x.trunc().addr()),
+            )),
+        }
+    }
+}
+
+// This can't be just per IP because that would limit some PaaS that share IP addresses
+pub type AuthRateLimiter = BucketRateLimiter<(EndpointIdInt, MaskedIp)>;
+
+impl RateBucketInfo {
+    /// All of these are per endpoint-maskedip pair.
+    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
+    ///
+    /// First bucket: 1000mcpus total per endpoint-ip pair
+    /// * 4096000 requests per second with 1 hash rounds.
+    /// * 1000 requests per second with 4096 hash rounds.
+    /// * 6.8 requests per second with 600000 hash rounds.
+    pub const DEFAULT_AUTH_SET: [Self; 3] = [
+        Self::new(1000 * 4096, Duration::from_secs(1)),
+        Self::new(600 * 4096, Duration::from_secs(60)),
+        Self::new(300 * 4096, Duration::from_secs(600)),
+    ];
+}
+
 impl AuthenticationConfig {
     pub fn check_rate_limit(
         &self,
-
         ctx: &mut RequestMonitoring,
+        config: &AuthenticationConfig,
         secret: AuthSecret,
         endpoint: &EndpointId,
         is_cleartext: bool,
@@ -201,9 +240,13 @@ impl AuthenticationConfig {
             1
         };
 
-        let limit_not_exceeded = self
-            .rate_limiter
-            .check((endpoint_int, ctx.peer_addr), password_weight);
+        let limit_not_exceeded = self.rate_limiter.check(
+            (
+                endpoint_int,
+                MaskedIp::new(ctx.peer_addr, config.rate_limit_ip_subnet),
+            ),
+            password_weight,
+        );
 
         if !limit_not_exceeded {
             warn!(
@@ -271,6 +314,7 @@ async fn auth_quirks(
     let secret = match secret {
         Some(secret) => config.check_rate_limit(
             ctx,
+            config,
             secret,
             &info.endpoint,
             unauthenticated_password.is_some() || allow_cleartext,
@@ -473,7 +517,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{net::IpAddr, sync::Arc, time::Duration};
 
     use bytes::BytesMut;
     use fallible_iterator::FallibleIterator;
@@ -486,7 +530,7 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
     use crate::{
-        auth::{ComputeUserInfoMaybeEndpoint, IpPattern},
+        auth::{backend::MaskedIp, ComputeUserInfoMaybeEndpoint, IpPattern},
         config::AuthenticationConfig,
         console::{
             self,
@@ -495,12 +539,12 @@ mod tests {
         },
         context::RequestMonitoring,
         proxy::NeonOptions,
-        rate_limiter::{AuthRateLimiter, RateBucketInfo},
+        rate_limiter::RateBucketInfo,
         scram::ServerSecret,
         stream::{PqStream, Stream},
     };
 
-    use super::auth_quirks;
+    use super::{auth_quirks, AuthRateLimiter};
 
     struct Auth {
         ips: Vec<IpPattern>,
@@ -541,6 +585,7 @@ mod tests {
         scram_protocol_timeout: std::time::Duration::from_secs(5),
         rate_limiter_enabled: true,
         rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
+        rate_limit_ip_subnet: 64,
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {
@@ -549,6 +594,51 @@ mod tests {
             if let Some(m) = PgMessage::parse(&mut *b).unwrap() {
                 break m;
             }
+        }
+    }
+
+    #[test]
+    fn masked_ip() {
+        let ip_a = IpAddr::V4([127, 0, 0, 1].into());
+        let ip_b = IpAddr::V4([127, 0, 0, 2].into());
+        let ip_c = IpAddr::V4([192, 168, 1, 101].into());
+        let ip_d = IpAddr::V4([192, 168, 1, 102].into());
+        let ip_e = IpAddr::V6("abcd:abcd:abcd:abcd:abcd:abcd:abcd:abcd".parse().unwrap());
+        let ip_f = IpAddr::V6("abcd:abcd:abcd:abcd:1234:abcd:abcd:abcd".parse().unwrap());
+
+        assert_ne!(MaskedIp::new(ip_a, 64), MaskedIp::new(ip_b, 64));
+        assert_ne!(MaskedIp::new(ip_a, 32), MaskedIp::new(ip_b, 32));
+        assert_eq!(MaskedIp::new(ip_a, 30), MaskedIp::new(ip_b, 30));
+        assert_eq!(MaskedIp::new(ip_c, 30), MaskedIp::new(ip_d, 30));
+
+        assert_ne!(MaskedIp::new(ip_e, 128), MaskedIp::new(ip_f, 128));
+        assert_eq!(MaskedIp::new(ip_e, 64), MaskedIp::new(ip_f, 64));
+    }
+
+    #[test]
+    fn test_default_auth_rate_limit_set() {
+        // these values used to exceed u32::MAX
+        assert_eq!(
+            RateBucketInfo::DEFAULT_AUTH_SET,
+            [
+                RateBucketInfo {
+                    interval: Duration::from_secs(1),
+                    max_rpi: 1000 * 4096,
+                },
+                RateBucketInfo {
+                    interval: Duration::from_secs(60),
+                    max_rpi: 600 * 4096 * 60,
+                },
+                RateBucketInfo {
+                    interval: Duration::from_secs(600),
+                    max_rpi: 300 * 4096 * 600,
+                }
+            ]
+        );
+
+        for x in RateBucketInfo::DEFAULT_AUTH_SET {
+            let y = x.to_string().parse().unwrap();
+            assert_eq!(x, y);
         }
     }
 

@@ -172,6 +172,10 @@ async fn connection_handler(
     };
 
     let peer_addr = peer.unwrap_or(peer_addr).ip();
+    let has_private_peer_addr = match peer_addr {
+        IpAddr::V4(ip) => ip.is_private(),
+        _ => false,
+    };
     info!(?session_id, %peer_addr, "accepted new TCP connection");
 
     // try upgrade to TLS, but with a timeout.
@@ -182,13 +186,17 @@ async fn connection_handler(
         }
         // The handshake failed
         Ok(Err(e)) => {
-            Metrics::get().proxy.tls_handshake_failures.inc();
+            if !has_private_peer_addr {
+                Metrics::get().proxy.tls_handshake_failures.inc();
+            }
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
             return;
         }
         // The handshake timed out
         Err(e) => {
-            Metrics::get().proxy.tls_handshake_failures.inc();
+            if !has_private_peer_addr {
+                Metrics::get().proxy.tls_handshake_failures.inc();
+            }
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
             return;
         }

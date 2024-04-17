@@ -541,7 +541,9 @@ async fn handle_inner(
     .map_err(SqlOverHttpError::from);
 
     let authenticate_and_connect = async {
-        let keys = backend.authenticate(ctx, &conn_info).await?;
+        let keys = backend
+            .authenticate(ctx, &config.authentication_config, &conn_info)
+            .await?;
         let client = backend
             .connect_to_compute(ctx, conn_info, keys, !allow_pool)
             .await?;

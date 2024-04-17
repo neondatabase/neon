@@ -11,7 +11,7 @@ use crate::{
     id_lock_map::IdLockMap,
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::ReconcileError,
-    scheduler::ScheduleContext,
+    scheduler::{ScheduleContext, ScheduleMode},
 };
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -4137,6 +4137,7 @@ impl Service {
             if tenant_shard_id.is_shard_zero() {
                 // Reset accumulators on the first shard in a tenant
                 schedule_context = ScheduleContext::default();
+                schedule_context.mode = ScheduleMode::Speculative;
                 tenant_shards.clear();
             }
 
