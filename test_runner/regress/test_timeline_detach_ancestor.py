@@ -1,24 +1,19 @@
-import random
-import threading
-import time
-from typing import List
-
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonEnv,
     NeonEnvBuilder,
-    PgBin,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverApiException
-from fixtures.pageserver.utils import wait_until_tenant_active
-from fixtures.types import Lsn, TimelineId
-from fixtures.utils import query_scalar
-from performance.test_perf_pgbench import get_scales_matrix
-from requests import RequestException
-from requests.exceptions import RetryError
+from fixtures.pageserver.http import HistoricLayerInfo
+from fixtures.types import Lsn
+
+
+def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
+    assert info.lsn_end is not None
+    return Lsn(info.lsn_end)
+
+
+def layer_name(info: HistoricLayerInfo) -> str:
+    return info.layer_file_name
 
 
 def test_ancestor_detach_with_restart_after(neon_env_builder: NeonEnvBuilder):
@@ -27,14 +22,17 @@ def test_ancestor_detach_with_restart_after(neon_env_builder: NeonEnvBuilder):
     implementation, because we restart after operation.
     """
 
-    env = neon_env_builder.init_start(initial_tenant_conf={
-        "gc_period": "0s",
-    })
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+        }
+    )
 
     client = env.pageserver.http_client()
 
-    with env.endpoints.create_start("main", tenant_id = env.initial_tenant) as ep:
-        ep.safe_psql("CREATE TABLE foo AS SELECT i::bigint FROM generate_series(0, 8191) g(i);")
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql("CREATE TABLE foo (i BIGINT);")
+        ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(0, 8191) g(i);")
 
         # create a single layer for us to remote copy
         wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
@@ -42,18 +40,41 @@ def test_ancestor_detach_with_restart_after(neon_env_builder: NeonEnvBuilder):
 
         ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(8192, 16383) g(i);")
 
-        branch_at = Lsn(ep.safe_psql("SELECT pg_current_wal_flush_lsn();")[0][0])
-        # 16384 rows in branch
+        future_branch_at = Lsn(ep.safe_psql("SELECT pg_current_wal_flush_lsn();")[0][0])
 
         ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(16384, 24575) g(i);")
-        # 24576 rows in original main
 
-    new_main_id = env.neon_cli.create_branch("new_main", "main", env.initial_tenant, ancestor_start_lsn=branch_at)
+    # do 3 branch detaches: first future, +1, then at the boundary, then -1
+    branches = []
 
-    # if this is done, we will see the timeline ancestor delete fail because it has children
-    # if this is not done, we see compute startup failure
-    # it breaks because of missing previous lsn
-    # which the flush_frozen_layer does through Timeline::schedule_uploads
+    deltas = client.layer_map_info(env.initial_tenant, env.initial_timeline).delta_layers()
+    assert len(deltas) == 2, "expecting there to be two deltas: initdb and checkpointed"
+    later_delta = max(deltas, key=by_end_lsn)
+    assert later_delta.lsn_end is not None
+
+    lsn_start = Lsn(later_delta.lsn_start)
+    lsn_end = Lsn(later_delta.lsn_end)
+
+    # half-way of a single transaction makes no sense, but we can do it
+    lowest_branch_at = lsn_start + Lsn((lsn_end.lsn_int - lsn_start.lsn_int) // 2)
+    # the end of delta lsn range is exclusive, so decrement one to get a full copy
+    at_delta_end = Lsn(lsn_end.lsn_int - 1)
+
+    after_delta_end = lsn_end + 7
+    assert future_branch_at > after_delta_end
+
+    named_lsns = [
+        ("fourth_new_main", lowest_branch_at, 0),
+        ("third_new_main", at_delta_end, 8192),
+        ("second_new_main", after_delta_end, 8192),
+        ("new_main", future_branch_at, 16384),
+    ]
+
+    for name, lsn, rows in named_lsns:
+        timeline_id = env.neon_cli.create_branch(
+            name, "main", env.initial_tenant, ancestor_start_lsn=lsn
+        )
+        branches.append((timeline_id, name, lsn, rows))
 
     write_to_branch_before_detach = True
 
@@ -61,25 +82,54 @@ def test_ancestor_detach_with_restart_after(neon_env_builder: NeonEnvBuilder):
     # no it's zenith.signal check between prev lsn being "invalid" or "none" without a hack
 
     if write_to_branch_before_detach:
-        with env.endpoints.create_start("new_main", tenant_id = env.initial_tenant) as ep:
-            assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 16384
-            # make sure the ep is writable
-            ep.safe_psql("CREATE TABLE audit AS SELECT 1 as starts;")
+        for timeline_id, name, _, rows in branches:
+            with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
+                assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
+                # make sure the ep is writable
+                ep.safe_psql("CREATE TABLE audit AS SELECT 1 as starts;")
 
-        client.timeline_checkpoint(env.initial_tenant, new_main_id)
+            # this is the most important part; this way the PREV_LSN will be available even after detach
+            # for "PREV_LSN: none", which would otherwise be "PREV_LSN: invalid".
+            client.timeline_checkpoint(env.initial_tenant, timeline_id)
 
-    # does gc_cutoff move on the timeline?
-    log.info(f"{client.timeline_detail(env.initial_tenant, env.initial_timeline)}")
+    # TODO: does gc_cutoff move on the timeline? probably not; a hole might appear but we will always keep what is required to reconstruct a branchpoint
 
-    client.detach_ancestor(env.initial_tenant, new_main_id)
+    # do 4 detaches in descending LSN order
+    branches.reverse()
+    prev_lsn = None
+    ancestor_deletion_order = []
+    for timeline_id, name, lsn, _ in branches:
+        if prev_lsn is not None:
+            assert prev_lsn > lsn, "expecting to iterate branches in desceding order"
+        ancestor = client.timeline_detail(env.initial_tenant, timeline_id)["ancestor_timeline_id"]
+        assert ancestor is not None
+        client.detach_ancestor(env.initial_tenant, timeline_id)
 
-    env.pageserver.stop()
-    env.pageserver.start()
+        env.pageserver.stop()
+        env.pageserver.start()
 
-    with env.endpoints.create_start("main", tenant_id = env.initial_tenant) as ep:
+        log.info(f"post detach layers for {name} ({timeline_id}):")
+
+        layers = client.layer_map_info(env.initial_tenant, timeline_id).historic_layers
+        layers.sort(key=layer_name)
+
+        for layer in layers:
+            log.info(f"- {layer.layer_file_name}")
+
+        ancestor_deletion_order.append(ancestor)
+
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 24576
 
-    with env.endpoints.create_start("new_main", tenant_id = env.initial_tenant) as ep:
-        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 16384
+    for _, name, _, rows in branches:
+        with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
+            assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
 
-    client.timeline_delete(env.initial_tenant, env.initial_timeline)
+    for ancestor in ancestor_deletion_order:
+        client.timeline_delete(env.initial_tenant, ancestor)
+
+
+# TODO:
+# - ancestor gets the checkpoint called at detach if necessary
+# - branch before existing layer boundary, at, after
+# - branch near existing L1 boundary
