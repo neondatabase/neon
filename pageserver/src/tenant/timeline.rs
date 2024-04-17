@@ -1,5 +1,6 @@
 mod compaction;
 pub mod delete;
+mod detach_ancestor;
 mod eviction_task;
 mod init;
 pub mod layer_manager;
@@ -4406,15 +4407,9 @@ impl Timeline {
                 .map_err(DetachFromAncestorError::FlushAncestor)?;
         }
 
-        // these we will need to copy the prefix of, if we haven't already
-        //
-        // idea: if any of these are empty, we should temporarily upload an .empty to show we don't
-        // need to walk them again
-        let mut straddling_branchpoint = vec![];
-        // these we will need to remote copy, if we haven't already
-        let mut rest_of_historic = vec![];
+        let end_lsn = ancestor_lsn + 1;
 
-        {
+        let (mut straddling_branchpoint, mut rest_of_historic) = {
             // we do not need to start from our layers, because they can only be layers that come
             // *after* our
             let layers = tokio::select! {
@@ -4427,147 +4422,80 @@ impl Timeline {
                 }
             };
 
-            let mut later_by_lsn = 0;
+            let (later_by_lsn, straddling, rest) =
+                detach_ancestor::partition_work(ancestor_lsn, &layers);
 
-            for desc in layers.layer_map().iter_historic_layers() {
-                // off by one chances here:
-                // - start is inclusive
-                // - end is exclusive
-                if desc.lsn_range.start > ancestor_lsn {
-                    later_by_lsn += 1;
-                    continue;
-                }
+            tracing::debug!(%later_by_lsn, to_rewrite = straddling.len(), historic=%rest.len(), "collected layers");
 
-                let target = if desc.lsn_range.start <= ancestor_lsn
-                    && desc.lsn_range.end > ancestor_lsn
-                    && desc.is_delta
-                {
-                    // TODO: image layer at Lsn optimization
-                    &mut straddling_branchpoint
-                } else {
-                    &mut rest_of_historic
-                };
-
-                target.push(layers.get_from_desc(&desc));
-            }
-
-            tracing::debug!(%later_by_lsn, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
-        }
-
-        let layers = tokio::select! {
-            guard = self.layers.read() => guard,
-            _ = self.cancel.cancelled() => return Err(ShuttingDown),
+            (straddling, rest)
         };
 
-        // we can safely not copy the layers again which happen to be found in the index_part.json
-        rest_of_historic.retain(|layer| {
-            let desc = layer.layer_desc();
-
-            let key_range = desc.key_range.clone();
-            let lsn_range = desc.lsn_range.clone();
-
-            let key = crate::tenant::storage_layer::PersistentLayerKey {
-                key_range,
-                lsn_range,
-                is_delta: true,
+        {
+            let layers = tokio::select! {
+                guard = self.layers.read() => guard,
+                _ = self.cancel.cancelled() => return Err(ShuttingDown),
             };
 
-            layers.get(&key).is_none()
-        });
+            detach_ancestor::retain_missing_layers(&mut rest_of_historic, &layers);
 
-        let end_lsn = ancestor_lsn + 1;
+            detach_ancestor::retain_layers_to_copy_lsn_prefix(
+                end_lsn,
+                ancestor_lsn,
+                &mut straddling_branchpoint,
+                &layers,
+            );
 
-        if straddling_branchpoint.is_empty() {
-            // as we flushed the inmem layer to disk, only reason:
-            // this branch has been created from a L1 layer LSN boundary, or checkpoint.
             drop(layers);
-            todo!("is there anything to do here? -- tests are not hitting this");
-        } else {
-            straddling_branchpoint.retain(|layer| {
-                let desc = layer.layer_desc();
-                assert!(desc.is_delta);
 
-                assert!(desc.lsn_range.start <= ancestor_lsn);
-                assert!(desc.lsn_range.end > ancestor_lsn);
-
-                let key_range = desc.key_range.clone();
-                let lsn_range = desc.lsn_range.start..end_lsn;
-
-                let key = crate::tenant::storage_layer::PersistentLayerKey {
-                    key_range,
-                    lsn_range,
-                    is_delta: true,
-                };
-
-                // keep if we haven't already rewritten this
-                layers.get(&key).is_none()
+            // process the remote layers in descending order by Lsn to leak less layers if we are
+            // restarted and a gc happens before we retry
+            rest_of_historic.sort_by_key(|layer| {
+                std::cmp::Reverse((
+                    layer.layer_desc().lsn_range.start,
+                    layer.layer_desc().key_range.start,
+                ))
             });
 
-            drop(layers);
-
-            // we should really have just one lsn
             straddling_branchpoint.sort_by_key(|layer| {
                 (
                     layer.layer_desc().key_range.start,
                     layer.layer_desc().lsn_range.start,
                 )
             });
+        }
 
+        const BATCH_SIZE: usize = 10;
+
+        if straddling_branchpoint.is_empty() {
+            // as we flushed the inmem layer to disk, only reason:
+            // this branch has been created from a L1 layer LSN boundary, or checkpoint.
+            todo!("is there anything to do here? -- tests are not hitting this");
+        } else {
             tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
 
             let mut wrote_any = false;
 
-            for layer in straddling_branchpoint {
-                tracing::debug!(%layer, %end_lsn, "copying lsn prefix");
+            for (i, layer) in straddling_branchpoint.into_iter().enumerate() {
+                let Some(copied) =
+                    detach_ancestor::copy_lsn_prefix(end_lsn, &layer, self, ctx).await?
+                else {
+                    continue;
+                };
 
-                let mut writer = DeltaLayerWriter::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_shard_id,
-                    layer.layer_desc().key_range.start,
-                    layer.layer_desc().lsn_range.start..end_lsn,
-                )
-                .await
-                .map_err(CopyDeltaPrefix)?;
-
-                // likely shutdown
-                let resident = layer
-                    .download_and_keep_resident()
-                    .await
-                    .map_err(RewrittenDeltaDownloadFailed)?;
-
-                let records = resident
-                    .copy_delta_prefix(&mut writer, end_lsn, ctx)
-                    .await
-                    .map_err(CopyDeltaPrefix)?;
-
-                drop(resident);
-
-                tracing::debug!(%layer, records, "copied records");
-
-                if records == 0 {
-                    drop(writer);
-                    // TODO: we might want to store an empty marker in remote storage for this
-                    // layer so that we will not needlessly walk `layer` on repeated attempts.
-                } else {
-                    // reuse the key instead of adding more holes between layers by using the real
-                    // highest key in the layer.
-                    let reused_highest_key = layer.layer_desc().key_range.end;
-                    let copied = writer
-                        .finish(reused_highest_key, self)
-                        .await
-                        .map_err(CopyDeltaPrefix)?;
-
-                    tracing::debug!(%layer, %copied, "new layer produced");
-
-                    // publish the layers right away so that they are evictable
+                // publish the layers right away so that they become evictable after upload
+                {
                     let mut layers = self.layers.write().await;
                     layers.track_adopted_delta_layers(std::array::from_ref(&copied), &self.metrics);
+                }
 
-                    rtc.schedule_layer_file_upload(copied)
+                rtc.schedule_layer_file_upload(copied)
+                    .map_err(|_| ShuttingDown)?;
+
+                wrote_any = true;
+
+                if i > 0 && i % BATCH_SIZE != 0 {
+                    rtc.schedule_index_upload_for_file_changes()
                         .map_err(|_| ShuttingDown)?;
-
-                    wrote_any = true;
                 }
             }
 
@@ -4583,43 +4511,17 @@ impl Timeline {
                     .sync_all()
                     .await
                     .fatal_err("VirtualFile::sync_all timeline dir");
-
-                rtc.schedule_index_upload_for_file_changes()
-                    .map_err(|_| ShuttingDown)?;
             }
         }
 
-        // process the remote layers in descending order by Lsn to leak less layers if we are
-        // restarted and a gc happens before we retry
-        rest_of_historic.sort_by_key(|layer| {
-            std::cmp::Reverse((
-                layer.layer_desc().lsn_range.start,
-                layer.layer_desc().key_range.start,
-            ))
-        });
-
-        // because we hold the layers, it will not be removed from remote storage.
-        //
-        // before making the layermap changes, should the resident ones be hardlinked?
-        // ResidentLayer being held here would help nicely.
-
+        // because we hold the layers, they will not be removed from remote storage.
         let mut new_owned = Vec::with_capacity(rest_of_historic.len());
-
-        let mut chunks = rest_of_historic.chunks(20);
+        let mut chunks = rest_of_historic.chunks(BATCH_SIZE);
 
         while let Some(layers) = chunks.next() {
             for adopted in layers {
                 // this layer will not exist until the copy completes
-                let owned = crate::tenant::storage_layer::Layer::for_evicted(
-                    self.conf,
-                    &self,
-                    adopted.layer_desc().filename(),
-                    // generation is per tenant, we don't have any values to change here
-                    adopted.metadata(),
-                );
-                rtc.schedule_layer_adoption(adopted.clone(), owned.clone())
-                    .map_err(|_| ShuttingDown)?;
-
+                let owned = detach_ancestor::schedule_remote_copy(&rtc, adopted, self)?;
                 new_owned.push(owned);
             }
             // after each batch schedule index_part update to be able to resume after a
@@ -4636,8 +4538,9 @@ impl Timeline {
             }
         }
 
+        // TODO: fsync directory again if we hardlinked something
+
         {
-            // TODO: optimization: hardlink any ancestor downloaded historic layer?
             let mut layers = self.layers.write().await;
             layers.track_adopted_historic_layers(&new_owned);
         }
