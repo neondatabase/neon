@@ -177,7 +177,7 @@ impl OwnedAsyncWriter for Vec<u8> {
     }
 
     async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.extend_from_slice(&buf[..]);
+        self.extend_from_slice(buf);
         Ok(buf.len())
     }
 }
@@ -288,7 +288,7 @@ mod tests {
                 let expect: &[&[u8]] = &[b"ab", b"cd", b"ef", b"gh", b"ij", b"kl", b"mn", b"o"];
                 expect
             }
-            .into_iter()
+            .iter()
             .map(|v| v[..].to_vec())
             .collect::<Vec<_>>()
         );

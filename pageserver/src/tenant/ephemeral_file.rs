@@ -184,7 +184,7 @@ impl EphemeralFile {
         }
 
         // Write the payload
-        self.file.write_all_borrowed(&srcbuf).await?;
+        self.file.write_all_borrowed(srcbuf).await?;
 
         // TODO: bring back pre-warming of page cache, using another sandwich layer
 
