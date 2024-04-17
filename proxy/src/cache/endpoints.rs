@@ -171,6 +171,9 @@ impl EndpointsCache {
 
             if res.keys.is_empty() {
                 if return_when_finish {
+                    if total != 0 {
+                        break;
+                    }
                     anyhow::bail!(
                         "Redis stream {} is empty, cannot be used to filter endpoints",
                         self.config.stream_name

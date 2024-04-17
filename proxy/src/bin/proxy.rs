@@ -42,6 +42,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
+use tracing::Instrument;
 use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
@@ -418,7 +419,8 @@ async fn main() -> anyhow::Result<()> {
             if let Some(regional_redis_client) = regional_redis_client {
                 let cache = api.caches.endpoints_cache.clone();
                 let con = regional_redis_client;
-                maintenance_tasks.spawn(async move { cache.do_read(con).await });
+                let span = tracing::info_span!("endpoints_cache");
+                maintenance_tasks.spawn(async move { cache.do_read(con).await }.instrument(span));
             }
         }
     }
