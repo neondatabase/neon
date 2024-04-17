@@ -507,6 +507,11 @@ class NeonEnvBuilder:
             self.pageserver_get_vectored_impl = "vectored"
             log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
 
+        self.pageserver_get_impl: Optional[str] = None
+        if os.getenv("PAGESERVER_GET_IMPL", "") == "vectored":
+            self.pageserver_get_impl = "vectored"
+            log.debug('Overriding pageserver get_impl config to "vectored"')
+
         assert test_name.startswith(
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
@@ -1078,6 +1083,8 @@ class NeonEnv:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_get_vectored_impl is not None:
                 ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
+            if config.pageserver_get_impl is not None:
+                ps_cfg["get_impl"] = config.pageserver_get_impl
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
