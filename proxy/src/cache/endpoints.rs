@@ -74,7 +74,7 @@ impl EndpointsCache {
         if self.config.disable_cache {
             let rejected = self.should_reject(endpoint);
             ctx.set_rejected(rejected);
-            info!(?rejected);
+            info!(?rejected, "check endpoint is valid, disabled cache");
             return true;
         }
         // If the limiter allows, we don't need to check the cache.
@@ -82,7 +82,7 @@ impl EndpointsCache {
             return true;
         }
         let rejected = self.should_reject(endpoint);
-        info!(?rejected);
+        info!(?rejected, "check endpoint is valid, enabled cache");
         ctx.set_rejected(rejected);
         !rejected
     }

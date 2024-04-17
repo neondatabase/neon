@@ -204,7 +204,8 @@ impl Drop for RequestMonitoring {
             .as_ref()
             .map(|x| x.as_str())
             .unwrap_or_default();
-        info!(?ep, ?outcome, ?rejected);
+        // This makes sense only if cache is disabled
+        info!(?ep, ?outcome, ?rejected, "check endpoint is valid with outcome");
         Metrics::get()
             .proxy
             .invalid_endpoints_total
