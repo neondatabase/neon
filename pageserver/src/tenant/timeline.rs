@@ -670,7 +670,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    #[inline(always)]
+    #[instrument(skip_all, fields(%key, %lsn))]
     pub(crate) async fn get(
         &self,
         key: Key,

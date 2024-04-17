@@ -538,7 +538,7 @@ impl Timeline {
     ///
     /// The return value is either given by the closure, or set to the `Default`
     /// impl's output.
-    #[instrument(skip_all, level = tracing::Level::DEBUG, fields(%probe_lsn, segno, blknum))]
+    #[instrument(skip_all, level = tracing::Level::DEBUG, fields(%probe_lsn))]
     async fn map_all_timestamps<T: Default>(
         &self,
         probe_lsn: Lsn,
@@ -549,12 +549,12 @@ impl Timeline {
             .list_slru_segments(SlruKind::Clog, Version::Lsn(probe_lsn), ctx)
             .await?
         {
-            tracing::Span::current().record("segno", tracing::field::display(segno));
+            debug!(%segno, "for_slru_segment");
             let nblocks = self
                 .get_slru_segment_size(SlruKind::Clog, segno, Version::Lsn(probe_lsn), ctx)
                 .await?;
             for blknum in (0..nblocks).rev() {
-                tracing::Span::current().record("blknum", tracing::field::display(blknum));
+                debug!(%blknum, "for_slru_page");
                 let clog_page = self
                     .get_slru_page_at_lsn(SlruKind::Clog, segno, blknum, probe_lsn, ctx)
                     .await?;

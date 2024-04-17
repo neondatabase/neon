@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
-use tracing::Instrument;
+use tracing::{debug, instrument, Instrument};
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
@@ -1636,6 +1636,7 @@ impl DownloadedLayer {
             })
     }
 
+    #[instrument(skip_all, level = tracing::Level::DEBUG, fields(%key, ?lsn_range))]
     async fn get_value_reconstruct_data(
         &self,
         key: Key,
@@ -1646,16 +1647,23 @@ impl DownloadedLayer {
     ) -> anyhow::Result<ValueReconstructResult> {
         use LayerKind::*;
 
-        match self.get(owner, ctx).await? {
+        let pre = reconstruct_data.records.len();
+        let layer_kind;
+        let res= match self.get(owner, ctx).await? {
             Delta(d) => {
+                layer_kind = "delta";
                 d.get_value_reconstruct_data(key, lsn_range, reconstruct_data, ctx)
                     .await
             }
             Image(i) => {
+                layer_kind = "image";
                 i.get_value_reconstruct_data(key, reconstruct_data, ctx)
                     .await
             }
-        }
+        };
+        let added_records = reconstruct_data.records.len() - pre;
+        debug!(layer_kind, added_records, "got reconstruct data");
+        res
     }
 
     async fn get_values_reconstruct_data(
