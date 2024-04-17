@@ -1,15 +1,6 @@
 use pageserver_api::key::{Key, AUX_KEY_PREFIX, METADATA_KEY_SIZE};
 use tracing::warn;
 
-/// Match the path with a prefix, and if it starts with the prefix, the function returns the remaining parts.
-fn split_prefix<'a, 'b>(path: &'a str, prefix: &'b str) -> Option<&'a str> {
-    if path.starts_with(prefix) {
-        Some(&path[prefix.len()..])
-    } else {
-        None
-    }
-}
-
 /// Create a metadata key from a hash, encoded as [AUX_KEY_PREFIX, 2B directory prefix, first 13B of 128b xxhash].
 fn aux_hash_to_metadata_key(prefix: u16, data: &[u8]) -> [u8; METADATA_KEY_SIZE] {
     let mut key = [0; METADATA_KEY_SIZE];
@@ -37,10 +28,10 @@ fn aux_hash_to_metadata_key(prefix: u16, data: &[u8]) -> [u8; METADATA_KEY_SIZE]
 ///
 /// If you add new AUX files to this function, please also add a test case to `test_encoding_portable`.
 pub fn encode_aux_file_key(path: &str) -> Key {
-    if let Some(fname) = split_prefix(path, "pg_logical/mappings/") {
+    if let Some(fname) = path.strip_prefix("pg_logical/mappings/") {
         let key = aux_hash_to_metadata_key(0x0101, fname.as_bytes());
         Key::from_metadata_key_fixed_size(&key)
-    } else if let Some(fname) = split_prefix(path, "pg_logical/snapshots/") {
+    } else if let Some(fname) = path.strip_prefix("pg_logical/snapshots/") {
         let key = aux_hash_to_metadata_key(0x0102, fname.as_bytes());
         Key::from_metadata_key_fixed_size(&key)
     } else if path == "pg_logical/replorigin_checkpoint" {
@@ -49,7 +40,7 @@ pub fn encode_aux_file_key(path: &str) -> Key {
         key[1] = 0x01;
         key[2] = 0x03;
         Key::from_metadata_key_fixed_size(&key)
-    } else if let Some(fname) = split_prefix(path, "pg_replslot/") {
+    } else if let Some(fname) = path.strip_prefix("pg_replslot/") {
         let key = aux_hash_to_metadata_key(0x0201, fname.as_bytes());
         Key::from_metadata_key_fixed_size(&key)
     } else {
