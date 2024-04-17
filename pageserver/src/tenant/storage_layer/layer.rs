@@ -336,6 +336,12 @@ impl Layer {
             .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
+            .map_err(|err| match err {
+                GetVectoredError::Other(err) => GetVectoredError::Other(
+                    err.context(format!("get_value_reconstruct_data for layer {self}")),
+                ),
+                err => err,
+            })
     }
 
     /// Download the layer if evicted.

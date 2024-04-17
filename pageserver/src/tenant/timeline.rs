@@ -969,6 +969,16 @@ impl Timeline {
                     {
                         return Err(GetVectoredError::MissingKey(key))
                     }
+                    Err(Other(err))
+                        if err
+                            .chain()
+                            .any(|cause| cause.to_string().contains("layer loading failed")) =>
+                    {
+                        // The intent here is to achieve error parity with the vectored read path.
+                        // When vectored read fails to load a layer it fails the whole read, hence
+                        // we mimic this behaviour here to keep the validation happy.
+                        return Err(GetVectoredError::Other(err))
+                    }
                     _ => {
                         values.insert(key, block);
                         key = key.next();
