@@ -4515,6 +4515,8 @@ impl Timeline {
 
             tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
 
+            let mut wrote_any = false;
+
             for layer in straddling_branchpoint {
                 tracing::debug!(%layer, %end_lsn, "copying lsn prefix");
 
@@ -4556,8 +4558,7 @@ impl Timeline {
                         .await
                         .map_err(CopyDeltaPrefix)?;
 
-                    // FIXME: fsync + fsync directory here or amortize?
-                    // adding the layers one by one is probably fine
+                    tracing::debug!(%layer, %copied, "new layer produced");
 
                     // publish the layers right away so that they are evictable
                     let mut layers = self.layers.write().await;
@@ -4566,10 +4567,25 @@ impl Timeline {
                     rtc.schedule_layer_file_upload(copied)
                         .map_err(|_| ShuttingDown)?;
 
-                    rtc.schedule_index_upload_for_file_changes()
-                        .map_err(|_| ShuttingDown)?;
-                    // without rtc there would be nothing to do
+                    wrote_any = true;
                 }
+            }
+
+            if wrote_any {
+                let timeline_dir = VirtualFile::open(
+                    &self
+                        .conf
+                        .timeline_path(&self.tenant_shard_id, &self.timeline_id),
+                )
+                .await
+                .fatal_err("VirtualFile::open for timeline dir fsync");
+                timeline_dir
+                    .sync_all()
+                    .await
+                    .fatal_err("VirtualFile::sync_all timeline dir");
+
+                rtc.schedule_index_upload_for_file_changes()
+                    .map_err(|_| ShuttingDown)?;
             }
         }
 
