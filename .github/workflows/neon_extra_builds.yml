@@ -310,6 +310,7 @@ jobs:
             exit 1
           fi
           echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
+
       - name: Run cargo clippy (debug)
         if: matrix.build_type == 'debug'
         run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
@@ -317,45 +318,27 @@ jobs:
         if: matrix.build_type == 'release'
         run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
-  check-codestyle-misc-arm:
-    needs: [ check-permissions, build-build-tools-image ]
-    timeout-minutes: 90
-    runs-on: [ self-hosted, ubuntu-latest-arm64 ]
-
-    container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
-      credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-      options: --init
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-          fetch-depth: 1
-
       - name: Check documentation generation
+        if: matrix.build_type == 'release'
         run: cargo doc --workspace --no-deps --document-private-items -j$(nproc)
         env:
             RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.build_type == 'release' }}
         run: cargo fmt --all -- --check
 
       # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
       - name: Check rust dependencies
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.build_type == 'release' }}
         run: |
           cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
           cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
 
       # https://github.com/EmbarkStudios/cargo-deny
       - name: Check rust licenses/bans/advisories/sources
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.build_type == 'release' }}
         run: cargo deny check
 
   gather-rust-build-stats:
