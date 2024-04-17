@@ -548,8 +548,6 @@ impl InMemoryLayer {
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub async fn freeze(&self, end_lsn: Lsn) {
-        let inner = self.inner.write().await;
-
         assert!(
             self.start_lsn < end_lsn,
             "{} >= {}",
@@ -567,9 +565,13 @@ impl InMemoryLayer {
             })
             .expect("frozen_local_path_str set only once");
 
-        for vec_map in inner.index.values() {
-            for (lsn, _pos) in vec_map.as_slice() {
-                assert!(*lsn < end_lsn);
+        #[cfg(debug_assertions)]
+        {
+            let inner = self.inner.write().await;
+            for vec_map in inner.index.values() {
+                for (lsn, _pos) in vec_map.as_slice() {
+                    assert!(*lsn < end_lsn);
+                }
             }
         }
     }
