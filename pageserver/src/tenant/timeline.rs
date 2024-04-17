@@ -1742,15 +1742,13 @@ impl Timeline {
     }
 
     fn get_image_layer_creation_check_threshold(&self) -> u8 {
-        let tenant_conf = self.tenant_conf.load();
-        tenant_conf
-            .tenant_conf
+        // Ignore the tenant config override and use the default.
+        // This was done as a quick fix to resolve a perf degrdation.
+        // TODO: figure out if we wish to keep this config and related functionality
+        // If not, deprecate the config gracefully.
+        self.conf
+            .default_tenant_conf
             .image_layer_creation_check_threshold
-            .unwrap_or(
-                self.conf
-                    .default_tenant_conf
-                    .image_layer_creation_check_threshold,
-            )
     }
 
     pub(super) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
