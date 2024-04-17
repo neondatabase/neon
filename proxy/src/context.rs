@@ -208,9 +208,9 @@ impl Drop for RequestMonitoring {
                 .unwrap_or_default();
             // This makes sense only if cache is disabled
             info!(
-                ?ep,
                 ?outcome,
                 ?rejected,
+                ?ep,
                 "check endpoint is valid with outcome"
             );
             Metrics::get()
