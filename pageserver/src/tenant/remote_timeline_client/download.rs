@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::str::FromStr;
 
 use anyhow::{anyhow, Context};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -25,7 +26,7 @@ use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode, RemotePath};
 use utils::crashsafe::path_with_suffix_extension;
-use utils::id::TimelineId;
+use utils::id::{TenantId, TimelineId};
 
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{
@@ -252,42 +253,31 @@ pub(crate) fn is_temp_download_file(path: &Utf8Path) -> bool {
     }
 }
 
-/// List timelines of given tenant in remote storage
-pub async fn list_remote_timelines(
+async fn list_identifiers<T>(
     storage: &GenericRemoteStorage,
-    tenant_shard_id: TenantShardId,
+    prefix: RemotePath,
     cancel: CancellationToken,
-) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
-    let remote_path = remote_timelines_path(&tenant_shard_id).add_trailing_slash();
-
-    fail::fail_point!("storage-sync-list-remote-timelines", |_| {
-        anyhow::bail!("storage-sync-list-remote-timelines");
-    });
-
+) -> anyhow::Result<(HashSet<T>, HashSet<String>)>
+where
+    T: FromStr + Eq + std::hash::Hash,
+{
     let listing = download_retry_forever(
-        || {
-            storage.list(
-                Some(&remote_path),
-                ListingMode::WithDelimiter,
-                None,
-                &cancel,
-            )
-        },
-        &format!("list timelines for {tenant_shard_id}"),
+        || storage.list(Some(&prefix), ListingMode::WithDelimiter, None, &cancel),
+        &format!("list identifiers in prefix {prefix}"),
         &cancel,
     )
     .await?;
 
-    let mut timeline_ids = HashSet::new();
+    let mut parsed_ids = HashSet::new();
     let mut other_prefixes = HashSet::new();
 
-    for timeline_remote_storage_key in listing.prefixes {
-        let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
-            anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_shard_id}")
+    for id_remote_storage_key in listing.prefixes {
+        let object_name = id_remote_storage_key.object_name().ok_or_else(|| {
+            anyhow::anyhow!("failed to get object name for key {id_remote_storage_key}")
         })?;
 
-        match object_name.parse::<TimelineId>() {
-            Ok(t) => timeline_ids.insert(t),
+        match object_name.parse::<T>() {
+            Ok(t) => parsed_ids.insert(t),
             Err(_) => other_prefixes.insert(object_name.to_string()),
         };
     }
@@ -299,7 +289,32 @@ pub async fn list_remote_timelines(
         other_prefixes.insert(object_name.to_string());
     }
 
-    Ok((timeline_ids, other_prefixes))
+    Ok((parsed_ids, other_prefixes))
+}
+
+/// List shards of given tenant in remote storage
+pub async fn list_remote_tenant_shards(
+    storage: &GenericRemoteStorage,
+    tenant_id: TenantId,
+    cancel: CancellationToken,
+) -> anyhow::Result<(HashSet<TenantShardId>, HashSet<String>)> {
+    // The unsharded tenantId path is a prefix of all shard paths, because they start with the tenant ID.
+    let remote_path = remote_timelines_path(&TenantShardId::unsharded(tenant_id));
+    list_identifiers::<TenantShardId>(storage, remote_path, cancel).await
+}
+
+/// List timelines of given tenant shard in remote storage
+pub async fn list_remote_timelines(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: TenantShardId,
+    cancel: CancellationToken,
+) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
+    fail::fail_point!("storage-sync-list-remote-timelines", |_| {
+        anyhow::bail!("storage-sync-list-remote-timelines");
+    });
+
+    let remote_path = remote_timelines_path(&tenant_shard_id).add_trailing_slash();
+    list_identifiers::<TimelineId>(storage, remote_path, cancel).await
 }
 
 async fn do_download_index_part(
