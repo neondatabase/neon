@@ -8,10 +8,11 @@ use crate::{
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
 };
-use bytes::{Buf, Bytes};
-use framed_websockets::{upgrade::UpgradeDowncastFut, Frame, OpCode, WebSocketServer};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
-use hyper::upgrade::Upgraded;
+use hyper1::upgrade::OnUpgrade;
+use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
 use tokio_rustls::server::TlsStream;
 
@@ -26,10 +27,12 @@ use tokio::{
 };
 use tracing::warn;
 
+use super::http_auto::Rewind;
+
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
     /// implements [`AsyncRead`] and [`AsyncWrite`].
-    pub struct WebSocketRw<S = Upgraded> {
+    pub struct WebSocketRw<S> {
         #[pin]
         stream: WebSocketServer<S>,
         bytes: Bytes,
@@ -130,12 +133,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 pub async fn serve_websocket(
     config: &'static ProxyConfig,
     mut ctx: RequestMonitoring,
-    websocket: UpgradeDowncastFut<TlsStream<ChainRW<TcpStream>>>,
+    websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
+    let websocket = websocket
+        .downcast::<TokioIo<Rewind<TlsStream<ChainRW<TcpStream>>>>>()
+        .expect("downcast error");
+
+    let pre0 = websocket.read_buf;
+    let (pre1, inner) = websocket.io.into_inner().into_inner();
+
+    let mut buf = BytesMut::with_capacity(8192);
+    buf.put(pre0);
+    buf.put(pre1);
+    let websocket = WebSocketServer::after_handshake_with_bytes(inner, buf);
+
     let conn_gauge = Metrics::get()
         .proxy
         .client_connections

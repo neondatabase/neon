@@ -2000,7 +2000,7 @@ dependencies = [
 [[package]]
 name = "framed-websockets"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/framed-websockets#51c2cd4c4bf1a91acdbe11a5f2d98983d0e0ed44"
+source = "git+https://github.com/neondatabase/framed-websockets#cf402cdcd6318c1072ce459d74c6f7b63af5c66a"
 dependencies = [
  "base64 0.21.1",
  "bytes",
