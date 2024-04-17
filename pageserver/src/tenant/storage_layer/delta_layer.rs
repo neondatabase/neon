@@ -36,13 +36,13 @@ use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, Fi
 use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::PageReconstructError;
 use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
@@ -73,8 +73,7 @@ use utils::{
 };
 
 use super::{
-    AsLayerDesc, LayerAccessStats, LayerName, PersistentLayerDesc, ResidentLayer,
-    ValuesReconstructState,
+    AsLayerDesc, LayerAccessStats, LayerName, PersistentLayerDesc, ValuesReconstructState,
 };
 
 ///
@@ -373,7 +372,6 @@ impl DeltaLayer {
 /// 3. Call `finish`.
 ///
 struct DeltaLayerWriterInner {
-    conf: &'static PageServerConf,
     pub path: Utf8PathBuf,
     timeline_id: TimelineId,
     tenant_shard_id: TenantShardId,
@@ -417,7 +415,6 @@ impl DeltaLayerWriterInner {
         let tree_builder = DiskBtreeBuilder::new(block_buf);
 
         Ok(Self {
-            conf,
             path,
             timeline_id,
             tenant_shard_id,
@@ -488,11 +485,10 @@ impl DeltaLayerWriterInner {
     async fn finish(
         self,
         key_end: Key,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<ResidentLayer> {
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let temp_path = self.path.clone();
-        let result = self.finish0(key_end, timeline, ctx).await;
+        let result = self.finish0(key_end, ctx).await;
         if result.is_err() {
             tracing::info!(%temp_path, "cleaning up temporary file after error during writing");
             if let Err(e) = std::fs::remove_file(&temp_path) {
@@ -505,9 +501,8 @@ impl DeltaLayerWriterInner {
     async fn finish0(
         self,
         key_end: Key,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<ResidentLayer> {
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -572,11 +567,9 @@ impl DeltaLayerWriterInner {
         // fsync the file
         file.sync_all().await?;
 
-        let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
+        trace!("created delta layer {}", self.path);
 
-        trace!("created delta layer {}", layer.local_path());
-
-        Ok(layer)
+        Ok((desc, self.path))
     }
 }
 
@@ -677,14 +670,9 @@ impl DeltaLayerWriter {
     pub(crate) async fn finish(
         mut self,
         key_end: Key,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<ResidentLayer> {
-        self.inner
-            .take()
-            .unwrap()
-            .finish(key_end, timeline, ctx)
-            .await
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+        self.inner.take().unwrap().finish(key_end, ctx).await
     }
 }
 
@@ -1669,8 +1657,9 @@ pub(crate) mod test {
     use super::*;
     use crate::repository::Value;
     use crate::tenant::harness::TIMELINE_ID;
+    use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
-    use crate::tenant::Tenant;
+    use crate::tenant::{Tenant, Timeline};
     use crate::{
         context::DownloadBehavior,
         task_mgr::TaskKind,
@@ -1964,9 +1953,8 @@ pub(crate) mod test {
             res?;
         }
 
-        let resident = writer
-            .finish(entries_meta.key_range.end, &timeline, &ctx)
-            .await?;
+        let (desc, path) = writer.finish(entries_meta.key_range.end, &ctx).await?;
+        let resident = Layer::finish_creating(harness.conf, &timeline, desc, &path)?;
 
         let inner = resident.get_as_delta(&ctx).await?;
 
@@ -2155,7 +2143,8 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let copied_layer = writer.finish(Key::MAX, &branch, ctx).await.unwrap();
+            let (desc, path) = writer.finish(Key::MAX, ctx).await.unwrap();
+            let copied_layer = Layer::finish_creating(tenant.conf, &branch, desc, &path).unwrap();
 
             copied_layer.get_as_delta(ctx).await.unwrap();
 
@@ -2283,7 +2272,9 @@ pub(crate) mod test {
         for (key, lsn, value) in deltas {
             writer.put_value(key, lsn, value, ctx).await?;
         }
-        let delta_layer = writer.finish(key_end, tline, ctx).await?;
+
+        let (desc, path) = writer.finish(key_end, ctx).await?;
+        let delta_layer = Layer::finish_creating(tenant.conf, tline, desc, &path)?;
 
         Ok::<_, anyhow::Error>(delta_layer)
     }

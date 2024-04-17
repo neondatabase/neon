@@ -24,7 +24,7 @@ impl Default for L0FlushConfig {
 #[derive(Clone)]
 pub struct L0FlushGlobalState(Arc<Inner>);
 
-pub(crate) enum Inner {
+pub enum Inner {
     PageCached,
     Direct { semaphore: tokio::sync::Semaphore },
 }
@@ -40,7 +40,7 @@ impl L0FlushGlobalState {
         }
     }
 
-    pub(crate) fn inner(&self) -> &Arc<Inner> {
+    pub fn inner(&self) -> &Arc<Inner> {
         &self.0
     }
 }
