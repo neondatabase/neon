@@ -47,19 +47,25 @@ pub fn encode_aux_file_key(path: &str) -> Key {
         key[2] = 0x03;
         Key::from_metadata_key_fixed_size(&key)
     } else if let Some(fname) = path.strip_prefix("pg_logical/") {
+        if cfg!(debug_assertions) {
+            warn!(
+                "unsupported pg_logical aux file type: {}, putting to 0x01FF, would affect path scanning",
+                path
+            );
+        }
         let key = aux_hash_to_metadata_key(0x01, 0xFF, fname.as_bytes());
         Key::from_metadata_key_fixed_size(&key)
     } else if let Some(fname) = path.strip_prefix("pg_replslot/") {
         let key = aux_hash_to_metadata_key(0x02, 0x01, fname.as_bytes());
         Key::from_metadata_key_fixed_size(&key)
     } else {
-        let key = aux_hash_to_metadata_key(0xFF, 0xFF, path.as_bytes());
         if cfg!(debug_assertions) {
             warn!(
-                "unsupported aux file type: {}, putting to other files, non-scan-able by prefix",
+                "unsupported aux file type: {}, putting to 0xFFFF, would affect path scanning",
                 path
             );
         }
+        let key = aux_hash_to_metadata_key(0xFF, 0xFF, path.as_bytes());
         Key::from_metadata_key_fixed_size(&key)
     }
 }
