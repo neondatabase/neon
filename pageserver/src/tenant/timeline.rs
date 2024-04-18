@@ -4194,9 +4194,8 @@ impl Timeline {
                 *self.get_latest_gc_cutoff_lsn()
             }
         } else {
-            // No time-based retention was configured. Set time-based cutoff to
-            // same as LSN based.
-            cutoff_horizon
+            // No time-based retention was configured. Interpret this as "keep no history".
+            self.get_last_record_lsn()
         };
 
         // Grab the lock and update the values
