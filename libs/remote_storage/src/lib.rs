@@ -134,6 +134,11 @@ impl RemotePath {
     pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Utf8Path, std::path::StripPrefixError> {
         self.0.strip_prefix(&p.0)
     }
+
+    pub fn add_trailing_slash(&self) -> Self {
+        // Unwrap safety inputs are guararnteed to be valid UTF-8
+        Self(format!("{}/", self.0).try_into().unwrap())
+    }
 }
 
 /// We don't need callers to be able to pass arbitrary delimiters: just control
