@@ -26,7 +26,9 @@ See the `http.rs` file in the source for where the HTTP APIs are implemented.
 
 ## Database
 
-The storage controller uses a postgres database to persist a subset of its state. Note that the storage controller does _not_ keep all its state in the database: this is a design choice to enable most operations to be done efficiently in memory, rather than having to read from the database. See `persistence.rs` for a more comprehensive comment explaining what we do and do not persist.
+The storage controller uses a postgres database to persist a subset of its state. Note that the storage controller does _not_ keep all its state in the database: this is a design choice to enable most operations to be done efficiently in memory, rather than having to read from the database. See `persistence.rs` for a more comprehensive comment explaining what we do and do not persist: a useful metaphor is that we persist objects like tenants and nodes, but we do not
+persist the _relationships_ between them: the attachment state of a tenant's shards to nodes is kept in memory and
+rebuilt on startup.
 
 The file `[persistence.rs](http://persistence.rs)` contains all the code for accessing the database, and has a large doc comment that goes into more detail about exactly what we persist and why.
 
