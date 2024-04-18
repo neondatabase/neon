@@ -3861,8 +3861,8 @@ mod tests {
     use pageserver_api::key::NON_INHERITED_RANGE;
     use pageserver_api::keyspace::KeySpace;
     use rand::{thread_rng, Rng};
-    use tests::timeline::{GetVectoredError, ShutdownMode};
     use tests::storage_layer::ValuesReconstructState;
+    use tests::timeline::{GetVectoredError, ShutdownMode};
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));

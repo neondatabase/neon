@@ -977,7 +977,7 @@ impl Timeline {
                         // The intent here is to achieve error parity with the vectored read path.
                         // When vectored read fails to load a layer it fails the whole read, hence
                         // we mimic this behaviour here to keep the validation happy.
-                        return Err(GetVectoredError::Other(err))
+                        return Err(GetVectoredError::Other(err));
                     }
                     _ => {
                         values.insert(key, block);
@@ -3182,7 +3182,11 @@ impl Timeline {
                     None => {
                         for range in unmapped_keyspace.ranges.iter() {
                             let results = layers.range_search(range.clone(), cont_lsn);
-                            tracing::info!("Range search at {} found {:?}", cont_lsn, results.found);
+                            tracing::info!(
+                                "Range search at {} found {:?}",
+                                cont_lsn,
+                                results.found
+                            );
 
                             results
                                 .found
