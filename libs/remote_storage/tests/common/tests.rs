@@ -54,9 +54,14 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
     let base_prefix = RemotePath::new(Utf8Path::new(ctx.enabled.base_prefix))
         .context("common_prefix construction")?;
     let root_remote_prefixes = test_client
-        .list_prefixes(None, &cancel)
-        .await
-        .context("client list root prefixes failure")?
+        .list(
+            None,
+            remote_storage::ListingMode::WithDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .prefixes
         .into_iter()
         .collect::<HashSet<_>>();
     assert_eq!(
@@ -65,9 +70,14 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
     );
 
     let nested_remote_prefixes = test_client
-        .list_prefixes(Some(&base_prefix), &cancel)
-        .await
-        .context("client list nested prefixes failure")?
+        .list(
+            Some(&base_prefix.add_trailing_slash()),
+            remote_storage::ListingMode::WithDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .prefixes
         .into_iter()
         .collect::<HashSet<_>>();
     let remote_only_prefixes = nested_remote_prefixes
@@ -199,7 +209,16 @@ async fn delete_objects_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
 
     ctx.client.delete_objects(&[path1, path2], &cancel).await?;
 
-    let prefixes = ctx.client.list_prefixes(None, &cancel).await?;
+    let prefixes = ctx
+        .client
+        .list(
+            None,
+            remote_storage::ListingMode::WithDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .prefixes;
 
     assert_eq!(prefixes.len(), 1);
 
