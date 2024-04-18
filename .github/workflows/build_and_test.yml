@@ -1133,8 +1133,6 @@ jobs:
               -f deployPreprodRegion=true
 
             gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main \
-              -f deployPgSniRouter=false \
-              -f deployProxy=false \
               -f deployStorage=true \
               -f deployStorageBroker=true \
               -f deployStorageController=true \

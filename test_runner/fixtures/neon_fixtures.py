@@ -2449,10 +2449,12 @@ class NeonPageserver(PgProtocol):
                 if cur_line_no < skip_until_line_no:
                     cur_line_no += 1
                     continue
-                if contains_re.search(line):
+                elif contains_re.search(line):
                     # found it!
                     cur_line_no += 1
                     return (line, LogCursor(cur_line_no))
+                else:
+                    cur_line_no += 1
         return None
 
     def tenant_attach(

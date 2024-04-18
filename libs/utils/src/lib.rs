@@ -92,6 +92,8 @@ pub mod zstd;
 
 pub mod env;
 
+pub mod poison;
+
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
 /// we have several cases:

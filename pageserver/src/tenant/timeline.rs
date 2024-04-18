@@ -1344,7 +1344,7 @@ impl Timeline {
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
-        if self.tenant_shard_id.is_zero() {
+        if self.tenant_shard_id.is_shard_zero() {
             // Logical size is only maintained accurately on shard zero.
             self.spawn_initial_logical_size_computation_task(ctx);
         }
@@ -2237,7 +2237,7 @@ impl Timeline {
         priority: GetLogicalSizePriority,
         ctx: &RequestContext,
     ) -> logical_size::CurrentLogicalSize {
-        if !self.tenant_shard_id.is_zero() {
+        if !self.tenant_shard_id.is_shard_zero() {
             // Logical size is only accurately maintained on shard zero: when called elsewhere, for example
             // when HTTP API is serving a GET for timeline zero, return zero
             return logical_size::CurrentLogicalSize::Approximate(logical_size::Approximate::zero());
@@ -2533,7 +2533,7 @@ impl Timeline {
         crate::span::debug_assert_current_span_has_tenant_and_timeline_id();
         // We should never be calculating logical sizes on shard !=0, because these shards do not have
         // accurate relation sizes, and they do not emit consumption metrics.
-        debug_assert!(self.tenant_shard_id.is_zero());
+        debug_assert!(self.tenant_shard_id.is_shard_zero());
 
         let guard = self
             .gate

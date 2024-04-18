@@ -32,10 +32,9 @@ use tokio_util::task::TaskTracker;
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
-use crate::metrics::{NUM_CLIENT_CONNECTION_GAUGE, TLS_HANDSHAKE_FAILURES};
+use crate::metrics::Metrics;
 use crate::protocol2::WithClientIp;
 use crate::proxy::run_until_cancelled;
-use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
 
@@ -53,7 +52,6 @@ pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_handler: Arc<CancellationHandlerMain>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
@@ -117,7 +115,6 @@ pub async fn task_main(
                 backend.clone(),
                 connections.clone(),
                 cancellation_handler.clone(),
-                endpoint_rate_limiter.clone(),
                 cancellation_token.clone(),
                 server.clone(),
                 tls_acceptor.clone(),
@@ -147,7 +144,6 @@ async fn connection_handler(
     backend: Arc<PoolingBackend>,
     connections: TaskTracker,
     cancellation_handler: Arc<CancellationHandlerMain>,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
     server: Builder<TokioExecutor>,
     tls_acceptor: TlsAcceptor,
@@ -156,9 +152,10 @@ async fn connection_handler(
 ) {
     let session_id = uuid::Uuid::new_v4();
 
-    let _gauge = NUM_CLIENT_CONNECTION_GAUGE
-        .with_label_values(&["http"])
-        .guard();
+    let _gauge = Metrics::get()
+        .proxy
+        .client_connections
+        .guard(crate::metrics::Protocol::Http);
 
     // handle PROXY protocol
     let mut conn = WithClientIp::new(conn);
@@ -171,6 +168,10 @@ async fn connection_handler(
     };
 
     let peer_addr = peer.unwrap_or(peer_addr).ip();
+    let has_private_peer_addr = match peer_addr {
+        IpAddr::V4(ip) => ip.is_private(),
+        _ => false,
+    };
     info!(?session_id, %peer_addr, "accepted new TCP connection");
 
     // try upgrade to TLS, but with a timeout.
@@ -181,13 +182,17 @@ async fn connection_handler(
         }
         // The handshake failed
         Ok(Err(e)) => {
-            TLS_HANDSHAKE_FAILURES.inc();
+            if !has_private_peer_addr {
+                Metrics::get().proxy.tls_handshake_failures.inc();
+            }
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
             return;
         }
         // The handshake timed out
         Err(e) => {
-            TLS_HANDSHAKE_FAILURES.inc();
+            if !has_private_peer_addr {
+                Metrics::get().proxy.tls_handshake_failures.inc();
+            }
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
             return;
         }
@@ -222,7 +227,6 @@ async fn connection_handler(
                     cancellation_handler.clone(),
                     session_id,
                     peer_addr,
-                    endpoint_rate_limiter.clone(),
                     http_request_token,
                 )
                 .in_current_span()
@@ -261,7 +265,6 @@ async fn request_handler(
     cancellation_handler: Arc<CancellationHandlerMain>,
     session_id: uuid::Uuid,
     peer_addr: IpAddr,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
@@ -274,7 +277,13 @@ async fn request_handler(
 
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&request) {
-        let ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
+        let ctx = RequestMonitoring::new(
+            session_id,
+            peer_addr,
+            crate::metrics::Protocol::Ws,
+            &config.region,
+        );
+
         let span = ctx.span.clone();
         info!(parent: &span, "performing websocket upgrade");
 
@@ -283,15 +292,9 @@ async fn request_handler(
 
         ws_connections.spawn(
             async move {
-                if let Err(e) = websocket::serve_websocket(
-                    config,
-                    ctx,
-                    websocket,
-                    cancellation_handler,
-                    host,
-                    endpoint_rate_limiter,
-                )
-                .await
+                if let Err(e) =
+                    websocket::serve_websocket(config, ctx, websocket, cancellation_handler, host)
+                        .await
                 {
                     error!("error in websocket connection: {e:#}");
                 }
@@ -302,7 +305,12 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
-        let ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
+        let ctx = RequestMonitoring::new(
+            session_id,
+            peer_addr,
+            crate::metrics::Protocol::Http,
+            &config.region,
+        );
         let span = ctx.span.clone();
 
         sql_over_http::handle(config, ctx, request, backend, http_cancellation_token)

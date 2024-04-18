@@ -43,8 +43,8 @@ use crate::context::RequestMonitoring;
 use crate::error::ErrorKind;
 use crate::error::ReportableError;
 use crate::error::UserFacingError;
-use crate::metrics::HTTP_CONTENT_LENGTH;
-use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
+use crate::metrics::HttpDirection;
+use crate::metrics::Metrics;
 use crate::proxy::run_until_cancelled;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
@@ -494,10 +494,11 @@ async fn handle_inner(
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
-    let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
-        .with_label_values(&[ctx.protocol])
-        .guard();
-    info!("handling interactive connection from client");
+    let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
+    info!(
+        protocol = %ctx.protocol,
+        "handling interactive connection from client"
+    );
 
     //
     // Determine the destination and connection params
@@ -520,9 +521,10 @@ async fn handle_inner(
         None => MAX_REQUEST_SIZE + 1,
     };
     info!(request_content_length, "request size in bytes");
-    HTTP_CONTENT_LENGTH
-        .with_label_values(&["request"])
-        .observe(request_content_length as f64);
+    Metrics::get()
+        .proxy
+        .http_conn_content_length_bytes
+        .observe(HttpDirection::Request, request_content_length as f64);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
@@ -539,7 +541,9 @@ async fn handle_inner(
     .map_err(SqlOverHttpError::from);
 
     let authenticate_and_connect = async {
-        let keys = backend.authenticate(ctx, &conn_info).await?;
+        let keys = backend
+            .authenticate(ctx, &config.authentication_config, &conn_info)
+            .await?;
         let client = backend
             .connect_to_compute(ctx, conn_info, keys, !allow_pool)
             .await?;
@@ -607,9 +611,10 @@ async fn handle_inner(
     // count the egress bytes - we miss the TLS and header overhead but oh well...
     // moving this later in the stack is going to be a lot of effort and ehhhh
     metrics.record_egress(len as u64);
-    HTTP_CONTENT_LENGTH
-        .with_label_values(&["response"])
-        .observe(len as f64);
+    Metrics::get()
+        .proxy
+        .http_conn_content_length_bytes
+        .observe(HttpDirection::Response, len as f64);
 
     Ok(response)
 }

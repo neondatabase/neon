@@ -3,9 +3,8 @@ use crate::{
     config::ProxyConfig,
     context::RequestMonitoring,
     error::{io_error, ReportableError},
-    metrics::NUM_CLIENT_CONNECTION_GAUGE,
+    metrics::Metrics,
     proxy::{handle_client, ClientMode},
-    rate_limiter::EndpointRateLimiter,
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream};
@@ -136,12 +135,12 @@ pub async fn serve_websocket(
     websocket: HyperWebsocket,
     cancellation_handler: Arc<CancellationHandlerMain>,
     hostname: Option<String>,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
-    let conn_gauge = NUM_CLIENT_CONNECTION_GAUGE
-        .with_label_values(&["ws"])
-        .guard();
+    let conn_gauge = Metrics::get()
+        .proxy
+        .client_connections
+        .guard(crate::metrics::Protocol::Ws);
 
     let res = handle_client(
         config,
@@ -149,7 +148,6 @@ pub async fn serve_websocket(
         cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
-        endpoint_rate_limiter,
         conn_gauge,
     )
     .await;

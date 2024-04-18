@@ -7,6 +7,7 @@ pub mod handshake;
 pub mod passthrough;
 pub mod retry;
 pub mod wake_compute;
+pub use copy_bidirectional::copy_bidirectional_client_compute;
 
 use crate::{
     auth,
@@ -15,16 +16,14 @@ use crate::{
     config::{ProxyConfig, TlsConfig},
     context::RequestMonitoring,
     error::ReportableError,
-    metrics::{NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE},
+    metrics::{Metrics, NumClientConnectionsGuard},
     protocol2::WithClientIp,
     proxy::handshake::{handshake, HandshakeData},
-    rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
     EndpointCacheKey,
 };
 use futures::TryFutureExt;
 use itertools::Itertools;
-use metrics::IntCounterPairGuard;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, StartupMessageParams};
 use regex::Regex;
@@ -61,7 +60,6 @@ pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_handler: Arc<CancellationHandlerMain>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
@@ -79,13 +77,13 @@ pub async fn task_main(
     {
         let (socket, peer_addr) = accept_result?;
 
-        let conn_gauge = NUM_CLIENT_CONNECTION_GAUGE
-            .with_label_values(&["tcp"])
-            .guard();
+        let conn_gauge = Metrics::get()
+            .proxy
+            .client_connections
+            .guard(crate::metrics::Protocol::Tcp);
 
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
-        let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
         tracing::info!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
@@ -113,7 +111,12 @@ pub async fn task_main(
                 },
             };
 
-            let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
+            let mut ctx = RequestMonitoring::new(
+                    session_id,
+                    peer_addr,
+                    crate::metrics::Protocol::Tcp,
+                    &config.region,
+                );
             let span = ctx.span.clone();
 
             let res = handle_client(
@@ -122,7 +125,6 @@ pub async fn task_main(
                 cancellation_handler,
                 socket,
                 ClientMode::Tcp,
-                endpoint_rate_limiter,
                 conn_gauge,
             )
             .instrument(span.clone())
@@ -236,20 +238,23 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     mode: ClientMode,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    conn_gauge: IntCounterPairGuard,
+    conn_gauge: NumClientConnectionsGuard<'static>,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
-    info!("handling interactive connection from client");
+    info!(
+        protocol = %ctx.protocol,
+        "handling interactive connection from client"
+    );
 
+    let metrics = &Metrics::get().proxy;
     let proto = ctx.protocol;
-    let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
-        .with_label_values(&[proto])
-        .guard();
+    // let _client_gauge = metrics.client_connections.guard(proto);
+    let _request_gauge = metrics.connection_requests.guard(proto);
 
     let tls = config.tls_config.as_ref();
 
+    let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(stream, mode.handshake_tls(tls));
+    let do_handshake = handshake(stream, mode.handshake_tls(tls), record_handshake_error);
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
@@ -277,15 +282,6 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         Ok(user_info) => user_info,
         Err(e) => stream.throw_error(e).await?,
     };
-
-    // check rate limit
-    if let Some(ep) = user_info.get_endpoint() {
-        if !endpoint_rate_limiter.check(ep, 1) {
-            return stream
-                .throw_error(auth::AuthError::too_many_connections())
-                .await?;
-        }
-    }
 
     let user = user_info.get_user().to_owned();
     let user_info = match user_info

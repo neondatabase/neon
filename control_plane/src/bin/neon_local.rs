@@ -1231,7 +1231,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
-                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast " }, false) {
+                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast" }, false) {
                     eprintln!("postgres stop failed: {e:#}");
                 }
             }
@@ -1417,6 +1417,7 @@ fn cli() -> Command {
         .subcommand(
             Command::new("timeline")
             .about("Manage timelines")
+            .arg_required_else_help(true)
             .subcommand(Command::new("list")
                 .about("List all timelines, available to this pageserver")
                 .arg(tenant_id_arg.clone()))

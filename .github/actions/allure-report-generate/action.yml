@@ -150,7 +150,7 @@ runs:
 
         # Use aws s3 cp (instead of aws s3 sync) to keep files from previous runs to make old URLs work,
         # and to keep files on the host to upload them to the database
-        time aws s3 cp --recursive --only-show-errors "${WORKDIR}/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}"
+        time s5cmd --log error cp "${WORKDIR}/report/*" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}/"
 
         # Generate redirect
         cat <<EOF > ${WORKDIR}/index.html

@@ -2932,9 +2932,9 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "measured"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbf033874bea03565f2449572c8640ca37ec26300455faf36001f24755da452"
+checksum = "652bc741286361c06de8cb4d89b21a6437f120c508c51713663589eeb9928ac5"
 dependencies = [
  "bytes",
  "crossbeam-utils",
@@ -2950,9 +2950,9 @@ dependencies = [
 
 [[package]]
 name = "measured-derive"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be9e29b682b38f8af2a89f960455054ab1a9f5a06822f6f3500637ad9fa57def"
+checksum = "6ea497f33e1e856a376c32ad916f69a0bd3c597db1f912a399f842b01a4a685d"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -2962,9 +2962,9 @@ dependencies = [
 
 [[package]]
 name = "measured-process"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a20849acdd04c5d6a88f565559044546904648a1842a2937cfff0b48b4ca7ef2"
+checksum = "b364ccb66937a814b6b2ad751d1a2f7a9d5a78c761144036825fb36bb0771000"
 dependencies = [
  "libc",
  "measured",
@@ -4322,6 +4322,7 @@ dependencies = [
  "itertools",
  "lasso",
  "md5",
+ "measured",
  "metrics",
  "native-tls",
  "once_cell",

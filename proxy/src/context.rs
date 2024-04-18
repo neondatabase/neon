@@ -5,14 +5,14 @@ use once_cell::sync::OnceCell;
 use smol_str::SmolStr;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
-use tracing::{field::display, info_span, Span};
+use tracing::{field::display, info, info_span, Span};
 use uuid::Uuid;
 
 use crate::{
     console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     intern::{BranchIdInt, ProjectIdInt},
-    metrics::{LatencyTimer, ENDPOINT_ERRORS_BY_KIND, ERROR_BY_KIND},
+    metrics::{ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol},
     DbName, EndpointId, RoleName,
 };
 
@@ -29,7 +29,7 @@ static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestData>> = OnceCell::ne
 pub struct RequestMonitoring {
     pub peer_addr: IpAddr,
     pub session_id: Uuid,
-    pub protocol: &'static str,
+    pub protocol: Protocol,
     first_packet: chrono::DateTime<Utc>,
     region: &'static str,
     pub span: Span,
@@ -50,6 +50,8 @@ pub struct RequestMonitoring {
     // This sender is here to keep the request monitoring channel open while requests are taking place.
     sender: Option<mpsc::UnboundedSender<RequestData>>,
     pub latency_timer: LatencyTimer,
+    // Whether proxy decided that it's not a valid endpoint end rejected it before going to cplane.
+    rejected: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,7 +67,7 @@ impl RequestMonitoring {
     pub fn new(
         session_id: Uuid,
         peer_addr: IpAddr,
-        protocol: &'static str,
+        protocol: Protocol,
         region: &'static str,
     ) -> Self {
         let span = info_span!(
@@ -74,6 +76,7 @@ impl RequestMonitoring {
             ?session_id,
             %peer_addr,
             ep = tracing::field::Empty,
+            role = tracing::field::Empty,
         );
 
         Self {
@@ -93,6 +96,7 @@ impl RequestMonitoring {
             error_kind: None,
             auth_method: None,
             success: false,
+            rejected: None,
             cold_start_info: ColdStartInfo::Unknown,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
@@ -102,7 +106,7 @@ impl RequestMonitoring {
 
     #[cfg(test)]
     pub fn test() -> Self {
-        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), "test", "test")
+        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), Protocol::Tcp, "test")
     }
 
     pub fn console_application_name(&self) -> String {
@@ -111,6 +115,10 @@ impl RequestMonitoring {
             self.application.as_deref().unwrap_or_default(),
             self.protocol
         )
+    }
+
+    pub fn set_rejected(&mut self, rejected: bool) {
+        self.rejected = Some(rejected);
     }
 
     pub fn set_cold_start_info(&mut self, info: ColdStartInfo) {
@@ -134,9 +142,9 @@ impl RequestMonitoring {
     pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
         if self.endpoint_id.is_none() {
             self.span.record("ep", display(&endpoint_id));
-            crate::metrics::CONNECTING_ENDPOINTS
-                .with_label_values(&[self.protocol])
-                .measure(&endpoint_id);
+            let metric = &Metrics::get().proxy.connecting_endpoints;
+            let label = metric.with_labels(self.protocol);
+            metric.get_metric(label).measure(&endpoint_id);
             self.endpoint_id = Some(endpoint_id);
         }
     }
@@ -150,6 +158,7 @@ impl RequestMonitoring {
     }
 
     pub fn set_user(&mut self, user: RoleName) {
+        self.span.record("role", display(&user));
         self.user = Some(user);
     }
 
@@ -157,14 +166,22 @@ impl RequestMonitoring {
         self.auth_method = Some(auth_method);
     }
 
+    pub fn has_private_peer_addr(&self) -> bool {
+        match self.peer_addr {
+            IpAddr::V4(ip) => ip.is_private(),
+            _ => false,
+        }
+    }
+
     pub fn set_error_kind(&mut self, kind: ErrorKind) {
-        ERROR_BY_KIND
-            .with_label_values(&[kind.to_metric_label()])
-            .inc();
+        // Do not record errors from the private address to metrics.
+        if !self.has_private_peer_addr() {
+            Metrics::get().proxy.errors_total.inc(kind);
+        }
         if let Some(ep) = &self.endpoint_id {
-            ENDPOINT_ERRORS_BY_KIND
-                .with_label_values(&[kind.to_metric_label()])
-                .measure(ep);
+            let metric = &Metrics::get().proxy.endpoints_affected_by_errors;
+            let label = metric.with_labels(kind);
+            metric.get_metric(label).measure(ep);
         }
         self.error_kind = Some(kind);
     }
@@ -178,6 +195,33 @@ impl RequestMonitoring {
 
 impl Drop for RequestMonitoring {
     fn drop(&mut self) {
+        let outcome = if self.success {
+            ConnectOutcome::Success
+        } else {
+            ConnectOutcome::Failed
+        };
+        if let Some(rejected) = self.rejected {
+            let ep = self
+                .endpoint_id
+                .as_ref()
+                .map(|x| x.as_str())
+                .unwrap_or_default();
+            // This makes sense only if cache is disabled
+            info!(
+                ?outcome,
+                ?rejected,
+                ?ep,
+                "check endpoint is valid with outcome"
+            );
+            Metrics::get()
+                .proxy
+                .invalid_endpoints_total
+                .inc(InvalidEndpointsGroup {
+                    protocol: self.protocol,
+                    rejected: rejected.into(),
+                    outcome,
+                });
+        }
         if let Some(tx) = self.sender.take() {
             let _: Result<(), _> = tx.send(RequestData::from(&*self));
         }

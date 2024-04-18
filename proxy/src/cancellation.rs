@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     error::ReportableError,
-    metrics::NUM_CANCELLATION_REQUESTS,
+    metrics::{CancellationRequest, CancellationSource, Metrics},
     redis::cancellation_publisher::{
         CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
     },
@@ -28,7 +28,7 @@ pub struct CancellationHandler<P> {
     client: P,
     /// This field used for the monitoring purposes.
     /// Represents the source of the cancellation request.
-    from: &'static str,
+    from: CancellationSource,
 }
 
 #[derive(Debug, Error)]
@@ -89,9 +89,13 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
         // NB: we should immediately release the lock after cloning the token.
         let Some(cancel_closure) = self.map.get(&key).and_then(|x| x.clone()) else {
             tracing::warn!("query cancellation key not found: {key}");
-            NUM_CANCELLATION_REQUESTS
-                .with_label_values(&[self.from, "not_found"])
-                .inc();
+            Metrics::get()
+                .proxy
+                .cancellation_requests_total
+                .inc(CancellationRequest {
+                    source: self.from,
+                    kind: crate::metrics::CancellationOutcome::NotFound,
+                });
             match self.client.try_publish(key, session_id).await {
                 Ok(()) => {} // do nothing
                 Err(e) => {
@@ -103,9 +107,13 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
             }
             return Ok(());
         };
-        NUM_CANCELLATION_REQUESTS
-            .with_label_values(&[self.from, "found"])
-            .inc();
+        Metrics::get()
+            .proxy
+            .cancellation_requests_total
+            .inc(CancellationRequest {
+                source: self.from,
+                kind: crate::metrics::CancellationOutcome::Found,
+            });
         info!("cancelling query per user's request using key {key}");
         cancel_closure.try_cancel_query().await
     }
@@ -122,7 +130,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
 }
 
 impl CancellationHandler<()> {
-    pub fn new(map: CancelMap, from: &'static str) -> Self {
+    pub fn new(map: CancelMap, from: CancellationSource) -> Self {
         Self {
             map,
             client: (),
@@ -132,7 +140,7 @@ impl CancellationHandler<()> {
 }
 
 impl<P: CancellationPublisherMut> CancellationHandler<Option<Arc<Mutex<P>>>> {
-    pub fn new(map: CancelMap, client: Option<Arc<Mutex<P>>>, from: &'static str) -> Self {
+    pub fn new(map: CancelMap, client: Option<Arc<Mutex<P>>>, from: CancellationSource) -> Self {
         Self { map, client, from }
     }
 }
@@ -192,15 +200,13 @@ impl<P> Drop for Session<P> {
 
 #[cfg(test)]
 mod tests {
-    use crate::metrics::NUM_CANCELLATION_REQUESTS_SOURCE_FROM_REDIS;
-
     use super::*;
 
     #[tokio::test]
     async fn check_session_drop() -> anyhow::Result<()> {
         let cancellation_handler = Arc::new(CancellationHandler::<()>::new(
             CancelMap::default(),
-            NUM_CANCELLATION_REQUESTS_SOURCE_FROM_REDIS,
+            CancellationSource::FromRedis,
         ));
 
         let session = cancellation_handler.clone().get_session();
@@ -214,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_session_noop_regression() {
-        let handler = CancellationHandler::<()>::new(Default::default(), "local");
+        let handler = CancellationHandler::<()>::new(Default::default(), CancellationSource::Local);
         handler
             .cancel_session(
                 CancelKeyData {

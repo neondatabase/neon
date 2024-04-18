@@ -11,7 +11,7 @@ use crate::{
     id_lock_map::IdLockMap,
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::ReconcileError,
-    scheduler::ScheduleContext,
+    scheduler::{ScheduleContext, ScheduleMode},
 };
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -2744,7 +2744,7 @@ impl Service {
         let mut describe_shards = Vec::new();
 
         for shard in shards {
-            if shard.tenant_shard_id.is_zero() {
+            if shard.tenant_shard_id.is_shard_zero() {
                 shard_zero = Some(shard);
             }
 
@@ -4084,7 +4084,7 @@ impl Service {
 
         let mut reconciles_spawned = 0;
         for (tenant_shard_id, shard) in tenants.iter_mut() {
-            if tenant_shard_id.is_zero() {
+            if tenant_shard_id.is_shard_zero() {
                 schedule_context = ScheduleContext::default();
             }
 
@@ -4134,9 +4134,10 @@ impl Service {
         let mut work = Vec::new();
 
         for (tenant_shard_id, shard) in tenants.iter() {
-            if tenant_shard_id.is_zero() {
+            if tenant_shard_id.is_shard_zero() {
                 // Reset accumulators on the first shard in a tenant
                 schedule_context = ScheduleContext::default();
+                schedule_context.mode = ScheduleMode::Speculative;
                 tenant_shards.clear();
             }
 

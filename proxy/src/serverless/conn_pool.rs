@@ -1,6 +1,5 @@
 use dashmap::DashMap;
 use futures::{future::poll_fn, Future};
-use metrics::IntCounterPairGuard;
 use parking_lot::RwLock;
 use rand::Rng;
 use smallvec::SmallVec;
@@ -19,11 +18,10 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
 use tokio_util::sync::CancellationToken;
 
 use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
-use crate::metrics::{ENDPOINT_POOLS, GC_LATENCY, NUM_OPEN_CLIENTS_IN_HTTP_POOL};
+use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{
-    auth::backend::ComputeUserInfo, context::RequestMonitoring, metrics::NUM_DB_CONNECTIONS_GAUGE,
-    DbName, EndpointCacheKey, RoleName,
+    auth::backend::ComputeUserInfo, context::RequestMonitoring, DbName, EndpointCacheKey, RoleName,
 };
 
 use tracing::{debug, error, warn, Span};
@@ -79,7 +77,7 @@ pub struct EndpointConnPool<C: ClientInnerExt> {
     pools: HashMap<(DbName, RoleName), DbUserConnPool<C>>,
     total_conns: usize,
     max_conns: usize,
-    _guard: IntCounterPairGuard,
+    _guard: HttpEndpointPoolsGuard<'static>,
     global_connections_count: Arc<AtomicUsize>,
     global_pool_size_max_conns: usize,
 }
@@ -111,7 +109,11 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
             let removed = old_len - new_len;
             if removed > 0 {
                 global_connections_count.fetch_sub(removed, atomic::Ordering::Relaxed);
-                NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(removed as i64);
+                Metrics::get()
+                    .proxy
+                    .http_pool_opened_connections
+                    .get_metric()
+                    .dec_by(removed as i64);
             }
             *total_conns -= removed;
             removed > 0
@@ -157,7 +159,11 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
                 pool.total_conns += 1;
                 pool.global_connections_count
                     .fetch_add(1, atomic::Ordering::Relaxed);
-                NUM_OPEN_CLIENTS_IN_HTTP_POOL.inc();
+                Metrics::get()
+                    .proxy
+                    .http_pool_opened_connections
+                    .get_metric()
+                    .inc();
             }
 
             pool.total_conns
@@ -177,7 +183,11 @@ impl<C: ClientInnerExt> Drop for EndpointConnPool<C> {
         if self.total_conns > 0 {
             self.global_connections_count
                 .fetch_sub(self.total_conns, atomic::Ordering::Relaxed);
-            NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(self.total_conns as i64);
+            Metrics::get()
+                .proxy
+                .http_pool_opened_connections
+                .get_metric()
+                .dec_by(self.total_conns as i64);
         }
     }
 }
@@ -216,7 +226,11 @@ impl<C: ClientInnerExt> DbUserConnPool<C> {
             removed += 1;
         }
         global_connections_count.fetch_sub(removed, atomic::Ordering::Relaxed);
-        NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(removed as i64);
+        Metrics::get()
+            .proxy
+            .http_pool_opened_connections
+            .get_metric()
+            .dec_by(removed as i64);
         conn
     }
 }
@@ -304,7 +318,10 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         // acquire a random shard lock
         let mut shard = self.global_pool.shards()[shard].write();
 
-        let timer = GC_LATENCY.start_timer();
+        let timer = Metrics::get()
+            .proxy
+            .http_pool_reclaimation_lag_seconds
+            .start_timer();
         let current_len = shard.len();
         let mut clients_removed = 0;
         shard.retain(|endpoint, x| {
@@ -332,7 +349,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
         let new_len = shard.len();
         drop(shard);
-        timer.observe_duration();
+        timer.observe();
 
         // Do logging outside of the lock.
         if clients_removed > 0 {
@@ -340,7 +357,11 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                 .global_connections_count
                 .fetch_sub(clients_removed, atomic::Ordering::Relaxed)
                 - clients_removed;
-            NUM_OPEN_CLIENTS_IN_HTTP_POOL.sub(clients_removed as i64);
+            Metrics::get()
+                .proxy
+                .http_pool_opened_connections
+                .get_metric()
+                .dec_by(clients_removed as i64);
             info!("pool: performed global pool gc. removed {clients_removed} clients, total number of clients in pool is {size}");
         }
         let removed = current_len - new_len;
@@ -411,7 +432,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
             pools: HashMap::new(),
             total_conns: 0,
             max_conns: self.config.pool_options.max_conns_per_endpoint,
-            _guard: ENDPOINT_POOLS.guard(),
+            _guard: Metrics::get().proxy.http_endpoint_pools.guard(),
             global_connections_count: self.global_connections_count.clone(),
             global_pool_size_max_conns: self.config.pool_options.max_total_conns,
         }));
@@ -451,9 +472,7 @@ pub fn poll_client<C: ClientInnerExt>(
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> Client<C> {
-    let conn_gauge = NUM_DB_CONNECTIONS_GAUGE
-        .with_label_values(&[ctx.protocol])
-        .guard();
+    let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol);
     let mut session_id = ctx.session_id;
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 

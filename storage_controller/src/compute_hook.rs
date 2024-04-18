@@ -17,6 +17,8 @@ use crate::service::Config;
 
 const SLOWDOWN_DELAY: Duration = Duration::from_secs(5);
 
+const NOTIFY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub(crate) const API_CONCURRENCY: usize = 32;
 
 struct UnshardedComputeHookTenant {
@@ -242,6 +244,10 @@ pub(super) struct ComputeHook {
 
     // This lock is only used in testing enviroments, to serialize calls into neon_lock
     neon_local_lock: tokio::sync::Mutex<()>,
+
+    // We share a client across all notifications to enable connection re-use etc when
+    // sending large numbers of notifications
+    client: reqwest::Client,
 }
 
 impl ComputeHook {
@@ -251,12 +257,18 @@ impl ComputeHook {
             .clone()
             .map(|jwt| format!("Bearer {}", jwt));
 
+        let client = reqwest::ClientBuilder::new()
+            .timeout(NOTIFY_REQUEST_TIMEOUT)
+            .build()
+            .expect("Failed to construct HTTP client");
+
         Self {
             state: Default::default(),
             config,
             authorization_header,
             neon_local_lock: Default::default(),
             api_concurrency: tokio::sync::Semaphore::new(API_CONCURRENCY),
+            client,
         }
     }
 
@@ -310,12 +322,11 @@ impl ComputeHook {
 
     async fn do_notify_iteration(
         &self,
-        client: &reqwest::Client,
         url: &String,
         reconfigure_request: &ComputeHookNotifyRequest,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let req = client.request(Method::PUT, url);
+        let req = self.client.request(Method::PUT, url);
         let req = if let Some(value) = &self.authorization_header {
             req.header(reqwest::header::AUTHORIZATION, value)
         } else {
@@ -381,8 +392,6 @@ impl ComputeHook {
         reconfigure_request: &ComputeHookNotifyRequest,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let client = reqwest::Client::new();
-
         // We hold these semaphore units across all retries, rather than only across each
         // HTTP request: this is to preserve fairness and avoid a situation where a retry might
         // time out waiting for a semaphore.
@@ -394,7 +403,7 @@ impl ComputeHook {
             .map_err(|_| NotifyError::ShuttingDown)?;
 
         backoff::retry(
-            || self.do_notify_iteration(&client, url, reconfigure_request, cancel),
+            || self.do_notify_iteration(url, reconfigure_request, cancel),
             |e| {
                 matches!(
                     e,

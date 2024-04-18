@@ -7,6 +7,7 @@ use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use futures::future::Either;
 use proxy::auth;
+use proxy::auth::backend::AuthRateLimiter;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
@@ -18,11 +19,10 @@ use proxy::config::ProjectInfoCacheOptions;
 use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
-use proxy::metrics::NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT;
-use proxy::rate_limiter::AuthRateLimiter;
+use proxy::http::health_server::AppMetrics;
+use proxy::metrics::Metrics;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
-use proxy::rate_limiter::RateLimiterConfig;
 use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
@@ -42,6 +42,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
+use tracing::Instrument;
 use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
@@ -131,14 +132,8 @@ struct ProxyCliArgs {
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
     /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_dynamic_rate_limiter: bool,
-    /// Rate limit algorithm. Makes sense only if `disable_rate_limiter` is `false`.
-    #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::Aimd)]
-    rate_limit_algorithm: proxy::rate_limiter::RateLimitAlgorithm,
-    /// Timeout for rate limiter. If it didn't manage to aquire a permit in this time, it will return an error.
-    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
-    rate_limiter_timeout: tokio::time::Duration,
     /// Endpoint rate limiter max number of requests per second.
     ///
     /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
@@ -151,14 +146,12 @@ struct ProxyCliArgs {
     /// Authentication rate limiter max number of hashes per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_AUTH_SET)]
     auth_rate_limit: Vec<RateBucketInfo>,
+    /// The IP subnet to use when considering whether two IP addresses are considered the same.
+    #[clap(long, default_value_t = 64)]
+    auth_rate_limit_ip_subnet: u8,
     /// Redis rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     redis_rps_limit: Vec<RateBucketInfo>,
-    /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
-    #[clap(long, default_value_t = 100)]
-    initial_limit: usize,
-    #[clap(flatten)]
-    aimd_config: proxy::rate_limiter::AimdConfig,
     /// cache for `allowed_ips` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     allowed_ips_cache: String,
@@ -189,7 +182,9 @@ struct ProxyCliArgs {
     /// cache for `project_info` (use `size=0` to disable)
     #[clap(long, default_value = config::ProjectInfoCacheOptions::CACHE_DEFAULT_OPTIONS)]
     project_info_cache: String,
-
+    /// cache for all valid endpoints
+    #[clap(long, default_value = config::EndpointCacheConfig::CACHE_DEFAULT_OPTIONS)]
+    endpoint_cache_config: String,
     #[clap(flatten)]
     parquet_upload: ParquetUploadArgs,
 
@@ -249,14 +244,18 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Version: {GIT_VERSION}");
     info!("Build_tag: {BUILD_TAG}");
-    ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
+    let neon_metrics = ::metrics::NeonMetrics::new(::metrics::BuildInfo {
+        revision: GIT_VERSION,
+        build_tag: BUILD_TAG,
+    });
 
-    match proxy::jemalloc::MetricRecorder::new(prometheus::default_registry()) {
-        Ok(t) => {
-            t.start();
+    let jemalloc = match proxy::jemalloc::MetricRecorder::new() {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::error!(error = ?e, "could not start jemalloc metrics loop");
+            None
         }
-        Err(e) => tracing::error!(error = ?e, "could not start jemalloc metrics loop"),
-    }
+    };
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
@@ -296,27 +295,27 @@ async fn main() -> anyhow::Result<()> {
         ),
         aws_credentials_provider,
     ));
-    let redis_notifications_client =
-        match (args.redis_notifications, (args.redis_host, args.redis_port)) {
-            (Some(url), _) => {
-                info!("Starting redis notifications listener ({url})");
-                Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
-            }
-            (None, (Some(host), Some(port))) => Some(
-                ConnectionWithCredentialsProvider::new_with_credentials_provider(
-                    host,
-                    port,
-                    elasticache_credentials_provider.clone(),
-                ),
+    let regional_redis_client = match (args.redis_host, args.redis_port) {
+        (Some(host), Some(port)) => Some(
+            ConnectionWithCredentialsProvider::new_with_credentials_provider(
+                host,
+                port,
+                elasticache_credentials_provider.clone(),
             ),
-            (None, (None, None)) => {
-                warn!("Redis is disabled");
-                None
-            }
-            _ => {
-                bail!("redis-host and redis-port must be specified together");
-            }
-        };
+        ),
+        (None, None) => {
+            warn!("Redis events from console are disabled");
+            None
+        }
+        _ => {
+            bail!("redis-host and redis-port must be specified together");
+        }
+    };
+    let redis_notifications_client = if let Some(url) = args.redis_notifications {
+        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
+    } else {
+        regional_redis_client.clone()
+    };
 
     // Check that we can bind to address before further initialization
     let http_address: SocketAddr = args.http.parse()?;
@@ -332,11 +331,9 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
     let cancellation_token = CancellationToken::new();
 
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
     let cancel_map = CancelMap::default();
 
-    // let redis_notifications_client = redis_notifications_client.map(|x| Box::leak(Box::new(x)));
-    let redis_publisher = match &redis_notifications_client {
+    let redis_publisher = match &regional_redis_client {
         Some(redis_publisher) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
             redis_publisher.clone(),
             args.region.clone(),
@@ -349,7 +346,7 @@ async fn main() -> anyhow::Result<()> {
     >::new(
         cancel_map.clone(),
         redis_publisher,
-        NUM_CANCELLATION_REQUESTS_SOURCE_FROM_CLIENT,
+        proxy::metrics::CancellationSource::FromClient,
     ));
 
     // client facing tasks. these will exit on error or on cancellation
@@ -359,7 +356,6 @@ async fn main() -> anyhow::Result<()> {
         config,
         proxy_listener,
         cancellation_token.clone(),
-        endpoint_rate_limiter.clone(),
         cancellation_handler.clone(),
     ));
 
@@ -374,7 +370,6 @@ async fn main() -> anyhow::Result<()> {
             config,
             serverless_listener,
             cancellation_token.clone(),
-            endpoint_rate_limiter.clone(),
             cancellation_handler.clone(),
         ));
     }
@@ -387,7 +382,14 @@ async fn main() -> anyhow::Result<()> {
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
-    maintenance_tasks.spawn(http::health_server::task_main(http_listener));
+    maintenance_tasks.spawn(http::health_server::task_main(
+        http_listener,
+        AppMetrics {
+            jemalloc,
+            neon_metrics,
+            proxy: proxy::metrics::Metrics::get(),
+        },
+    ));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
@@ -404,12 +406,18 @@ async fn main() -> anyhow::Result<()> {
             if let Some(redis_notifications_client) = redis_notifications_client {
                 let cache = api.caches.project_info.clone();
                 maintenance_tasks.spawn(notifications::task_main(
-                    redis_notifications_client.clone(),
+                    redis_notifications_client,
                     cache.clone(),
                     cancel_map.clone(),
                     args.region.clone(),
                 ));
                 maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+            }
+            if let Some(regional_redis_client) = regional_redis_client {
+                let cache = api.caches.endpoints_cache.clone();
+                let con = regional_redis_client;
+                let span = tracing::info_span!("endpoints_cache");
+                maintenance_tasks.spawn(async move { cache.do_read(con).await }.instrument(span));
             }
         }
     }
@@ -476,27 +484,27 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
-    let rate_limiter_config = RateLimiterConfig {
-        disable: args.disable_dynamic_rate_limiter,
-        algorithm: args.rate_limit_algorithm,
-        timeout: args.rate_limiter_timeout,
-        initial_limit: args.initial_limit,
-        aimd_config: Some(args.aimd_config),
-    };
+    if !args.disable_dynamic_rate_limiter {
+        bail!("dynamic rate limiter should be disabled");
+    }
 
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
 
             info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
             info!(
                 "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
             );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
             let caches = Box::leak(Box::new(console::caches::ApiCaches::new(
                 wake_compute_cache_config,
                 project_info_cache_config,
+                endpoint_cache_config,
             )));
 
             let config::WakeComputeLockOptions {
@@ -507,15 +515,26 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             } = args.wake_compute_lock.parse()?;
             info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
             let locks = Box::leak(Box::new(
-                console::locks::ApiLocks::new("wake_compute_lock", permits, shards, timeout)
-                    .unwrap(),
+                console::locks::ApiLocks::new(
+                    "wake_compute_lock",
+                    permits,
+                    shards,
+                    timeout,
+                    epoch,
+                    &Metrics::get().wake_compute_lock,
+                )
+                .unwrap(),
             ));
-            tokio::spawn(locks.garbage_collect_worker(epoch));
+            tokio::spawn(locks.garbage_collect_worker());
 
             let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));
+            let endpoint = http::Endpoint::new(url, http::new_client());
 
-            let api = console::provider::neon::Api::new(endpoint, caches, locks);
+            let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
+            RateBucketInfo::validate(&mut endpoint_rps_limit)?;
+            let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(endpoint_rps_limit));
+            let api =
+                console::provider::neon::Api::new(endpoint, caches, locks, endpoint_rate_limiter);
             let api = console::provider::ConsoleBackend::Console(api);
             auth::BackendType::Console(MaybeOwned::Owned(api), ())
         }
@@ -546,10 +565,9 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
+        rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
 
-    let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
-    RateBucketInfo::validate(&mut endpoint_rps_limit)?;
     let mut redis_rps_limit = args.redis_rps_limit.clone();
     RateBucketInfo::validate(&mut redis_rps_limit)?;
 
@@ -562,7 +580,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         authentication_config,
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
-        endpoint_rps_limit,
         redis_rps_limit,
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),

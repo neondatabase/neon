@@ -386,7 +386,7 @@ impl WalRedoManager {
 
     pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
         match self {
-            WalRedoManager::Prod(m) => m.status(),
+            WalRedoManager::Prod(m) => Some(m.status()),
             #[cfg(test)]
             WalRedoManager::Test(_) => None,
         }
@@ -3190,7 +3190,7 @@ impl Tenant {
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
             // Upload the created data dir to S3
-            if self.tenant_shard_id().is_zero() {
+            if self.tenant_shard_id().is_shard_zero() {
                 self.upload_initdb(&timelines_path, &pgdata_path, &timeline_id)
                     .await?;
             }
@@ -3437,7 +3437,7 @@ impl Tenant {
             .store(size, Ordering::Relaxed);
 
         // Only shard zero should be calculating synthetic sizes
-        debug_assert!(self.shard_identity.is_zero());
+        debug_assert!(self.shard_identity.is_shard_zero());
 
         TENANT_SYNTHETIC_SIZE_METRIC
             .get_metric_with_label_values(&[&self.tenant_shard_id.tenant_id.to_string()])
