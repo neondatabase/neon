@@ -408,6 +408,10 @@ pub struct Timeline {
 
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
+
+    /// Transient storage of a Timeline::detach_from_ancestor marked on the ancestor, not the
+    /// detachee.
+    ongoing_branch_detach: Mutex<Option<(utils::completion::Barrier, TimelineId)>>,
 }
 
 pub struct WalReceiverInfo {
@@ -2251,6 +2255,8 @@ impl Timeline {
                     dir: None,
                     n_deltas: 0,
                 }),
+
+                ongoing_branch_detach: Mutex::default(),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -4396,9 +4402,46 @@ impl Timeline {
             return Err(TooManyAncestors);
         }
 
-        // shutdown order: if we would shut down from the roots, wouldn't it mean that we would
-        // only need a single cancellation token? perhaps anyways we need to be mindful of shutdown
-        // failing our copys
+        // before we acquire the gate, we must mark the ancestor as having a detach operation
+        // ongoing which will block other concurrent detach operations so we don't get to ackward
+        // situations where there would be two branches trying to reparent earlier branches.
+        let (_guard, barrier) = utils::completion::channel();
+
+        {
+            // why only set this on the ancestor? because we have limited depth, we can check both
+            // in gc.
+            let mut locked = ancestor.ongoing_branch_detach.lock().unwrap();
+
+            if locked
+                .as_ref()
+                .is_some_and(|(other_barrier, _)| !other_barrier.is_ready())
+            {
+                let other = locked.as_ref().unwrap().1;
+                return Err(OtherTimelineDetachOngoing(other));
+            }
+
+            *locked = Some((barrier, self.timeline_id));
+        }
+
+        // if necessary, wait out a full gc cycle on both
+        tokio::select! {
+            _ = ancestor.gc_lock.lock() => {
+                // acquiring is enough to guarantee that the next gc will see our blocking
+            },
+            _ = ancestor.cancel.cancelled() => {
+                return Err(ShuttingDown);
+            }
+        };
+
+        tokio::select! {
+            _ = self.gc_lock.lock() => {
+                // see above
+            },
+            _ = self.cancel.cancelled() => {
+                return Err(ShuttingDown);
+            }
+        };
+
         let _gate_entered = self.gate.enter().map_err(|_| ShuttingDown)?;
 
         if ancestor_lsn >= ancestor.get_disk_consistent_lsn() {
@@ -4406,6 +4449,9 @@ impl Timeline {
                 .freeze_and_flush()
                 .await
                 .map_err(DetachFromAncestorError::FlushAncestor)?;
+
+            // we do not need to wait for uploads to complete, because we only want to see the file
+            // on disk.
         }
 
         let end_lsn = ancestor_lsn + 1;
@@ -4902,12 +4948,31 @@ impl Timeline {
         })
     }
 
+    fn is_branch_detach_ongoing(&self) -> bool {
+        self.ongoing_branch_detach
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(barrier, _)| !barrier.is_ready())
+    }
+
     /// Garbage collect layer files on a timeline that are no longer needed.
     ///
     /// Currently, we don't make any attempt at removing unneeded page versions
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
+        if self.is_branch_detach_ongoing()
+            || self
+                .ancestor_timeline
+                .as_ref()
+                .map(|tl| tl.is_branch_detach_ongoing())
+                .unwrap_or(false)
+        {
+            tracing::debug!("skipping gc as there is ongoing branch detach");
+            return Ok(GcResult::default());
+        }
+
         // this is most likely the background tasks, but it might be the spawned task from
         // immediate_gc
         let cancel = crate::task_mgr::shutdown_token();
