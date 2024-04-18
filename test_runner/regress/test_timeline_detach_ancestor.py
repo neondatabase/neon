@@ -45,12 +45,14 @@ class Branchpoint(str, enum.Enum):
 
 
 @pytest.mark.parametrize("branchpoint", Branchpoint.all())
-def test_ancestor_detach_branched_from(neon_env_builder: NeonEnvBuilder, branchpoint: Branchpoint):
+@pytest.mark.parametrize("restart_after", [True, False])
+def test_ancestor_detach_branched_from(
+    neon_env_builder: NeonEnvBuilder, branchpoint: Branchpoint, restart_after: bool
+):
     """
     Creates a branch relative to L0 lsn boundary according to Branchpoint. Later the timeline is detached.
     """
     # TODO: parametrize; currently unimplemented over at pageserver
-    restart_after = True
     write_to_branch_first = True
 
     env = neon_env_builder.init_start(
@@ -164,7 +166,8 @@ def test_ancestor_detach_branched_from(neon_env_builder: NeonEnvBuilder, branchp
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
 
 
-def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("restart_after", [True, False])
+def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, restart_after: bool):
     """
     The case from RFC:
 
@@ -194,13 +197,16 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     """
 
     # TODO: support not yet implemented for these
-    restart_after = True
     write_to_branch_first = True
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             "gc_period": "0s",
         }
+    )
+
+    env.pageserver.allowed_errors.append(
+        ".*initial size calculation failed: downloading failed, possibly for shutdown"
     )
 
     client = env.pageserver.http_client()
@@ -253,6 +259,8 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
         env.pageserver.stop()
         env.pageserver.start()
 
+    env.pageserver.quiesce_tenants()
+
     # checking the ancestor after is much faster than waiting for the endpoint not start
     expected_result = [
         ("main", env.initial_timeline, None, 16384, 1),
@@ -278,7 +286,6 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     client.timeline_delete(env.initial_tenant, after)
     wait_timeline_detail_404(client, env.initial_tenant, after, 10, 1.0)
 
-    # if this succeeds, the reparenting must've happened
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
 
@@ -287,6 +294,6 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
 # - after starting the operation, tenant is deleted
 # - after starting the operation, pageserver is shutdown, restarted
 # - after starting the operation, bottom-most timeline is deleted, pageserver is restarted, gc is inhibited
-# - detach while receiving writes and *layer flushes*
+# - deletion of reparented while reparenting should fail once, then succeed (?)
 # - branch near existing L1 boundary, image layers?
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
