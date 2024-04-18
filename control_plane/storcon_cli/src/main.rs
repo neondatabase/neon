@@ -1,15 +1,15 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use clap::{Parser, Subcommand};
-use hyper::Method;
+use hyper::{Method, StatusCode};
 use pageserver_api::{
     controller_api::{
         NodeAvailabilityWrapper, NodeDescribeResponse, ShardSchedulingPolicy,
         TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
-        ShardParameters, TenantConfig, TenantConfigRequest, TenantCreateRequest,
-        TenantShardSplitRequest, TenantShardSplitResponse,
+        LocationConfigSecondary, ShardParameters, TenantConfig, TenantConfigRequest,
+        TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
     },
     shard::{ShardStripeSize, TenantShardId},
 };
@@ -117,6 +117,12 @@ enum Command {
     },
     /// Print details about a particular tenant, including all its shards' states.
     TenantDescribe {
+        #[arg(long)]
+        tenant_id: TenantId,
+    },
+    /// For a tenant which hasn't been onboarded to the storage controller yet, add it in secondary
+    /// mode so that it can warm up content on a pageserver.
+    TenantWarmup {
         #[arg(long)]
         tenant_id: TenantId,
     },
@@ -580,6 +586,94 @@ async fn main() -> anyhow::Result<()> {
                 ]);
             }
             println!("{table}");
+        }
+        Command::TenantWarmup { tenant_id } => {
+            let describe_response = storcon_client
+                .dispatch::<(), TenantDescribeResponse>(
+                    Method::GET,
+                    format!("control/v1/tenant/{tenant_id}"),
+                    None,
+                )
+                .await;
+            match describe_response {
+                Ok(describe) => {
+                    if matches!(describe.policy, PlacementPolicy::Secondary) {
+                        // Fine: it's already known to controller in secondary mode: calling
+                        // again to put it into secondary mode won't cause problems.
+                    } else {
+                        anyhow::bail!("Tenant already present with policy {:?}", describe.policy);
+                    }
+                }
+                Err(mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _)) => {
+                    // Fine: this tenant isn't know to the storage controller yet.
+                }
+                Err(e) => {
+                    // Unexpected API error
+                    return Err(e.into());
+                }
+            }
+
+            vps_client
+                .location_config(
+                    TenantShardId::unsharded(tenant_id),
+                    pageserver_api::models::LocationConfig {
+                        mode: pageserver_api::models::LocationConfigMode::Secondary,
+                        generation: None,
+                        secondary_conf: Some(LocationConfigSecondary { warm: true }),
+                        shard_number: 0,
+                        shard_count: 0,
+                        shard_stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE.0,
+                        tenant_conf: TenantConfig::default(),
+                    },
+                    None,
+                    true,
+                )
+                .await?;
+
+            let describe_response = storcon_client
+                .dispatch::<(), TenantDescribeResponse>(
+                    Method::GET,
+                    format!("control/v1/tenant/{tenant_id}"),
+                    None,
+                )
+                .await?;
+
+            let secondary_ps_id = describe_response
+                .shards
+                .first()
+                .unwrap()
+                .node_secondary
+                .first()
+                .unwrap();
+
+            println!("Tenant {tenant_id} warming up on pageserver {secondary_ps_id}");
+            loop {
+                let (status, progress) = vps_client
+                    .tenant_secondary_download(
+                        TenantShardId::unsharded(tenant_id),
+                        Some(Duration::from_secs(10)),
+                    )
+                    .await?;
+                println!(
+                    "Progress: {}/{} layers, {}/{} bytes",
+                    progress.layers_downloaded,
+                    progress.layers_total,
+                    progress.bytes_downloaded,
+                    progress.bytes_total
+                );
+                match status {
+                    StatusCode::OK => {
+                        println!("Download complete");
+                        break;
+                    }
+                    StatusCode::ACCEPTED => {
+                        // Loop
+                    }
+                    _ => {
+                        anyhow::bail!("Unexpected download status: {status}");
+                    }
+                }
+            }
         }
     }
 
