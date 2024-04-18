@@ -91,7 +91,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
             ..
         } = self;
         pools.get_mut(&db_user).and_then(|pool_entries| {
-            pool_entries.get_conn_entry(total_conns, global_connections_count.clone())
+            pool_entries.get_conn_entry(total_conns, global_connections_count)
         })
     }
 
@@ -125,19 +125,16 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
     fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInner<C>) {
         let conn_id = client.conn_id;
 
-        if client.is_closed() {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
-            return;
-        }
-        let global_max_conn = pool.read().global_pool_size_max_conns;
-        if pool
-            .read()
-            .global_connections_count
-            .load(atomic::Ordering::Relaxed)
-            >= global_max_conn
         {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full");
-            return;
+            let pool = pool.read();
+            if pool
+                .global_connections_count
+                .load(atomic::Ordering::Relaxed)
+                >= pool.global_pool_size_max_conns
+            {
+                info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full");
+                return;
+            }
         }
 
         // return connection to the pool
@@ -217,7 +214,7 @@ impl<C: ClientInnerExt> DbUserConnPool<C> {
     fn get_conn_entry(
         &mut self,
         conns: &mut usize,
-        global_connections_count: Arc<AtomicUsize>,
+        global_connections_count: &AtomicUsize,
     ) -> Option<ConnPoolEntry<C>> {
         let mut removed = self.clear_closed_clients(conns);
         let conn = self.conns.pop();
@@ -692,6 +689,14 @@ impl<C: ClientInnerExt> Client<C> {
             .inner
             .take()
             .expect("client inner should not be removed");
+
+        let conn_id = client.conn_id;
+
+        if client.is_closed() {
+            info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
+            return None;
+        }
+
         if let Some(conn_pool) = std::mem::take(&mut self.pool).upgrade() {
             let current_span = self.span.clone();
             // return connection to the pool
