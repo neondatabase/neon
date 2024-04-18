@@ -236,6 +236,7 @@ use utils::id::{TenantId, TimelineId};
 
 use self::index::IndexPart;
 
+use super::metadata::MetadataUpdate;
 use super::storage_layer::{Layer, LayerFileName, ResidentLayer};
 use super::upload_queue::SetDeletedFlagProgress;
 use super::Generation;
@@ -536,9 +537,10 @@ impl RemoteTimelineClient {
     // Upload operations.
     //
 
-    ///
     /// Launch an index-file upload operation in the background, with
-    /// updated metadata.
+    /// fully updated metadata.
+    ///
+    /// This should only be used to upload initial metadata to remote storage.
     ///
     /// The upload will be added to the queue immediately, but it
     /// won't be performed until all previously scheduled layer file
@@ -550,7 +552,7 @@ impl RemoteTimelineClient {
     /// If there were any changes to the list of files, i.e. if any
     /// layer file uploads were scheduled, since the last index file
     /// upload, those will be included too.
-    pub fn schedule_index_upload_for_metadata_update(
+    pub fn schedule_index_upload_for_full_metadata_update(
         self: &Arc<Self>,
         metadata: &TimelineMetadata,
     ) -> anyhow::Result<()> {
@@ -560,6 +562,27 @@ impl RemoteTimelineClient {
         // As documented in the struct definition, it's ok for latest_metadata to be
         // ahead of what's _actually_ on the remote during index upload.
         upload_queue.latest_metadata = metadata.clone();
+
+        self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+
+        Ok(())
+    }
+
+    /// Launch an index-file upload operation in the background, with only parts of the metadata
+    /// updated.
+    ///
+    /// This is the regular way of updating metadata on layer flushes or Gc.
+    ///
+    /// Using this lighter update mechanism allows for reparenting and detaching without changes to
+    /// `index_part.json`, while being more clear on what values update regularly.
+    pub(crate) fn schedule_index_upload_for_metadata_update(
+        self: &Arc<Self>,
+        update: &MetadataUpdate,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        upload_queue.latest_metadata.apply(update);
 
         self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
 
@@ -2024,7 +2047,7 @@ mod tests {
         // Schedule upload of index. Check that it is queued
         let metadata = dummy_metadata(Lsn(0x20));
         client
-            .schedule_index_upload_for_metadata_update(&metadata)
+            .schedule_index_upload_for_full_metadata_update(&metadata)
             .unwrap();
         {
             let mut guard = client.upload_queue.lock().unwrap();
