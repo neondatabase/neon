@@ -6,7 +6,6 @@ use pin_project_lite::pin_project;
 use rand::Rng;
 use smallvec::SmallVec;
 use std::pin::Pin;
-use std::sync::Weak;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use std::{
     fmt,
@@ -386,7 +385,6 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         {
             client = Some(entry.conn)
         }
-        let endpoint_pool = Arc::downgrade(&endpoint_pool);
 
         // ok return cached connection if found and establish a new one otherwise
         if let Some(client) = client {
@@ -405,7 +403,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                 );
                 ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
                 ctx.latency_timer.success();
-                return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
+                return Ok(Some(Client::new(client, conn_info.clone())));
             }
         }
         Ok(None)
@@ -533,10 +531,9 @@ pub fn poll_client<C: ClientInnerExt, I: Future<Output = ()> + Send + 'static>(
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, "new connection");
     });
 
-    let pool = match conn_info.endpoint_cache_key() {
-        Some(endpoint) => Arc::downgrade(&global_pool.get_or_create_endpoint_pool(&endpoint)),
-        None => Weak::new(),
-    };
+    let pool = conn_info
+        .endpoint_cache_key()
+        .map(|endpoint| global_pool.get_or_create_endpoint_pool(&endpoint));
 
     let idle = global_pool.get_idle_timeout();
     let cancel = CancellationToken::new();
@@ -551,7 +548,7 @@ pub fn poll_client<C: ClientInnerExt, I: Future<Output = ()> + Send + 'static>(
         node: Node::<ConnTypes<C>>::new(),
         recv_client,
         db_user: conn_info.db_and_user(),
-        pool: pool.clone(),
+        pool,
 
         session_span,
 
@@ -569,7 +566,7 @@ pub fn poll_client<C: ClientInnerExt, I: Future<Output = ()> + Send + 'static>(
         aux,
         conn_id,
     };
-    Client::new(inner, conn_info, pool)
+    Client::new(inner, conn_info)
 }
 
 pin_project! {
@@ -588,7 +585,7 @@ pin_project! {
         node: Node<ConnTypes<C>>,
         recv_client: tokio::sync::mpsc::Receiver<(tracing::Span, ClientInner<C>, ConnInfo)>,
         db_user: (DbName, RoleName),
-        pool: Weak<RwLock<EndpointConnPool<C>>>,
+        pool: Option<Arc<RwLock<EndpointConnPool<C>>>>,
 
         // Used for reporting the current session the conn is attached to
         session_span: tracing::Span,
@@ -603,8 +600,8 @@ pin_project! {
     impl<C: ClientInnerExt, I> PinnedDrop for DbConnection<C, I> {
         fn drop(this: Pin<&mut Self>) {
             let mut this = this.project();
-            let Some(pool) = this.pool.upgrade() else { return };
-            let Some(init) = this.node.as_mut().initialized_mut() else { return };
+            let Some(init) = this.node.as_mut().initialized_mut() else {  return };
+            let pool = this.pool.as_ref().expect("pool must be set if the node is initialsed in the pool");
             if pool.write().remove_client(this.db_user.clone(), init) {
                 info!("closed connection removed");
             }
@@ -623,13 +620,12 @@ impl<C: ClientInnerExt, I: Future<Output = ()>> Future for DbConnection<C, I> {
             return Poll::Ready(());
         }
 
-        // if there's no pool, then this client will be closed.
-        let Some(pool) = this.pool.upgrade() else {
-            info!("connection dropped");
-            return Poll::Ready(());
-        };
-
         if let Some(init) = this.node.as_mut().initialized_mut() {
+            // if there's no pool, then this client will be closed.
+            let Some(pool) = &this.pool else {
+                info!("connection dropped");
+                return Poll::Ready(());
+            };
             if let Some(entry) = pool.read().pools.get(this.db_user) {
                 if let Ok((session_id, _)) = init.take_removed(&entry.conns) {
                     *this.session_span = info_span!("", %session_id);
@@ -649,9 +645,14 @@ impl<C: ClientInnerExt, I: Future<Output = ()>> Future for DbConnection<C, I> {
                 info!("connection dropped");
                 return Poll::Ready(());
             };
+            // if there's no pool, then this client will be closed.
+            let Some(pool) = &this.pool else {
+                info!("connection dropped");
+                return Poll::Ready(());
+            };
 
             let _span = span.enter();
-            if !EndpointConnPool::put(&*pool, this.node.as_mut(), this.db_user, client, conn_info) {
+            if !EndpointConnPool::put(pool, this.node.as_mut(), this.db_user, client, conn_info) {
                 return Poll::Ready(());
             }
         }
@@ -664,7 +665,7 @@ impl<C: ClientInnerExt, I: Future<Output = ()>> Future for DbConnection<C, I> {
                 .as_mut()
                 .reset(Instant::now() + *this.idle);
             info!("connection idle");
-            if let Some(pool) = this.pool.upgrade() {
+            if let Some(pool) = &this.pool {
                 // remove client from pool - should close the connection if it's idle.
                 // does nothing if the client is currently checked-out and in-use
                 if let Some(init) = this.node.as_mut().initialized_mut() {
@@ -728,51 +729,52 @@ pub struct Client<C: ClientInnerExt> {
     span: Span,
     inner: Option<ClientInner<C>>,
     conn_info: ConnInfo,
-    pool: Weak<RwLock<EndpointConnPool<C>>>,
+    discarded: bool,
 }
 
-pub struct Discard<'a, C: ClientInnerExt> {
+pub struct Discard<'a> {
     conn_info: &'a ConnInfo,
-    pool: &'a mut Weak<RwLock<EndpointConnPool<C>>>,
+    discarded: &'a mut bool,
 }
 
 impl<C: ClientInnerExt> Client<C> {
-    pub(self) fn new(
-        inner: ClientInner<C>,
-        conn_info: ConnInfo,
-        pool: Weak<RwLock<EndpointConnPool<C>>>,
-    ) -> Self {
+    pub(self) fn new(inner: ClientInner<C>, conn_info: ConnInfo) -> Self {
         Self {
             inner: Some(inner),
             span: Span::current(),
             conn_info,
-            pool,
+            discarded: false,
         }
     }
-    pub fn inner(&mut self) -> (&mut C, Discard<'_, C>) {
+    pub fn inner(&mut self) -> (&mut C, Discard<'_>) {
         let Self {
             inner,
-            pool,
             conn_info,
             span: _,
+            discarded,
         } = self;
         let inner = inner.as_mut().expect("client inner should not be removed");
-        (&mut inner.inner, Discard { pool, conn_info })
+        (
+            &mut inner.inner,
+            Discard {
+                discarded,
+                conn_info,
+            },
+        )
     }
 }
 
-impl<C: ClientInnerExt> Discard<'_, C> {
+impl Discard<'_> {
     pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
         let conn_info = &self.conn_info;
-        if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
+        if status != ReadyForQueryStatus::Idle && !*self.discarded {
             info!("pool: throwing away connection '{conn_info}' because connection is not idle")
         }
     }
     pub fn discard(&mut self) {
         let conn_info = &self.conn_info;
-        if std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state")
-        }
+        *self.discarded = true;
+        info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state")
     }
 }
 
@@ -788,8 +790,12 @@ impl<C: ClientInnerExt> Deref for Client<C> {
     }
 }
 
-impl<C: ClientInnerExt> Client<C> {
-    fn do_drop(&mut self) {
+impl<C: ClientInnerExt> Drop for Client<C> {
+    fn drop(&mut self) {
+        if self.discarded {
+            return;
+        }
+
         let conn_info = self.conn_info.clone();
         let client = self
             .inner
@@ -804,19 +810,13 @@ impl<C: ClientInnerExt> Client<C> {
         }
 
         let tx = client.pool.clone();
-        match tx.try_send((self.span.clone(), client, self.conn_info.clone())) {
+        match tx.try_send((self.span.clone(), client, conn_info)) {
             Ok(_) => {}
             Err(TrySendError::Closed(_)) => {}
             Err(TrySendError::Full(_)) => {
                 error!("client channel should not be full")
             }
         }
-    }
-}
-
-impl<C: ClientInnerExt> Drop for Client<C> {
-    fn drop(&mut self) {
-        self.do_drop()
     }
 }
 
@@ -947,6 +947,7 @@ mod tests {
         }
 
         cancel.cancel();
+        yield_now().await;
         // Do gc for all shards.
         pool.gc(0);
         pool.gc(1);
