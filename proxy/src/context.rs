@@ -51,7 +51,7 @@ pub struct RequestMonitoring {
     sender: Option<mpsc::UnboundedSender<RequestData>>,
     pub latency_timer: LatencyTimer,
     // Whether proxy decided that it's not a valid endpoint end rejected it before going to cplane.
-    rejected: bool,
+    rejected: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,7 +96,7 @@ impl RequestMonitoring {
             error_kind: None,
             auth_method: None,
             success: false,
-            rejected: false,
+            rejected: None,
             cold_start_info: ColdStartInfo::Unknown,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
@@ -118,7 +118,7 @@ impl RequestMonitoring {
     }
 
     pub fn set_rejected(&mut self, rejected: bool) {
-        self.rejected = rejected;
+        self.rejected = Some(rejected);
     }
 
     pub fn set_cold_start_info(&mut self, info: ColdStartInfo) {
@@ -200,27 +200,28 @@ impl Drop for RequestMonitoring {
         } else {
             ConnectOutcome::Failed
         };
-        let rejected = self.rejected;
-        let ep = self
-            .endpoint_id
-            .as_ref()
-            .map(|x| x.as_str())
-            .unwrap_or_default();
-        // This makes sense only if cache is disabled
-        info!(
-            ?ep,
-            ?outcome,
-            ?rejected,
-            "check endpoint is valid with outcome"
-        );
-        Metrics::get()
-            .proxy
-            .invalid_endpoints_total
-            .inc(InvalidEndpointsGroup {
-                protocol: self.protocol,
-                rejected: rejected.into(),
-                outcome,
-            });
+        if let Some(rejected) = self.rejected {
+            let ep = self
+                .endpoint_id
+                .as_ref()
+                .map(|x| x.as_str())
+                .unwrap_or_default();
+            // This makes sense only if cache is disabled
+            info!(
+                ?outcome,
+                ?rejected,
+                ?ep,
+                "check endpoint is valid with outcome"
+            );
+            Metrics::get()
+                .proxy
+                .invalid_endpoints_total
+                .inc(InvalidEndpointsGroup {
+                    protocol: self.protocol,
+                    rejected: rejected.into(),
+                    outcome,
+                });
+        }
         if let Some(tx) = self.sender.take() {
             let _: Result<(), _> = tx.send(RequestData::from(&*self));
         }
