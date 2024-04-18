@@ -2968,7 +2968,8 @@ impl Timeline {
                 break;
             }
 
-            cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
+            // Take the min to avoid reconstructing a page with data newer than request Lsn.
+            cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
             timeline_owned = timeline
                 .get_ready_ancestor_timeline(ctx)
                 .await
