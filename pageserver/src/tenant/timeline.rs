@@ -4555,7 +4555,6 @@ impl Timeline {
         // on retry after shutdown, we must repeat the reparenting before returning Ok.
 
         rtc.schedule_detaching_from_ancestor_and_wait((ancestor.timeline_id, ancestor_lsn))
-            .map_err(|_| ShuttingDown)?
             .await
             .map_err(|_| ShuttingDown)?;
 
@@ -4596,16 +4595,12 @@ impl Timeline {
 
                 tasks.spawn(
                     async move {
-                        let fut = timeline
+                        let res = timeline
                             .remote_client
                             .as_ref()
                             .expect("sibling has to have remote client because we have one")
-                            .schedule_reparenting_and_wait(&new_parent);
-
-                        let res = match fut {
-                            Ok(fut) => fut.await,
-                            Err(e) => Err(e),
-                        };
+                            .schedule_reparenting_and_wait(&new_parent)
+                            .await;
 
                         match res {
                             Ok(()) => Some(timeline),

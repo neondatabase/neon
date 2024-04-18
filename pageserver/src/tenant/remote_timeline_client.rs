@@ -645,25 +645,24 @@ impl RemoteTimelineClient {
         self.launch_queued_tasks(upload_queue);
     }
 
-    pub(crate) fn schedule_reparenting_and_wait(
+    pub(crate) async fn schedule_reparenting_and_wait(
         self: &Arc<Self>,
         new_parent: &TimelineId,
-    ) -> anyhow::Result<impl std::future::Future<Output = anyhow::Result<()>> + 'static> {
+    ) -> anyhow::Result<()> {
         // FIXME: because of how Timeline::schedule_uploads works when called from layer flushing
         // and reads the in-memory part we cannot do the detaching like this
+        let receiver = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
 
-        let mut guard = self.upload_queue.lock().unwrap();
-        let upload_queue = guard.initialized_mut()?;
+            upload_queue.latest_metadata.reparent(new_parent);
 
-        upload_queue.latest_metadata.reparent(new_parent);
+            self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
 
-        self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+            self.schedule_barrier0(upload_queue)
+        };
 
-        let receiver = self.schedule_barrier0(upload_queue);
-
-        drop(guard);
-
-        Ok(Self::wait_completion0(receiver))
+        Self::wait_completion0(receiver).await
     }
 
     /// Schedule an index part update as the last step of timeline detach.
@@ -677,31 +676,25 @@ impl RemoteTimelineClient {
     ///
     /// Cancellation-safety: cancelling or not waiting for the returned future will not cancel the
     /// upload.
-    pub(crate) fn schedule_detaching_from_ancestor_and_wait(
+    pub(crate) async fn schedule_detaching_from_ancestor_and_wait(
         self: &Arc<Self>,
-        _adopted: (TimelineId, Lsn),
-    ) -> anyhow::Result<impl std::future::Future<Output = anyhow::Result<()>> + 'static> {
-        let mut guard = self.upload_queue.lock().unwrap();
-        let upload_queue = guard.initialized_mut()?;
+        adopted: (TimelineId, Lsn),
+    ) -> anyhow::Result<()> {
+        let receiver = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
 
-        // FIXME: need to also upload it in case there is no ancestor but the lineage has not been
-        // updated
-        if upload_queue.latest_metadata.ancestor_timeline().is_some() {
+            // TODO: update lineage in index_part once we have it
             upload_queue
                 .latest_metadata
-                .detach_from_ancestor(&_adopted.0, &_adopted.1);
+                .detach_from_ancestor(&adopted.0, &adopted.1);
 
             self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
-        } else {
-            // there was already a scheduled upload without ancestor, or it had happned way before
-        }
 
-        // lets wait something out regardless
-        let receiver = self.schedule_barrier0(upload_queue);
+            self.schedule_barrier0(upload_queue)
+        };
 
-        drop(guard);
-
-        Ok(Self::wait_completion0(receiver))
+        Self::wait_completion0(receiver).await
     }
 
     /// Schedules a remote copy of the given Layer file from another timeline of the same tenant.
