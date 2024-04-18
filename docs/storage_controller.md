@@ -2,12 +2,13 @@
 
 ## Concepts
 
-The storage controller sits between the user and the pageserver, and handles the details of mapping tenants to pageserver tenant shards.
+The storage controller sits between administrative API clients and pageservers, and handles the details of mapping tenants to pageserver tenant shards. For example, creating a tenant is one API call to the storage controller,
+which is mapped into many API calls to many pageservers (for multiple shards, and for secondary locations).
 
-It implements a pageserver-compatible API that may be used for CRUD operations on tenants and timelines, translating these requests into appropriate operations on the shards within a tenant, which may be on many different pageservers. Using this API, the storage controller may be used as "virtual pageserver" that
-hides the underlying details of how data is spread across multiple nodes.
+It implements a pageserver-compatible API that may be used for CRUD operations on tenants and timelines, translating these requests into appropriate operations on the shards within a tenant, which may be on many different pageservers. Using this API, the storage controller may be used in the same way as the pageserver's administrative HTTP API, hiding
+the underlying details of how data is spread across multiple nodes.
 
-The storage controller also manages generations, high availability (via secondary locations) and live migrations for tenants under its management. This is done with a reconciliation loop pattern, where tenants have an “intent” state and are “reconcile” task that tries to make the outside world match the intent.
+The storage controller also manages generations, high availability (via secondary locations) and live migrations for tenants under its management. This is done with a reconciliation loop pattern, where tenants have an “intent” state and a “reconcile” task that tries to make the outside world match the intent.
 
 ## APIs
 
@@ -25,7 +26,7 @@ See the `http.rs` file in the source for where the HTTP APIs are implemented.
 
 ## Database
 
-The storage controller uses a postgres database to persist a subset of its state. Note that the storage controller does _not_ keep all its state in the database: this is a design choice to enable most operations to be done efficiently in memory, rather than having to read from the database.
+The storage controller uses a postgres database to persist a subset of its state. Note that the storage controller does _not_ keep all its state in the database: this is a design choice to enable most operations to be done efficiently in memory, rather than having to read from the database. See `persistence.rs` for a more comprehensive comment explaining what we do and do not persist.
 
 The file `[persistence.rs](http://persistence.rs)` contains all the code for accessing the database, and has a large doc comment that goes into more detail about exactly what we persist and why.
 
