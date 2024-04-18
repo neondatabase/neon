@@ -192,8 +192,7 @@ impl ConnectMechanism for TokioMechanism {
             connection,
             self.conn_id,
             node_info.aux.clone(),
-        )
-        .await)
+        ))
     }
 
     fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
