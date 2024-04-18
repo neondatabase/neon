@@ -187,7 +187,7 @@ impl ConnectMechanism for TokioMechanism {
         Ok(poll_tokio_client(
             self.pool.clone(),
             ctx,
-            self.conn_info.clone(),
+            &self.conn_info,
             client,
             connection,
             self.conn_id,
