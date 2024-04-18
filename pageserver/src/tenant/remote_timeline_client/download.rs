@@ -258,7 +258,7 @@ pub async fn list_remote_timelines(
     tenant_shard_id: TenantShardId,
     cancel: CancellationToken,
 ) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
-    let remote_path = remote_timelines_path(&tenant_shard_id);
+    let remote_path = remote_timelines_path(&tenant_shard_id).add_trailing_slash();
 
     fail::fail_point!("storage-sync-list-remote-timelines", |_| {
         anyhow::bail!("storage-sync-list-remote-timelines");
