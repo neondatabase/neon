@@ -1124,7 +1124,7 @@ impl RemoteTimelineClient {
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
         let timeline_storage_path = remote_timeline_path(&self.tenant_shard_id, &self.timeline_id);
 
-        // Execute all pending deletions, so that when we proceed to do a list_prefixes below, we aren't
+        // Execute all pending deletions, so that when we proceed to do a listing below, we aren't
         // taking the burden of listing all the layers that we already know we should delete.
         self.flush_deletion_queue().await?;
 

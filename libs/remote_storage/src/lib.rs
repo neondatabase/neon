@@ -162,47 +162,21 @@ pub struct Listing {
 /// providing basic CRUD operations for storage files.
 #[allow(async_fn_in_trait)]
 pub trait RemoteStorage: Send + Sync + 'static {
-    /// Lists all top level subdirectories for a given prefix
-    /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
-    /// which already takes into account any kind of global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)
-    /// so this method doesnt need to.
-    async fn list_prefixes(
-        &self,
-        prefix: Option<&RemotePath>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        let result = self
-            .list(prefix, ListingMode::WithDelimiter, None, cancel)
-            .await?
-            .prefixes;
-        Ok(result)
-    }
-    /// Lists all files in directory "recursively"
-    /// (not really recursively, because AWS has a flat namespace)
-    /// Note: This is subtely different than list_prefixes,
-    /// because it is for listing files instead of listing
-    /// names sharing common prefixes.
-    /// For example,
-    /// list_files("foo/bar") = ["foo/bar/cat123.txt",
-    /// "foo/bar/cat567.txt", "foo/bar/dog123.txt", "foo/bar/dog456.txt"]
-    /// whereas,
-    /// list_prefixes("foo/bar/") = ["cat", "dog"]
-    /// See `test_real_s3.rs` for more details.
+    /// List objects in remote storage, with semantics matching AWS S3's ListObjectsV2.
+    /// (see `<https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>`)
     ///
-    /// max_keys limits max number of keys returned; None means unlimited.
-    async fn list_files(
-        &self,
-        prefix: Option<&RemotePath>,
-        max_keys: Option<NonZeroU32>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        let result = self
-            .list(prefix, ListingMode::NoDelimiter, max_keys, cancel)
-            .await?
-            .keys;
-        Ok(result)
-    }
-
+    /// Note that the prefix is relative to any `prefix_in_bucket` configured for the client, not
+    /// from the absolute root of the bucket.
+    ///
+    /// `mode` configures whether to use a delimiter.  Without a delimiter all keys
+    /// within the prefix are listed in the `keys` of the result.  With a delimiter, any "directories" at the top level of
+    /// the prefix are returned in the `prefixes` of the result, and keys in the top level of the prefix are
+    /// returned in `keys` ().
+    ///
+    /// `max_keys` controls the maximum number of keys that will be returned.  If this is None, this function
+    /// will iteratively call listobjects until it runs out of keys.  Note that this is not safe to use on
+    /// unlimted size buckets, as the full list of objects is allocated into a monolithic data structure.
+    ///
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
@@ -338,41 +312,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::AzureBlob(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::Unreliable(s) => s.list(prefix, mode, max_keys, cancel).await,
-        }
-    }
-
-    // A function for listing all the files in a "directory"
-    // Example:
-    // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
-    //
-    // max_keys limits max number of keys returned; None means unlimited.
-    pub async fn list_files(
-        &self,
-        folder: Option<&RemotePath>,
-        max_keys: Option<NonZeroU32>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        match self {
-            Self::LocalFs(s) => s.list_files(folder, max_keys, cancel).await,
-            Self::AwsS3(s) => s.list_files(folder, max_keys, cancel).await,
-            Self::AzureBlob(s) => s.list_files(folder, max_keys, cancel).await,
-            Self::Unreliable(s) => s.list_files(folder, max_keys, cancel).await,
-        }
-    }
-
-    // lists common *prefixes*, if any of files
-    // Example:
-    // list_prefixes("foo123","foo567","bar123","bar432") = ["foo", "bar"]
-    pub async fn list_prefixes(
-        &self,
-        prefix: Option<&RemotePath>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        match self {
-            Self::LocalFs(s) => s.list_prefixes(prefix, cancel).await,
-            Self::AwsS3(s) => s.list_prefixes(prefix, cancel).await,
-            Self::AzureBlob(s) => s.list_prefixes(prefix, cancel).await,
-            Self::Unreliable(s) => s.list_prefixes(prefix, cancel).await,
         }
     }
 
