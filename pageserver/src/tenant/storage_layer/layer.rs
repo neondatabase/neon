@@ -338,7 +338,7 @@ impl Layer {
             .await
             .map_err(|err| match err {
                 GetVectoredError::Other(err) => GetVectoredError::Other(
-                    err.context(format!("get_value_reconstruct_data for layer {self}")),
+                    err.context(format!("get_values_reconstruct_data for layer {self}")),
                 ),
                 err => err,
             })
