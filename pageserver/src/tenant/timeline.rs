@@ -4389,12 +4389,7 @@ impl Timeline {
         //
         // because on the first attempt we are holding all Layer instances, they will not be
         // removed from remote. if a restart happens and parent runs gc before we resume this
-        // operation, we could had copied more layers than is needed now.
-        //
-        // is that a problem? wouldn't the same layers get removed after reparenting is done and we
-        // release the gc lock on the `self`?
-        //
-        // TODO: gc lock taking for `self`
+        // operation, we could had copied more layers than is needed now, so we would leak layers.
 
         if ancestor.ancestor_timeline.is_some() {
             // non-technical requirement; we could flatten N ancestors just as easily but we chose
@@ -4578,21 +4573,14 @@ impl Timeline {
             layers.track_adopted_historic_layers(&new_owned);
         }
 
-        // we must detach ourselves first because otherwise due to shutdown, the reparented
-        // timelines would otherwise be branching off before our own ancestor_lsn, and that is not
-        // supported.
-        //
-        // on retry after shutdown, we must repeat the reparenting before returning Ok.
-
-        rtc.schedule_detaching_from_ancestor_and_wait((ancestor.timeline_id, ancestor_lsn))
-            .await
-            .map_err(|_| ShuttingDown)?;
-
-        // we need to reparent the other timelines here in remote storage
+        // we need to reparent the other timelines here in remote storage.
         //
         // if we get a restarted between here to the completion of all remote storage reparentings:
         // some of the timelines would be reparented and some not, we need to retry after restart
         // to reparent all suitable.
+        //
+        // on restart there will be weird configuration with us having branches before our
+        // ancestor_lsn.
         let mut tasks = tokio::task::JoinSet::new();
 
         tenant
@@ -4673,30 +4661,34 @@ impl Timeline {
         }
 
         if self.cancel.is_cancelled() {
-            // FIXME: this does not work if we do linear shutdown of timelines, but it might still
-            // be good enough
             return Err(ShuttingDown);
         }
 
-        // FIXME: gc should already be inhibited across restarts
-        //
+        if reparenting_candidates != reparented.len() {
+            // fail if any one branch was deleted before reparenting completed; also hold off
+            // schedule_detaching_from_ancestor_and_wait until we've been retried.
+            //
+            // caused by: we cannot know if timelines are being deleted or tenant is being
+            // shutdown.
+            return Err(ReparetingsFailed);
+        }
+
+        rtc.schedule_detaching_from_ancestor_and_wait((ancestor.timeline_id, ancestor_lsn))
+            .await
+            .map_err(|_| ShuttingDown)?;
+
+        pausable_failpoint!("timeline-ancestor-detach-before-restart-pausable");
+
         // FIXME: is there some situation in which we need to move gc_cutoff backwards...? probably
         // not, if we mark the timeline via remote storage for as being detached.
 
-        // FIXME: unmark the timeline as being detached
-        //
-        // FIXME: unmark the parent timeline as being detached (in-memory only)
-
-        if reparenting_candidates != reparented.len() {
-            // FIXME: this does seem quite naive as well
-            return Err(ReparetingsFailed);
-        }
+        // guards will handle "cleaning up" the ancestor.ongoing_branch_detach
 
         // IDEMPOTENCY: we should look at our own timelines to find timelines which were previously
         // reparented to us. we should also look at other ancestorless timelines here to find other
         // but later detached timelines. OR document that those will never be returned here.
 
-        tracing::info!(reparenting_candidates, reparented=%reparented.len(), "successfully detached and reparented");
+        tracing::info!(reparented=%reparented.len(), "successfully detached and reparented in remote storage");
 
         Ok(AncestorDetached {
             reparented_timelines: reparented,
