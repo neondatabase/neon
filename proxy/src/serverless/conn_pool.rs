@@ -229,13 +229,11 @@ impl<C: ClientInnerExt> DbUserConnPool<C> {
         global_connections_count: &AtomicUsize,
         session_id: uuid::Uuid,
     ) -> Option<ConnPoolEntry<C>> {
-        let mut cursor = self.conns.cursor_front_mut();
-        let conn = loop {
-            let client = cursor.remove_current(session_id).ok()?;
-            if !client.conn.is_closed() {
-                break client;
-            }
-        };
+        let conn = self
+            .conns
+            .cursor_front_mut()
+            .remove_current(session_id)
+            .ok()?;
 
         *conns -= 1;
         global_connections_count.fetch_sub(1, atomic::Ordering::Relaxed);
@@ -384,23 +382,18 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
         // ok return cached connection if found and establish a new one otherwise
         if let Some(client) = client {
-            if client.is_closed() {
-                info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-                return Ok(None);
-            } else {
-                tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
-                tracing::Span::current().record(
-                    "pid",
-                    &tracing::field::display(client.inner.get_process_id()),
-                );
-                info!(
-                    cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
-                    "pool: reusing connection '{conn_info}'"
-                );
-                ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
-                ctx.latency_timer.success();
-                return Ok(Some(Client::new(client)));
-            }
+            tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
+            tracing::Span::current().record(
+                "pid",
+                &tracing::field::display(client.inner.get_process_id()),
+            );
+            info!(
+                cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
+                "pool: reusing connection '{conn_info}'"
+            );
+            ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
+            ctx.latency_timer.success();
+            return Ok(Some(Client::new(client)));
         }
         Ok(None)
     }
@@ -686,22 +679,12 @@ struct ClientInner<C: ClientInnerExt> {
 }
 
 pub trait ClientInnerExt: Sync + Send + 'static {
-    fn is_closed(&self) -> bool;
     fn get_process_id(&self) -> i32;
 }
 
 impl ClientInnerExt for tokio_postgres::Client {
-    fn is_closed(&self) -> bool {
-        self.is_closed()
-    }
     fn get_process_id(&self) -> i32 {
         self.get_process_id()
-    }
-}
-
-impl<C: ClientInnerExt> ClientInner<C> {
-    pub fn is_closed(&self) -> bool {
-        self.inner.is_closed()
     }
 }
 
@@ -744,6 +727,7 @@ impl Discard<'_> {
     pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
         let conn_id = &self.conn_id;
         if status != ReadyForQueryStatus::Idle && !*self.discarded {
+            *self.discarded = true;
             info!(%conn_id, "pool: throwing away connection because connection is not idle")
         }
     }
@@ -768,26 +752,23 @@ impl<C: ClientInnerExt> Deref for Client<C> {
 
 impl<C: ClientInnerExt> Drop for Client<C> {
     fn drop(&mut self) {
-        if self.discarded {
-            return;
-        }
-
         let client = self
             .inner
             .take()
             .expect("client inner should not be removed");
 
-        let conn_id = client.conn_id;
-
-        if client.is_closed() {
-            info!(%conn_id, "pool: throwing away connection because connection is closed");
+        if self.discarded {
             return;
         }
+
+        let conn_id = client.conn_id;
 
         let tx = client.pool.clone();
         match tx.try_send(client) {
             Ok(_) => {}
-            Err(TrySendError::Closed(_)) => {}
+            Err(TrySendError::Closed(_)) => {
+                info!(%conn_id, "pool: throwing away connection because connection is closed");
+            }
             Err(TrySendError::Full(_)) => {
                 error!("client channel should not be full")
             }
@@ -804,11 +785,8 @@ mod tests {
 
     use super::*;
 
-    struct MockClient(CancellationToken);
+    struct MockClient;
     impl ClientInnerExt for MockClient {
-        fn is_closed(&self) -> bool {
-            self.0.is_cancelled()
-        }
         fn get_process_id(&self) -> i32 {
             0
         }
@@ -823,7 +801,7 @@ mod tests {
             global_pool,
             &mut RequestMonitoring::test(),
             conn_info,
-            MockClient(cancelled.clone()),
+            MockClient,
             cancelled.clone().cancelled_owned(),
             uuid::Uuid::new_v4(),
             MetricsAuxInfo {
