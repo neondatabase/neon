@@ -4824,14 +4824,7 @@ mod tests {
     // ```
     #[tokio::test]
     async fn test_get_vectored_ancestor_descent() -> anyhow::Result<()> {
-        let tenant_conf = TenantConf {
-            // Make compaction deterministic
-            gc_period: Duration::ZERO,
-            compaction_period: Duration::ZERO,
-            ..TenantConf::default()
-        };
-
-        let harness = TenantHarness::create_custom("test_get_vectored_on_lsn_axis", tenant_conf)?;
+        let harness = TenantHarness::create("test_get_vectored_on_lsn_axis")?;
         let (tenant, ctx) = harness.load().await;
 
         let start_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
@@ -4878,13 +4871,9 @@ mod tests {
 
         let child_timeline_id = TimelineId::generate();
 
-        tenant
+        let child_timeline = tenant
             .branch_timeline_test(&parent_timeline, child_timeline_id, Some(current_lsn), &ctx)
             .await?;
-
-        let child_timeline = tenant
-            .get_timeline(child_timeline_id, true)
-            .expect("Should have the branched timeline");
 
         let mut key = start_key;
         while key < end_key {
@@ -4915,7 +4904,10 @@ mod tests {
         let mut query_lsns = Vec::new();
         for image_lsn in parent_gap_lsns.keys().rev() {
             for offset in lsn_offsets {
-                query_lsns.push(Lsn(u64::try_from(i64::try_from(image_lsn.0)? + offset)?))
+                query_lsns.push(Lsn(image_lsn
+                    .0
+                    .checked_add_signed(offset)
+                    .expect("Shouldn't overflow")));
             }
         }
 
