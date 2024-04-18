@@ -90,6 +90,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
         WakeComputeError::ApiError(ApiError::Console { .. }) => {
             WakeupFailureKind::ApiConsoleOtherError
         }
+        WakeComputeError::TooManyConnections => WakeupFailureKind::ApiConsoleLocked,
         WakeComputeError::TimeoutError => WakeupFailureKind::TimeoutError,
     };
     Metrics::get()
