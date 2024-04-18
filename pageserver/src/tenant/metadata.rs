@@ -61,6 +61,7 @@ struct TimelineMetadataBodyV2 {
     latest_gc_cutoff_lsn: Lsn,
     initdb_lsn: Lsn,
     pg_version: u32,
+    aux_file_v2: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +93,7 @@ impl TimelineMetadata {
         latest_gc_cutoff_lsn: Lsn,
         initdb_lsn: Lsn,
         pg_version: u32,
+        aux_file_v2: bool,
     ) -> Self {
         Self {
             hdr: TimelineMetadataHeader {
@@ -107,6 +109,7 @@ impl TimelineMetadata {
                 latest_gc_cutoff_lsn,
                 initdb_lsn,
                 pg_version,
+                aux_file_v2: if aux_file_v2 { Some(true) } else { None },
             },
         }
     }
@@ -134,6 +137,7 @@ impl TimelineMetadata {
             latest_gc_cutoff_lsn: body.latest_gc_cutoff_lsn,
             initdb_lsn: body.initdb_lsn,
             pg_version: 14, // All timelines created before this version had pg_version 14
+            aux_file_v2: None,
         };
 
         hdr.format_version = METADATA_FORMAT_VERSION;
@@ -217,6 +221,10 @@ impl TimelineMetadata {
 
     pub fn pg_version(&self) -> u32 {
         self.body.pg_version
+    }
+
+    pub fn aux_file_v2(&self) -> bool {
+        self.body.aux_file_v2.unwrap_or(false)
     }
 
     // Checksums make it awkward to build a valid instance by hand.  This helper

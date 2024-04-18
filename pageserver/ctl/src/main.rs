@@ -74,6 +74,8 @@ struct MetadataCmd {
     prev_record_lsn: Option<Lsn>,
     /// Replace latest gc cuttoff
     latest_gc_cuttoff: Option<Lsn>,
+    /// Enable aux file v2 storage
+    aux_file_v2: Option<bool>,
 }
 
 #[derive(Parser)]
@@ -213,12 +215,14 @@ fn handle_metadata(
         disk_consistent_lsn,
         prev_record_lsn,
         latest_gc_cuttoff,
+        aux_file_v2,
     }: &MetadataCmd,
 ) -> Result<(), anyhow::Error> {
     let metadata_bytes = std::fs::read(path)?;
     let mut meta = TimelineMetadata::from_bytes(&metadata_bytes)?;
     println!("Current metadata:\n{meta:?}");
     let mut update_meta = false;
+    // TODO: simplify this part
     if let Some(disk_consistent_lsn) = disk_consistent_lsn {
         meta = TimelineMetadata::new(
             *disk_consistent_lsn,
@@ -228,6 +232,7 @@ fn handle_metadata(
             meta.latest_gc_cutoff_lsn(),
             meta.initdb_lsn(),
             meta.pg_version(),
+            meta.aux_file_v2(),
         );
         update_meta = true;
     }
@@ -240,6 +245,7 @@ fn handle_metadata(
             meta.latest_gc_cutoff_lsn(),
             meta.initdb_lsn(),
             meta.pg_version(),
+            meta.aux_file_v2()
         );
         update_meta = true;
     }
@@ -252,6 +258,20 @@ fn handle_metadata(
             *latest_gc_cuttoff,
             meta.initdb_lsn(),
             meta.pg_version(),
+            meta.aux_file_v2(),
+        );
+        update_meta = true;
+    }
+    if let Some(aux_file_v2) = aux_file_v2 {
+        meta = TimelineMetadata::new(
+            meta.disk_consistent_lsn(),
+            meta.prev_record_lsn(),
+            meta.ancestor_timeline(),
+            meta.ancestor_lsn(),
+            meta.latest_gc_cutoff_lsn(),
+            meta.initdb_lsn(),
+            meta.pg_version(),
+            *aux_file_v2,
         );
         update_meta = true;
     }

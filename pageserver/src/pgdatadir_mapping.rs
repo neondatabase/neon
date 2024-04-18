@@ -32,7 +32,7 @@ use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -1398,6 +1398,31 @@ impl<'a> DatadirModification<'a> {
         } else {
             Some(Bytes::copy_from_slice(content))
         };
+
+        // TODO: either ensure we don't flip the flag for users with existing AUX files, or do a check there.
+        let aux_file_v2 = {
+            let tline_aux_file_v2 = self
+                .tline
+                .aux_file_v2
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if tline_aux_file_v2 {
+                true
+            } else if self.tline.get_try_enable_aux_file_v2() {
+                info!(
+                    "enabling aux file v2 support for timeline {}",
+                    self.tline.timeline_id
+                );
+                // The next index part upload will have `aux_file_v2` to `true`.
+                self.tline
+                    .aux_file_v2
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        };
+
+        let _ = aux_file_v2; // keep this unused until the write path is implemented
 
         let n_files;
         let mut aux_files = self.tline.aux_files.lock().await;

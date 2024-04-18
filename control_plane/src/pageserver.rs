@@ -434,6 +434,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
+            try_enable_aux_file_v2: settings
+                .remove("try_enable_aux_file_v2")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'try_enable_aux_file_v2' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -552,6 +557,11 @@ impl PageServerNode {
                     .map(serde_json::from_str)
                     .transpose()
                     .context("parse `timeline_get_throttle` from json")?,
+                try_enable_aux_file_v2: settings
+                    .remove("try_enable_aux_file_v2")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'try_enable_aux_file_v2' as bool")?,
             }
         };
 

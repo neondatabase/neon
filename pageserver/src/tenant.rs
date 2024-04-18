@@ -1346,6 +1346,7 @@ impl Tenant {
             initdb_lsn,
             initdb_lsn,
             pg_version,
+            false,
         );
         self.prepare_new_timeline(
             new_timeline_id,
@@ -3007,6 +3008,7 @@ impl Tenant {
             *src_timeline.latest_gc_cutoff_lsn.read(), // FIXME: should we hold onto this guard longer?
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
+            src_timeline.aux_file_v2.load(Ordering::SeqCst),
         );
 
         let uninitialized_timeline = self
@@ -3210,6 +3212,7 @@ impl Tenant {
             pgdata_lsn,
             pgdata_lsn,
             pg_version,
+            false,
         );
         let raw_timeline = self
             .prepare_new_timeline(
@@ -3661,6 +3664,7 @@ pub(crate) mod harness {
                 image_layer_creation_check_threshold: Some(
                     tenant_conf.image_layer_creation_check_threshold,
                 ),
+                try_enable_aux_file_v2: Some(tenant_conf.try_enable_aux_file_v2),
             }
         }
     }

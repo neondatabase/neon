@@ -303,6 +303,7 @@ pub struct TenantConfig {
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
+    pub try_enable_aux_file_v2: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -578,6 +579,9 @@ pub struct TimelineInfo {
     pub state: TimelineState,
 
     pub walreceiver_status: String,
+
+    /// Whether aux file v2 is enabled
+    pub aux_file_v2: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

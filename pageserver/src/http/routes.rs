@@ -426,6 +426,8 @@ async fn build_timeline_info_common(
         state,
 
         walreceiver_status,
+
+        aux_file_v2: timeline.aux_file_v2.load(std::sync::atomic::Ordering::SeqCst)
     };
     Ok(info)
 }
