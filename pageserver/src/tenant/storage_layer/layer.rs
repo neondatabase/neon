@@ -604,7 +604,7 @@ enum Status {
 
 impl Drop for LayerInner {
     fn drop(&mut self) {
-        // if there was a pending cancellation, mark it cancelled here to balance metrics
+        // if there was a pending eviction, mark it cancelled here to balance metrics
         if let Some((ResidentOrWantedEvicted::WantedEvicted(..), _)) = self.inner.take_and_deinit()
         {
             // eviction has already been started
