@@ -4712,6 +4712,8 @@ pub(crate) enum DetachFromAncestorError {
     CopyDeltaPrefix(#[source] anyhow::Error),
     #[error("some reparentings failed, please retry")]
     ReparetingsFailed,
+    #[error("ancestor is already being detached by: {}", .0)]
+    OtherTimelineDetachOngoing(TimelineId),
 }
 
 /// Top-level failure to compact.
