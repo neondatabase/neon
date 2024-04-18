@@ -15,7 +15,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use tokio::time::{Duration, Instant};
 use tracing::info;
 
-use crate::EndpointId;
+use crate::intern::EndpointIdInt;
 
 pub struct GlobalRateLimiter {
     data: Vec<RateBucket>,
@@ -61,12 +61,7 @@ impl GlobalRateLimiter {
 // Purposefully ignore user name and database name as clients can reconnect
 // with different names, so we'll end up sending some http requests to
 // the control plane.
-//
-// We also may save quite a lot of CPU (I think) by bailing out right after we
-// saw SNI, before doing TLS handshake. User-side error messages in that case
-// does not look very nice (`SSL SYSCALL error: Undefined error: 0`), so for now
-// I went with a more expensive way that yields user-friendlier error messages.
-pub type EndpointRateLimiter = BucketRateLimiter<EndpointId, StdRng, RandomState>;
+pub type EndpointRateLimiter = BucketRateLimiter<EndpointIdInt, StdRng, RandomState>;
 
 pub struct BucketRateLimiter<Key, Rand = StdRng, Hasher = RandomState> {
     map: DashMap<Key, Vec<RateBucket>, Hasher>,
@@ -245,7 +240,7 @@ mod tests {
     use tokio::time;
 
     use super::{BucketRateLimiter, EndpointRateLimiter};
-    use crate::{rate_limiter::RateBucketInfo, EndpointId};
+    use crate::{intern::EndpointIdInt, rate_limiter::RateBucketInfo, EndpointId};
 
     #[test]
     fn rate_bucket_rpi() {
@@ -295,39 +290,40 @@ mod tests {
         let limiter = EndpointRateLimiter::new(rates);
 
         let endpoint = EndpointId::from("ep-my-endpoint-1234");
+        let endpoint = EndpointIdInt::from(endpoint);
 
         time::pause();
 
         for _ in 0..100 {
-            assert!(limiter.check(endpoint.clone(), 1));
+            assert!(limiter.check(endpoint, 1));
         }
         // more connections fail
-        assert!(!limiter.check(endpoint.clone(), 1));
+        assert!(!limiter.check(endpoint, 1));
 
         // fail even after 500ms as it's in the same bucket
         time::advance(time::Duration::from_millis(500)).await;
-        assert!(!limiter.check(endpoint.clone(), 1));
+        assert!(!limiter.check(endpoint, 1));
 
         // after a full 1s, 100 requests are allowed again
         time::advance(time::Duration::from_millis(500)).await;
         for _ in 1..6 {
             for _ in 0..50 {
-                assert!(limiter.check(endpoint.clone(), 2));
+                assert!(limiter.check(endpoint, 2));
             }
             time::advance(time::Duration::from_millis(1000)).await;
         }
 
         // more connections after 600 will exceed the 20rps@30s limit
-        assert!(!limiter.check(endpoint.clone(), 1));
+        assert!(!limiter.check(endpoint, 1));
 
         // will still fail before the 30 second limit
         time::advance(time::Duration::from_millis(30_000 - 6_000 - 1)).await;
-        assert!(!limiter.check(endpoint.clone(), 1));
+        assert!(!limiter.check(endpoint, 1));
 
         // after the full 30 seconds, 100 requests are allowed again
         time::advance(time::Duration::from_millis(1)).await;
         for _ in 0..100 {
-            assert!(limiter.check(endpoint.clone(), 1));
+            assert!(limiter.check(endpoint, 1));
         }
     }
 
