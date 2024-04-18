@@ -1,5 +1,6 @@
 use anyhow::Context;
 use camino::Utf8Path;
+use remote_storage::ListingMode;
 use remote_storage::RemotePath;
 use std::sync::Arc;
 use std::{collections::HashSet, num::NonZeroU32};
@@ -54,12 +55,7 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
     let base_prefix = RemotePath::new(Utf8Path::new(ctx.enabled.base_prefix))
         .context("common_prefix construction")?;
     let root_remote_prefixes = test_client
-        .list(
-            None,
-            remote_storage::ListingMode::WithDelimiter,
-            None,
-            &cancel,
-        )
+        .list(None, ListingMode::WithDelimiter, None, &cancel)
         .await?
         .prefixes
         .into_iter()
@@ -72,7 +68,7 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
     let nested_remote_prefixes = test_client
         .list(
             Some(&base_prefix.add_trailing_slash()),
-            remote_storage::ListingMode::WithDelimiter,
+            ListingMode::WithDelimiter,
             None,
             &cancel,
         )
@@ -100,11 +96,13 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
 ///
 /// First, create a set of S3 objects with keys `random_prefix/folder{j}/blob_{i}.txt` in [`upload_remote_data`]
 /// Then performs the following queries:
-///    1. `list_files(None)`. This should return all files `random_prefix/folder{j}/blob_{i}.txt`
-///    2. `list_files("folder1")`.  This  should return all files `random_prefix/folder1/blob_{i}.txt`
+///    1. `list(None)`. This should return all files `random_prefix/folder{j}/blob_{i}.txt`
+///    2. `list("folder1")`.  This  should return all files `random_prefix/folder1/blob_{i}.txt`
 #[test_context(MaybeEnabledStorageWithSimpleTestBlobs)]
 #[tokio::test]
-async fn list_files_works(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> anyhow::Result<()> {
+async fn list_no_delimiter_works(
+    ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs,
+) -> anyhow::Result<()> {
     let ctx = match ctx {
         MaybeEnabledStorageWithSimpleTestBlobs::Enabled(ctx) => ctx,
         MaybeEnabledStorageWithSimpleTestBlobs::Disabled => return Ok(()),
@@ -117,29 +115,36 @@ async fn list_files_works(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> a
     let base_prefix =
         RemotePath::new(Utf8Path::new("folder1")).context("common_prefix construction")?;
     let root_files = test_client
-        .list_files(None, None, &cancel)
+        .list(None, ListingMode::NoDelimiter, None, &cancel)
         .await
         .context("client list root files failure")?
+        .keys
         .into_iter()
         .collect::<HashSet<_>>();
     assert_eq!(
         root_files,
         ctx.remote_blobs.clone(),
-        "remote storage list_files on root mismatches with the uploads."
+        "remote storage list on root mismatches with the uploads."
     );
 
     // Test that max_keys limit works. In total there are about 21 files (see
     // upload_simple_remote_data call in test_real_s3.rs).
     let limited_root_files = test_client
-        .list_files(None, Some(NonZeroU32::new(2).unwrap()), &cancel)
+        .list(
+            None,
+            ListingMode::NoDelimiter,
+            Some(NonZeroU32::new(2).unwrap()),
+            &cancel,
+        )
         .await
         .context("client list root files failure")?;
-    assert_eq!(limited_root_files.len(), 2);
+    assert_eq!(limited_root_files.keys.len(), 2);
 
     let nested_remote_files = test_client
-        .list_files(Some(&base_prefix), None, &cancel)
+        .list(Some(&base_prefix), ListingMode::NoDelimiter, None, &cancel)
         .await
         .context("client list nested files failure")?
+        .keys
         .into_iter()
         .collect::<HashSet<_>>();
     let trim_remote_blobs: HashSet<_> = ctx
@@ -151,7 +156,7 @@ async fn list_files_works(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> a
         .collect();
     assert_eq!(
         nested_remote_files, trim_remote_blobs,
-        "remote storage list_files on subdirrectory mismatches with the uploads."
+        "remote storage list on subdirrectory mismatches with the uploads."
     );
     Ok(())
 }
@@ -211,12 +216,7 @@ async fn delete_objects_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
 
     let prefixes = ctx
         .client
-        .list(
-            None,
-            remote_storage::ListingMode::WithDelimiter,
-            None,
-            &cancel,
-        )
+        .list(None, ListingMode::WithDelimiter, None, &cancel)
         .await?
         .prefixes;
 
