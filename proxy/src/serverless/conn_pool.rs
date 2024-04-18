@@ -620,22 +620,28 @@ impl<C: ClientInnerExt, I: Future<Output = ()>> Future for DbConnection<C, I> {
             return Poll::Ready(());
         }
 
+        // node is initiated via EndpointConnPool::put.
+        // this is only called in the if statement below.
+        // this can only occur if pool is set (and pool is never removed).
+        // when this occurs, it guarantees that the DbUserConnPool is created (it is never removed).
         if let Some(init) = this.node.as_mut().initialized_mut() {
-            // if there's no pool, then this client will be closed.
-            let Some(pool) = &this.pool else {
-                info!("connection dropped");
-                return Poll::Ready(());
+            let pool = this
+                .pool
+                .as_ref()
+                .expect("node cannot be init without pool");
+            let pool = pool.read();
+            let pool = pool
+                .pools
+                .get(this.db_user)
+                .expect("node cannot be init without pool");
+            if let Ok((session_id, _)) = init.take_removed(&pool.conns) {
+                *this.session_span = info_span!("", %session_id);
+                let _span = this.session_span.enter();
+                info!("changed session");
+                this.idle_timeout
+                    .as_mut()
+                    .reset(Instant::now() + *this.idle);
             };
-            if let Some(entry) = pool.read().pools.get(this.db_user) {
-                if let Ok((session_id, _)) = init.take_removed(&entry.conns) {
-                    *this.session_span = info_span!("", %session_id);
-                    let _span = this.session_span.enter();
-                    info!("changed session");
-                    this.idle_timeout
-                        .as_mut()
-                        .reset(Instant::now() + *this.idle);
-                };
-            }
         }
 
         if let Poll::Ready(client) = this.recv_client.poll_recv(cx) {
