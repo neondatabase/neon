@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -580,6 +581,91 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
             )
         ),
     )
+
+
+def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
+    """
+    Slow test that runs in realtime, checks that the background scheduling of secondary
+    downloads happens as expected.
+    """
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    # Create this many tenants, each with two timelines
+    tenant_count = 4
+    tenant_timelines = {}
+
+    # This mirrors a constant in `downloader.rs`
+    freshen_interval_secs = 60
+
+    for _i in range(0, tenant_count):
+        tenant_id = TenantId.generate()
+        timeline_a = TimelineId.generate()
+        timeline_b = TimelineId.generate()
+        env.neon_cli.create_tenant(
+            tenant_id,
+            timeline_a,
+            placement_policy='{"Attached":1}',
+            # Run with a low heatmap period so that we can avoid having to do synthetic API calls
+            # to trigger the upload promptly.
+            conf={"heatmap_period": "1s"},
+        )
+        env.neon_cli.create_timeline("main2", tenant_id, timeline_b)
+
+        tenant_timelines[tenant_id] = [timeline_a, timeline_b]
+
+    t_start = time.time()
+
+    # Wait long enough that the background downloads should happen; we expect all the inital layers
+    # of all the initial timelines to show up on the secondary location of each tenant.
+    time.sleep(freshen_interval_secs * 1.5)
+
+    for tenant_id, timelines in tenant_timelines.items():
+        attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
+        ps_attached = env.get_pageserver(attached_to_id)
+        # We only have two: the other one must be secondary
+        ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+        for timeline_id in timelines:
+            log.info(f"Checking for secondary timeline {timeline_id} on node {ps_secondary.id}")
+            # One or more layers should be present for all timelines
+            assert list_layers(ps_secondary, tenant_id, timeline_id)
+
+        # Delete the second timeline: this should be reflected later on the secondary
+        env.storage_controller.pageserver_api().timeline_delete(tenant_id, timelines[1])
+
+    # Wait long enough for the secondary locations to see the deletion
+    time.sleep(freshen_interval_secs * 1.5)
+
+    for tenant_id, timelines in tenant_timelines.items():
+        attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
+        ps_attached = env.get_pageserver(attached_to_id)
+        # We only have two: the other one must be secondary
+        ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+        # This one was not deleted
+        assert list_layers(ps_secondary, tenant_id, timelines[0])
+
+        # This one was deleted
+        assert not list_layers(ps_secondary, tenant_id, timelines[1])
+
+    t_end = time.time()
+
+    # Measure how many heatmap downloads we did in total: this checks that we succeeded with
+    # proper scheduling, and not some bug that just runs downloads in a loop.
+    total_heatmap_downloads = 0
+    for ps in env.pageservers:
+        v = ps.http_client().get_metric_value("pageserver_secondary_download_heatmap_total")
+        assert v is not None
+        total_heatmap_downloads += int(v)
+
+    download_rate = (total_heatmap_downloads / tenant_count) / (t_end - t_start)
+
+    expect_download_rate = 1.0 / freshen_interval_secs
+    log.info(f"Download rate: {download_rate * 60}/min vs expected {expect_download_rate * 60}/min")
+
+    assert download_rate < expect_download_rate * 2
 
 
 @pytest.mark.skipif(os.environ.get("BUILD_TYPE") == "debug", reason="only run with release build")
