@@ -4985,6 +4985,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
+                    ValuesReconstructState::new(),
                     &ctx,
                 )
                 .await;
