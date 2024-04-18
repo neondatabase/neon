@@ -417,11 +417,16 @@ pub(super) async fn download_index_part(
     let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
 
     let indices = download_retry(
-        || async { storage.list_files(Some(&index_prefix), None, cancel).await },
+        || async {
+            storage
+                .list(Some(&index_prefix), ListingMode::NoDelimiter, None, cancel)
+                .await
+        },
         "list index_part files",
         cancel,
     )
-    .await?;
+    .await?
+    .keys;
 
     // General case logic for which index to use: the latest index whose generation
     // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
