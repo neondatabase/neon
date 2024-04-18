@@ -113,7 +113,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
         } = self;
         if let Some(pool) = pools.get_mut(&db_user) {
             let mut removed = 0;
-            let mut cursor = pool.conns2.cursor_front_mut();
+            let mut cursor = pool.conns.cursor_front_mut();
             while let Some(client) = cursor.protected() {
                 if client.conn.conn_id != conn_id {
                     let _ = cursor.remove_current(uuid::Uuid::nil());
@@ -140,7 +140,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
 
     fn put(
         pool: &RwLock<Self>,
-        mut node: Pin<&mut Node<PinListTypes<C>>>,
+        mut node: Pin<&mut Node<ConnTypes<C>>>,
         db_user: &(DbName, RoleName),
         client: ClientInner<C>,
         conn_info: ConnInfo,
@@ -169,11 +169,11 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
                 let pool_entries = pool.pools.entry(db_user.clone()).or_default();
 
                 if let Some(node) = node.as_mut().initialized_mut() {
-                    if node.take_removed(&pool_entries.conns2).is_err() {
+                    if node.take_removed(&pool_entries.conns).is_err() {
                         panic!("client is already in the pool")
                     };
                 }
-                pool_entries.conns2.cursor_front_mut().insert_after(
+                pool_entries.conns.cursor_front_mut().insert_after(
                     node,
                     ConnPoolEntry {
                         conn: client,
@@ -224,14 +224,14 @@ impl<C: ClientInnerExt> Drop for EndpointConnPool<C> {
 }
 
 pub struct DbUserConnPool<C: ClientInnerExt> {
-    conns2: pin_list::PinList<PinListTypes<C>>,
+    conns: pin_list::PinList<ConnTypes<C>>,
     len: usize,
 }
 
 impl<C: ClientInnerExt> Default for DbUserConnPool<C> {
     fn default() -> Self {
         Self {
-            conns2: pin_list::PinList::new(pin_list::id::Checked::new()),
+            conns: pin_list::PinList::new(pin_list::id::Checked::new()),
             len: 0,
         }
     }
@@ -241,7 +241,7 @@ impl<C: ClientInnerExt> DbUserConnPool<C> {
     fn clear_closed_clients(&mut self, conns: &mut usize) -> usize {
         let mut removed = 0;
 
-        let mut cursor = self.conns2.cursor_front_mut();
+        let mut cursor = self.conns.cursor_front_mut();
         while let Some(client) = cursor.protected() {
             if client.conn.is_closed() {
                 let _ = cursor.remove_current(uuid::Uuid::nil());
@@ -264,7 +264,7 @@ impl<C: ClientInnerExt> DbUserConnPool<C> {
         let mut removed = self.clear_closed_clients(conns);
 
         let conn = self
-            .conns2
+            .conns
             .cursor_front_mut()
             .remove_current(session_id)
             .ok();
@@ -511,7 +511,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
     }
 }
 
-type PinListTypes<C> = dyn pin_list::Types<
+type ConnTypes<C> = dyn pin_list::Types<
     Id = pin_list::id::Checked,
     Protected = ConnPoolEntry<C>,
     // session ID
@@ -603,7 +603,7 @@ pub fn poll_client<C: ClientInnerExt, I: Future<Output = ()> + Send + 'static>(
         idle_timeout: tokio::time::sleep(idle),
         idle,
 
-        node: Node::<PinListTypes<C>>::new(),
+        node: Node::<ConnTypes<C>>::new(),
         recv_client,
         db_user: conn_info.db_and_user(),
         pool: pool.clone(),
@@ -642,7 +642,7 @@ pin_project! {
 
         // Used to add/remove conn from the conn pool
         #[pin]
-        node: Node<PinListTypes<C>>,
+        node: Node<ConnTypes<C>>,
         recv_client: tokio::sync::mpsc::Receiver<(tracing::Span, ClientInner<C>, ConnInfo)>,
         db_user: (DbName, RoleName),
         pool: Weak<RwLock<EndpointConnPool<C>>>,
