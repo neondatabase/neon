@@ -1850,7 +1850,25 @@ async fn timeline_detach_ancestor_handler(
         .map_err(|e| ApiError::NotFound(e.into()))?;
 
     match timeline.detach_from_ancestor(&tenant, &ctx).await {
-        Ok(res) => json_response(StatusCode::OK, res),
+        Ok(detach_result) => {
+            drop(timeline);
+            drop(tenant);
+
+            let res = state
+                .tenant_manager
+                .reset_tenant(tenant_shard_id, false, &ctx)
+                .await;
+
+            match res {
+                Ok(()) => {
+                    // it would be best to wait until completed
+                    json_response(StatusCode::OK, detach_result)
+                }
+                Err(e) => Err(ApiError::InternalServerError(
+                    e.context("tenant restart after timeline detach"),
+                )),
+            }
+        }
         Err(e) => Err(ApiError::InternalServerError(e.into())),
     }
 }
