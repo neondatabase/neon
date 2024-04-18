@@ -4493,34 +4493,18 @@ impl Timeline {
             );
 
             drop(layers);
-
-            // process the remote layers in descending order by Lsn to leak less layers if we are
-            // restarted and a gc happens before we retry
-            rest_of_historic.sort_by_key(|layer| {
-                std::cmp::Reverse((
-                    layer.layer_desc().lsn_range.start,
-                    layer.layer_desc().key_range.start,
-                ))
-            });
-
-            straddling_branchpoint.sort_by_key(|layer| {
-                (
-                    layer.layer_desc().key_range.start,
-                    layer.layer_desc().lsn_range.start,
-                )
-            });
         }
 
         const BATCH_SIZE: usize = 10;
 
-        // FIXME: as we have the gc blocking, remote copies and delta lsn prefix copying could be
-        // done at the same time.
         if straddling_branchpoint.is_empty() {
             // as we flushed the inmem layer to disk, only reason:
             // this branch has been created from a L1 layer LSN boundary, or checkpoint.
             // TODO: hit this in tests
             todo!("is there anything to do here? -- tests are not hitting this");
-        } else {
+        }
+
+        {
             tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
 
             let mut wrote_any = false;
@@ -4561,6 +4545,8 @@ impl Timeline {
                     .sync_all()
                     .await
                     .fatal_err("VirtualFile::sync_all timeline dir");
+                rtc.schedule_index_upload_for_file_changes()
+                    .map_err(|_| ShuttingDown)?;
             }
         }
 
@@ -4580,11 +4566,9 @@ impl Timeline {
             //
             // intentional: we are not publishing the new to LayerMap until the end, because
             // they have better chance of being already downloaded at ancestor
-            if chunks.len() > 0 {
-                rtc.schedule_index_upload_for_file_changes()
-                    .map_err(|_| ShuttingDown)?;
-                rtc.wait_completion().await.map_err(|_| ShuttingDown)?;
-            }
+            rtc.schedule_index_upload_for_file_changes()
+                .map_err(|_| ShuttingDown)?;
+            rtc.wait_completion().await.map_err(|_| ShuttingDown)?;
         }
 
         // TODO: fsync directory again if we hardlinked something
