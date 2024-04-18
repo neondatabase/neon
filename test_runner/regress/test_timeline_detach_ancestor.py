@@ -1,4 +1,5 @@
 import enum
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 import pytest
@@ -9,6 +10,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import HistoricLayerInfo
 from fixtures.pageserver.utils import wait_timeline_detail_404
 from fixtures.types import Lsn, TimelineId
+from fixtures.utils import wait_until
 
 
 def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
@@ -288,6 +290,99 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
+
+
+@pytest.mark.parametrize("restart_after", [True, False])
+def test_detached_receives_flushes_while_being_detached(
+    neon_env_builder: NeonEnvBuilder, restart_after: bool
+):
+    """
+    Specifically the flush is received before restart, after making the remote storage change.
+    This requires that layer file flushes do not overwrite ancestor_timeline_id.
+    """
+    write_to_branch_first = True
+
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+        },
+    )
+
+    client = env.pageserver.http_client()
+
+    # row counts have been manually verified to cause reconnections and getpage
+    # requests when restart_after=False with pg16
+    def insert_rows(n: int, ep) -> int:
+        ep.safe_psql(
+            f"INSERT INTO foo SELECT i::bigint, 'more info!! this is a long string' || i FROM generate_series(0, {n - 1}) g(i);"
+        )
+        return n
+
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql("CREATE TABLE foo (i BIGINT, aux TEXT NOT NULL);")
+
+        rows = insert_rows(256, ep)
+
+        branchpoint = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+
+    timeline_id = env.neon_cli.create_branch(
+        "new main", "main", tenant_id=env.initial_tenant, ancestor_start_lsn=branchpoint
+    )
+
+    ep = env.endpoints.create_start("new main", tenant_id=env.initial_tenant)
+    assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
+
+    if write_to_branch_first:
+        rows += insert_rows(256, ep)
+        wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
+        client.timeline_checkpoint(env.initial_tenant, timeline_id)
+
+    failpoint_name = "timeline-ancestor-detach-before-restart-pausable"
+    client.configure_failpoints((failpoint_name, "pause"))
+
+    with ThreadPoolExecutor(max_workers=1) as exec:
+        completion = exec.submit(client.detach_ancestor, env.initial_tenant, timeline_id)
+
+        wait_until(
+            10,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(f".*at failpoint.*{failpoint_name}"),
+        )
+
+        historic_before = len(
+            client.layer_map_info(env.initial_tenant, timeline_id).historic_layers
+        )
+
+        # just a quick write to make sure we have something to flush
+        rows += insert_rows(256, ep)
+        wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
+        client.timeline_checkpoint(env.initial_tenant, timeline_id)
+
+        historic_after = len(client.layer_map_info(env.initial_tenant, timeline_id).historic_layers)
+        assert historic_before < historic_after, "actually flushed something"
+
+        client.configure_failpoints((failpoint_name, "off"))
+
+        reparented = completion.result()
+        assert len(reparented) == 0
+
+    if restart_after:
+        # ep is kept alive on purpose
+        env.pageserver.stop()
+        env.pageserver.start()
+
+    env.pageserver.quiesce_tenants()
+
+    assert client.timeline_detail(env.initial_tenant, timeline_id)["ancestor_timeline_id"] is None
+
+    # before restart this might all come from shared buffers
+    assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
+    assert ep.safe_psql("SELECT SUM(LENGTH(aux)) FROM foo")[0][0] != 0
+    ep.stop()
+
+    # finally restart the endpoint and make sure we still have the same answer
+    with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
+        assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
 
 
 # TODO:
