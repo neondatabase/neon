@@ -2,13 +2,16 @@ use pageserver_api::key::{Key, AUX_KEY_PREFIX, METADATA_KEY_SIZE};
 use tracing::warn;
 
 /// Create a metadata key from a hash, encoded as [AUX_KEY_PREFIX, 2B directory prefix, first 13B of 128b xxhash].
-fn aux_hash_to_metadata_key(prefix: u16, data: &[u8]) -> [u8; METADATA_KEY_SIZE] {
+fn aux_hash_to_metadata_key(
+    dir_level1: u8,
+    dir_level2: u8,
+    data: &[u8],
+) -> [u8; METADATA_KEY_SIZE] {
     let mut key = [0; METADATA_KEY_SIZE];
     let hash = twox_hash::xxh3::hash128(data).to_be_bytes();
-    let prefix = prefix.to_be_bytes();
     key[0] = AUX_KEY_PREFIX;
-    key[1] = prefix[0];
-    key[2] = prefix[1];
+    key[1] = dir_level1;
+    key[2] = dir_level2;
     key[3..16].copy_from_slice(&hash[0..13]);
     key
 }
@@ -23,16 +26,19 @@ fn aux_hash_to_metadata_key(prefix: u16, data: &[u8]) -> [u8; METADATA_KEY_SIZE]
 /// * pg_logical/mappings -> 0x0101
 /// * pg_logical/snapshots -> 0x0102
 /// * pg_logical/replorigin_checkpoint -> 0x0103
+/// * pg_logical/<other things> -> 0x01FF
 /// * pg_replslot/ -> 0x0201
 /// * others -> 0xFFFF
 ///
 /// If you add new AUX files to this function, please also add a test case to `test_encoding_portable`.
+/// The new file type must have never been written to the storage before. Otherwise, there could be data
+/// corruptions as the new file belongs to a new prefix but it might have been stored under the `others` prefix.
 pub fn encode_aux_file_key(path: &str) -> Key {
     if let Some(fname) = path.strip_prefix("pg_logical/mappings/") {
-        let key = aux_hash_to_metadata_key(0x0101, fname.as_bytes());
+        let key = aux_hash_to_metadata_key(0x01, 0x01, fname.as_bytes());
         Key::from_metadata_key_fixed_size(&key)
     } else if let Some(fname) = path.strip_prefix("pg_logical/snapshots/") {
-        let key = aux_hash_to_metadata_key(0x0102, fname.as_bytes());
+        let key = aux_hash_to_metadata_key(0x01, 0x02, fname.as_bytes());
         Key::from_metadata_key_fixed_size(&key)
     } else if path == "pg_logical/replorigin_checkpoint" {
         let mut key = [0; METADATA_KEY_SIZE];
@@ -40,15 +46,20 @@ pub fn encode_aux_file_key(path: &str) -> Key {
         key[1] = 0x01;
         key[2] = 0x03;
         Key::from_metadata_key_fixed_size(&key)
+    } else if let Some(fname) = path.strip_prefix("pg_logical/") {
+        let key = aux_hash_to_metadata_key(0x01, 0xFF, fname.as_bytes());
+        Key::from_metadata_key_fixed_size(&key)
     } else if let Some(fname) = path.strip_prefix("pg_replslot/") {
-        let key = aux_hash_to_metadata_key(0x0201, fname.as_bytes());
+        let key = aux_hash_to_metadata_key(0x02, 0x01, fname.as_bytes());
         Key::from_metadata_key_fixed_size(&key)
     } else {
-        let key = aux_hash_to_metadata_key(0xFFFF, path.as_bytes());
-        warn!(
-            "unsupported aux file type: {}, putting to other files, non-scan-able by prefix",
-            path
-        );
+        let key = aux_hash_to_metadata_key(0xFF, 0xFF, path.as_bytes());
+        if cfg!(debug_assertions) {
+            warn!(
+                "unsupported aux file type: {}, putting to other files, non-scan-able by prefix",
+                path
+            );
+        }
         Key::from_metadata_key_fixed_size(&key)
     }
 }
@@ -77,23 +88,27 @@ mod tests {
         // To correct retrieve AUX files, the generated keys for the same file must be the same for all versions
         // of the page server.
         assert_eq!(
-            "9000000101E5B20C5F8DD5AA3289D6D9EAFA",
+            "8200000101E5B20C5F8DD5AA3289D6D9EAFA",
             encode_aux_file_key("pg_logical/mappings/test1").to_string()
         );
         assert_eq!(
-            "900000010239AAC544893139B26F501B97E6",
+            "820000010239AAC544893139B26F501B97E6",
             encode_aux_file_key("pg_logical/snapshots/test2").to_string()
         );
         assert_eq!(
-            "900000010300000000000000000000000000",
+            "820000010300000000000000000000000000",
             encode_aux_file_key("pg_logical/replorigin_checkpoint").to_string()
         );
         assert_eq!(
-            "9000000201772D0E5D71DE14DA86142A1619",
+            "82000001FF8635AF2134B7266EC5B4189FD6",
+            encode_aux_file_key("pg_logical/unsupported").to_string()
+        );
+        assert_eq!(
+            "8200000201772D0E5D71DE14DA86142A1619",
             encode_aux_file_key("pg_replslot/test3").to_string()
         );
         assert_eq!(
-            "900000FFFF1866EBEB53B807B26A2416F317",
+            "820000FFFF1866EBEB53B807B26A2416F317",
             encode_aux_file_key("other_file_not_supported").to_string()
         );
     }
