@@ -42,12 +42,12 @@ use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{thread, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use clap::Arg;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
@@ -110,6 +110,7 @@ fn main() -> Result<()> {
         .expect("Postgres connection string is required");
     let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
+    let resize_swap_on_bind = matches.get_flag("resize-swap-on-bind");
 
     // Extract OpenTelemetry context for the startup actions from the
     // TRACEPARENT and TRACESTATE env variables, and attach it to the current
@@ -275,11 +276,76 @@ fn main() -> Result<()> {
         "running compute with features: {:?}",
         state.pspec.as_ref().unwrap().spec.features
     );
+    // before we release the mutex, fetch the swap size (if any) for later.
+    let swap_size_bytes = state.pspec.as_ref().unwrap().spec.swap_size_bytes;
     drop(state);
 
     // Launch remaining service threads
     let _monitor_handle = launch_monitor(&compute);
     let _configurator_handle = launch_configurator(&compute);
+
+    // Resize swap to the desired size if the compute spec says so
+    if let (Some(size_bytes), true) = (swap_size_bytes, resize_swap_on_bind) {
+        // TODO(cloud#12047/sharnoff): For avoid 'swapoff' hitting during postgres startup, we need
+        // to run resize-swap to completion *before* starting postgres.
+        //
+        // Maybe we want to do this asynchronously in the future? If so, we should probably set
+        // SkipSwapon for VMs before doing that (so that we're not running 'swapoff' during or
+        // after postgres startup).
+        // We may also *not* want to do it asynchronously, so we can guarantee that the swap is
+        // actually available before postgres starts (otherwise we may have potential issues).
+        // Or maybe the startup delay isn't worth it, and if postgres OOMs it'll restart
+        // successfully once the swap is added.
+        //
+        // ---
+        //
+        // run `/neonvm/bin/resize-swap --once {size_bytes}`
+        //
+        // Passing '--once' causes resize-swap to delete itself after successful completion, which
+        // means that if compute_ctl restarts later, we won't end up calling 'swapoff' while
+        // postgres is running.
+        //
+        // NOTE: resize-swap is dumb. If present, --once MUST be the first arg.
+        const RESIZE_SWAP_BIN: &str = "/neonvm/bin/resize-swap";
+        // use a closure to make error handling easier.
+        let result = (|| -> anyhow::Result<()> {
+            let child_result = std::process::Command::new(RESIZE_SWAP_BIN)
+                .arg("--once")
+                .arg(size_bytes.to_string())
+                .spawn();
+            let mut child = match child_result {
+                Ok(child) => child,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    warn!("ignoring \"not found\" error from resize-swap to avoid swapoff while compute is running");
+                    return Ok(()); // returns from the closure
+                }
+                Err(e) => return Err(e).context("spawn() failed"), // returns from the closure
+            };
+
+            child
+                .wait()
+                .context("wait() failed")
+                .and_then(|status| match status.success() {
+                    true => Ok(()),
+                    false => Err(anyhow!("process exited with {status}")),
+                })
+        })();
+        match result {
+            Ok(()) => {
+                let size_gib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                info!(%size_bytes, %size_gib, "resized swap");
+            }
+            Err(err) => {
+                error!("could not run `{RESIZE_SWAP_BIN} {size_bytes}: {err:#}");
+                // TODO(#7239/sharnoff): What should we do here?
+                // Should we fail compute startup if swap resizing fails?
+                //
+                // It'd be a clearer signal, making it immediately clear if something's wrong, but
+                // swap is also often just nice-to-have, so having startup fail over a nice-to-have
+                // feature makes the system more fragile. Maybe that's ultimately the best though.
+            }
+        }
+    }
 
     // Start Postgres
     let mut delay_exit = false;
@@ -525,6 +591,11 @@ fn cli() -> clap::Command {
                     "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable",
                 )
                 .value_name("FILECACHE_CONNSTR"),
+        )
+        .arg(
+            Arg::new("resize-swap-on-bind")
+                .long("resize-swap-on-bind")
+                .action(clap::ArgAction::SetTrue),
         )
 }
 
