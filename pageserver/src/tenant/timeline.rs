@@ -3127,55 +3127,57 @@ impl Timeline {
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
 
-            let guard = timeline.layers.read().await;
-            let layers = guard.layer_map();
+            if unmapped_keyspace.start().is_some() {
+                let guard = timeline.layers.read().await;
+                let layers = guard.layer_map();
 
-            let in_memory_layer = layers.find_in_memory_layer(|l| {
-                let start_lsn = l.get_lsn_range().start;
-                cont_lsn > start_lsn
-            });
+                let in_memory_layer = layers.find_in_memory_layer(|l| {
+                    let start_lsn = l.get_lsn_range().start;
+                    cont_lsn > start_lsn
+                });
 
-            match in_memory_layer {
-                Some(l) => {
-                    let lsn_range = l.get_lsn_range().start..cont_lsn;
-                    fringe.update(
-                        ReadableLayer::InMemoryLayer(l),
-                        unmapped_keyspace.clone(),
-                        lsn_range,
-                    );
-                }
-                None => {
-                    for range in unmapped_keyspace.ranges.iter() {
-                        let results = layers.range_search(range.clone(), cont_lsn);
+                match in_memory_layer {
+                    Some(l) => {
+                        let lsn_range = l.get_lsn_range().start..cont_lsn;
+                        fringe.update(
+                            ReadableLayer::InMemoryLayer(l),
+                            unmapped_keyspace.clone(),
+                            lsn_range,
+                        );
+                    }
+                    None => {
+                        for range in unmapped_keyspace.ranges.iter() {
+                            let results = layers.range_search(range.clone(), cont_lsn);
 
-                        results
-                            .found
-                            .into_iter()
-                            .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                                (
-                                    ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
-                                    keyspace_accum.to_keyspace(),
-                                    lsn_floor..cont_lsn,
-                                )
-                            })
-                            .for_each(|(layer, keyspace, lsn_range)| {
-                                fringe.update(layer, keyspace, lsn_range)
-                            });
+                            results
+                                .found
+                                .into_iter()
+                                .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                                    (
+                                        ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
+                                        keyspace_accum.to_keyspace(),
+                                        lsn_floor..cont_lsn,
+                                    )
+                                })
+                                .for_each(|(layer, keyspace, lsn_range)| {
+                                    fringe.update(layer, keyspace, lsn_range)
+                                });
+                        }
                     }
                 }
-            }
 
-            // It's safe to drop the layer map lock after planning the next round of reads.
-            // The fringe keeps readable handles for the layers which are safe to read even
-            // if layers were compacted or flushed.
-            //
-            // The more interesting consideration is: "Why is the read algorithm still correct
-            // if the layer map changes while it is operating?". Doing a vectored read on a
-            // timeline boils down to pushing an imaginary lsn boundary downwards for each range
-            // covered by the read. The layer map tells us how to move the lsn downwards for a
-            // range at *a particular point in time*. It is fine for the answer to be different
-            // at two different time points.
-            drop(guard);
+                // It's safe to drop the layer map lock after planning the next round of reads.
+                // The fringe keeps readable handles for the layers which are safe to read even
+                // if layers were compacted or flushed.
+                //
+                // The more interesting consideration is: "Why is the read algorithm still correct
+                // if the layer map changes while it is operating?". Doing a vectored read on a
+                // timeline boils down to pushing an imaginary lsn boundary downwards for each range
+                // covered by the read. The layer map tells us how to move the lsn downwards for a
+                // range at *a particular point in time*. It is fine for the answer to be different
+                // at two different time points.
+                drop(guard);
+            }
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
                 let next_cont_lsn = lsn_range.start;
