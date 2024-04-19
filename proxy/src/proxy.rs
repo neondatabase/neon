@@ -178,13 +178,6 @@ impl ClientMode {
         }
     }
 
-    pub fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
-        match self {
-            ClientMode::Tcp => config.allow_self_signed_compute,
-            ClientMode::Websockets { .. } => false,
-        }
-    }
-
     fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
         match self {
             ClientMode::Tcp => s.sni_hostname(),
@@ -307,7 +300,6 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         ctx,
         &TcpMechanism { params: &params },
         &user_info,
-        mode.allow_self_signed_compute(config),
     )
     .or_else(|e| stream.throw_error(e))
     .await?;

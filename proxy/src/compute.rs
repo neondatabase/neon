@@ -10,7 +10,12 @@ use crate::{
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use std::{io, net::SocketAddr, time::Duration};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::tls::MakeTlsConnect;
@@ -27,9 +32,6 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     CouldNotConnect(#[from] io::Error),
-
-    #[error("{COULD_NOT_CONNECT}: {0}")]
-    TlsError(#[from] native_tls::Error),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     WakeComputeError(#[from] WakeComputeError),
@@ -69,7 +71,6 @@ impl ReportableError for ConnectionError {
             }
             ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
             ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
-            ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
         }
     }
@@ -239,7 +240,7 @@ pub struct PostgresConnection {
     /// Socket connected to a compute node.
     pub stream: tokio_postgres::maybe_tls_stream::MaybeTlsStream<
         tokio::net::TcpStream,
-        postgres_native_tls::TlsStream<tokio::net::TcpStream>,
+        tokio_postgres_rustls::RustlsStream<tokio::net::TcpStream>,
     >,
     /// PostgreSQL connection parameters.
     pub params: std::collections::HashMap<String, String>,
@@ -251,22 +252,39 @@ pub struct PostgresConnection {
     _guage: NumDbConnectionsGuard<'static>,
 }
 
+static ROOT_STORE: OnceLock<Arc<rustls::RootCertStore>> = OnceLock::new();
+
 impl ConnCfg {
     /// Connect to a corresponding compute node.
     pub async fn connect(
         &self,
         ctx: &mut RequestMonitoring,
-        allow_self_signed_compute: bool,
         aux: MetricsAuxInfo,
         timeout: Duration,
     ) -> Result<PostgresConnection, ConnectionError> {
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
 
-        let tls_connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(allow_self_signed_compute)
-            .build()
-            .unwrap();
-        let mut mk_tls = postgres_native_tls::MakeTlsConnector::new(tls_connector);
+        let root_store = ROOT_STORE.get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+
+            let certs = match rustls_native_certs::load_native_certs() {
+                Ok(certs) => certs,
+                Err(e) => {
+                    error!("could not load native ssl certs: {e:?}");
+                    return Arc::new(roots);
+                }
+            };
+
+            let (added, ignored) = roots.add_parsable_certificates(certs);
+            info!(added, ignored, "loaded native ssl certifications");
+
+            Arc::new(roots)
+        });
+
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store.clone())
+            .with_no_client_auth();
+        let mut mk_tls = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
         let tls = MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut mk_tls, host)?;
 
         // connect_raw() will not use TLS if sslmode is "disable"

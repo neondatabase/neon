@@ -107,7 +107,6 @@ impl PoolingBackend {
                 pool: self.pool.clone(),
             },
             &backend,
-            false, // do not allow self signed compute for http flow
         )
         .await
     }

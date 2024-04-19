@@ -92,7 +92,6 @@ pub async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
     ctx: &mut RequestMonitoring,
     mechanism: &M,
     user_info: &B,
-    allow_self_signed_compute: bool,
 ) -> Result<M::Connection, M::Error>
 where
     M::ConnectError: ShouldRetry + std::fmt::Debug,
@@ -103,8 +102,6 @@ where
     if let Some(keys) = user_info.get_keys() {
         node_info.set_keys(keys);
     }
-    node_info.allow_self_signed_compute = allow_self_signed_compute;
-    // let mut node_info = credentials.get_node_info(ctx, user_info).await?;
     mechanism.update_connect_config(&mut node_info.config);
 
     // try once

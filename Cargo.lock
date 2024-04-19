@@ -4010,17 +4010,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "postgres-native-tls"
-version = "0.5.0"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#20031d7a9ee1addeae6e0968e3899ae6bf01cee2"
-dependencies = [
- "native-tls",
- "tokio",
- "tokio-native-tls",
- "tokio-postgres",
-]
-
-[[package]]
 name = "postgres-protocol"
 version = "0.6.4"
 source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#20031d7a9ee1addeae6e0968e3899ae6bf01cee2"
@@ -4324,7 +4313,6 @@ dependencies = [
  "md5",
  "measured",
  "metrics",
- "native-tls",
  "once_cell",
  "opentelemetry",
  "parking_lot 0.12.1",
@@ -4332,7 +4320,6 @@ dependencies = [
  "parquet_derive",
  "pbkdf2",
  "pin-project-lite",
- "postgres-native-tls",
  "postgres-protocol",
  "postgres_backend",
  "pq_proto",
@@ -4351,6 +4338,7 @@ dependencies = [
  "rstest",
  "rustc-hash",
  "rustls 0.22.2",
+ "rustls-native-certs 0.7.0",
  "rustls-pemfile 2.1.1",
  "scopeguard",
  "serde",

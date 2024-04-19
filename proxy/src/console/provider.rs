@@ -293,9 +293,6 @@ pub struct NodeInfo {
 
     /// Labels for proxy's metrics.
     pub aux: MetricsAuxInfo,
-
-    /// Whether we should accept self-signed certificates (for testing)
-    pub allow_self_signed_compute: bool,
 }
 
 impl NodeInfo {
@@ -304,17 +301,9 @@ impl NodeInfo {
         ctx: &mut RequestMonitoring,
         timeout: Duration,
     ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
-        self.config
-            .connect(
-                ctx,
-                self.allow_self_signed_compute,
-                self.aux.clone(),
-                timeout,
-            )
-            .await
+        self.config.connect(ctx, self.aux.clone(), timeout).await
     }
     pub fn reuse_settings(&mut self, other: Self) {
-        self.allow_self_signed_compute = other.allow_self_signed_compute;
         self.config.reuse_password(other.config);
     }
 

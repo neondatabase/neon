@@ -519,7 +519,6 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
             branch_id: (&BranchId::from("branch")).into(),
             cold_start_info: crate::console::messages::ColdStartInfo::Warm,
         },
-        allow_self_signed_compute: false,
     };
     let (_, node) = cache.insert("key".into(), node);
     node
@@ -549,7 +548,7 @@ async fn connect_to_compute_success() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    connect_to_compute(&mut ctx, &mechanism, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -562,7 +561,7 @@ async fn connect_to_compute_retry() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    connect_to_compute(&mut ctx, &mechanism, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -576,7 +575,7 @@ async fn connect_to_compute_non_retry_1() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Fail]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    connect_to_compute(&mut ctx, &mechanism, &user_info)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -590,7 +589,7 @@ async fn connect_to_compute_non_retry_2() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Fail, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    connect_to_compute(&mut ctx, &mechanism, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -608,7 +607,7 @@ async fn connect_to_compute_non_retry_3() {
         Retry, Retry, Retry, Retry, Retry, /* the 17th time */ Retry,
     ]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    connect_to_compute(&mut ctx, &mechanism, &user_info)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -622,7 +621,7 @@ async fn wake_retry() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    connect_to_compute(&mut ctx, &mechanism, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -636,7 +635,7 @@ async fn wake_non_retry() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, WakeFail]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    connect_to_compute(&mut ctx, &mechanism, &user_info)
         .await
         .unwrap_err();
     mechanism.verify();

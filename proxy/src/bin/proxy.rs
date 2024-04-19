@@ -120,9 +120,6 @@ struct ProxyCliArgs {
     /// lock for `wake_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
     #[clap(long, default_value = config::WakeComputeLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
     wake_compute_lock: String,
-    /// Allow self-signed certificates for compute nodes (for testing)
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    allow_self_signed_compute: bool,
     #[clap(flatten)]
     sql_over_http: SqlOverHttpArgs,
     /// timeout for scram authentication protocol
@@ -458,9 +455,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    if args.allow_self_signed_compute {
-        warn!("allowing self-signed compute certificates");
-    }
     let backup_metric_collection_config = config::MetricBackupCollectionConfig {
         interval: args.metric_backup_collection_interval,
         remote_storage_config: remote_storage_from_toml(
@@ -575,7 +569,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         tls_config,
         auth_backend,
         metric_collection,
-        allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
         require_client_ip: args.require_client_ip,
