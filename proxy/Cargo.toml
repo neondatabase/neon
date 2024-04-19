@@ -85,7 +85,7 @@ tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["signal", "tracing"] }
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
@@ -98,6 +98,8 @@ webpki-roots.workspace = true
 x509-parser.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
+
+console-subscriber = "0.2.0"
 
 workspace_hack.workspace = true
 

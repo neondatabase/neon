@@ -214,6 +214,7 @@ jobs:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
+      RUSTFLAGS: "--cfg=tokio_unstable"
 
     steps:
       - name: Fix git ownership

@@ -26,7 +26,12 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
         .await
         .map(OpenTelemetryLayer::new);
 
+    // spawn the console server in the background,
+    // returning a `Layer`:
+    let console_layer = console_subscriber::spawn();
+
     tracing_subscriber::registry()
+        .with(console_layer)
         .with(env_filter)
         .with(otlp_layer)
         .with(fmt_layer)
