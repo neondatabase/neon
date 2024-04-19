@@ -147,6 +147,25 @@ impl std::fmt::Display for ReadPathStatsInner {
 }
 
 impl ReadPathStatsInner {
+    pub fn reset(&self) {
+        self.get_reconstruct_data_time
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.plan_read_time
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.read_time
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.sort_reconstruct_data_time
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.layer_search_time
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.keyspace_manipulation_time
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.buffer_cache_hits
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.layers_visited
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn add_get_reconstruct_data_time(&self, dur: Duration) {
         self.get_reconstruct_data_time.fetch_add(
             dur.as_micros().try_into().unwrap(),
@@ -395,6 +414,7 @@ impl RequestContext {
     }
 
     pub fn report_stats(&self) {
-        tracing::info!("Read path stats: {}", *self.read_path_stats.inner)
+        tracing::info!("Read path stats: {}", *self.read_path_stats.inner);
+        self.read_path_stats.inner.reset();
     }
 }
