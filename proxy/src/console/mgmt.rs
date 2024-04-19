@@ -40,28 +40,31 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
 
         let span = info_span!("mgmt", peer = %peer_addr);
 
-        tokio::task::spawn(
-            async move {
-                info!("serving a new console management API connection");
+        tokio::task::Builder::new()
+            .name("mgmt handler")
+            .spawn(
+                async move {
+                    info!("serving a new console management API connection");
 
-                // these might be long running connections, have a separate logging for cancelling
-                // on shutdown and other ways of stopping.
-                let cancelled = scopeguard::guard(tracing::Span::current(), |span| {
-                    let _e = span.entered();
-                    info!("console management API task cancelled");
-                });
+                    // these might be long running connections, have a separate logging for cancelling
+                    // on shutdown and other ways of stopping.
+                    let cancelled = scopeguard::guard(tracing::Span::current(), |span| {
+                        let _e = span.entered();
+                        info!("console management API task cancelled");
+                    });
 
-                if let Err(e) = handle_connection(socket).await {
-                    error!("serving failed with an error: {e}");
-                } else {
-                    info!("serving completed");
+                    if let Err(e) = handle_connection(socket).await {
+                        error!("serving failed with an error: {e}");
+                    } else {
+                        info!("serving completed");
+                    }
+
+                    // we can no longer get dropped
+                    scopeguard::ScopeGuard::into_inner(cancelled);
                 }
-
-                // we can no longer get dropped
-                scopeguard::ScopeGuard::into_inner(cancelled);
-            }
-            .instrument(span),
-        );
+                .instrument(span),
+            )
+            .unwrap();
     }
 }
 

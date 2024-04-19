@@ -63,7 +63,10 @@ impl Api {
             let (client, connection) =
                 tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
 
-            tokio::spawn(connection);
+            tokio::task::Builder::new()
+                .name("mock conn")
+                .spawn(connection)
+                .unwrap();
             let secret = match get_execute_postgres_query(
                 &client,
                 "select rolpassword from pg_catalog.pg_authid where rolname = $1",

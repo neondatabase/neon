@@ -142,10 +142,13 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                 // To make sure that the entry is invalidated, let's repeat the invalidation in INVALIDATION_LAG seconds.
                 // TODO: include the version (or the timestamp) in the message and invalidate only if the entry is cached before the message.
                 let cache = self.cache.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(INVALIDATION_LAG).await;
-                    invalidate_cache(cache, msg);
-                });
+                tokio::task::Builder::new()
+                    .name("invalidate cache lazy")
+                    .spawn(async move {
+                        tokio::time::sleep(INVALIDATION_LAG).await;
+                        invalidate_cache(cache, msg);
+                    })
+                    .unwrap();
             }
         }
 

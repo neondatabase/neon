@@ -492,7 +492,7 @@ pub fn poll_client<C: ClientInnerExt>(
     let cancel = CancellationToken::new();
     let cancelled = cancel.clone().cancelled_owned();
 
-    tokio::spawn(
+    tokio::task::Builder::new().name("pooled conn").spawn(
     async move {
         let _conn_gauge = conn_gauge;
         let mut idle_timeout = pin!(tokio::time::sleep(idle));
@@ -565,7 +565,7 @@ pub fn poll_client<C: ClientInnerExt>(
         }).await;
 
     }
-    .instrument(span));
+    .instrument(span)).unwrap();
     let inner = ClientInner {
         inner: client,
         session: tx,

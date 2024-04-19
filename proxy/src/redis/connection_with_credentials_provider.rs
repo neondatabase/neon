@@ -108,10 +108,12 @@ impl ConnectionWithCredentialsProvider {
         if let Credentials::Dynamic(credentials_provider, _) = &self.credentials {
             let credentials_provider = credentials_provider.clone();
             let con2 = con.clone();
-            let f = tokio::spawn(async move {
-                let _ = Self::keep_connection(con2, credentials_provider).await;
-            });
-            self.refresh_token_task = Some(f);
+            let f = tokio::task::Builder::new()
+                .name("redis keep connection")
+                .spawn(async move {
+                    let _ = Self::keep_connection(con2, credentials_provider).await;
+                });
+            self.refresh_token_task = Some(f.unwrap());
         }
         match Self::ping(&mut con).await {
             Ok(()) => {

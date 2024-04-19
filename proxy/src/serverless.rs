@@ -61,22 +61,28 @@ pub async fn task_main(
     let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
     {
         let conn_pool = Arc::clone(&conn_pool);
-        tokio::spawn(async move {
-            conn_pool.gc_worker(StdRng::from_entropy()).await;
-        });
+        tokio::task::Builder::new()
+            .name("serverless pool gc")
+            .spawn(async move {
+                conn_pool.gc_worker(StdRng::from_entropy()).await;
+            })
+            .unwrap();
     }
 
     // shutdown the connection pool
-    tokio::spawn({
-        let cancellation_token = cancellation_token.clone();
-        let conn_pool = conn_pool.clone();
-        async move {
-            cancellation_token.cancelled().await;
-            tokio::task::spawn_blocking(move || conn_pool.shutdown())
-                .await
-                .unwrap();
-        }
-    });
+    tokio::task::Builder::new()
+        .name("serverless pool shutdown")
+        .spawn({
+            let cancellation_token = cancellation_token.clone();
+            let conn_pool = conn_pool.clone();
+            async move {
+                cancellation_token.cancelled().await;
+                tokio::task::spawn_blocking(move || conn_pool.shutdown())
+                    .await
+                    .unwrap();
+            }
+        })
+        .unwrap();
 
     let backend = Arc::new(PoolingBackend {
         pool: Arc::clone(&conn_pool),

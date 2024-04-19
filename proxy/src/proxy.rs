@@ -296,13 +296,9 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         }
     };
 
-    let mut node = connect_to_compute(
-        ctx,
-        &TcpMechanism { params: &params },
-        &user_info,
-    )
-    .or_else(|e| stream.throw_error(e))
-    .await?;
+    let mut node = connect_to_compute(ctx, &TcpMechanism { params: &params }, &user_info)
+        .or_else(|e| stream.throw_error(e))
+        .await?;
 
     let session = cancellation_handler.get_session();
     prepare_client_connection(&node, &session, &mut stream).await?;

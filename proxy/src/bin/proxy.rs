@@ -534,7 +534,10 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 )
                 .unwrap(),
             ));
-            tokio::spawn(locks.garbage_collect_worker());
+            tokio::task::Builder::new()
+                .name("wake compute lock gc")
+                .spawn(locks.garbage_collect_worker())
+                .unwrap();
 
             let url = args.auth_endpoint.parse()?;
             let endpoint = http::Endpoint::new(url, http::new_client());

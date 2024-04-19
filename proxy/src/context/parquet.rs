@@ -141,12 +141,15 @@ pub async fn worker(
     LOG_CHAN.set(tx.downgrade()).unwrap();
 
     // setup row stream that will close on cancellation
-    tokio::spawn(async move {
-        cancellation_token.cancelled().await;
-        // dropping this sender will cause the channel to close only once
-        // all the remaining inflight requests have been completed.
-        drop(tx);
-    });
+    tokio::task::Builder::new()
+        .name("drop parquet conn")
+        .spawn(async move {
+            cancellation_token.cancelled().await;
+            // dropping this sender will cause the channel to close only once
+            // all the remaining inflight requests have been completed.
+            drop(tx);
+        })
+        .unwrap();
     let rx = futures::stream::poll_fn(move |cx| rx.poll_recv(cx));
     let rx = rx.map(RequestData::from);
 
