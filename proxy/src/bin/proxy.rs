@@ -200,6 +200,12 @@ struct ProxyCliArgs {
     /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
     #[clap(long, default_value = "4194304")]
     metric_backup_collection_chunk_size: usize,
+    /// Whether to retry the connection to the compute node
+    #[clap(long, default_value = config::RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)]
+    connect_to_compute_retry: String,
+    /// Whether to retry the wake_compute request
+    #[clap(long, default_value = config::RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)]
+    wake_compute_retry: String,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -584,6 +590,10 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
         aws_region: args.aws_region.clone(),
+        wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
+        connect_to_compute_retry_config: config::RetryConfig::parse(
+            &args.connect_to_compute_retry,
+        )?,
     }));
 
     Ok(config)

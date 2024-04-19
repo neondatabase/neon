@@ -308,6 +308,8 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         &TcpMechanism { params: &params },
         &user_info,
         mode.allow_self_signed_compute(config),
+        config.wake_compute_retry_config,
+        config.connect_to_compute_retry_config,
     )
     .or_else(|e| stream.throw_error(e))
     .await?;

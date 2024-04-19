@@ -108,6 +108,8 @@ impl PoolingBackend {
             },
             &backend,
             false, // do not allow self signed compute for http flow
+            self.config.wake_compute_retry_config,
+            self.config.connect_to_compute_retry_config,
         )
         .await
     }
