@@ -5084,6 +5084,7 @@ dependencies = [
  "aws-smithy-async",
  "bincode",
  "bytes",
+ "camino",
  "chrono",
  "clap",
  "crc32c",

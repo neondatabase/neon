@@ -1,9 +1,12 @@
+use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
 use s3_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use s3_scrubber::scan_metadata::scan_metadata;
+use s3_scrubber::tenant_snapshot::SnapshotDownloader;
 use s3_scrubber::{init_logging, BucketConfig, ConsoleConfig, NodeKind, TraversingDepth};
 
 use clap::{Parser, Subcommand};
+use utils::id::TenantId;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -38,6 +41,12 @@ enum Command {
         #[arg(long = "tenant-id", num_args = 0..)]
         tenant_ids: Vec<TenantShardId>,
     },
+    TenantSnapshot {
+        #[arg(long = "tenant-id", num_args = 0..)]
+        tenant_id: TenantId,
+        #[arg(short, long)]
+        output_path: Utf8PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -50,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
         Command::ScanMetadata { .. } => "scan",
         Command::FindGarbage { .. } => "find-garbage",
         Command::PurgeGarbage { .. } => "purge-garbage",
+        Command::TenantSnapshot { .. } => "tenant-snapshot",
     };
     let _guard = init_logging(&format!(
         "{}_{}_{}_{}.log",
@@ -101,6 +111,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::PurgeGarbage { input_path, mode } => {
             purge_garbage(input_path, mode, !cli.delete).await
+        }
+        Command::TenantSnapshot {
+            tenant_id,
+            output_path,
+        } => {
+            let downloader = SnapshotDownloader::new(bucket_config, tenant_id, output_path)?;
+            downloader.download().await
         }
     }
 }
