@@ -87,41 +87,28 @@ impl<'a> ShardedRange<'a> {
     /// Estimate the physical pages that are within this range, on this shard.  This returns
     /// u32::MAX if the range spans relations: this return value should be interpreted as "large".
     pub fn page_count(&self) -> u32 {
-        let start = self.range.start;
-        let end = self.range.end;
-        // Although only field4 & field6 are included in the hash, if other fields differ then
-        // it would be inaccurate for us to return a block count that assumed they were the same.
-        if end.field1 != start.field1
-            || end.field2 != start.field2
-            || end.field3 != start.field3
-            || end.field4 != start.field4
-        {
+        let raw_size = Self::raw_size(&self.range);
+        if raw_size == u32::MAX {
             return u32::MAX;
         }
 
-        // Fast path: avoid hashing if we can immediately identify the owner of the whole range
+        // Special case for single sharded tenants: our logical and physical sizes are the same
         if self.shard_identity.count < ShardCount::new(2) {
-            let start = (start.field5 as u64) << 32 | start.field6 as u64;
-            let end = (end.field5 as u64) << 32 | end.field6 as u64;
-
-            let diff = end - start;
-            if diff > u32::MAX as u64 {
-                return u32::MAX;
-            } else {
-                return diff as u32;
-            }
+            return raw_size;
         }
 
         // Special cases for single keys like logical sizes
-        if end == start.add(1) && self.shard_identity.is_key_local(&start) {
+        if self.range.end == self.range.start.add(1)
+            && self.shard_identity.is_key_local(&self.range.start)
+        {
             return 1;
         }
 
         // Normal path: step through stripes and part-stripes in the range, evaluate whether each one belongs
         // to Self, and add the stripe's block count to our total if so.
         let mut result: u64 = 0;
-        let mut stripe_start = start;
-        while stripe_start < end {
+        let mut stripe_start = self.range.start;
+        while stripe_start < self.range.end {
             let is_key_disposable = self.shard_identity.is_key_disposable(&stripe_start);
 
             // Count up to the next stripe_size boundary
@@ -130,7 +117,7 @@ impl<'a> ShardedRange<'a> {
                 - (stripe_start.field6 - stripe_index * self.shard_identity.stripe_size.0);
 
             let next_stripe_start = stripe_start.add(stripe_remainder);
-            let stripe_end = std::cmp::min(end, next_stripe_start);
+            let stripe_end = std::cmp::min(self.range.end, next_stripe_start);
 
             // If this blocks in this stripe belong to us, add them to our count
             if !is_key_disposable {
@@ -141,10 +128,42 @@ impl<'a> ShardedRange<'a> {
 
             stripe_start = next_stripe_start;
         }
+
+        // Sharding should always decrease the number of pages we estimate, never increase it
+        debug_assert!(result <= raw_size as u64);
+
         if result > u32::MAX as u64 {
             u32::MAX
         } else {
             result as u32
+        }
+    }
+
+    /// Whereas `page_count` estimates the number of pages physically in this range on this shard,
+    /// this function simply calculates the number of pages in the space, without accounting for those
+    /// pages that would not actually be stored on this node.
+    ///
+    /// Don't use this function in code that works with physical entities like layer files.
+    fn raw_size(range: &Range<Key>) -> u32 {
+        let start = range.start;
+        let end = range.end;
+
+        if end.field1 != start.field1
+            || end.field2 != start.field2
+            || end.field3 != start.field3
+            || end.field4 != start.field4
+        {
+            return u32::MAX;
+        }
+
+        let start = (start.field5 as u64) << 32 | start.field6 as u64;
+        let end = (end.field5 as u64) << 32 | end.field6 as u64;
+
+        let diff = end - start;
+        if diff > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            diff as u32
         }
     }
 }
@@ -285,16 +304,16 @@ impl KeySpace {
         self.ranges.last().map(|range| range.end)
     }
 
-    #[allow(unused)]
-    pub fn total_size(&self) -> usize {
+    /// The size of the keyspace in pages, before accounting for sharding
+    pub fn total_raw_size(&self) -> usize {
         self.ranges
             .iter()
-            .map(|range| key_range_size(range) as usize)
+            .map(|range| ShardedRange::raw_size(range) as usize)
             .sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.total_size() == 0
+        self.total_raw_size() == 0
     }
 
     fn overlaps_at(&self, range: &Range<Key>) -> Option<usize> {
@@ -367,7 +386,7 @@ impl KeySpaceAccum {
 
     #[inline(always)]
     pub fn add_range(&mut self, range: Range<Key>) {
-        self.size += key_range_size(&range) as u64;
+        self.size += ShardedRange::raw_size(&range) as u64;
 
         match self.accum.as_mut() {
             Some(accum) => {
@@ -399,7 +418,9 @@ impl KeySpaceAccum {
         std::mem::take(self).to_keyspace()
     }
 
-    pub fn size(&self) -> u64 {
+    // The total number of keys in this object, ignoring any sharding effects that might cause some of
+    // the keys to be omitted in storage on this shard.
+    pub fn raw_size(&self) -> u64 {
         self.size
     }
 }
@@ -452,30 +473,6 @@ impl KeySpaceRandomAccum {
         std::mem::swap(self, &mut prev_accum);
 
         prev_accum.to_keyspace()
-    }
-}
-
-#[inline(always)]
-fn key_range_size(key_range: &Range<Key>) -> u32 {
-    let start = key_range.start;
-    let end = key_range.end;
-
-    if end.field1 != start.field1
-        || end.field2 != start.field2
-        || end.field3 != start.field3
-        || end.field4 != start.field4
-    {
-        return u32::MAX;
-    }
-
-    let start = (start.field5 as u64) << 32 | start.field6 as u64;
-    let end = (end.field5 as u64) << 32 | end.field6 as u64;
-
-    let diff = end - start;
-    if diff > u32::MAX as u64 {
-        u32::MAX
-    } else {
-        diff as u32
     }
 }
 
@@ -532,14 +529,17 @@ mod tests {
             accum.add_range(range.clone());
         }
 
-        let expected_size: u64 = ranges.iter().map(|r| key_range_size(r) as u64).sum();
-        assert_eq!(accum.size(), expected_size);
+        let expected_size: u64 = ranges
+            .iter()
+            .map(|r| ShardedRange::raw_size(r) as u64)
+            .sum();
+        assert_eq!(accum.raw_size(), expected_size);
 
         assert_ks_eq(&accum.consume_keyspace(), ranges.clone());
-        assert_eq!(accum.size(), 0);
+        assert_eq!(accum.raw_size(), 0);
 
         assert_ks_eq(&accum.consume_keyspace(), vec![]);
-        assert_eq!(accum.size(), 0);
+        assert_eq!(accum.raw_size(), 0);
 
         for range in &ranges {
             accum.add_range(range.clone());
