@@ -970,11 +970,9 @@ impl Timeline {
                         return Err(GetVectoredError::MissingKey(key))
                     }
                     Err(Other(err))
-                        if err.chain().any(|cause| {
-                            cause
-                                .to_string()
-                                .contains("downloading evicted layer failed")
-                        }) =>
+                        if err
+                            .to_string()
+                            .contains("downloading evicted layer file failed") =>
                     {
                         return Err(GetVectoredError::Other(err))
                     }
