@@ -35,6 +35,8 @@ use proxy::config::{self, ProxyConfig};
 use proxy::serverless;
 use std::net::SocketAddr;
 use std::pin::pin;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -233,8 +235,21 @@ struct SqlOverHttpArgs {
     sql_over_http_pool_shards: usize,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name_fn(|| {
+            static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+            let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+            format!("worker-{}", id)
+        })
+        .build()
+        .unwrap();
+
+    rt.block_on(main2())
+}
+
+async fn main2() -> anyhow::Result<()> {
     let _logging_guard = proxy::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
