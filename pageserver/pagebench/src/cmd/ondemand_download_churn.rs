@@ -198,7 +198,7 @@ async fn timeline_actor(
         layers: Vec<mpsc::Sender<OwnedSemaphorePermit>>,
         concurrency: Arc<tokio::sync::Semaphore>,
     }
-    loop {
+    while !token.is_cancelled() {
         debug!("restarting timeline");
         let layer_map_info = mgmt_api_client
             .layer_map_info(tenant_shard_id, timeline.timeline_id)
@@ -234,11 +234,7 @@ async fn timeline_actor(
 
         live_stats.timeline_restart_done();
 
-        loop {
-            if token.is_cancelled() {
-                return;
-            }
-
+        while !token.is_cancelled() {
             assert!(!timeline.joinset.is_empty());
             if let Some(res) = timeline.joinset.try_join_next() {
                 debug!(?res, "a layer actor exited, should not happen");
