@@ -532,11 +532,14 @@ pub struct RetryConfig {
 
 impl RetryConfig {
     /// Default options for RetryConfig.
+
     /// Total delay for 5 retries with 1s base delay and 2.0 backoff factor is 15s.
     pub const CONNECT_TO_COMPUTE_DEFAULT_VALUES: &'static str =
         "num_retries=5,base_retry_wait_duration=1s,retry_wait_exponent_base=2.0";
+    /// Total delay for 5 retries with 1s base delay and 2.0 backoff factor is 15s.
+    /// Cplane has timeout of 60s on each request.
     pub const WAKE_COMPUTE_DEFAULT_VALUES: &'static str =
-        "num_retries=2,base_retry_wait_duration=1s,retry_wait_exponent_base=2.0";
+        "num_retries=5,base_retry_wait_duration=1s,retry_wait_exponent_base=2.0";
 
     /// Parse retry options passed via cmdline.
     /// Example: [`Self::DEFAULT_VALUES`].
