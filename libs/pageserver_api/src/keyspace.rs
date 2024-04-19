@@ -27,9 +27,9 @@ pub struct KeySpace {
 /// The start + end keys may not belong to the shard: these specify where layer files should
 /// start  + end, but we will never actually read/write those keys.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ShardedRange<'a> {
-    pub(crate) shard_identity: &'a ShardIdentity,
-    pub(crate) range: Range<Key>,
+pub struct ShardedRange<'a> {
+    pub shard_identity: &'a ShardIdentity,
+    pub range: Range<Key>,
 }
 
 impl<'a> ShardedRange<'a> {
@@ -456,7 +456,7 @@ impl KeySpaceRandomAccum {
 }
 
 #[inline(always)]
-pub fn key_range_size(key_range: &Range<Key>) -> u32 {
+fn key_range_size(key_range: &Range<Key>) -> u32 {
     let start = key_range.start;
     let end = key_range.end;
 
