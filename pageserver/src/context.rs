@@ -415,6 +415,9 @@ impl RequestContext {
 
     pub fn report_stats(&self) {
         tracing::info!("Read path stats: {}", *self.read_path_stats.inner);
+    }
+
+    pub fn reset_stats(&self) {
         self.read_path_stats.inner.reset();
     }
 }

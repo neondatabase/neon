@@ -802,6 +802,8 @@ impl Timeline {
             ctx.report_stats();
         }
 
+        ctx.reset_stats();
+
         res
     }
 
