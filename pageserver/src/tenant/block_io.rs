@@ -203,7 +203,10 @@ impl<'a> FileBlockReader<'a> {
                     format!("Failed to read immutable buf: {e:#}"),
                 )
             })? {
-            ReadBufResult::Found(guard) => Ok(guard.into()),
+            ReadBufResult::Found(guard) => {
+                ctx.read_path_stats.inner.inc_buffer_cache_hits();
+                Ok(guard.into())
+            }
             ReadBufResult::NotFound(write_guard) => {
                 // Read the page from disk into the buffer
                 let write_guard = self.fill_buffer(write_guard, blknum).await?;

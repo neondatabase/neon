@@ -3182,11 +3182,19 @@ impl Timeline {
                 return Err(GetVectoredError::Cancelled);
             }
 
+            let keyspace_manip_timer = Instant::now();
+
             let keys_done_last_step = reconstruct_state.consume_done_keys();
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
 
+            ctx.read_path_stats
+                .inner
+                .add_keyspace_manipulation_timer(keyspace_manip_timer.elapsed());
+
             if unmapped_keyspace.start().is_some() {
+                let layer_search_timer = Instant::now();
+
                 let guard = timeline.layers.read().await;
                 let layers = guard.layer_map();
 
@@ -3241,6 +3249,10 @@ impl Timeline {
                 // range at *a particular point in time*. It is fine for the answer to be different
                 // at two different time points.
                 drop(guard);
+
+                ctx.read_path_stats
+                    .inner
+                    .add_layer_search_time(layer_search_timer.elapsed());
             }
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {

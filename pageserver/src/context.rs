@@ -117,6 +117,9 @@ pub struct ReadPathStatsInner {
     pub plan_read_time: AtomicU32,
     pub read_time: AtomicU32,
     pub sort_reconstruct_data_time: AtomicU32,
+    pub layer_search_time: AtomicU32,
+    pub keyspace_manipulation_time: AtomicU32,
+    pub buffer_cache_hits: AtomicU32,
     pub layers_visited: AtomicU32,
 }
 
@@ -124,12 +127,18 @@ impl std::fmt::Display for ReadPathStatsInner {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "get_reconstruct_data_time={} plan_read_time={} read_time={} sort_time={} layers_visited={}",
+            "get_reconstruct_data_time={} plan_read_time={} read_time={} sort_time={} layer_search_time={} keyspace_manipulation_time={} buffer_cache_hits={} layers_visited={}",
             self.get_reconstruct_data_time.load(std::sync::atomic::Ordering::Relaxed),
             self.plan_read_time
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.read_time.load(std::sync::atomic::Ordering::Relaxed),
             self.sort_reconstruct_data_time
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.layer_search_time
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.keyspace_manipulation_time
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.buffer_cache_hits
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.layers_visited
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -153,7 +162,7 @@ impl ReadPathStatsInner {
     }
 
     pub fn add_read_time(&self, dur: Duration) {
-        self.plan_read_time.fetch_add(
+        self.read_time.fetch_add(
             dur.as_micros().try_into().unwrap(),
             std::sync::atomic::Ordering::Relaxed,
         );
@@ -166,8 +175,27 @@ impl ReadPathStatsInner {
         );
     }
 
+    pub fn add_layer_search_time(&self, dur: Duration) {
+        self.layer_search_time.fetch_add(
+            dur.as_micros().try_into().unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn add_keyspace_manipulation_timer(&self, dur: Duration) {
+        self.keyspace_manipulation_time.fetch_add(
+            dur.as_micros().try_into().unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     pub fn inc_layer_visited(&self) {
         self.layers_visited
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn inc_buffer_cache_hits(&self) {
+        self.buffer_cache_hits
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
