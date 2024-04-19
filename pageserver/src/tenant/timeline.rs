@@ -3897,7 +3897,7 @@ impl Timeline {
         }
 
         let keyspace = self.collect_keyspace(lsn, ctx).await?;
-        let partitioning = keyspace.partition(partition_size);
+        let partitioning = keyspace.partition(&self.shard_identity, partition_size);
 
         *partitioning_guard = (partitioning, lsn);
 
