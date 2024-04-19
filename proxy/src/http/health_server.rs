@@ -75,6 +75,10 @@ async fn prometheus_metrics_handler(
 
     let span = info_span!("blocking");
     let body = tokio::task::spawn_blocking(move || {
+        // there are situations where we lose scraped metrics under load, try to gather some clues
+        // since all nodes are queried this, keep the message count low.
+        let spawned_at = std::time::Instant::now();
+
         let _span = span.entered();
 
         let mut state = state.lock().unwrap();
@@ -84,11 +88,19 @@ async fn prometheus_metrics_handler(
             .collect_group_into(&mut *encoder)
             .unwrap_or_else(|infallible| match infallible {});
 
+        let encoded_at = std::time::Instant::now();
+
         let body = encoder.finish();
+
+        let spawned_in = spawned_at - started_at;
+        let encoded_in = encoded_at - spawned_at;
+        let total = encoded_at - started_at;
 
         tracing::info!(
             bytes = body.len(),
-            elapsed_ms = started_at.elapsed().as_millis(),
+            total_ms = total.as_millis(),
+            spawning_ms = spawned_in.as_millis(),
+            encoding_ms = encoded_in.as_millis(),
             "responded /metrics"
         );
 
