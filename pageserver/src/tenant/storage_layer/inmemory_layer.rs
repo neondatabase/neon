@@ -298,6 +298,9 @@ impl InMemoryLayer {
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
+        ctx.read_path_stats.inner.inc_layer_visited();
+        let read_timer = Instant::now();
+
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
@@ -333,6 +336,10 @@ impl InMemoryLayer {
             }
         }
 
+        ctx.read_path_stats
+            .inner
+            .add_read_time(read_timer.elapsed());
+
         // release lock on 'inner'
 
         // If an older page image is needed to reconstruct the page, let the
@@ -355,6 +362,9 @@ impl InMemoryLayer {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
+        ctx.read_path_stats.inner.inc_layer_visited();
+        let plan_timer = Instant::now();
+
         let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
             .build();
@@ -394,6 +404,12 @@ impl InMemoryLayer {
             }
         }
 
+        ctx.read_path_stats
+            .inner
+            .add_plan_read_time(plan_timer.elapsed());
+
+        let read_timer = Instant::now();
+
         let keyspace_size = keyspace.total_size();
 
         let mut completed_keys = HashSet::new();
@@ -427,6 +443,10 @@ impl InMemoryLayer {
         }
 
         reconstruct_state.on_lsn_advanced(&keyspace, self.start_lsn);
+
+        ctx.read_path_stats
+            .inner
+            .add_read_time(read_timer.elapsed());
 
         Ok(())
     }

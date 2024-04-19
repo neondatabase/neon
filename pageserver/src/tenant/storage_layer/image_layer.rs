@@ -55,6 +55,7 @@ use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tracing::*;
@@ -422,6 +423,9 @@ impl ImageLayerInner {
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
+        ctx.read_path_stats.inner.inc_layer_visited();
+        let plan_timer = Instant::now();
+
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
@@ -437,6 +441,12 @@ impl ImageLayerInner {
             )
             .await?
         {
+            ctx.read_path_stats
+                .inner
+                .add_plan_read_time(plan_timer.elapsed());
+
+            let read_timer = Instant::now();
+
             let blob = block_reader
                 .block_cursor()
                 .read_blob(
@@ -450,6 +460,11 @@ impl ImageLayerInner {
             let value = Bytes::from(blob);
 
             reconstruct_state.img = Some((self.lsn, value));
+
+            ctx.read_path_stats
+                .inner
+                .add_read_time(read_timer.elapsed());
+
             Ok(ValueReconstructResult::Complete)
         } else {
             Ok(ValueReconstructResult::Missing)
@@ -464,13 +479,26 @@ impl ImageLayerInner {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
+        ctx.read_path_stats.inner.inc_layer_visited();
+        let plan_timer = Instant::now();
+
         let reads = self
             .plan_reads(keyspace, ctx)
             .await
             .map_err(GetVectoredError::Other)?;
 
+        ctx.read_path_stats
+            .inner
+            .add_plan_read_time(plan_timer.elapsed());
+
+        let read_timer = Instant::now();
+
         self.do_reads_and_update_state(reads, reconstruct_state)
             .await;
+
+        ctx.read_path_stats
+            .inner
+            .add_read_time(read_timer.elapsed());
 
         Ok(())
     }

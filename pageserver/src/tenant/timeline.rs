@@ -739,7 +739,7 @@ impl Timeline {
             None => None,
         };
 
-        match self.conf.get_impl {
+        let res = match self.conf.get_impl {
             GetImpl::Legacy => {
                 let reconstruct_state = ValueReconstructState {
                     records: Vec::new(),
@@ -796,7 +796,13 @@ impl Timeline {
                     }
                 }
             }
+        };
+
+        if key.to_i128() % 100 < 10 {
+            ctx.report_stats();
         }
+
+        res
     }
 
     /// Not subject to [`Self::timeline_get_throttle`].
@@ -818,9 +824,13 @@ impl Timeline {
         let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
             .for_get_kind(crate::metrics::GetKind::Singular)
             .start_timer();
+        let get_reconstruct_data_timer = Instant::now();
         let path = self
             .get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
+        ctx.read_path_stats
+            .inner
+            .add_get_reconstruct_data_time(get_reconstruct_data_timer.elapsed());
         timer.stop_and_record();
 
         let start = Instant::now();
@@ -1015,8 +1025,12 @@ impl Timeline {
         let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
             .for_get_kind(get_kind)
             .start_timer();
+        let timer = Instant::now();
         self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
             .await?;
+        ctx.read_path_stats
+            .inner
+            .add_get_reconstruct_data_time(timer.elapsed());
         get_data_timer.stop_and_record();
 
         let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
@@ -1029,7 +1043,11 @@ impl Timeline {
                     results.insert(key, Err(err));
                 }
                 Ok(state) => {
+                    let timer = Instant::now();
                     let state = ValueReconstructState::from(state);
+                    ctx.read_path_stats
+                        .inner
+                        .add_sort_reconstruct_data_time(timer.elapsed());
 
                     let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
                     results.insert(key, reconstruct_res);
@@ -1072,10 +1090,10 @@ impl Timeline {
                 panic!(concat!("Sequential get failed with {}, but vectored get did not",
                                " - keyspace={:?} lsn={}"),
                        seq_err, keyspace, lsn) },
-            (Ok(_), Err(vec_err)) => {
+            (Ok(seq_ok), Err(vec_err)) => {
                 panic!(concat!("Vectored get failed with {}, but sequential get did not",
-                               " - keyspace={:?} lsn={}"),
-                       vec_err, keyspace, lsn) },
+                               " - keyspace={:?} lsn={} seq_ok={:?}"),
+                       vec_err, keyspace, lsn, seq_ok) },
             (Err(seq_err), Err(vec_err)) => {
                 assert!(errors_match(seq_err, vec_err),
                         "Mismatched errors: {seq_err} != {vec_err} - keyspace={keyspace:?} lsn={lsn}")},

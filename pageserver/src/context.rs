@@ -86,6 +86,11 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
+use std::{
+    sync::{atomic::AtomicU32, Arc},
+    time::Duration,
+};
+
 use crate::task_mgr::TaskKind;
 
 pub(crate) mod optional_counter;
@@ -98,6 +103,73 @@ pub struct RequestContext {
     access_stats_behavior: AccessStatsBehavior,
     page_content_kind: PageContentKind,
     pub micros_spent_throttled: optional_counter::MicroSecondsCounterU32,
+    pub read_path_stats: ReadPathStats,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ReadPathStats {
+    pub inner: Arc<ReadPathStatsInner>,
+}
+
+#[derive(Debug, Default)]
+pub struct ReadPathStatsInner {
+    pub get_reconstruct_data_time: AtomicU32,
+    pub plan_read_time: AtomicU32,
+    pub read_time: AtomicU32,
+    pub sort_reconstruct_data_time: AtomicU32,
+    pub layers_visited: AtomicU32,
+}
+
+impl std::fmt::Display for ReadPathStatsInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "get_reconstruct_data_time={} plan_read_time={} read_time={} sort_time={} layers_visited={}",
+            self.get_reconstruct_data_time.load(std::sync::atomic::Ordering::Relaxed),
+            self.plan_read_time
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.read_time.load(std::sync::atomic::Ordering::Relaxed),
+            self.sort_reconstruct_data_time
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.layers_visited
+                .load(std::sync::atomic::Ordering::Relaxed)
+        )
+    }
+}
+
+impl ReadPathStatsInner {
+    pub fn add_get_reconstruct_data_time(&self, dur: Duration) {
+        self.get_reconstruct_data_time.fetch_add(
+            dur.as_micros().try_into().unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn add_plan_read_time(&self, dur: Duration) {
+        self.plan_read_time.fetch_add(
+            dur.as_micros().try_into().unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn add_read_time(&self, dur: Duration) {
+        self.plan_read_time.fetch_add(
+            dur.as_micros().try_into().unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn add_sort_reconstruct_data_time(&self, dur: Duration) {
+        self.sort_reconstruct_data_time.fetch_add(
+            dur.as_micros().try_into().unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn inc_layer_visited(&self) {
+        self.layers_visited
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The kind of access to the page cache.
@@ -154,6 +226,7 @@ impl RequestContextBuilder {
                 access_stats_behavior: AccessStatsBehavior::Update,
                 page_content_kind: PageContentKind::Unknown,
                 micros_spent_throttled: Default::default(),
+                read_path_stats: Default::default(),
             },
         }
     }
@@ -168,6 +241,7 @@ impl RequestContextBuilder {
                 access_stats_behavior: original.access_stats_behavior,
                 page_content_kind: original.page_content_kind,
                 micros_spent_throttled: Default::default(),
+                read_path_stats: original.read_path_stats.clone(),
             },
         }
     }
@@ -290,5 +364,9 @@ impl RequestContext {
 
     pub(crate) fn page_content_kind(&self) -> PageContentKind {
         self.page_content_kind
+    }
+
+    pub fn report_stats(&self) {
+        tracing::info!("Read path stats: {}", *self.read_path_stats.inner)
     }
 }

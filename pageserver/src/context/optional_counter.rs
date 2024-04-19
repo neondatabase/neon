@@ -72,6 +72,7 @@ impl MicroSecondsCounterU32 {
             Err(_) => Err("add(): duration conversion error"),
         }
     }
+
     pub fn close_and_checked_sub_from(&self, from: Duration) -> Result<Duration, &'static str> {
         let val = self.inner.close()?;
         let val = Duration::from_micros(val as u64);

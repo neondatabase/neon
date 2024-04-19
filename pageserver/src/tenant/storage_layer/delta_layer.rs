@@ -58,6 +58,7 @@ use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::OnceCell;
 use tracing::*;
 
@@ -755,6 +756,9 @@ impl DeltaLayerInner {
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
+        ctx.read_path_stats.inner.inc_layer_visited();
+        let plan_timer = Instant::now();
+
         let mut need_image = true;
         // Scan the page versions backwards, starting from `lsn`.
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
@@ -789,6 +793,12 @@ impl DeltaLayerInner {
                     .build(),
             )
             .await?;
+
+        ctx.read_path_stats
+            .inner
+            .add_plan_read_time(plan_timer.elapsed());
+
+        let read_timer = Instant::now();
 
         let ctx = &RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::DeltaLayerValue)
@@ -828,6 +838,10 @@ impl DeltaLayerInner {
             }
         }
 
+        ctx.read_path_stats
+            .inner
+            .add_read_time(read_timer.elapsed());
+
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
         if need_image {
@@ -851,6 +865,9 @@ impl DeltaLayerInner {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
+        ctx.read_path_stats.inner.inc_layer_visited();
+        let plan_timer = Instant::now();
+
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let index_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             self.index_start_blk,
@@ -879,10 +896,20 @@ impl DeltaLayerInner {
         .await
         .map_err(GetVectoredError::Other)?;
 
+        ctx.read_path_stats
+            .inner
+            .add_plan_read_time(plan_timer.elapsed());
+
+        let read_timer = Instant::now();
+
         self.do_reads_and_update_state(reads, reconstruct_state)
             .await;
 
         reconstruct_state.on_lsn_advanced(&keyspace, self.lsn_range.start);
+
+        ctx.read_path_stats
+            .inner
+            .add_read_time(read_timer.elapsed());
 
         Ok(())
     }
