@@ -115,20 +115,25 @@ pub async fn task_main(
         let conn_id = uuid::Uuid::new_v4();
         let http_conn_span = tracing::info_span!("http_conn", ?conn_id);
 
-        connections.spawn(
-            connection_handler(
-                config,
-                backend.clone(),
-                connections.clone(),
-                cancellation_handler.clone(),
-                cancellation_token.clone(),
-                server.clone(),
-                tls_acceptor.clone(),
-                conn,
-                peer_addr,
+        tokio::task::Builder::new()
+            .name("serverless conn handler")
+            .spawn(
+                connections.track_future(
+                    connection_handler(
+                        config,
+                        backend.clone(),
+                        connections.clone(),
+                        cancellation_handler.clone(),
+                        cancellation_token.clone(),
+                        server.clone(),
+                        tls_acceptor.clone(),
+                        conn,
+                        peer_addr,
+                    )
+                    .instrument(http_conn_span),
+                ),
             )
-            .instrument(http_conn_span),
-        );
+            .unwrap();
     }
 
     connections.wait().await;
@@ -224,20 +229,25 @@ async fn connection_handler(
 
             // `request_handler` is not cancel safe. It expects to be cancelled only at specific times.
             // By spawning the future, we ensure it never gets cancelled until it decides to.
-            let handler = connections.spawn(
-                request_handler(
-                    req,
-                    config,
-                    backend.clone(),
-                    connections.clone(),
-                    cancellation_handler.clone(),
-                    session_id,
-                    peer_addr,
-                    http_request_token,
+            let handler = tokio::task::Builder::new()
+                .name("serverless request handler")
+                .spawn(
+                    connections.track_future(
+                        request_handler(
+                            req,
+                            config,
+                            backend.clone(),
+                            connections.clone(),
+                            cancellation_handler.clone(),
+                            session_id,
+                            peer_addr,
+                            http_request_token,
+                        )
+                        .in_current_span()
+                        .map_ok_or_else(api_error_into_response, |r| r),
+                    ),
                 )
-                .in_current_span()
-                .map_ok_or_else(api_error_into_response, |r| r),
-            );
+                .unwrap();
 
             async move {
                 let res = handler.await;
@@ -296,17 +306,27 @@ async fn request_handler(
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
-        ws_connections.spawn(
-            async move {
-                if let Err(e) =
-                    websocket::serve_websocket(config, ctx, websocket, cancellation_handler, host)
+        tokio::task::Builder::new()
+            .name("websocket client conn")
+            .spawn(
+                ws_connections.track_future(
+                    async move {
+                        if let Err(e) = websocket::serve_websocket(
+                            config,
+                            ctx,
+                            websocket,
+                            cancellation_handler,
+                            host,
+                        )
                         .await
-                {
-                    error!("error in websocket connection: {e:#}");
-                }
-            }
-            .instrument(span),
-        );
+                        {
+                            error!("error in websocket connection: {e:#}");
+                        }
+                    }
+                    .instrument(span),
+                ),
+            )
+            .unwrap();
 
         // Return the response so the spawned future can continue.
         Ok(response)

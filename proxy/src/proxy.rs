@@ -87,7 +87,7 @@ pub async fn task_main(
 
         tracing::info!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
-        connections.spawn(async move {
+        tokio::task::Builder::new().name("tcp client connection").spawn(connections.track_future(async move {
             let mut socket = WithClientIp::new(socket);
             let mut peer_addr = peer_addr.ip();
             match socket.wait_for_addr().await {
@@ -152,7 +152,7 @@ pub async fn task_main(
                     }
                 }
             }
-        });
+        })).unwrap();
     }
 
     connections.close();
