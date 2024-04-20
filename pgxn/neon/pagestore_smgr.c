@@ -1457,8 +1457,6 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 		 */
 		if (PageIsNew((Page) buffer))
 		{
-			static PGAlignedBlock empty_page;
-			Assert(memcmp(buffer, empty_page.data, BLCKSZ) == 0);
 			ereport(SmgrTrace,
 					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is all-zeros",
 							blocknum,
@@ -2538,7 +2536,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
 	if (forkNum == MAIN_FORKNUM && PageIsNew((Page)buffer) && mdexists(reln, forkNum))
 	{
-		elog(LOG, "Read local page %d of relation %u/%u/%u.%u",
+		elog(SmgrTrace, "Read local page %d of relation %u/%u/%u.%u",
 			 blkno, RelFileInfoFmt(InfoFromSMgrRel(reln)), forkNum);
 		if (blkno >= mdnblocks(reln, forkNum))
 			memset(buffer, 0, BLCKSZ);
