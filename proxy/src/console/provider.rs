@@ -17,7 +17,7 @@ use crate::{
     scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
-use std::{sync::Arc, time::Duration};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tracing::info;
@@ -449,11 +449,15 @@ impl ApiCaches {
 /// Various caches for [`console`](super).
 pub struct ApiLocks {
     name: &'static str,
-    node_locks: DashMap<EndpointCacheKey, Arc<Semaphore>>,
-    permits: usize,
+    inner: Option<ApiLocksInner>,
     timeout: Duration,
     epoch: std::time::Duration,
     metrics: &'static ApiLockMetrics,
+}
+
+struct ApiLocksInner {
+    permits: NonZeroUsize,
+    node_locks: DashMap<EndpointCacheKey, Arc<Semaphore>>,
 }
 
 impl ApiLocks {
@@ -465,10 +469,14 @@ impl ApiLocks {
         epoch: std::time::Duration,
         metrics: &'static ApiLockMetrics,
     ) -> prometheus::Result<Self> {
+        let inner = NonZeroUsize::new(permits).map(|permits| ApiLocksInner {
+            permits,
+            node_locks: DashMap::with_shard_amount(shards),
+        });
+
         Ok(Self {
             name,
-            node_locks: DashMap::with_shard_amount(shards),
-            permits,
+            inner,
             timeout,
             epoch,
             metrics,
@@ -479,20 +487,21 @@ impl ApiLocks {
         &self,
         key: &EndpointCacheKey,
     ) -> Result<WakeComputePermit, errors::WakeComputeError> {
-        if self.permits == 0 {
+        let Some(inner) = &self.inner else {
             return Ok(WakeComputePermit { permit: None });
-        }
+        };
         let now = Instant::now();
         let semaphore = {
             // get fast path
-            if let Some(semaphore) = self.node_locks.get(key) {
+            if let Some(semaphore) = inner.node_locks.get(key) {
                 semaphore.clone()
             } else {
-                self.node_locks
+                inner
+                    .node_locks
                     .entry(key.clone())
                     .or_insert_with(|| {
                         self.metrics.semaphores_registered.inc();
-                        Arc::new(Semaphore::new(self.permits))
+                        Arc::new(Semaphore::new(inner.permits.get()))
                     })
                     .clone()
             }
@@ -509,13 +518,13 @@ impl ApiLocks {
     }
 
     pub async fn garbage_collect_worker(&self) {
-        if self.permits == 0 {
+        let Some(inner) = &self.inner else {
             return;
-        }
+        };
         let mut interval =
-            tokio::time::interval(self.epoch / (self.node_locks.shards().len()) as u32);
+            tokio::time::interval(self.epoch / (inner.node_locks.shards().len()) as u32);
         loop {
-            for (i, shard) in self.node_locks.shards().iter().enumerate() {
+            for (i, shard) in inner.node_locks.shards().iter().enumerate() {
                 interval.tick().await;
                 // temporary lock a single shard and then clear any semaphores that aren't currently checked out
                 // race conditions: if strong_count == 1, there's no way that it can increase while the shard is locked

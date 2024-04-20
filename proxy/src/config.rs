@@ -3,13 +3,18 @@ use crate::{
     rate_limiter::RateBucketInfo,
     serverless::GlobalConnPoolOptions,
 };
-use anyhow::{bail, ensure, Context, Ok};
+use anyhow::{bail, ensure, Context};
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
 use rustls::{
     crypto::ring::sign,
     pki_types::{CertificateDer, PrivateKeyDer},
 };
+use serde::{
+    de::{value::BorrowedStrDeserializer, MapAccess},
+    forward_to_deserialize_any, Deserialize, Deserializer,
+};
+use serde_with::serde_as;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -518,14 +523,23 @@ impl FromStr for ProjectInfoCacheOptions {
 }
 
 /// Helper for cmdline cache options parsing.
+#[serde_as]
+#[derive(Deserialize)]
 pub struct WakeComputeLockOptions {
     /// The number of shards the lock map should have
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    #[serde(default)]
     pub shards: usize,
     /// The number of allowed concurrent requests for each endpoitn
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub permits: usize,
     /// Garbage collection epoch
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
     pub epoch: Duration,
     /// Lock timeout
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
     pub timeout: Duration,
 }
 
@@ -538,44 +552,22 @@ impl WakeComputeLockOptions {
     /// Parse lock options passed via cmdline.
     /// Example: [`Self::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK`].
     fn parse(options: &str) -> anyhow::Result<Self> {
-        let mut shards = None;
-        let mut permits = None;
-        let mut epoch = None;
-        let mut timeout = None;
-
-        for option in options.split(',') {
-            let (key, value) = option
-                .split_once('=')
-                .with_context(|| format!("bad key-value pair: {option}"))?;
-
-            match key {
-                "shards" => shards = Some(value.parse()?),
-                "permits" => permits = Some(value.parse()?),
-                "epoch" => epoch = Some(humantime::parse_duration(value)?),
-                "timeout" => timeout = Some(humantime::parse_duration(value)?),
-                unknown => bail!("unknown key: {unknown}"),
-            }
+        let out = Self::deserialize(SimpleKVConfig(options))?;
+        if out.permits != 0 {
+            ensure!(
+                out.timeout > Duration::ZERO,
+                "wake compute lock timeout should be non-zero"
+            );
+            ensure!(
+                out.epoch > Duration::ZERO,
+                "wake compute lock gc epoch should be non-zero"
+            );
+            ensure!(out.shards > 1, "shard count must be > 1");
+            ensure!(
+                out.shards.is_power_of_two(),
+                "shard count must be a power of two"
+            );
         }
-
-        // these dont matter if lock is disabled
-        if let Some(0) = permits {
-            timeout = Some(Duration::default());
-            epoch = Some(Duration::default());
-            shards = Some(2);
-        }
-
-        let out = Self {
-            shards: shards.context("missing `shards`")?,
-            permits: permits.context("missing `permits`")?,
-            epoch: epoch.context("missing `epoch`")?,
-            timeout: timeout.context("missing `timeout`")?,
-        };
-
-        ensure!(out.shards > 1, "shard count must be > 1");
-        ensure!(
-            out.shards.is_power_of_two(),
-            "shard count must be a power of two"
-        );
 
         Ok(out)
     }
@@ -587,6 +579,100 @@ impl FromStr for WakeComputeLockOptions {
     fn from_str(options: &str) -> Result<Self, Self::Err> {
         let error = || format!("failed to parse cache lock options '{options}'");
         Self::parse(options).with_context(error)
+    }
+}
+
+struct SimpleKVConfig<'a>(&'a str);
+struct SimpleKVConfigMapAccess<'a> {
+    kv: std::str::Split<'a, char>,
+    val: Option<&'a str>,
+}
+
+#[derive(Debug)]
+struct SimpleKVConfigErr(String);
+
+impl std::fmt::Display for SimpleKVConfigErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SimpleKVConfigErr {}
+
+impl serde::de::Error for SimpleKVConfigErr {
+    fn custom<T>(msg: T) -> Self
+    where
+        T: std::fmt::Display,
+    {
+        Self(msg.to_string())
+    }
+}
+
+impl<'de> MapAccess<'de> for SimpleKVConfigMapAccess<'de> {
+    type Error = SimpleKVConfigErr;
+
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+    where
+        K: serde::de::DeserializeSeed<'de>,
+    {
+        let Some(kv) = self.kv.next() else {
+            return Ok(None);
+        };
+        let (key, value) = kv
+            .split_once('=')
+            .ok_or_else(|| SimpleKVConfigErr("invalid kv pair".to_string()))?;
+        self.val = Some(value);
+
+        seed.deserialize(BorrowedStrDeserializer::new(key))
+            .map(Some)
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::DeserializeSeed<'de>,
+    {
+        seed.deserialize(BorrowedStrDeserializer::new(self.val.take().unwrap()))
+    }
+
+    fn next_entry_seed<K, V>(
+        &mut self,
+        kseed: K,
+        vseed: V,
+    ) -> Result<Option<(K::Value, V::Value)>, Self::Error>
+    where
+        K: serde::de::DeserializeSeed<'de>,
+        V: serde::de::DeserializeSeed<'de>,
+    {
+        let Some(kv) = self.kv.next() else {
+            return Ok(None);
+        };
+        let (key, value) = kv
+            .split_once('=')
+            .ok_or_else(|| SimpleKVConfigErr("invalid kv pair".to_string()))?;
+
+        let key = kseed.deserialize(BorrowedStrDeserializer::new(key))?;
+        let value = vseed.deserialize(BorrowedStrDeserializer::new(value))?;
+        Ok(Some((key, value)))
+    }
+}
+
+impl<'de> Deserializer<'de> for SimpleKVConfig<'de> {
+    type Error = SimpleKVConfigErr;
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        visitor.visit_map(SimpleKVConfigMapAccess {
+            kv: self.0.split(','),
+            val: None,
+        })
+    }
+
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit struct unit_struct newtype_struct seq tuple
+        tuple_struct map enum identifier ignored_any
     }
 }
 
@@ -647,7 +733,7 @@ mod tests {
         } = "permits=0".parse()?;
         assert_eq!(epoch, Duration::ZERO);
         assert_eq!(timeout, Duration::ZERO);
-        assert_eq!(shards, 2);
+        assert_eq!(shards, 0);
         assert_eq!(permits, 0);
 
         Ok(())
