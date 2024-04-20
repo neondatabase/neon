@@ -542,7 +542,7 @@ impl RetryConfig {
         "num_retries=4,base_retry_wait_duration=1s,retry_wait_exponent_base=2.0";
 
     /// Parse retry options passed via cmdline.
-    /// Example: [`Self::DEFAULT_VALUES`].
+    /// Example: [`Self::CONNECT_TO_COMPUTE_DEFAULT_VALUES`].
     pub fn parse(options: &str) -> anyhow::Result<Self> {
         let mut num_retries = None;
         let mut base_retry_wait_duration = None;
