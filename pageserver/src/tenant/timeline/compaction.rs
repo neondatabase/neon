@@ -252,6 +252,25 @@ impl Timeline {
             }
         }
 
+        // drop the readlock for now; in theory, gc could also remove the same layers as we are now
+        // compacting. FIXME: how to prepare such a test case?
+        // 0. tenant with minimal pitr
+        // 1. create 10 layers
+        // 2. await on pausable_failpoint after dropping the read guard
+        // 3. delete all data, vacuum, checkpoint
+        // 4. gc
+        //
+        // now gc deletes the layers and when we finally get to writing our results back in
+        // finish_compact_batch, LayerManager::finish_compact_l0 will panic when deleting a layer
+        // which does not exist in LayerMap::remove_historic_noflush or LayerFileManager::remove.
+        //
+        // is the easy solution just to make the deletions from compaction more lenient? currently
+        // gc holds a write lock, so it cannot have this problem right now. if gc were to be loosened to take the
+        // read lock only momentarily and write lock for applying, it would have a similar issue in
+        // trying to gc layers which have just been compacted.
+        stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
+        drop_rlock(guard);
+
         // Gather the files to compact in this iteration.
         //
         // Start with the oldest Level 0 delta file, and collect any other
@@ -336,6 +355,9 @@ impl Timeline {
 
         stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
 
+        let guard = self.layers.read().await;
+        let layers = guard.layer_map();
+
         for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
             if let Some(prev_key) = prev {
                 // just first fast filter
@@ -359,8 +381,6 @@ impl Timeline {
             }
             prev = Some(next_key.next());
         }
-        stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
-        drop_rlock(guard);
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
         let mut holes = heap.into_vec();
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
