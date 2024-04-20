@@ -408,11 +408,15 @@ pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfi
 }
 
 /// Helper for cmdline cache options parsing.
-#[derive(Debug)]
+#[serde_as]
+#[derive(Debug, Deserialize)]
 pub struct CacheOptions {
     /// Max number of entries.
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub size: usize,
     /// Entry's time-to-live.
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
     pub ttl: Duration,
 }
 
@@ -423,30 +427,7 @@ impl CacheOptions {
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
     fn parse(options: &str) -> anyhow::Result<Self> {
-        let mut size = None;
-        let mut ttl = None;
-
-        for option in options.split(',') {
-            let (key, value) = option
-                .split_once('=')
-                .with_context(|| format!("bad key-value pair: {option}"))?;
-
-            match key {
-                "size" => size = Some(value.parse()?),
-                "ttl" => ttl = Some(humantime::parse_duration(value)?),
-                unknown => bail!("unknown key: {unknown}"),
-            }
-        }
-
-        // TTL doesn't matter if cache is always empty.
-        if let Some(0) = size {
-            ttl.get_or_insert(Duration::default());
-        }
-
-        Ok(Self {
-            size: size.context("missing `size`")?,
-            ttl: ttl.context("missing `ttl`")?,
-        })
+        Ok(Self::deserialize(SimpleKVConfig(options))?)
     }
 }
 
@@ -460,15 +441,21 @@ impl FromStr for CacheOptions {
 }
 
 /// Helper for cmdline cache options parsing.
-#[derive(Debug)]
+#[serde_as]
+#[derive(Debug, Deserialize)]
 pub struct ProjectInfoCacheOptions {
     /// Max number of entries.
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub size: usize,
     /// Entry's time-to-live.
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
     pub ttl: Duration,
     /// Max number of roles per endpoint.
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub max_roles: usize,
     /// Gc interval.
+    #[serde(with = "humantime_serde")]
     pub gc_interval: Duration,
 }
 
@@ -480,36 +467,7 @@ impl ProjectInfoCacheOptions {
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
     fn parse(options: &str) -> anyhow::Result<Self> {
-        let mut size = None;
-        let mut ttl = None;
-        let mut max_roles = None;
-        let mut gc_interval = None;
-
-        for option in options.split(',') {
-            let (key, value) = option
-                .split_once('=')
-                .with_context(|| format!("bad key-value pair: {option}"))?;
-
-            match key {
-                "size" => size = Some(value.parse()?),
-                "ttl" => ttl = Some(humantime::parse_duration(value)?),
-                "max_roles" => max_roles = Some(value.parse()?),
-                "gc_interval" => gc_interval = Some(humantime::parse_duration(value)?),
-                unknown => bail!("unknown key: {unknown}"),
-            }
-        }
-
-        // TTL doesn't matter if cache is always empty.
-        if let Some(0) = size {
-            ttl.get_or_insert(Duration::default());
-        }
-
-        Ok(Self {
-            size: size.context("missing `size`")?,
-            ttl: ttl.context("missing `ttl`")?,
-            max_roles: max_roles.context("missing `max_roles`")?,
-            gc_interval: gc_interval.context("missing `gc_interval`")?,
-        })
+        Ok(Self::deserialize(SimpleKVConfig(options))?)
     }
 }
 
