@@ -735,7 +735,7 @@ jobs:
         run: |
           mkdir -p .docker-custom
           echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v2
 
       - uses: docker/login-action@v3
         with:
@@ -792,7 +792,7 @@ jobs:
         run: |
           mkdir -p .docker-custom
           echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v2
         with:
           # Disable parallelism for docker buildkit.
           # As we already build everything with `make -j$(nproc)`, running it in additional level of parallelisam blows up the Runner.
