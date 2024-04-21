@@ -4,7 +4,9 @@ use log::*;
 use postgres::types::PgLsn;
 use postgres::Client;
 use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
-use postgres_ffi::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
+use postgres_ffi::{
+    XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -262,11 +264,21 @@ fn craft_internal<C: postgres::GenericClient>(
         intermediate_lsns.insert(0, initial_lsn);
     }
 
-    // Some records may be not flushed, e.g. non-transactional logical messages.
+    // Some records may be not flushed, e.g. non-transactional logical messages. Flush now.
     //
-    // Note: this is broken if pg_current_wal_insert_lsn is at page boundary
-    // because pg_current_wal_insert_lsn skips page headers.
-    client.execute("select neon_xlogflush(pg_current_wal_insert_lsn())", &[])?;
+    // If the previous WAL record ended exactly at page boundary, pg_current_wal_insert_lsn
+    // returns the position just after the page header on the next page. That's where the next
+    // record will be inserted. But the page header hasn't actually been written to the WAL
+    // yet, and if you try to flush it, you get a "request to flush past end of generated WAL"
+    // error. Because of that, if the insert location is just after a page header, back off to
+    // previous page boundary.
+    let mut lsn = u64::from(client.pg_current_wal_insert_lsn()?);
+    if lsn % WAL_SEGMENT_SIZE as u64 == XLOG_SIZE_OF_XLOG_LONG_PHD as u64 {
+        lsn -= XLOG_SIZE_OF_XLOG_LONG_PHD as u64;
+    } else if lsn % XLOG_BLCKSZ as u64 == XLOG_SIZE_OF_XLOG_SHORT_PHD as u64 {
+        lsn -= XLOG_SIZE_OF_XLOG_SHORT_PHD as u64;
+    }
+    client.execute("select neon_xlogflush($1)", &[&PgLsn::from(lsn)])?;
     Ok(intermediate_lsns)
 }
 
