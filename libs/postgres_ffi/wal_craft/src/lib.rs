@@ -320,38 +320,49 @@ impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
 
         client.execute("CREATE table t(x int)", &[])?;
 
-        // Add padding so the XLOG_SWITCH record ends exactly on XLOG_BLCKSZ boundary.
-        // We will use logical message as the padding. We start with detecting how much WAL
-        // it takes for one logical message, considering all alignments and headers.
-        let base_wal_advance = {
+        // Add padding so the XLOG_SWITCH record ends exactly on XLOG_BLCKSZ boundary.  We
+        // will use carefully-sized logical messages to advance WAL insert location such
+        // that there is just enough space on the page for the XLOG_SWITCH record.
+        loop {
+            // We start with measuring how much WAL it takes for one logical message,
+            // considering all alignments and headers.
             let before_lsn = client.pg_current_wal_insert_lsn()?;
-            // Small non-empty message bigger than few bytes is more likely than an empty
-            // message to have the same format as the big padding message.
             client.execute(
                 "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', 10))",
                 &[],
             )?;
-            // The XLOG_SWITCH record has no data => its size is exactly XLOG_SIZE_OF_XLOG_RECORD.
-            (u64::from(client.pg_current_wal_insert_lsn()?) - u64::from(before_lsn)) as usize
-                + XLOG_SIZE_OF_XLOG_RECORD
-        };
-        let mut remaining_lsn =
-            XLOG_BLCKSZ - u64::from(client.pg_current_wal_insert_lsn()?) as usize % XLOG_BLCKSZ;
-        if remaining_lsn < base_wal_advance {
-            remaining_lsn += XLOG_BLCKSZ;
+            let after_lsn = client.pg_current_wal_insert_lsn()?;
+
+            // Did the record cross a page boundary? If it did, start over. Crossing a
+            // page boundary adds to the apparent size of the record because of the page
+            // header, which throws off the calculation.
+            if u64::from(before_lsn) / XLOG_BLCKSZ as u64
+                != u64::from(after_lsn) / XLOG_BLCKSZ as u64
+            {
+                continue;
+            }
+            // base_size is the size of a logical message without the payload
+            let base_size = u64::from(after_lsn) - u64::from(before_lsn) - 10;
+
+            // Is there enough space on the page for another logical message and an
+            // XLOG_SWITCH? If not, start over.
+            let page_remain = XLOG_BLCKSZ as u64 - u64::from(after_lsn) % XLOG_BLCKSZ as u64;
+            if page_remain < base_size - XLOG_SIZE_OF_XLOG_RECORD as u64 {
+                continue;
+            }
+
+            // We will write another logical message, such that after the logical message
+            // record, there will be space for exactly one XLOG_SWITCH. How large should
+            // the logical message's payload be? An XLOG_SWITCH record has no data => its
+            // size is exactly XLOG_SIZE_OF_XLOG_RECORD.
+            let repeats = page_remain - base_size - XLOG_SIZE_OF_XLOG_RECORD as u64;
+
+            client.execute(
+                "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', $1))",
+                &[&(repeats as i32)],
+            )?;
+            break;
         }
-        let repeats = 10 + remaining_lsn - base_wal_advance;
-        info!(
-            "current_wal_insert_lsn={}, remaining_lsn={}, base_wal_advance={}, repeats={}",
-            client.pg_current_wal_insert_lsn()?,
-            remaining_lsn,
-            base_wal_advance,
-            repeats
-        );
-        client.execute(
-            "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', $1))",
-            &[&(repeats as i32)],
-        )?;
         info!(
             "current_wal_insert_lsn={}, XLOG_SIZE_OF_XLOG_RECORD={}",
             client.pg_current_wal_insert_lsn()?,
