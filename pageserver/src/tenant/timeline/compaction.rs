@@ -496,13 +496,14 @@ impl Timeline {
                         || contains_hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
-                        new_layers.push(
-                            writer
-                                .take()
-                                .unwrap()
-                                .finish(prev_key.unwrap().next(), self)
-                                .await?,
-                        );
+                        let (desc, path) = writer
+                            .take()
+                            .unwrap()
+                            .finish(prev_key.unwrap().next())
+                            .await?;
+                        let new_delta = Layer::finish_creating(self.conf, self, desc, &path)?;
+
+                        new_layers.push(new_delta);
                         writer = None;
 
                         if contains_hole {
@@ -558,7 +559,9 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next(), self).await?);
+            let (desc, path) = writer.finish(prev_key.unwrap().next()).await?;
+            let new_delta = Layer::finish_creating(self.conf, self, desc, &path)?;
+            new_layers.push(new_delta);
         }
 
         // Sync layers
@@ -962,9 +965,9 @@ impl CompactionJobExecutor for TimelineAdaptor {
             ))
         });
 
-        let new_delta_layer = writer
-            .finish(prev.unwrap().0.next(), &self.timeline)
-            .await?;
+        let (desc, path) = writer.finish(prev.unwrap().0.next()).await?;
+        let new_delta_layer =
+            Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?;
 
         self.new_deltas.push(new_delta_layer);
         Ok(())

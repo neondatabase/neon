@@ -4115,6 +4115,8 @@ def wait_for_last_flush_lsn(
     tenant: TenantId,
     timeline: TimelineId,
     pageserver_id: Optional[int] = None,
+    wait_secs=None,
+    wait_iterations=None,
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
 
@@ -4128,7 +4130,12 @@ def wait_for_last_flush_lsn(
             f"wait_for_last_flush_lsn: waiting for {last_flush_lsn} on shard {tenant_shard_id} on pageserver {pageserver.id})"
         )
         waited = wait_for_last_record_lsn(
-            pageserver.http_client(), tenant_shard_id, timeline, last_flush_lsn
+            pageserver.http_client(),
+            tenant_shard_id,
+            timeline,
+            last_flush_lsn,
+            wait_secs=wait_secs,
+            wait_iterations=wait_iterations,
         )
 
         assert waited >= last_flush_lsn

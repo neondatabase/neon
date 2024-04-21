@@ -11,14 +11,15 @@ use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::ValueReconstructResult;
 use crate::tenant::timeline::GetVectoredError;
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::PageReconstructError;
 use crate::{page_cache, walrecord};
 use anyhow::{anyhow, ensure, Result};
+use camino::Utf8PathBuf;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
-use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
+use std::sync::OnceLock;
 use std::time::Instant;
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
@@ -33,7 +34,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use super::{
-    DeltaLayerWriter, ResidentLayer, ValueReconstructSituation, ValueReconstructState,
+    DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValueReconstructState,
     ValuesReconstructState,
 };
 
@@ -75,7 +76,7 @@ pub struct InMemoryLayerInner {
     /// All versions of all pages in the layer are kept here.  Indexed
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
-    index: HashMap<Key, VecMap<Lsn, u64>>,
+    index: BTreeMap<Key, VecMap<Lsn, u64>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
@@ -465,7 +466,7 @@ impl InMemoryLayer {
             end_lsn: OnceLock::new(),
             opened_at: Instant::now(),
             inner: RwLock::new(InMemoryLayerInner {
-                index: HashMap::new(),
+                index: BTreeMap::new(),
                 file,
                 resource_units: GlobalResourceUnits::new(),
             }),
@@ -476,8 +477,7 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-
-    pub(crate) async fn put_value(
+    pub async fn put_value(
         &self,
         key: Key,
         lsn: Lsn,
@@ -542,8 +542,6 @@ impl InMemoryLayer {
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub async fn freeze(&self, end_lsn: Lsn) {
-        let inner = self.inner.write().await;
-
         assert!(
             self.start_lsn < end_lsn,
             "{} >= {}",
@@ -552,9 +550,13 @@ impl InMemoryLayer {
         );
         self.end_lsn.set(end_lsn).expect("end_lsn set only once");
 
-        for vec_map in inner.index.values() {
-            for (lsn, _pos) in vec_map.as_slice() {
-                assert!(*lsn < end_lsn);
+        #[cfg(debug_assertions)]
+        {
+            let inner = self.inner.write().await;
+            for vec_map in inner.index.values() {
+                for (lsn, _pos) in vec_map.as_slice() {
+                    debug_assert!(*lsn < end_lsn);
+                }
             }
         }
     }
@@ -562,11 +564,10 @@ impl InMemoryLayer {
     /// Write this frozen in-memory layer to disk.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub(crate) async fn write_to_disk(
+    pub async fn write_to_disk(
         &self,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> Result<ResidentLayer> {
+    ) -> Result<(PersistentLayerDesc, Utf8PathBuf)> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -619,7 +620,6 @@ impl InMemoryLayer {
         }
 
         // MAX is used here because we identify L0 layers by full key range
-        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline).await?;
-        Ok(delta_layer)
+        delta_layer_writer.finish(Key::MAX).await
     }
 }

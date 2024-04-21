@@ -36,6 +36,7 @@ routerify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
+smallvec.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tar.workspace = true

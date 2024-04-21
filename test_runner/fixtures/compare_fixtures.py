@@ -132,7 +132,9 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
-        wait_for_last_flush_lsn(self.env, self._pg, self.tenant, self.timeline)
+        wait_for_last_flush_lsn(
+            self.env, self._pg, self.tenant, self.timeline, wait_secs=0.5, wait_iterations=600
+        )
         self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline)
         self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 

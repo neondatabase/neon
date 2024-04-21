@@ -34,12 +34,12 @@ use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, MaxVectoredReadBytes, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
 };
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::PageReconstructError;
 use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
@@ -67,9 +67,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{
-    AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
-};
+use super::{AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -368,7 +366,6 @@ impl DeltaLayer {
 /// 3. Call `finish`.
 ///
 struct DeltaLayerWriterInner {
-    conf: &'static PageServerConf,
     pub path: Utf8PathBuf,
     timeline_id: TimelineId,
     tenant_shard_id: TenantShardId,
@@ -411,7 +408,6 @@ impl DeltaLayerWriterInner {
         let tree_builder = DiskBtreeBuilder::new(block_buf);
 
         Ok(Self {
-            conf,
             path,
             timeline_id,
             tenant_shard_id,
@@ -462,7 +458,7 @@ impl DeltaLayerWriterInner {
     ///
     /// Finish writing the delta layer.
     ///
-    async fn finish(self, key_end: Key, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
+    async fn finish(self, key_end: Key) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -527,11 +523,7 @@ impl DeltaLayerWriterInner {
         // fsync the file
         file.sync_all().await?;
 
-        let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
-
-        trace!("created delta layer {}", layer.local_path());
-
-        Ok(layer)
+        Ok((desc, self.path))
     }
 }
 
@@ -619,11 +611,10 @@ impl DeltaLayerWriter {
     pub(crate) async fn finish(
         mut self,
         key_end: Key,
-        timeline: &Arc<Timeline>,
-    ) -> anyhow::Result<ResidentLayer> {
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let inner = self.inner.take().unwrap();
         let temp_path = inner.path.clone();
-        let result = inner.finish(key_end, timeline).await;
+        let result = inner.finish(key_end).await;
         // The delta layer files can sometimes be really large. Clean them up.
         if result.is_err() {
             tracing::warn!(
@@ -1467,6 +1458,7 @@ mod test {
     use rand::RngCore;
 
     use super::*;
+    use crate::tenant::storage_layer::Layer;
     use crate::{
         context::DownloadBehavior,
         task_mgr::TaskKind,
@@ -1758,7 +1750,8 @@ mod test {
             res?;
         }
 
-        let resident = writer.finish(entries_meta.key_range.end, &timeline).await?;
+        let (desc, path) = writer.finish(entries_meta.key_range.end).await?;
+        let resident = Layer::finish_creating(harness.conf, &timeline, desc, &path)?;
 
         let inner = resident.as_delta(&ctx).await?;
 

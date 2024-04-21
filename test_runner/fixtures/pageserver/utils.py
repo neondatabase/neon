@@ -196,9 +196,18 @@ def wait_for_last_record_lsn(
     tenant: Union[TenantId, TenantShardId],
     timeline: TimelineId,
     lsn: Lsn,
+    wait_secs=None,
+    wait_iterations=None,
 ) -> Lsn:
     """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
-    for i in range(100):
+
+    if wait_secs is None:
+        wait_secs = 0.1
+
+    if wait_iterations is None:
+        wait_iterations = 100
+
+    for i in range(wait_iterations):
         current_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
             return current_lsn
@@ -206,7 +215,7 @@ def wait_for_last_record_lsn(
             log.info(
                 f"{tenant}/{timeline} waiting for last_record_lsn to reach {lsn}, now {current_lsn}, iteration {i + 1}"
             )
-        time.sleep(0.1)
+        time.sleep(wait_secs)
     raise Exception(
         f"timed out while waiting for last_record_lsn to reach {lsn}, was {current_lsn}"
     )

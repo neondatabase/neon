@@ -3598,7 +3598,10 @@ impl Timeline {
         let frozen_layer = Arc::clone(frozen_layer);
         let ctx = ctx.attached_child();
         let work = async move {
-            let new_delta = frozen_layer.write_to_disk(&self_clone, &ctx).await?;
+            let (desc, path) = frozen_layer.write_to_disk(&ctx).await?;
+            let new_delta = Layer::finish_creating(self_clone.conf, &self_clone, desc, &path)?;
+            trace!("created delta layer {}", new_delta.local_path());
+
             // The write_to_disk() above calls writer.finish() which already did the fsync of the inodes.
             // We just need to fsync the directory in which these inodes are linked,
             // which we know to be the timeline directory.

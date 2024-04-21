@@ -6764,6 +6764,7 @@ dependencies = [
  "serde_path_to_error",
  "serde_with",
  "signal-hook",
+ "smallvec",
  "strum",
  "strum_macros",
  "thiserror",
