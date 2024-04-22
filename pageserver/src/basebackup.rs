@@ -90,15 +90,8 @@ where
         (end_of_timeline.prev, end_of_timeline.last)
     };
 
-    // Consolidate the derived and the provided prev_lsn values
-    let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
-        if backup_prev != Lsn(0) {
-            ensure!(backup_prev == provided_prev_lsn);
-        }
-        provided_prev_lsn
-    } else {
-        backup_prev
-    };
+    // XXX hack for imports
+    let prev_lsn = backup_lsn;
 
     info!(
         "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
