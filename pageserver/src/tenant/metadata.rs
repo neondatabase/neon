@@ -61,6 +61,8 @@ struct TimelineMetadataBodyV2 {
     latest_gc_cutoff_lsn: Lsn,
     initdb_lsn: Lsn,
     pg_version: u32,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     aux_file_v2: Option<bool>,
 }
 
@@ -391,7 +393,7 @@ mod tests {
             Lsn(0),
             Lsn(0),
             14, // All timelines created before this version had pg_version 14
-            true,
+            false,
         );
 
         assert_eq!(
@@ -482,6 +484,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, // latest_gc_cutoff_lsn (8 bytes)
             0, 0, 0, 0, 0, 0, 0, 0, // initdb_lsn (8 bytes)
             0, 0, 0, 15, // pg_version (4 bytes)
+            1, 1, // aux_file_v2 (2 bytes)
             /* padding bytes */
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -498,7 +501,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0,
         ];
         let metadata_ser_bytes = original_metadata.ser().unwrap();
         assert_eq!(metadata_ser_bytes, expected_bytes);
