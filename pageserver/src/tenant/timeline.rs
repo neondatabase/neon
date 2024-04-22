@@ -4501,6 +4501,8 @@ impl Timeline {
 
         tracing::info!(filtered=%filtered_layers, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
 
+        // TODO: copying and lsn prefix copying could be done at the same time for shared
+        // index_part.json updates, with a single fsync after
 
         {
             tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
