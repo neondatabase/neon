@@ -1446,10 +1446,14 @@ impl<'a> DatadirModification<'a> {
                     // reset the map.
                     return Err(e.into());
                 }
-                // FIXME: PageReconstructError doesn't have an explicit variant for key-not-found, so
-                // we are assuming that all _other_ possible errors represents a missing key.  If some
-                // other error occurs, we may incorrectly reset the map of aux files.
-                Err(PageReconstructError::Other(_) | PageReconstructError::WalRedo(_)) => {
+                // Note: we added missing key error variant in https://github.com/neondatabase/neon/pull/7393 but
+                // the original code assumes all other errors are missing keys. Therefore, we keep the code path
+                // the same for now, though in theory, we should only match the `MissingKey` variant.
+                Err(
+                    PageReconstructError::Other(_)
+                    | PageReconstructError::WalRedo(_)
+                    | PageReconstructError::MissingKey { .. },
+                ) => {
                     // Key is missing, we must insert an image as the basis for subsequent deltas.
 
                     let mut dir = AuxFilesDirectory {

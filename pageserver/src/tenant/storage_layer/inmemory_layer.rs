@@ -26,7 +26,7 @@ use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // while being able to use std::fmt::Write's methods
 use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
 use std::cmp::Ordering;
-use std::fmt::Write as _;
+use std::fmt::Write;
 use std::ops::Range;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -53,6 +53,12 @@ pub struct InMemoryLayer {
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is `None`.
     end_lsn: OnceLock<Lsn>,
+
+    /// Used for traversal path. Cached representation of the in-memory layer before frozen.
+    local_path_str: Arc<str>,
+
+    /// Used for traversal path. Cached representation of the in-memory layer after frozen.
+    frozen_local_path_str: OnceLock<Arc<str>>,
 
     opened_at: Instant,
 
@@ -239,6 +245,12 @@ impl InMemoryLayer {
 
     pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
         self.start_lsn..self.end_lsn_or_max()
+    }
+
+    pub(crate) fn local_path_str(&self) -> &Arc<str> {
+        self.frozen_local_path_str
+            .get()
+            .unwrap_or(&self.local_path_str)
     }
 
     /// debugging function to print out the contents of the layer
@@ -430,10 +442,24 @@ impl InMemoryLayer {
     }
 }
 
+fn inmem_layer_display(mut f: impl Write, start_lsn: Lsn, end_lsn: Lsn) -> std::fmt::Result {
+    write!(f, "inmem-{:016X}-{:016X}", start_lsn.0, end_lsn.0)
+}
+
+fn inmem_layer_log_display(
+    mut f: impl Write,
+    timeline: TimelineId,
+    start_lsn: Lsn,
+    end_lsn: Lsn,
+) -> std::fmt::Result {
+    write!(f, "timeline {} in-memory ", timeline)?;
+    inmem_layer_display(f, start_lsn, end_lsn)
+}
+
 impl std::fmt::Display for InMemoryLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let end_lsn = self.end_lsn_or_max();
-        write!(f, "inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
+        inmem_layer_display(f, self.start_lsn, end_lsn)
     }
 }
 
@@ -458,6 +484,12 @@ impl InMemoryLayer {
 
         Ok(InMemoryLayer {
             file_id: key,
+            local_path_str: {
+                let mut buf = String::new();
+                inmem_layer_log_display(&mut buf, timeline_id, start_lsn, Lsn::MAX).unwrap();
+                buf.into()
+            },
+            frozen_local_path_str: OnceLock::new(),
             conf,
             timeline_id,
             tenant_shard_id,
@@ -551,6 +583,15 @@ impl InMemoryLayer {
             end_lsn
         );
         self.end_lsn.set(end_lsn).expect("end_lsn set only once");
+
+        self.frozen_local_path_str
+            .set({
+                let mut buf = String::new();
+                inmem_layer_log_display(&mut buf, self.get_timeline_id(), self.start_lsn, end_lsn)
+                    .unwrap();
+                buf.into()
+            })
+            .expect("frozen_local_path_str set only once");
 
         for vec_map in inner.index.values() {
             for (lsn, _pos) in vec_map.as_slice() {
