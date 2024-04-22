@@ -3,11 +3,13 @@ use std::{collections::HashMap, time::Duration};
 
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
+use futures::StreamExt;
 use hyper::{Method, StatusCode};
 use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+use tracing::{info_span, Instrument};
 use utils::{
     backoff::{self},
     id::{NodeId, TenantId},
@@ -420,48 +422,37 @@ impl ComputeHook {
         .and_then(|x| x)
     }
 
-    /// Call this to notify the compute (postgres) tier of new pageservers to use
-    /// for a tenant.  notify() is called by each shard individually, and this function
-    /// will decide whether an update to the tenant is sent.  An update is sent on the
-    /// condition that:
-    /// - We know a pageserver for every shard.
-    /// - All the shards have the same shard_count (i.e. we are not mid-split)
-    ///
-    /// Cancellation token enables callers to drop out, e.g. if calling from a Reconciler
-    /// that is cancelled.
-    ///
-    /// This function is fallible, including in the case that the control plane is transiently
-    /// unavailable.  A limited number of retries are done internally to efficiently hide short unavailability
-    /// periods, but we don't retry forever.  The **caller** is responsible for handling failures and
-    /// ensuring that they eventually call again to ensure that the compute is eventually notified of
-    /// the proper pageserver nodes for a tenant.
-    #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), node_id))]
-    pub(super) async fn notify(
+    /// Synchronous phase: update the per-tenant state for the next intended notification
+    fn notify_prepare(
         &self,
         tenant_shard_id: TenantShardId,
         node_id: NodeId,
         stripe_size: ShardStripeSize,
+    ) -> MaybeSendResult {
+        let mut state_locked = self.state.lock().unwrap();
+
+        use std::collections::hash_map::Entry;
+        let tenant = match state_locked.entry(tenant_shard_id.tenant_id) {
+            Entry::Vacant(e) => e.insert(ComputeHookTenant::new(
+                tenant_shard_id,
+                stripe_size,
+                node_id,
+            )),
+            Entry::Occupied(e) => {
+                let tenant = e.into_mut();
+                tenant.update(tenant_shard_id, stripe_size, node_id);
+                tenant
+            }
+        };
+        tenant.maybe_send(tenant_shard_id.tenant_id, None)
+    }
+
+    async fn notify_execute(
+        &self,
+        maybe_send_result: MaybeSendResult,
+        tenant_shard_id: TenantShardId,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let maybe_send_result = {
-            let mut state_locked = self.state.lock().unwrap();
-
-            use std::collections::hash_map::Entry;
-            let tenant = match state_locked.entry(tenant_shard_id.tenant_id) {
-                Entry::Vacant(e) => e.insert(ComputeHookTenant::new(
-                    tenant_shard_id,
-                    stripe_size,
-                    node_id,
-                )),
-                Entry::Occupied(e) => {
-                    let tenant = e.into_mut();
-                    tenant.update(tenant_shard_id, stripe_size, node_id);
-                    tenant
-                }
-            };
-            tenant.maybe_send(tenant_shard_id.tenant_id, None)
-        };
-
         // Process result: we may get an update to send, or we may have to wait for a lock
         // before trying again.
         let (request, mut send_lock_guard) = match maybe_send_result {
@@ -507,6 +498,94 @@ impl ComputeHook {
             *send_lock_guard = Some(request);
         }
         result
+    }
+
+    /// Infallible synchronous fire-and-forget version of notify(), that sends its results to
+    /// a channel.  Something should consume the channel and arrange to try notifying again
+    /// if something failed.
+    pub(super) fn notify_background(
+        self: &Arc<Self>,
+        notifications: Vec<(TenantShardId, NodeId, ShardStripeSize)>,
+        result_tx: tokio::sync::mpsc::Sender<Result<(), (TenantShardId, NotifyError)>>,
+        cancel: &CancellationToken,
+    ) {
+        let mut maybe_sends = Vec::new();
+        for (tenant_shard_id, node_id, stripe_size) in notifications {
+            let maybe_send_result = self.notify_prepare(tenant_shard_id, node_id, stripe_size);
+            maybe_sends.push((tenant_shard_id, maybe_send_result))
+        }
+
+        let this = self.clone();
+        let cancel = cancel.clone();
+
+        tokio::task::spawn(async move {
+            // Construct an async stream of futures to invoke the compute notify function: we do this
+            // in order to subsequently use .buffered() on the stream to execute with bounded parallelism.  The
+            // ComputeHook semaphore already limits concurrency, but this way we avoid constructing+polling lots of futures which
+            // would mostly just be waiting on that semaphore.
+            let mut stream = futures::stream::iter(maybe_sends)
+                .map(|(tenant_shard_id, maybe_send_result)| {
+                    let this = this.clone();
+                    let cancel = cancel.clone();
+
+                    async move {
+                        this
+                            .notify_execute(maybe_send_result, tenant_shard_id, &cancel)
+                            .await.map_err(|e| (tenant_shard_id, e))
+                    }.instrument(info_span!(
+                        "notify_background", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()
+                    ))
+                })
+                .buffered(API_CONCURRENCY);
+
+            loop {
+                tokio::select! {
+                    next = stream.next() => {
+                        match next {
+                            Some(r) => {
+                                result_tx.send(r).await.ok();
+                            },
+                            None => {
+                                tracing::info!("Finished sending background compute notifications");
+                                break;
+                            }
+                        }
+                    },
+                    _ = cancel.cancelled() => {
+                        tracing::info!("Shutdown while running background compute notifications");
+                        break;
+                    }
+                };
+            }
+        });
+    }
+
+    /// Call this to notify the compute (postgres) tier of new pageservers to use
+    /// for a tenant.  notify() is called by each shard individually, and this function
+    /// will decide whether an update to the tenant is sent.  An update is sent on the
+    /// condition that:
+    /// - We know a pageserver for every shard.
+    /// - All the shards have the same shard_count (i.e. we are not mid-split)
+    ///
+    /// Cancellation token enables callers to drop out, e.g. if calling from a Reconciler
+    /// that is cancelled.
+    ///
+    /// This function is fallible, including in the case that the control plane is transiently
+    /// unavailable.  A limited number of retries are done internally to efficiently hide short unavailability
+    /// periods, but we don't retry forever.  The **caller** is responsible for handling failures and
+    /// ensuring that they eventually call again to ensure that the compute is eventually notified of
+    /// the proper pageserver nodes for a tenant.
+    #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), node_id))]
+    pub(super) async fn notify(
+        &self,
+        tenant_shard_id: TenantShardId,
+        node_id: NodeId,
+        stripe_size: ShardStripeSize,
+        cancel: &CancellationToken,
+    ) -> Result<(), NotifyError> {
+        let maybe_send_result = self.notify_prepare(tenant_shard_id, node_id, stripe_size);
+        self.notify_execute(maybe_send_result, tenant_shard_id, cancel)
+            .await
     }
 }
 
