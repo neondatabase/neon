@@ -10,8 +10,9 @@ use std::{
 use crate::{
     id_lock_map::IdLockMap,
     persistence::{AbortShardSplitStatus, TenantFilter},
-    reconciler::ReconcileError,
+    reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{ScheduleContext, ScheduleMode},
+    tenant_shard::ReconcileNeeded,
 };
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -48,7 +49,7 @@ use pageserver_api::{
     },
 };
 use pageserver_client::mgmt_api;
-use tokio::sync::OwnedRwLockWriteGuard;
+use tokio::sync::{mpsc::error::TrySendError, OwnedRwLockWriteGuard};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use utils::{
@@ -90,6 +91,8 @@ pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
 
+pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
+
 // Top level state available to all HTTP handlers
 struct ServiceState {
     tenants: BTreeMap<TenantShardId, TenantShard>,
@@ -97,6 +100,9 @@ struct ServiceState {
     nodes: Arc<HashMap<NodeId, Node>>,
 
     scheduler: Scheduler,
+
+    /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
+    delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
 }
 
 impl ServiceState {
@@ -104,11 +110,13 @@ impl ServiceState {
         nodes: HashMap<NodeId, Node>,
         tenants: BTreeMap<TenantShardId, TenantShard>,
         scheduler: Scheduler,
+        delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
     ) -> Self {
         Self {
             tenants,
             nodes: Arc::new(nodes),
             scheduler,
+            delayed_reconcile_rx,
         }
     }
 
@@ -142,6 +150,9 @@ pub struct Config {
     /// considered active. Once the grace period elapses, the next heartbeat failure will
     /// mark the pagseserver offline.
     pub max_unavailable_interval: Duration,
+
+    /// How many Reconcilers may be spawned concurrently
+    pub reconciler_concurrency: usize,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -179,6 +190,17 @@ pub struct Service {
     // Locking for node-mutating operations: take exclusively for operations that modify the node's persistent state, or
     // that transition it to/from Active.
     node_op_locks: IdLockMap<NodeId>,
+
+    // Limit how many Reconcilers we will spawn concurrently
+    reconciler_concurrency: Arc<tokio::sync::Semaphore>,
+
+    /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
+    /// Send into this queue to promptly attempt to reconcile this shard next time units are available.
+    ///
+    /// Note that this state logically lives inside ServiceInner, but carrying Sender here makes the code simpler
+    /// by avoiding needing a &mut ref to something inside the ServiceInner.  This could be optimized to
+    /// use a VecDeque instead of a channel to reduce synchronization overhead, at the cost of some code complexity.
+    delayed_reconcile_tx: tokio::sync::mpsc::Sender<TenantShardId>,
 
     // Process shutdown will fire this token
     cancel: CancellationToken,
@@ -742,8 +764,9 @@ impl Service {
     }
 
     /// Apply the contents of a [`ReconcileResult`] to our in-memory state: if the reconciliation
-    /// was successful, this will update the observed state of the tenant such that subsequent
-    /// calls to [`TenantShard::maybe_reconcile`] will do nothing.
+    /// was successful and intent hasn't changed since the Reconciler was spawned, this will update
+    /// the observed state of the tenant such that subsequent calls to [`TenantShard::get_reconcile_needed`]
+    /// will indicate that reconciliation is not needed.
     #[instrument(skip_all, fields(
         tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
         sequence=%result.sequence
@@ -801,6 +824,17 @@ impl Service {
 
                 for (node_id, o) in result.observed.locations {
                     tenant.observed.locations.insert(node_id, o);
+                }
+            }
+        }
+
+        // Maybe some other work can proceed now that this job finished.
+        if self.reconciler_concurrency.available_permits() > 0 {
+            if let Ok(tenant_shard_id) = locked.delayed_reconcile_rx.try_recv() {
+                let (nodes, tenants, _scheduler) = locked.parts_mut();
+                if let Some(shard) = tenants.get_mut(&tenant_shard_id) {
+                    shard.delayed_reconcile = false;
+                    self.maybe_reconcile_shard(shard, nodes);
                 }
             }
         }
@@ -986,6 +1020,11 @@ impl Service {
 
         let (startup_completion, startup_complete) = utils::completion::channel();
 
+        // This channel is finite-size to avoid OOM'ing if we get into a state where reconciles are finishing more slowly
+        // than they're being pushed onto the queue (this queue is not unique wrt shard ID, so shards will keep pushing themselves).
+        // The size is chosen to enable reconciles to proceed promptly for reasonably sized workloads.
+        let (delayed_reconcile_tx, delayed_reconcile_rx) = tokio::sync::mpsc::channel(10000);
+
         let cancel = CancellationToken::new();
         let heartbeater = Heartbeater::new(
             config.jwt_token.clone(),
@@ -994,13 +1033,20 @@ impl Service {
         );
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
-                nodes, tenants, scheduler,
+                nodes,
+                tenants,
+                scheduler,
+                delayed_reconcile_rx,
             ))),
             config: config.clone(),
             persistence,
-            compute_hook: Arc::new(ComputeHook::new(config)),
+            compute_hook: Arc::new(ComputeHook::new(config.clone())),
             result_tx,
             heartbeater,
+            reconciler_concurrency: Arc::new(tokio::sync::Semaphore::new(
+                config.reconciler_concurrency,
+            )),
+            delayed_reconcile_tx,
             abort_tx,
             startup_complete: startup_complete.clone(),
             cancel,
@@ -1535,7 +1581,7 @@ impl Service {
 
         let (response, waiters) = self.do_tenant_create(create_req).await?;
 
-        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+        if let Err(e) = self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
             // Avoid deadlock: reconcile may fail while notifying compute, if the cloud control plane refuses to
             // accept compute notifications while it is in the process of creating.  Reconciliation will
             // be retried in the background.
@@ -4053,20 +4099,62 @@ impl Service {
         Ok(())
     }
 
-    /// Convenience wrapper around [`TenantShard::maybe_reconcile`] that provides
-    /// all the references to parts of Self that are needed
+    /// Wrap [`TenantShard`] reconciliation methods with acquisition of [`Gate`] and [`ReconcileUnits`],
     fn maybe_reconcile_shard(
         &self,
         shard: &mut TenantShard,
         nodes: &Arc<HashMap<NodeId, Node>>,
     ) -> Option<ReconcilerWaiter> {
-        shard.maybe_reconcile(
+        let reconcile_needed = shard.get_reconcile_needed(nodes);
+
+        match reconcile_needed {
+            ReconcileNeeded::No => return None,
+            ReconcileNeeded::WaitExisting(waiter) => return Some(waiter),
+            ReconcileNeeded::Yes => {
+                // Fall through to try and acquire units for spawning reconciler
+            }
+        };
+
+        let units = match self.reconciler_concurrency.clone().try_acquire_owned() {
+            Ok(u) => ReconcileUnits::new(u),
+            Err(_) => {
+                tracing::info!(tenant_id=%shard.tenant_shard_id.tenant_id, shard_id=%shard.tenant_shard_id.shard_slug(),
+                    "Concurrency limited: enqueued for reconcile later");
+                match self.delayed_reconcile_tx.try_send(shard.tenant_shard_id) {
+                    Err(TrySendError::Closed(_)) => {
+                        // Weird mid-shutdown case?
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        // It is safe to skip sending our ID in the channel: we will eventually get retried by the background reconcile task.
+                        tracing::warn!(
+                            "Many shards are waiting to reconcile: delayed_reconcile queue is full"
+                        );
+                    }
+                    Ok(()) => {
+                        shard.delayed_reconcile = true;
+                    }
+                }
+
+                // We won't spawn a reconciler, but we will construct a waiter that waits for the shard's sequence
+                // number to advance.  When this function is eventually called again and succeeds in getting units,
+                // it will spawn a reconciler that makes this waiter complete.
+                return Some(shard.await_next_reconcile());
+            }
+        };
+
+        let Ok(gate_guard) = self.gate.enter() else {
+            // Gate closed: we're shutting down, drop out.
+            return None;
+        };
+
+        shard.spawn_reconciler(
             &self.result_tx,
             nodes,
             &self.compute_hook,
             &self.config,
             &self.persistence,
-            &self.gate,
+            units,
+            gate_guard,
             &self.cancel,
         )
     }
@@ -4086,6 +4174,11 @@ impl Service {
         for (tenant_shard_id, shard) in tenants.iter_mut() {
             if tenant_shard_id.is_shard_zero() {
                 schedule_context = ScheduleContext::default();
+            }
+
+            // Skip checking if this shard is already enqueued for reconciliation
+            if shard.delayed_reconcile {
+                continue;
             }
 
             // Eventual consistency: if an earlier reconcile job failed, and the shard is still
