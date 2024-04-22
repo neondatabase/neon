@@ -4566,12 +4566,12 @@ impl Timeline {
 
         // because we hold the layers, they will not be removed from remote storage.
         let mut new_owned = Vec::with_capacity(rest_of_historic.len());
-        let mut chunks = rest_of_historic.chunks(options.batch_size.get());
+        let chunks = rest_of_historic.chunks(options.batch_size.get());
 
-        while let Some(layers) = chunks.next() {
+        for layers in chunks {
             for adopted in layers {
                 // this layer will not exist until the copy completes
-                let owned = detach_ancestor::schedule_remote_copy(&rtc, adopted, self)?;
+                let owned = detach_ancestor::schedule_remote_copy(rtc, adopted, self)?;
                 new_owned.push(owned);
             }
 
@@ -4627,13 +4627,11 @@ impl Timeline {
             .unwrap()
             .values()
             .filter_map(|tl| {
-                if Arc::ptr_eq(&tl, self) {
+                if Arc::ptr_eq(tl, self) {
                     return None;
                 }
 
-                let Some(tl_ancestor) = tl.ancestor_timeline.as_ref() else {
-                    return None;
-                };
+                let tl_ancestor = tl.ancestor_timeline.as_ref()?;
 
                 let is_same = Arc::ptr_eq(&ancestor, tl_ancestor);
                 let is_earlier = tl.ancestor_lsn <= ancestor_lsn;
