@@ -4501,12 +4501,6 @@ impl Timeline {
 
         tracing::info!(filtered=%filtered_layers, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
 
-        if straddling_branchpoint.is_empty() {
-            // as we flushed the inmem layer to disk, only reason:
-            // this branch has been created from a L1 layer LSN boundary, or checkpoint.
-            // TODO: hit this in tests
-            todo!("is there anything to do here? -- tests are not hitting this");
-        }
 
         {
             tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
