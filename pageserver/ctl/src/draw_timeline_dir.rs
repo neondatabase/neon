@@ -121,14 +121,14 @@ pub fn main() -> Result<()> {
     let mut lsns: Vec<Lsn> = vec![];
     for Layer {
         key_range: keyr,
-        lsn_range: lsn_r,
+        lsn_range: lsnr,
         ..
     } in &files
     {
         keys.push(keyr.start);
         keys.push(keyr.end);
-        lsns.push(lsn_r.start);
-        lsns.push(lsn_r.end);
+        lsns.push(lsnr.start);
+        lsns.push(lsnr.end);
     }
 
     // Analyze
