@@ -1,13 +1,5 @@
-//
 //! The Page Service listens for client connections and serves their GetPage@LSN
 //! requests.
-//
-//   It is possible to connect here using usual psql/pgbench/libpq. Following
-// commands are supported now:
-//     *status* -- show actual info about this pageserver,
-//     *pagestream* -- enter mode where smgr and pageserver talk with their
-//  custom protocol.
-//
 
 use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
@@ -23,7 +15,7 @@ use pageserver_api::models::{
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
     PagestreamGetSlruSegmentRequest, PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest,
-    PagestreamNblocksResponse,
+    PagestreamNblocksResponse, PagestreamProtocolVersion,
 };
 use pageserver_api::shard::ShardIndex;
 use pageserver_api::shard::ShardNumber;
@@ -551,6 +543,7 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend<IO>,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        protocol_version: PagestreamProtocolVersion,
         ctx: RequestContext,
     ) -> Result<(), QueryError>
     where
@@ -613,14 +606,15 @@ impl PageServerHandler {
                 t.trace(&copy_data_bytes)
             }
 
-            let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
+            let neon_fe_msg =
+                PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
 
             // TODO: We could create a new per-request context here, with unique ID.
             // Currently we use the same per-timeline context for all requests
 
             let (response, span) = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
-                    let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.lsn);
+                    let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_rel_exists_request(tenant_id, timeline_id, &req, &ctx)
                             .instrument(span.clone())
@@ -629,7 +623,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::Nblocks(req) => {
-                    let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.lsn);
+                    let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &ctx)
                             .instrument(span.clone())
@@ -639,7 +633,7 @@ impl PageServerHandler {
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     // shard_id is filled in by the handler
-                    let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
+                    let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_page_at_lsn_request(tenant_id, timeline_id, &req, &ctx)
                             .instrument(span.clone())
@@ -648,7 +642,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::DbSize(req) => {
-                    let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.lsn);
+                    let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
                     (
                         self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
                             .instrument(span.clone())
@@ -657,7 +651,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetSlruSegment(req) => {
-                    let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.lsn);
+                    let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &ctx)
                             .instrument(span.clone())
@@ -838,83 +832,80 @@ impl PageServerHandler {
     /// Helper function to handle the LSN from client request.
     ///
     /// Each GetPage (and Exists and Nblocks) request includes information about
-    /// which version of the page is being requested. The client can request the
-    /// latest version of the page, or the version that's valid at a particular
-    /// LSN. The primary compute node will always request the latest page
-    /// version, while a standby will request a version at the LSN that it's
-    /// currently caught up to.
+    /// which version of the page is being requested. The primary compute node
+    /// will always request the latest page version, by setting 'request_lsn' to
+    /// the last inserted or flushed WAL position, while a standby will request
+    /// a version at the LSN that it's currently caught up to.
     ///
     /// In either case, if the page server hasn't received the WAL up to the
     /// requested LSN yet, we will wait for it to arrive. The return value is
     /// the LSN that should be used to look up the page versions.
+    ///
+    /// In addition to the request LSN, each request carries another LSN,
+    /// 'not_modified_since', which is a hint to the pageserver that the client
+    /// knows that the page has not been modified between 'not_modified_since'
+    /// and the request LSN. This allows skipping the wait, as long as the WAL
+    /// up to 'not_modified_since' has arrived. If the client doesn't have any
+    /// information about when the page was modified, it will use
+    /// not_modified_since == lsn. If the client lies and sends a too low
+    /// not_modified_hint such that there are in fact later page versions, the
+    /// behavior is undefined: the pageserver may return any of the page versions
+    /// or an error.
     async fn wait_or_get_last_lsn(
         timeline: &Timeline,
-        mut lsn: Lsn,
-        latest: bool,
+        request_lsn: Lsn,
+        not_modified_since: Lsn,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
         ctx: &RequestContext,
     ) -> Result<Lsn, PageStreamError> {
-        if latest {
-            // Latest page version was requested. If LSN is given, it is a hint
-            // to the page server that there have been no modifications to the
-            // page after that LSN. If we haven't received WAL up to that point,
-            // wait until it arrives.
-            let last_record_lsn = timeline.get_last_record_lsn();
+        let last_record_lsn = timeline.get_last_record_lsn();
 
-            // Note: this covers the special case that lsn == Lsn(0). That
-            // special case means "return the latest version whatever it is",
-            // and it's used for bootstrapping purposes, when the page server is
-            // connected directly to the compute node. That is needed because
-            // when you connect to the compute node, to receive the WAL, the
-            // walsender process will do a look up in the pg_authid catalog
-            // table for authentication. That poses a deadlock problem: the
-            // catalog table lookup will send a GetPage request, but the GetPage
-            // request will block in the page server because the recent WAL
-            // hasn't been received yet, and it cannot be received until the
-            // walsender completes the authentication and starts streaming the
-            // WAL.
-            if lsn <= last_record_lsn {
-                // It might be better to use max(lsn, latest_gc_cutoff_lsn) instead
-                // last_record_lsn. That would give the same result, since we know
-                // that there haven't been modifications since 'lsn'. Using an older
-                // LSN might be faster, because that could allow skipping recent
-                // layers when finding the page.
-                lsn = last_record_lsn;
+        // Sanity check the request
+        if request_lsn < not_modified_since {
+            return Err(PageStreamError::BadRequest(
+                format!(
+                    "invalid request with request LSN {} and not_modified_since {}",
+                    request_lsn, not_modified_since,
+                )
+                .into(),
+            ));
+        }
+
+        if request_lsn < **latest_gc_cutoff_lsn {
+            // Check explicitly for INVALID just to get a less scary error message if the
+            // request is obviously bogus
+            return Err(if request_lsn == Lsn::INVALID {
+                PageStreamError::BadRequest("invalid LSN(0) in request".into())
             } else {
-                timeline
-                    .wait_lsn(
-                        lsn,
-                        crate::tenant::timeline::WaitLsnWaiter::PageService,
-                        ctx,
-                    )
-                    .await?;
-                // Since we waited for 'lsn' to arrive, that is now the last
-                // record LSN. (Or close enough for our purposes; the
-                // last-record LSN can advance immediately after we return
-                // anyway)
-            }
-        } else {
-            if lsn == Lsn(0) {
-                return Err(PageStreamError::BadRequest(
-                    "invalid LSN(0) in request".into(),
-                ));
-            }
+                PageStreamError::BadRequest(format!(
+                        "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
+                        request_lsn, **latest_gc_cutoff_lsn
+                    ).into())
+            });
+        }
+
+        // Wait for WAL up to 'not_modified_since' to arrive, if necessary
+        if not_modified_since > last_record_lsn {
             timeline
                 .wait_lsn(
-                    lsn,
+                    not_modified_since,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
                     ctx,
                 )
                 .await?;
+            // Since we waited for 'not_modified_since' to arrive, that is now the last
+            // record LSN. (Or close enough for our purposes; the last-record LSN can
+            // advance immediately after we return anyway)
+            Ok(not_modified_since)
+        } else {
+            // It might be better to use max(not_modified_since, latest_gc_cutoff_lsn)
+            // here instead. That would give the same result, since we know that there
+            // haven't been any modifications since 'not_modified_since'. Using an older
+            // LSN might be faster, because that could allow skipping recent layers when
+            // finding the page. However, we have historically used 'last_record_lsn', so
+            // stick to that for now.
+            Ok(std::cmp::min(last_record_lsn, request_lsn))
         }
-
-        if lsn < **latest_gc_cutoff_lsn {
-            return Err(PageStreamError::BadRequest(format!(
-                "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
-                lsn, **latest_gc_cutoff_lsn
-            ).into()));
-        }
-        Ok(lsn)
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -931,9 +922,14 @@ impl PageServerHandler {
             .start_timer(metrics::SmgrQueryType::GetRelExists, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
-                .await?;
+        let lsn = Self::wait_or_get_last_lsn(
+            timeline,
+            req.request_lsn,
+            req.not_modified_since,
+            &latest_gc_cutoff_lsn,
+            ctx,
+        )
+        .await?;
 
         let exists = timeline
             .get_rel_exists(req.rel, Version::Lsn(lsn), ctx)
@@ -959,9 +955,14 @@ impl PageServerHandler {
             .start_timer(metrics::SmgrQueryType::GetRelSize, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
-                .await?;
+        let lsn = Self::wait_or_get_last_lsn(
+            timeline,
+            req.request_lsn,
+            req.not_modified_since,
+            &latest_gc_cutoff_lsn,
+            ctx,
+        )
+        .await?;
 
         let n_blocks = timeline
             .get_rel_size(req.rel, Version::Lsn(lsn), ctx)
@@ -987,9 +988,14 @@ impl PageServerHandler {
             .start_timer(metrics::SmgrQueryType::GetDbSize, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
-                .await?;
+        let lsn = Self::wait_or_get_last_lsn(
+            timeline,
+            req.request_lsn,
+            req.not_modified_since,
+            &latest_gc_cutoff_lsn,
+            ctx,
+        )
+        .await?;
 
         let total_blocks = timeline
             .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, Version::Lsn(lsn), ctx)
@@ -1159,9 +1165,14 @@ impl PageServerHandler {
             .start_timer(metrics::SmgrQueryType::GetPageAtLsn, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
-                .await?;
+        let lsn = Self::wait_or_get_last_lsn(
+            timeline,
+            req.request_lsn,
+            req.not_modified_since,
+            &latest_gc_cutoff_lsn,
+            ctx,
+        )
+        .await?;
 
         let page = timeline
             .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), ctx)
@@ -1187,9 +1198,14 @@ impl PageServerHandler {
             .start_timer(metrics::SmgrQueryType::GetSlruSegment, ctx);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn =
-            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
-                .await?;
+        let lsn = Self::wait_or_get_last_lsn(
+            timeline,
+            req.request_lsn,
+            req.not_modified_since,
+            &latest_gc_cutoff_lsn,
+            ctx,
+        )
+        .await?;
 
         let kind = SlruKind::from_repr(req.kind)
             .ok_or(PageStreamError::BadRequest("invalid SLRU kind".into()))?;
@@ -1403,7 +1419,34 @@ where
 
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
-        if query_string.starts_with("pagestream ") {
+        if query_string.starts_with("pagestream_v2 ") {
+            let (_, params_raw) = query_string.split_at("pagestream_v2 ".len());
+            let params = params_raw.split(' ').collect::<Vec<_>>();
+            if params.len() != 2 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for pagestream command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
+            self.check_permission(Some(tenant_id))?;
+
+            self.handle_pagerequests(
+                pgb,
+                tenant_id,
+                timeline_id,
+                PagestreamProtocolVersion::V2,
+                ctx,
+            )
+            .await?;
+        } else if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             if params.len() != 2 {
@@ -1422,8 +1465,14 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            self.handle_pagerequests(pgb, tenant_id, timeline_id, ctx)
-                .await?;
+            self.handle_pagerequests(
+                pgb,
+                tenant_id,
+                timeline_id,
+                PagestreamProtocolVersion::V1,
+                ctx,
+            )
+            .await?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
