@@ -4496,6 +4496,17 @@ impl Timeline {
                 &layers,
             );
 
+            if straddling_branchpoint
+                .iter()
+                .any(|layer| LayerMap::is_l0(layer.layer_desc()))
+            {
+                if !options.allow_l0_rewriting {
+                    return Err(RewrittenContainsL0);
+                }
+
+                tracing::warn!("to_rewrite layers contain L0s which might cause problems if detach_ancestor is retried and a compaction happens in meantime");
+            }
+
             detach_ancestor::retain_missing_layers(&mut rest_of_historic, &layers);
         }
 
@@ -4772,6 +4783,11 @@ pub(crate) enum DetachFromAncestorError {
     ReparetingsFailed,
     #[error("ancestor is already being detached by: {}", .0)]
     OtherTimelineDetachOngoing(TimelineId),
+
+    /// This is a problem currently because we cannot know which layers to remove. Basically we
+    /// would like to freeze ancestors layers at the detach point.
+    #[error("rewritten or copied layers contain L0s")]
+    RewrittenContainsL0,
 
     #[cfg(feature = "testing")]
     #[error("failpoint: {}", .0)]
