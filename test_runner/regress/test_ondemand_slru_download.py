@@ -7,13 +7,17 @@ from fixtures.utils import query_scalar
 #
 # Test on-demand download of the pg_xact SLRUs
 #
+@pytest.mark.parametrize("shard_count", [None, 4])
 def test_ondemand_download_pg_xact(neon_env_builder: NeonEnvBuilder):
+    if shard_count is not None:
+        neon_env_builder.num_pageservers = shard_count
+
     tenant_conf = {
         "lazy_slru_download": "true",
         # set PITR interval to be small, so we can do GC
         "pitr_interval": "0 s",
     }
-    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
+    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf, initial_tenant_shard_count=shard_count)
 
     timeline_id = env.initial_timeline
     tenant_id = env.initial_tenant
@@ -54,9 +58,10 @@ def test_ondemand_download_pg_xact(neon_env_builder: NeonEnvBuilder):
     )
 
     # Run GC
-    env.pageserver.http_client().timeline_checkpoint(tenant_id, timeline_id)
-    env.pageserver.http_client().timeline_compact(tenant_id, timeline_id)
-    env.pageserver.http_client().timeline_gc(tenant_id, timeline_id, 0)
+    for ps in env.pageservers:
+        ps.http_client().timeline_checkpoint(tenant_id, timeline_id)
+        ps.http_client().timeline_compact(tenant_id, timeline_id)
+        ps.http_client().timeline_gc(tenant_id, timeline_id, 0)
 
     # Test that this can still on-demand download the old pg_xact segments
     cur.execute("select xmin, xmax, * from clogtest")
@@ -64,11 +69,15 @@ def test_ondemand_download_pg_xact(neon_env_builder: NeonEnvBuilder):
     log.info(f"tuples = {tup}")
 
 
+@pytest.mark.parametrize("shard_count", [None, 4])
 def test_ondemand_download_replica(neon_env_builder: NeonEnvBuilder):
+    if shard_count is not None:
+        neon_env_builder.num_pageservers = shard_count
+
     tenant_conf = {
         "lazy_slru_download": "true",
     }
-    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
+    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf, initial_tenant_shard_count=shard_count)
 
     endpoint = env.endpoints.create_start("main")
 
