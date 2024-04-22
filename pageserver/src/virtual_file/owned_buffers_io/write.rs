@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 /// A trait for doing owned-buffer write IO.
@@ -7,7 +8,57 @@ pub trait OwnedAsyncWriter {
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)>;
-    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize>;
+}
+
+pub trait Buffer {
+    const BUFFER_SIZE: usize;
+
+    fn len(&self) -> usize;
+    fn clear(&mut self);
+    fn extend_from_slice(&mut self, other: &[u8]);
+}
+
+pub struct BytesMutBuffer<const BUFFER_SIZE: usize> {
+    buf: BytesMut,
+}
+
+/// SAFETY: just forwards to the pre-existing impl for BytesMut
+unsafe impl<const BUFFER_SIZE: usize> IoBuf for BytesMutBuffer<BUFFER_SIZE> {
+    fn stable_ptr(&self) -> *const u8 {
+        IoBuf::stable_ptr(&self.buf)
+    }
+
+    fn bytes_init(&self) -> usize {
+        IoBuf::bytes_init(&self.buf)
+    }
+
+    fn bytes_total(&self) -> usize {
+        IoBuf::bytes_total(&self.buf)
+    }
+}
+
+impl<const BUFFER_SIZE: usize> Buffer for BytesMutBuffer<BUFFER_SIZE> {
+    const BUFFER_SIZE: usize = BUFFER_SIZE;
+
+    fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear()
+    }
+
+    fn extend_from_slice(&mut self, other: &[u8]) {
+        self.buf.extend_from_slice(other)
+    }
+}
+
+impl<const BUFFER_SIZE: usize> BytesMutBuffer<BUFFER_SIZE> {
+    pub fn new() -> Self {
+        BytesMutBuffer {
+            buf: BytesMut::with_capacity(BUFFER_SIZE),
+        }
+    }
 }
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that batches smaller writers
@@ -25,26 +76,25 @@ pub trait OwnedAsyncWriter {
 ///
 /// In such cases, a different implementation that always buffers in memory
 /// may be preferable.
-pub struct BufferedWriter<const BUFFER_SIZE: usize, W> {
+pub struct BufferedWriter<B, W> {
     writer: W,
     // invariant: always remains Some(buf)
     // with buf.capacity() == BUFFER_SIZE except
     // - while IO is ongoing => goes back to Some() once the IO completed successfully
     // - after an IO error => stays `None` forever
     // In these exceptional cases, it's `None`.
-    buf: Option<zero_initialized_buffer::Buf<BUFFER_SIZE>>,
+    buf: Option<B>,
 }
 
-mod zero_initialized_buffer;
-
-impl<const BUFFER_SIZE: usize, W> BufferedWriter<BUFFER_SIZE, W>
+impl<B, W> BufferedWriter<B, W>
 where
+    B: Buffer + IoBuf + Send,
     W: OwnedAsyncWriter,
 {
-    pub fn new(writer: W) -> Self {
+    pub fn new(writer: W, buffer: B) -> Self {
         Self {
             writer,
-            buf: Some(zero_initialized_buffer::Buf::default()),
+            buf: Some(buffer),
         }
     }
 
@@ -52,13 +102,9 @@ where
         &self.writer
     }
 
-    /// panics if used after an error
-    pub fn inspect_buffer(&self) -> &[u8; BUFFER_SIZE] {
-        self.buf
-            .as_ref()
-            // TODO: can this happen on the EphemeralFile read path?
-            .expect("must not use after an error")
-            .as_zero_padded_slice()
+    /// Panics if used after any of the write paths returned an error
+    pub fn inspect_buffer(&self) -> &B {
+        self.buf.as_ref().expect("must not use after an error")
     }
 
     pub async fn flush_and_into_inner(mut self) -> std::io::Result<W> {
@@ -68,13 +114,13 @@ where
         Ok(writer)
     }
 
-    pub async fn write_buffered<B: IoBuf>(&mut self, chunk: Slice<B>) -> std::io::Result<(usize, B)>
+    pub async fn write_buffered<S: IoBuf>(&mut self, chunk: Slice<S>) -> std::io::Result<(usize, S)>
     where
-        B: IoBuf + Send,
+        S: IoBuf + Send,
     {
         let chunk_len = chunk.len();
         // avoid memcpy for the middle of the chunk
-        if chunk.len() >= BUFFER_SIZE {
+        if chunk.len() >= B::BUFFER_SIZE {
             self.flush().await?;
             // do a big write, bypassing `buf`
             assert_eq!(
@@ -89,17 +135,17 @@ where
             return Ok((nwritten, chunk));
         }
         // in-memory copy the < BUFFER_SIZED tail of the chunk
-        assert!(chunk.len() < BUFFER_SIZE);
+        assert!(chunk.len() < B::BUFFER_SIZE);
         let mut slice = &chunk[..];
         while !slice.is_empty() {
             let buf = self.buf.as_mut().expect("must not use after an error");
-            let need = BUFFER_SIZE - buf.len();
+            let need = B::BUFFER_SIZE - buf.len();
             let have = slice.len();
             let n = std::cmp::min(need, have);
             buf.extend_from_slice(&slice[..n]);
             slice = &slice[n..];
-            if buf.len() >= BUFFER_SIZE {
-                assert_eq!(buf.len(), BUFFER_SIZE);
+            if buf.len() >= B::BUFFER_SIZE {
+                assert_eq!(buf.len(), B::BUFFER_SIZE);
                 self.flush().await?;
             }
         }
@@ -107,19 +153,22 @@ where
         Ok((chunk_len, chunk.into_inner()))
     }
 
-    /// Always goes through the internal buffer.
-    /// Guaranteed to never invoke [`OwnedAsyncWriter::write_all_borrowed`] on the underlying.
-    pub async fn write_all_borrowed(&mut self, mut chunk: &[u8]) -> std::io::Result<usize> {
+    /// Strictly less performant variant of [`Self::write_buffered`] that allows writing borrowed data.
+    ///
+    /// It is less performant because we always have to copy the borrowed data into the internal buffer
+    /// before we can do the IO. The [`Self::write_buffered`] can avoid this, which is more performant
+    /// for large writes.
+    pub async fn write_buffered_borrowed(&mut self, mut chunk: &[u8]) -> std::io::Result<usize> {
         let chunk_len = chunk.len();
         while !chunk.is_empty() {
             let buf = self.buf.as_mut().expect("must not use after an error");
-            let need = BUFFER_SIZE - buf.len();
+            let need = B::BUFFER_SIZE - buf.len();
             let have = chunk.len();
             let n = std::cmp::min(need, have);
             buf.extend_from_slice(&chunk[..n]);
             chunk = &chunk[n..];
-            if buf.len() >= BUFFER_SIZE {
-                assert_eq!(buf.len(), BUFFER_SIZE);
+            if buf.len() >= B::BUFFER_SIZE {
+                assert_eq!(buf.len(), B::BUFFER_SIZE);
                 self.flush().await?;
             }
         }
@@ -128,7 +177,7 @@ where
 
     async fn flush(&mut self) -> std::io::Result<()> {
         let buf = self.buf.take().expect("must not use after an error");
-        if buf.is_empty() {
+        if buf.bytes_init() == 0 {
             self.buf = Some(buf);
             return std::io::Result::Ok(());
         }
@@ -138,27 +187,6 @@ where
         buf.clear();
         self.buf = Some(buf);
         Ok(())
-    }
-}
-
-impl<const BUFFER_SIZE: usize, W: OwnedAsyncWriter> OwnedAsyncWriter
-    for BufferedWriter<BUFFER_SIZE, W>
-{
-    #[inline(always)]
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
-        &mut self,
-        buf: B,
-    ) -> std::io::Result<(usize, B::Buf)> {
-        let nbytes = buf.bytes_init();
-        if nbytes == 0 {
-            return Ok((0, Slice::into_inner(buf.slice_full())));
-        }
-        let slice = buf.slice(0..nbytes);
-        BufferedWriter::write_buffered(self, slice).await
-    }
-    #[inline(always)]
-    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        BufferedWriter::write_all_borrowed(self, buf).await
     }
 }
 
@@ -174,11 +202,6 @@ impl OwnedAsyncWriter for Vec<u8> {
         let buf = buf.slice(0..nbytes);
         self.extend_from_slice(&buf[..]);
         Ok((buf.len(), Slice::into_inner(buf)))
-    }
-
-    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.extend_from_slice(buf);
-        Ok(buf.len())
     }
 }
 
@@ -204,11 +227,6 @@ mod tests {
             self.writes.push(Vec::from(&buf[..]));
             Ok((buf.len(), Slice::into_inner(buf)))
         }
-
-        async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.writes.push(Vec::from(buf));
-            Ok(buf.len())
-        }
     }
 
     macro_rules! write {
@@ -222,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn test_buffered_writes_only() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::<2, _>::new(recorder);
+        let mut writer = BufferedWriter::new(recorder, BytesMutBuffer::<2>::new());
         write!(writer, b"a");
         write!(writer, b"b");
         write!(writer, b"c");
@@ -239,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn test_passthrough_writes_only() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::<2, _>::new(recorder);
+        let mut writer = BufferedWriter::new(recorder, BytesMutBuffer::<2>::new());
         write!(writer, b"abc");
         write!(writer, b"de");
         write!(writer, b"");
@@ -255,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn test_passthrough_write_with_nonempty_buffer() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::<2, _>::new(recorder);
+        let mut writer = BufferedWriter::new(recorder, BytesMutBuffer::<2>::new());
         write!(writer, b"a");
         write!(writer, b"bc");
         write!(writer, b"d");
@@ -271,15 +289,15 @@ mod tests {
     #[tokio::test]
     async fn test_write_all_borrowed_always_goes_through_buffer() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::<2, _>::new(recorder);
+        let mut writer = BufferedWriter::new(recorder, BytesMutBuffer::<2>::new());
 
-        writer.write_all_borrowed(b"abc").await?;
-        writer.write_all_borrowed(b"d").await?;
-        writer.write_all_borrowed(b"e").await?;
-        writer.write_all_borrowed(b"fg").await?;
-        writer.write_all_borrowed(b"hi").await?;
-        writer.write_all_borrowed(b"j").await?;
-        writer.write_all_borrowed(b"klmno").await?;
+        writer.write_buffered_borrowed(b"abc").await?;
+        writer.write_buffered_borrowed(b"d").await?;
+        writer.write_buffered_borrowed(b"e").await?;
+        writer.write_buffered_borrowed(b"fg").await?;
+        writer.write_buffered_borrowed(b"hi").await?;
+        writer.write_buffered_borrowed(b"j").await?;
+        writer.write_buffered_borrowed(b"klmno").await?;
 
         let recorder = writer.flush_and_into_inner().await?;
         assert_eq!(

@@ -39,11 +39,4 @@ where
         self.bytes_amount += u64::try_from(nwritten).unwrap();
         Ok((nwritten, buf))
     }
-
-    #[inline(always)]
-    async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let nwritten = self.dst.write_all_borrowed(buf).await?;
-        self.bytes_amount += u64::try_from(nwritten).unwrap();
-        Ok(nwritten)
-    }
 }

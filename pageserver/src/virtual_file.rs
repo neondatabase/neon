@@ -1093,12 +1093,6 @@ impl OwnedAsyncWriter for VirtualFile {
         let (buf, res) = VirtualFile::write_all(self, buf).await;
         res.map(move |v| (v, buf))
     }
-
-    #[inline(always)]
-    async fn write_all_borrowed(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-        // TODO: ensure this through the type system
-        panic!("this should not happen");
-    }
 }
 
 impl OpenFiles {

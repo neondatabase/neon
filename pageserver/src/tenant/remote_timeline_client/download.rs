@@ -194,10 +194,10 @@ async fn download_object<'a>(
                 // There's chunks_vectored() on the stream.
                 let (bytes_amount, destination_file) = async {
                     let size_tracking = size_tracking_writer::Writer::new(destination_file);
-                    let mut buffered = owned_buffers_io::write::BufferedWriter::<
-                        { super::BUFFER_SIZE },
-                        _,
-                    >::new(size_tracking);
+                    let mut buffered = owned_buffers_io::write::BufferedWriter::new(
+                        size_tracking,
+                        owned_buffers_io::write::BytesMutBuffer::<{ super::BUFFER_SIZE }>::new(),
+                    );
                     while let Some(res) =
                         futures::StreamExt::next(&mut download.download_stream).await
                     {
