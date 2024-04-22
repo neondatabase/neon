@@ -94,6 +94,12 @@ pub(crate) static READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_layers_visited_per_vectored_read_global",
+        "Average number of layers visited to reconstruct one key",
+        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
     )
     .expect("failed to define a metric")
 });
@@ -2774,8 +2780,8 @@ pub fn preinitialize_metrics() {
 
     // histograms
     [
-        &READ_NUM_FS_LAYERS,
         &READ_NUM_LAYERS_VISITED,
+        &VEC_READ_NUM_LAYERS_VISITED,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,

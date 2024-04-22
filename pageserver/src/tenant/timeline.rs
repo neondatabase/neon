@@ -957,6 +957,7 @@ impl Timeline {
             .await?;
 
         let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
+        let layers_visited = reconstruct_state.get_layers_visited();
         for (key, res) in reconstruct_state.keys {
             match res {
                 Err(err) => {
@@ -970,6 +971,12 @@ impl Timeline {
                 }
             }
         }
+
+        // Note that this is an approximation. Tracking the exact number of layers visited
+        // per key requires virtually unbounded memory usage and is inefficient
+        // (i.e. segment tree tracking each range queried from a layer)
+        crate::metrics::VEC_READ_NUM_LAYERS_VISITED
+            .observe(layers_visited as f64 / results.len() as f64);
 
         Ok(results)
     }
@@ -3129,6 +3136,8 @@ impl Timeline {
 
                 unmapped_keyspace = keyspace_to_read;
                 cont_lsn = next_cont_lsn;
+
+                reconstruct_state.on_layer_visited();
             } else {
                 break;
             }
