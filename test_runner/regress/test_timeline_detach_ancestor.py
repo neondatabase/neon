@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import HistoricLayerInfo
+from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
 from fixtures.pageserver.utils import wait_timeline_detail_404
 from fixtures.types import Lsn, TimelineId
 from fixtures.utils import wait_until
@@ -383,6 +383,126 @@ def test_detached_receives_flushes_while_being_detached(
     # finally restart the endpoint and make sure we still have the same answer
     with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
+
+
+# @pytest.mark.parametrize("failmode", ["return", "exit"])
+def test_retried_ancestor_detach(neon_env_builder: NeonEnvBuilder):
+    """
+    Fail or restart the pageserver, and retry detaching the ancestor.
+    """
+    write_to_branch_first = True
+
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+            "pitr_interval": "0s",
+            "compaction_period": "0s",
+            "checkpoint_distance": f"{128 * 1024}",
+            "compaction_target_size": f"{96 * 1024}",
+            "image_layer_creation_check_threshold": "0",
+            "compaction_threshold": "3",
+        },
+    )
+
+    def insert_rows(n: int, ep, i_from: int = 0) -> int:
+        start = i_from
+        end = i_from + n - 1
+        ep.safe_psql(
+            f"INSERT INTO foo SELECT i::bigint, 'more info!! this is a long string' || i FROM generate_series({start}, {end}) g(i);"
+        )
+        return n
+
+    rows = 0
+    batch = 128
+    assert (batch // 2) > 0
+
+    client = env.pageserver.http_client()
+    waited_lsns = []
+
+    # try to create interesting enough
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql("CREATE TABLE foo (i BIGINT, aux TEXT NOT NULL);")
+
+        # batch size is 10, so hopefully we have more; this creates about 300 layers on pg16 in single iteration
+        for _ in range(4):
+            rows += insert_rows(batch, ep, rows)
+
+            # this attempts to write rows, delete half of them, update the remaining half, then vacuum
+            ep.safe_psql(f"DELETE FROM foo WHERE i >= {rows - batch} AND i < {rows - (batch // 2)}")
+            rows -= batch // 2
+            ep.safe_psql(
+                f"UPDATE foo SET i = i - {batch // 2} WHERE i >= {rows} AND i < {rows + (batch // 2)}"
+            )
+            ep.safe_psql("VACUUM FULL")
+
+            lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+            waited_lsns.append(lsn)
+            client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
+
+        assert (
+            len(client.layer_map_info(env.initial_tenant, env.initial_timeline).historic_layers)
+            > 200
+        )
+        assert len(waited_lsns) == 4
+
+        reparented_old = env.neon_cli.create_branch(
+            "reparented_old",
+            "main",
+            tenant_id=env.initial_tenant,
+            ancestor_start_lsn=waited_lsns[0],
+        )
+
+        reparented_newer = env.neon_cli.create_branch(
+            "reparented_newer",
+            "main",
+            tenant_id=env.initial_tenant,
+            ancestor_start_lsn=waited_lsns[2],
+        )
+
+        detached_timeline = env.neon_cli.create_branch(
+            "detached", "main", tenant_id=env.initial_tenant, ancestor_start_lsn=waited_lsns[3]
+        )
+
+    if write_to_branch_first:
+        with env.endpoints.create_start("detached", tenant_id=env.initial_tenant) as ep:
+            rows += insert_rows(batch // 2, ep, rows)
+            wait_for_last_flush_lsn(env, ep, env.initial_tenant, detached_timeline)
+            client.timeline_checkpoint(env.initial_tenant, detached_timeline)
+
+    # FIXME: a compaction during detach is ok, because we will always get a consistent view of the layers, but we might need to compact again...?
+
+    failpoints = [
+        ("timeline-ancestor-after-one-rewritten", "return"),
+        ("timeline-ancestor-after-rewrite-batch", "return"),
+        ("timeline-ancestor-after-rewrite-fsync", "return"),
+        ("timeline-ancestor-after-copy-batch", "return"),
+        ("timeline-ancestor-reparent", "return"),
+        ("timeline-ancestor-detach-before-detach", "return"),
+        ("timeline-ancestor-detach-before-restart", "return"),
+    ]
+
+    client.configure_failpoints(failpoints)
+
+    for index, (name, _) in enumerate(failpoints):
+        if name == "timeline-ancestor-reparent":
+            matcher = "some reparentings failed, please retry"
+        else:
+            matcher = f"failpoint: {failpoints[index][0]}"
+
+        with pytest.raises(PageserverApiException, match=matcher):
+            client.detach_ancestor(env.initial_tenant, detached_timeline, batch_size=10)
+
+        client.configure_failpoints((failpoints[index][0], "off"))
+
+    reparented = client.detach_ancestor(env.initial_tenant, detached_timeline)
+    assert reparented == set([reparented_old, reparented_newer])
+
+    env.pageserver.allowed_errors.append(
+        ".* request\\{method=POST path=/v1/tenant/[0-9a-f]+/timeline/[0-9a-f]+/detach_ancestor request_id=[-0-9a-f]+\\}: Error processing HTTP request: InternalServerError\\(failpoint:.*"
+    )
+    env.pageserver.allowed_errors.append(
+        ".* request\\{method=POST path=/v1/tenant/[0-9a-f]+/timeline/[0-9a-f]+/detach_ancestor request_id=[-0-9a-f]+\\}: Error processing HTTP request: InternalServerError\\(some reparentings failed, please retry"
+    )
 
 
 # TODO:
