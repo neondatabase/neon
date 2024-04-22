@@ -538,6 +538,24 @@ impl ShardIdentity {
         }
     }
 
+    /// Special case for issue `<https://github.com/neondatabase/neon/issues/7451>`
+    ///
+    /// When we fail to read a forknum block, this function tells us whether we may ignore the error
+    /// as a symptom of that issue.
+    pub fn is_key_buggy_forknum(&self, key: &Key) -> bool {
+        if !is_rel_block_key(key) || key.field5 != INIT_FORKNUM {
+            return false;
+        }
+
+        let mut hash = murmurhash32(key.field4);
+        hash = hash_combine(hash, murmurhash32(key.field6 / self.stripe_size.0));
+        let mapped_shard = ShardNumber((hash % self.count.0 as u32) as u8);
+
+        // The key may be affected by issue #7454: it is an initfork and it would not
+        // have mapped to shard 0 until we fixed that issue.
+        mapped_shard != ShardNumber(0)
+    }
+
     /// Return true if the key should be discarded if found in this shard's
     /// data store, e.g. during compaction after a split.
     ///
