@@ -2794,7 +2794,7 @@ impl Timeline {
         let mut timeline = self;
 
         let mut read_count = scopeguard::guard(0, |cnt| {
-            crate::metrics::READ_NUM_FS_LAYERS.observe(cnt as f64)
+            crate::metrics::READ_NUM_LAYERS_VISITED.observe(cnt as f64)
         });
 
         // For debugging purposes, collect the path of layers that we traversed
@@ -2909,7 +2909,7 @@ impl Timeline {
                         Err(e) => return Err(PageReconstructError::from(e)),
                     };
                     cont_lsn = lsn_floor;
-                    // metrics: open_layer does not count as fs access, so we are not updating `read_count`
+                    *read_count += 1;
                     traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
                     continue 'outer;
                 }
@@ -2936,7 +2936,7 @@ impl Timeline {
                         Err(e) => return Err(PageReconstructError::from(e)),
                     };
                     cont_lsn = lsn_floor;
-                    // metrics: open_layer does not count as fs access, so we are not updating `read_count`
+                    *read_count += 1;
                     traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
                     continue 'outer;
                 }
