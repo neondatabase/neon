@@ -16,7 +16,10 @@ use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
-    key::{AUX_FILES_KEY, NON_INHERITED_RANGE},
+    key::{
+        AUX_FILES_KEY, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+        NON_INHERITED_SPARSE_RANGE,
+    },
     keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
@@ -55,7 +58,6 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::TimelineMetadata,
@@ -76,6 +78,9 @@ use crate::{
 };
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
+};
+use crate::{
+    metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 use crate::{
@@ -1016,6 +1021,70 @@ impl Timeline {
         }
 
         res
+    }
+
+    /// Scan the keyspace and return all existing key-values in the keyspace. This currently uses vectored
+    /// get underlying. Normal vectored get would throw an error when a key in the keyspace is not found
+    /// during the search, but for the scan interface, it returns all existing key-value pairs, and does
+    /// not expect each single key in the key space will be found. The semantics is closer to the RocksDB
+    /// scan iterator interface. We could optimize this interface later to avoid some checks in the vectored
+    /// get path to maintain and split the probing and to-be-probe keyspace. We also need to ensure that
+    /// the scan operation will not cause OOM in the future.
+    #[allow(dead_code)]
+    pub(crate) async fn scan(
+        &self,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        if !lsn.is_valid() {
+            return Err(GetVectoredError::InvalidLsn(lsn));
+        }
+
+        trace!(
+            "key-value scan request for {:?}@{} from task kind {:?}",
+            keyspace,
+            lsn,
+            ctx.task_kind()
+        );
+
+        // We should generalize this into Keyspace::contains in the future.
+        for range in &keyspace.ranges {
+            if range.start.field1 < METADATA_KEY_BEGIN_PREFIX
+                || range.end.field1 >= METADATA_KEY_END_PREFIX
+            {
+                return Err(GetVectoredError::Other(anyhow::anyhow!(
+                    "only metadata keyspace can be scanned"
+                )));
+            }
+        }
+
+        let start = crate::metrics::SCAN_LATENCY
+            .for_task_kind(ctx.task_kind())
+            .map(ScanLatencyOngoingRecording::start_recording);
+
+        // start counting after throttle so that throttle time
+        // is always less than observation time
+        let throttled = self
+            .timeline_get_throttle
+            // assume scan = 1 quota for now until we find a better way to process this
+            .throttle(ctx, 1)
+            .await;
+
+        let vectored_res = self
+            .get_vectored_impl(
+                keyspace.clone(),
+                lsn,
+                ValuesReconstructState::default(),
+                ctx,
+            )
+            .await;
+
+        if let Some(recording) = start {
+            recording.observe(throttled);
+        }
+
+        vectored_res
     }
 
     /// Not subject to [`Self::timeline_get_throttle`].
@@ -3188,7 +3257,9 @@ impl Timeline {
             // We don't return a blanket [`GetVectoredError::MissingKey`] to avoid
             // stalling compaction.
             // TODO(chi): this will need to be updated for aux files v2 storage
-            if keyspace.overlaps(&NON_INHERITED_RANGE) {
+            if keyspace.overlaps(&NON_INHERITED_RANGE)
+                || keyspace.overlaps(&NON_INHERITED_SPARSE_RANGE)
+            {
                 let removed = keyspace.remove_overlapping_with(&KeySpace {
                     ranges: vec![NON_INHERITED_RANGE],
                 });
@@ -3217,6 +3288,13 @@ impl Timeline {
                 }
             }
 
+            // For sparse keyspace, remove overlapping and do not produce missing key error.
+            keyspace.remove_overlapping_with(&KeySpace {
+                ranges: vec![NON_INHERITED_SPARSE_RANGE],
+            });
+
+            // Keyspace is fully retrieved, no ancestor timeline, or metadata scan (where we do not look
+            // into ancestor timelines). TODO: is there any other metadata which we want to inherit?
             if keyspace.total_raw_size() == 0 || timeline.ancestor_timeline.is_none() {
                 break;
             }
