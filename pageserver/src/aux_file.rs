@@ -2,19 +2,19 @@ use pageserver_api::key::{Key, AUX_KEY_PREFIX, METADATA_KEY_SIZE};
 use tracing::warn;
 
 /// Create a metadata key from a hash, encoded as [AUX_KEY_PREFIX, 2B directory prefix, first 13B of 128b xxhash].
-fn aux_hash_to_metadata_key(
-    dir_level1: u8,
-    dir_level2: u8,
-    data: &[u8],
-) -> [u8; METADATA_KEY_SIZE] {
+fn aux_hash_to_metadata_key(dir_level1: u8, dir_level2: u8, data: &[u8]) -> Key {
     let mut key = [0; METADATA_KEY_SIZE];
     let hash = twox_hash::xxh3::hash128(data).to_be_bytes();
     key[0] = AUX_KEY_PREFIX;
     key[1] = dir_level1;
     key[2] = dir_level2;
     key[3..16].copy_from_slice(&hash[0..13]);
-    key
+    Key::from_metadata_key_fixed_size(&key)
 }
+
+const AUX_DIR_PG_LOGICAL: u8 = 0x01;
+const AUX_DIR_PG_REPLSLOT: u8 = 0x02;
+const AUX_DIR_PG_UNKNOWN: u8 = 0xFF;
 
 /// Encode the aux file into a fixed-size key.
 ///
@@ -35,17 +35,11 @@ fn aux_hash_to_metadata_key(
 /// corruptions as the new file belongs to a new prefix but it might have been stored under the `others` prefix.
 pub fn encode_aux_file_key(path: &str) -> Key {
     if let Some(fname) = path.strip_prefix("pg_logical/mappings/") {
-        let key = aux_hash_to_metadata_key(0x01, 0x01, fname.as_bytes());
-        Key::from_metadata_key_fixed_size(&key)
+        aux_hash_to_metadata_key(AUX_DIR_PG_LOGICAL, 0x01, fname.as_bytes())
     } else if let Some(fname) = path.strip_prefix("pg_logical/snapshots/") {
-        let key = aux_hash_to_metadata_key(0x01, 0x02, fname.as_bytes());
-        Key::from_metadata_key_fixed_size(&key)
+        aux_hash_to_metadata_key(AUX_DIR_PG_LOGICAL, 0x02, fname.as_bytes())
     } else if path == "pg_logical/replorigin_checkpoint" {
-        let mut key = [0; METADATA_KEY_SIZE];
-        key[0] = AUX_KEY_PREFIX;
-        key[1] = 0x01;
-        key[2] = 0x03;
-        Key::from_metadata_key_fixed_size(&key)
+        aux_hash_to_metadata_key(AUX_DIR_PG_LOGICAL, 0x03, b"")
     } else if let Some(fname) = path.strip_prefix("pg_logical/") {
         if cfg!(debug_assertions) {
             warn!(
@@ -53,11 +47,9 @@ pub fn encode_aux_file_key(path: &str) -> Key {
                 path
             );
         }
-        let key = aux_hash_to_metadata_key(0x01, 0xFF, fname.as_bytes());
-        Key::from_metadata_key_fixed_size(&key)
+        aux_hash_to_metadata_key(AUX_DIR_PG_LOGICAL, 0xFF, fname.as_bytes())
     } else if let Some(fname) = path.strip_prefix("pg_replslot/") {
-        let key = aux_hash_to_metadata_key(0x02, 0x01, fname.as_bytes());
-        Key::from_metadata_key_fixed_size(&key)
+        aux_hash_to_metadata_key(AUX_DIR_PG_REPLSLOT, 0x01, fname.as_bytes())
     } else {
         if cfg!(debug_assertions) {
             warn!(
@@ -65,8 +57,7 @@ pub fn encode_aux_file_key(path: &str) -> Key {
                 path
             );
         }
-        let key = aux_hash_to_metadata_key(0xFF, 0xFF, path.as_bytes());
-        Key::from_metadata_key_fixed_size(&key)
+        aux_hash_to_metadata_key(AUX_DIR_PG_UNKNOWN, 0xFF, path.as_bytes())
     }
 }
 
