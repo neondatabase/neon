@@ -1,6 +1,3 @@
-//! Implementation of append-only file data structure
-//! used to keep in-memory layers spilled on disk.
-
 use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::BlockLease;
