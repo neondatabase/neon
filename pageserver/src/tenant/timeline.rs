@@ -4525,14 +4525,24 @@ impl Timeline {
                 rtc.schedule_layer_file_upload(copied)
                     .map_err(|_| ShuttingDown)?;
 
+                fail::fail_point!("timeline-ancestor-after-one-rewritten", |_| {
+                    Err(Failpoint("timeline-ancestor-after-one-rewritten"))
+                });
+
                 wrote_any = true;
 
                 if i > 0 && (i % options.batch_size.get()) == 0 {
                     rtc.schedule_index_upload_for_file_changes()
                         .map_err(|_| ShuttingDown)?;
+
+                    fail::fail_point!("timeline-ancestor-after-rewrite-batch", |_| {
+                        Err(Failpoint("timeline-ancestor-after-rewrite-batch"))
+                    });
                 }
             }
 
+            // FIXME: the fsync should be mandatory, after both rewrites and copies in the case of
+            // failpoint usage
             if wrote_any {
                 let timeline_dir = VirtualFile::open(
                     &self
@@ -4573,6 +4583,10 @@ impl Timeline {
             rtc.schedule_index_upload_for_file_changes()
                 .map_err(|_| ShuttingDown)?;
             rtc.wait_completion().await.map_err(|_| ShuttingDown)?;
+
+            fail::fail_point!("timeline-ancestor-after-copy-batch", |_| {
+                Err(Failpoint("timeline-ancestor-after-copy-batch"))
+            });
         }
 
         // TODO: fsync directory again if we hardlinked something
@@ -4591,6 +4605,21 @@ impl Timeline {
         // on restart there will be weird configuration with us having branches before our
         // ancestor_lsn.
         let mut tasks = tokio::task::JoinSet::new();
+
+        let mut failed_reparentings = (|| {
+            // macro will implicitly return
+            fail::fail_point!("timeline-ancestor-reparent", |failures| {
+                if let Some(param) = failures {
+                    let failures = param.parse::<usize>().expect(
+                        "expected failpoint to be `return(5)` to fail first 5 reparentings",
+                    );
+                    Some(failures)
+                } else {
+                    Some(1)
+                }
+            });
+            None
+        })();
 
         tenant
             .timelines
@@ -4616,18 +4645,32 @@ impl Timeline {
                 }
             })
             .for_each(|timeline| {
+                // important in this scope: we are holding the Tenant::timelines lock
                 let span = tracing::info_span!("reparent", reparented=%timeline.timeline_id);
 
                 let new_parent = self.timeline_id;
 
+                let fail = if let Some(remaining) = failed_reparentings {
+                    failed_reparentings = remaining.checked_sub(1);
+                    remaining != 0
+                } else {
+                    false
+                };
+
                 tasks.spawn(
                     async move {
-                        let res = timeline
-                            .remote_client
-                            .as_ref()
-                            .expect("sibling has to have remote client because we have one")
-                            .schedule_reparenting_and_wait(&new_parent)
-                            .await;
+                        // failpoint before so we'll essentially fake a shutdown
+
+                        let res = if fail {
+                            Err(anyhow::anyhow!("failpoint: timeline-ancestor-reparent"))
+                        } else {
+                            timeline
+                                .remote_client
+                                .as_ref()
+                                .expect("sibling has to have remote client because we have one")
+                                .schedule_reparenting_and_wait(&new_parent)
+                                .await
+                        };
 
                         match res {
                             Ok(()) => Some(timeline),
@@ -4682,9 +4725,17 @@ impl Timeline {
             return Err(ReparetingsFailed);
         }
 
+        fail::fail_point!("timeline-ancestor-detach-before-detach", |_| Err(
+            Failpoint("timeline-ancestor-detach-before-detach")
+        ));
+
         rtc.schedule_detaching_from_ancestor_and_wait((ancestor.timeline_id, ancestor_lsn))
             .await
             .map_err(|_| ShuttingDown)?;
+
+        fail::fail_point!("timeline-ancestor-detach-before-restart", |_| Err(
+            Failpoint("timeline-ancestor-detach-before-restart")
+        ));
 
         pausable_failpoint!("timeline-ancestor-detach-before-restart-pausable");
 
@@ -4723,6 +4774,10 @@ pub(crate) enum DetachFromAncestorError {
     ReparetingsFailed,
     #[error("ancestor is already being detached by: {}", .0)]
     OtherTimelineDetachOngoing(TimelineId),
+
+    #[cfg(feature = "testing")]
+    #[error("failpoint: {}", .0)]
+    Failpoint(&'static str),
 }
 
 #[derive(Debug)]
