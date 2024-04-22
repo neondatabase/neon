@@ -52,11 +52,12 @@ pub(super) fn retain_missing_layers(historic: &mut Vec<Layer>, target_layermap: 
 
         let key_range = desc.key_range.clone();
         let lsn_range = desc.lsn_range.clone();
+        let is_delta = desc.is_delta;
 
         let key = crate::tenant::storage_layer::PersistentLayerKey {
             key_range,
             lsn_range,
-            is_delta: true,
+            is_delta,
         };
 
         target_layermap.get(&key).is_none()
