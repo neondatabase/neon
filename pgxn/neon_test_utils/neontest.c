@@ -48,10 +48,10 @@ PG_FUNCTION_INFO_V1(neon_xlogflush);
  */
 #if PG_MAJORVERSION_NUM < 16
 typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-									   XLogRecPtr request_lsn, bool request_latest, char *buffer);
+									   XLogRecPtr request_lsn, XLogRecPtr not_modified_since, char *buffer);
 #else
 typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-									   XLogRecPtr request_lsn, bool request_latest, void *buffer);
+									   XLogRecPtr request_lsn, XLogRecPtr not_modified_since, void *buffer);
 #endif
 
 static neon_read_at_lsn_type neon_read_at_lsn_ptr;
@@ -299,8 +299,8 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	text	   *forkname;
 	uint32		blkno;
 
-	bool		request_latest = PG_ARGISNULL(3);
-	uint64		read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(3);
+	XLogRecPtr	request_lsn;
+	XLogRecPtr	not_modified_since;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
 		PG_RETURN_NULL();
@@ -308,6 +308,9 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	relname = PG_GETARG_TEXT_PP(0);
 	forkname = PG_GETARG_TEXT_PP(1);
 	blkno = PG_GETARG_UINT32(2);
+
+	request_lsn = PG_ARGISNULL(3) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(3);
+	not_modified_since = PG_ARGISNULL(4) ? request_lsn : PG_GETARG_LSN(4);
 
 	if (!superuser())
 		ereport(ERROR,
@@ -361,7 +364,7 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 	raw_page_data = VARDATA(raw_page);
 
-	neon_read_at_lsn(InfoFromRelation(rel), forknum, blkno, read_lsn, request_latest, raw_page_data);
+	neon_read_at_lsn(InfoFromRelation(rel), forknum, blkno, request_lsn, not_modified_since, raw_page_data);
 
 	relation_close(rel, AccessShareLock);
 
@@ -403,18 +406,20 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 		};
 
 		ForkNumber	forknum = PG_GETARG_UINT32(3);
-
 		uint32		blkno = PG_GETARG_UINT32(4);
-		bool		request_latest = PG_ARGISNULL(5);
-		uint64		read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(5);
+		XLogRecPtr	request_lsn;
+		XLogRecPtr	not_modified_since;
 
 		/* Initialize buffer to copy to */
 		bytea	   *raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
 
+		request_lsn = PG_ARGISNULL(5) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(5);
+		not_modified_since = PG_ARGISNULL(6) ? request_lsn : PG_GETARG_LSN(6);
+
 		SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 		raw_page_data = VARDATA(raw_page);
 
-		neon_read_at_lsn(rinfo, forknum, blkno, read_lsn, request_latest, raw_page_data);
+		neon_read_at_lsn(rinfo, forknum, blkno, request_lsn, not_modified_since, raw_page_data);
 		PG_RETURN_BYTEA_P(raw_page);
 	}
 }

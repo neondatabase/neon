@@ -49,6 +49,8 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
+int         neon_protocol_version;
+
 static int	n_reconnect_attempts = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
@@ -379,7 +381,10 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		pfree(msg);
 		return false;
 	}
-	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
+	if (neon_protocol_version >= 2)
+		query = psprintf("pagestream_v2 %s %s", neon_tenant, neon_timeline);
+	else
+		query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
 	ret = PQsendQuery(conn, query);
 	pfree(query);
 	if (ret != 1)
@@ -844,6 +849,16 @@ pg_init_libpagestore(void)
 							PGC_USERSET,
 							0,	/* no flags required */
 							NULL, (GucIntAssignHook) &readahead_buffer_resize, NULL);
+	DefineCustomIntVariable("neon.protocol_version",
+							"Version of compute<->page server protocol",
+							NULL,
+							&neon_protocol_version,
+							1, /* default to old protocol for now */
+							1, /* min */
+							2, /* max */
+							PGC_SU_BACKEND,
+							0,	/* no flags required */
+							NULL, NULL, NULL);
 
 	relsize_hash_init();
 
