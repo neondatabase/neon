@@ -175,7 +175,6 @@ impl Timeline {
         tag: RelTag,
         blknum: BlockNumber,
         version: Version<'_>,
-        latest: bool,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         if tag.relnode == 0 {
@@ -184,7 +183,7 @@ impl Timeline {
             ));
         }
 
-        let nblocks = self.get_rel_size(tag, version, latest, ctx).await?;
+        let nblocks = self.get_rel_size(tag, version, ctx).await?;
         if blknum >= nblocks {
             debug!(
                 "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
@@ -206,7 +205,6 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         version: Version<'_>,
-        latest: bool,
         ctx: &RequestContext,
     ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
@@ -214,7 +212,7 @@ impl Timeline {
         let rels = self.list_rels(spcnode, dbnode, version, ctx).await?;
 
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, version, latest, ctx).await?;
+            let n_blocks = self.get_rel_size(rel, version, ctx).await?;
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -225,7 +223,6 @@ impl Timeline {
         &self,
         tag: RelTag,
         version: Version<'_>,
-        latest: bool,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
@@ -239,7 +236,7 @@ impl Timeline {
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, version, latest, ctx).await?
+            && !self.get_rel_exists(tag, version, ctx).await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
@@ -262,7 +259,6 @@ impl Timeline {
         &self,
         tag: RelTag,
         version: Version<'_>,
-        _latest: bool,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
@@ -1089,7 +1085,7 @@ impl<'a> DatadirModification<'a> {
     ) -> anyhow::Result<()> {
         let total_blocks = self
             .tline
-            .get_db_size(spcnode, dbnode, Version::Modified(self), true, ctx)
+            .get_db_size(spcnode, dbnode, Version::Modified(self), ctx)
             .await?;
 
         // Remove entry from dbdir
@@ -1188,7 +1184,7 @@ impl<'a> DatadirModification<'a> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         if self
             .tline
-            .get_rel_exists(rel, Version::Modified(self), true, ctx)
+            .get_rel_exists(rel, Version::Modified(self), ctx)
             .await?
         {
             let size_key = rel_size_to_key(rel);

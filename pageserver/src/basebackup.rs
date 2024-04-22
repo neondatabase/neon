@@ -363,7 +363,7 @@ where
     async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> anyhow::Result<()> {
         let nblocks = self
             .timeline
-            .get_rel_size(src, Version::Lsn(self.lsn), false, self.ctx)
+            .get_rel_size(src, Version::Lsn(self.lsn), self.ctx)
             .await?;
 
         // If the relation is empty, create an empty file
@@ -384,7 +384,7 @@ where
             for blknum in startblk..endblk {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(src, blknum, Version::Lsn(self.lsn), false, self.ctx)
+                    .get_rel_page_at_lsn(src, blknum, Version::Lsn(self.lsn), self.ctx)
                     .await?;
                 segment_data.extend_from_slice(&img[..]);
             }
