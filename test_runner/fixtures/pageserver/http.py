@@ -820,10 +820,17 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             self.download_layer(tenant_id, timeline_id, layer.layer_file_name)
 
     def detach_ancestor(
-        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timeline_id: TimelineId,
+        batch_size: int | None = None,
     ) -> Set[TimelineId]:
+        params = {}
+        if batch_size is not None:
+            params["batch_size"] = batch_size
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
+            params=params,
         )
         self.verbose_error(res)
         json = res.json()
