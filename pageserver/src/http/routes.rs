@@ -19,6 +19,8 @@ use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
+use pageserver_api::models::TenantScanRemoteStorageResponse;
+use pageserver_api::models::TenantScanRemoteStorageShard;
 use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
@@ -29,6 +31,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
+use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
 use tenant_size_model::{SizeResult, StorageModel};
@@ -54,6 +57,9 @@ use crate::tenant::mgr::{
 };
 use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
 use crate::tenant::remote_timeline_client;
+use crate::tenant::remote_timeline_client::download_index_part;
+use crate::tenant::remote_timeline_client::list_remote_tenant_shards;
+use crate::tenant::remote_timeline_client::list_remote_timelines;
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
@@ -457,8 +463,12 @@ async fn reload_auth_validation_keys_handler(
             json_response(StatusCode::OK, ())
         }
         Err(e) => {
+            let err_msg = "Error reloading public keys";
             warn!("Error reloading public keys from {key_path:?}: {e:}");
-            json_response(StatusCode::INTERNAL_SERVER_ERROR, ())
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HttpErrorBody::from_msg(err_msg.to_string()),
+            )
         }
     }
 }
@@ -696,7 +706,7 @@ async fn get_lsn_by_timestamp_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -747,7 +757,7 @@ async fn get_timestamp_of_lsn_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -772,7 +782,9 @@ async fn get_timestamp_of_lsn_handler(
             let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
             json_response(StatusCode::OK, time)
         }
-        None => json_response(StatusCode::NOT_FOUND, ()),
+        None => Err(ApiError::NotFound(
+            anyhow::anyhow!("Timestamp for lsn {} not found", lsn).into(),
+        )),
     }
 }
 
@@ -1086,7 +1098,7 @@ async fn tenant_size_handler(
     let headers = request.headers();
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
         )));
@@ -2026,6 +2038,75 @@ async fn secondary_upload_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn tenant_scan_remote_handler(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+
+    let Some(remote_storage) = state.remote_storage.as_ref() else {
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "Remote storage not configured"
+        )));
+    };
+
+    let mut response = TenantScanRemoteStorageResponse::default();
+
+    let (shards, _other_keys) =
+        list_remote_tenant_shards(remote_storage, tenant_id, cancel.clone())
+            .await
+            .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
+
+    for tenant_shard_id in shards {
+        let (timeline_ids, _other_keys) =
+            list_remote_timelines(remote_storage, tenant_shard_id, cancel.clone())
+                .await
+                .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
+
+        let mut generation = Generation::none();
+        for timeline_id in timeline_ids {
+            match download_index_part(
+                remote_storage,
+                &tenant_shard_id,
+                &timeline_id,
+                Generation::MAX,
+                &cancel,
+            )
+            .await
+            {
+                Ok((index_part, index_generation)) => {
+                    tracing::info!("Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
+                        index_part.layer_metadata.len(), index_part.get_disk_consistent_lsn());
+                    generation = std::cmp::max(generation, index_generation);
+                }
+                Err(DownloadError::NotFound) => {
+                    // This is normal for tenants that were created with multiple shards: they have an unsharded path
+                    // containing the timeline's initdb tarball but no index.  Otherwise it is a bit strange.
+                    tracing::info!("Timeline path {tenant_shard_id}/{timeline_id} exists in remote storage but has no index, skipping");
+                    continue;
+                }
+                Err(e) => {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
+                }
+            };
+        }
+
+        response.shards.push(TenantScanRemoteStorageShard {
+            tenant_shard_id,
+            generation: generation.into(),
+        });
+    }
+
+    if response.shards.is_empty() {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("No shards found for tenant ID {tenant_id}").into(),
+        ));
+    }
+
+    json_response(StatusCode::OK, response)
+}
+
 async fn secondary_download_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -2421,6 +2502,9 @@ pub fn make_router(
         )
         .post("/v1/tenant/:tenant_shard_id/heatmap_upload", |r| {
             api_handler(r, secondary_upload_handler)
+        })
+        .get("/v1/tenant/:tenant_id/scan_remote_storage", |r| {
+            api_handler(r, tenant_scan_remote_handler)
         })
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)

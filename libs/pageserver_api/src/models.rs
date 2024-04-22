@@ -748,9 +748,17 @@ pub struct TimelineGcRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalRedoManagerProcessStatus {
+    pub pid: u32,
+    /// The strum-generated `into::<&'static str>()` for `pageserver::walredo::ProcessKind`.
+    /// `ProcessKind` are a transitory thing, so, they have no enum representation in `pageserver_api`.
+    pub kind: Cow<'static, str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRedoManagerStatus {
     pub last_redo_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub pid: Option<u32>,
+    pub process: Option<WalRedoManagerProcessStatus>,
 }
 
 /// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating
@@ -770,6 +778,17 @@ pub struct SecondaryProgress {
     pub bytes_downloaded: u64,
     /// The number of layer bytes in the most recently seen heatmap
     pub bytes_total: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantScanRemoteStorageShard {
+    pub tenant_shard_id: TenantShardId,
+    pub generation: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct TenantScanRemoteStorageResponse {
+    pub shards: Vec<TenantScanRemoteStorageShard>,
 }
 
 pub mod virtual_file {

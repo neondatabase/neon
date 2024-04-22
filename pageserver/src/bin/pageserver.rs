@@ -285,6 +285,7 @@ fn start_pageserver(
     ))
     .unwrap();
     pageserver::preinitialize_metrics();
+    pageserver::metrics::wal_redo::set_process_kind_metric(conf.walredo_process_kind);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes

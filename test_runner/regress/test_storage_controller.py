@@ -26,6 +26,7 @@ from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.types import TenantId, TenantShardId, TimelineId
 from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
+from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
@@ -1237,3 +1238,71 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     # Quiesce any background reconciliation before doing consistency check
     env.storage_controller.reconcile_until_idle(timeout_secs=10)
     env.storage_controller.consistency_check()
+
+
+@pytest.mark.parametrize("remote_storage", [RemoteStorageKind.LOCAL_FS, s3_storage()])
+@pytest.mark.parametrize("shard_count", [None, 4])
+def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_storage):
+    """
+    Tenant import is a support/debug tool for recovering a tenant from remote storage
+    if we don't have any metadata for it in the storage controller.
+    """
+
+    # This test is parametrized on remote storage because it exercises the relatively rare
+    # code path of listing with a prefix that is not a directory name: this helps us notice
+    # quickly if local_fs or s3_bucket implementations diverge.
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage)
+
+    # Use multiple pageservers because some test helpers assume single sharded tenants
+    # if there is only one pageserver.
+    neon_env_builder.num_pageservers = 2
+
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+    tenant_id = env.initial_tenant
+
+    # Create a second timeline to ensure that import finds both
+    timeline_b = env.neon_cli.create_branch("branch_b", tenant_id=tenant_id)
+
+    workload = Workload(env, tenant_id, timeline_b, branch_name="branch_b")
+    workload.init()
+
+    # Bump generation to make sure generation recovery works properly
+    for pageserver in env.pageservers:
+        pageserver.stop()
+        pageserver.start()
+
+    # Write some data in the higher generation
+    workload.write_rows(100)
+    expect_rows = workload.expect_rows
+    workload.stop()
+    del workload
+
+    # Detach from pageservers
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "placement": "Detached",
+        },
+    )
+    env.storage_controller.reconcile_until_idle(timeout_secs=10)
+
+    # Force-drop it from the storage controller
+    env.storage_controller.request(
+        "POST",
+        f"{env.storage_controller_api}/debug/v1/tenant/{tenant_id}/drop",
+        headers=env.storage_controller.headers(TokenScope.ADMIN),
+    )
+
+    # Now import it again
+    env.neon_cli.import_tenant(tenant_id)
+
+    # Check we found the shards
+    describe = env.storage_controller.tenant_describe(tenant_id)
+    literal_shard_count = 1 if shard_count is None else shard_count
+    assert len(describe["shards"]) == literal_shard_count
+
+    # Check the data is still there: this implicitly proves that we recovered generation numbers
+    # properly.
+    workload = Workload(env, tenant_id, timeline_b, branch_name="branch_1")
+    workload.expect_rows = expect_rows
+    workload.validate()

@@ -178,10 +178,7 @@ impl S3Bucket {
 
     pub fn relative_path_to_s3_object(&self, path: &RemotePath) -> String {
         assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
-        let path_string = path
-            .get_path()
-            .as_str()
-            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR);
+        let path_string = path.get_path().as_str();
         match &self.prefix_in_bucket {
             Some(prefix) => prefix.clone() + "/" + path_string,
             None => path_string.to_string(),
@@ -471,17 +468,7 @@ impl RemoteStorage for S3Bucket {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
             .map(|p| self.relative_path_to_s3_object(p))
-            .or_else(|| self.prefix_in_bucket.clone())
-            .map(|mut p| {
-                // required to end with a separator
-                // otherwise request will return only the entry of a prefix
-                if matches!(mode, ListingMode::WithDelimiter)
-                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
-                {
-                    p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
-                }
-                p
-            });
+            .or_else(|| self.prefix_in_bucket.clone().map(|s| s + "/"));
 
         let _permit = self.permit(kind, cancel).await?;
 
@@ -549,11 +536,15 @@ impl RemoteStorage for S3Bucket {
                 }
             }
 
-            result.prefixes.extend(
-                prefixes
-                    .iter()
-                    .filter_map(|o| Some(self.s3_object_to_relative_path(o.prefix()?))),
-            );
+            // S3 gives us prefixes like "foo/", we return them like "foo"
+            result.prefixes.extend(prefixes.iter().filter_map(|o| {
+                Some(
+                    self.s3_object_to_relative_path(
+                        o.prefix()?
+                            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR),
+                    ),
+                )
+            }));
 
             continuation_token = match response.next_continuation_token {
                 Some(new_token) => Some(new_token),
@@ -1050,22 +1041,22 @@ mod tests {
             Some("/test/prefix/"),
         ];
         let expected_outputs = [
-            vec!["", "some/path", "some/path"],
-            vec!["/", "/some/path", "/some/path"],
+            vec!["", "some/path", "some/path/"],
+            vec!["/", "/some/path", "/some/path/"],
             vec![
                 "test/prefix/",
                 "test/prefix/some/path",
-                "test/prefix/some/path",
+                "test/prefix/some/path/",
             ],
             vec![
                 "test/prefix/",
                 "test/prefix/some/path",
-                "test/prefix/some/path",
+                "test/prefix/some/path/",
             ],
             vec![
                 "test/prefix/",
                 "test/prefix/some/path",
-                "test/prefix/some/path",
+                "test/prefix/some/path/",
             ],
         ];
 

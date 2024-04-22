@@ -11,7 +11,7 @@ use crate::{
     id_lock_map::IdLockMap,
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::ReconcileError,
-    scheduler::ScheduleContext,
+    scheduler::{ScheduleContext, ScheduleMode},
 };
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -97,6 +97,42 @@ struct ServiceState {
     nodes: Arc<HashMap<NodeId, Node>>,
 
     scheduler: Scheduler,
+}
+
+/// Transform an error from a pageserver into an error to return to callers of a storage
+/// controller API.
+fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
+    match e {
+        mgmt_api::Error::ReceiveErrorBody(str) => {
+            // Presume errors receiving body are connectivity/availability issues
+            ApiError::ResourceUnavailable(
+                format!("{node} error receiving error body: {str}").into(),
+            )
+        }
+        mgmt_api::Error::ReceiveBody(str) => {
+            // Presume errors receiving body are connectivity/availability issues
+            ApiError::ResourceUnavailable(format!("{node} error receiving body: {str}").into())
+        }
+        mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, msg) => {
+            ApiError::NotFound(anyhow::anyhow!(format!("{node}: {msg}")).into())
+        }
+        mgmt_api::Error::ApiError(StatusCode::SERVICE_UNAVAILABLE, msg) => {
+            ApiError::ResourceUnavailable(format!("{node}: {msg}").into())
+        }
+        mgmt_api::Error::ApiError(status @ StatusCode::UNAUTHORIZED, msg)
+        | mgmt_api::Error::ApiError(status @ StatusCode::FORBIDDEN, msg) => {
+            // Auth errors talking to a pageserver are not auth errors for the caller: they are
+            // internal server errors, showing that something is wrong with the pageserver or
+            // storage controller's auth configuration.
+            ApiError::InternalServerError(anyhow::anyhow!("{node} {status}: {msg}"))
+        }
+        mgmt_api::Error::ApiError(status, msg) => {
+            // Presume general case of pageserver API errors is that we tried to do something
+            // that can't be done right now.
+            ApiError::Conflict(format!("{node} {status}: {status} {msg}"))
+        }
+        mgmt_api::Error::Cancelled => ApiError::ShuttingDown,
+    }
 }
 
 impl ServiceState {
@@ -2467,17 +2503,7 @@ impl Service {
             client
                 .timeline_create(tenant_shard_id, &create_req)
                 .await
-                .map_err(|e| match e {
-                    mgmt_api::Error::ApiError(status, msg)
-                        if status == StatusCode::INTERNAL_SERVER_ERROR
-                            || status == StatusCode::NOT_ACCEPTABLE =>
-                    {
-                        // TODO: handle more error codes, e.g. 503 should be passed through.  Make a general wrapper
-                        // for pass-through API calls.
-                        ApiError::InternalServerError(anyhow::anyhow!(msg))
-                    }
-                    _ => ApiError::Conflict(format!("Failed to create timeline: {e}")),
-                })
+                .map_err(|e| passthrough_api_error(&node, e))
         }
 
         // Because the caller might not provide an explicit LSN, we must do the creation first on a single shard, and then
@@ -2744,7 +2770,7 @@ impl Service {
         let mut describe_shards = Vec::new();
 
         for shard in shards {
-            if shard.tenant_shard_id.is_zero() {
+            if shard.tenant_shard_id.is_shard_zero() {
                 shard_zero = Some(shard);
             }
 
@@ -3595,6 +3621,88 @@ impl Service {
         Ok(())
     }
 
+    /// This is for debug/support only: assuming tenant data is already present in S3, we "create" a
+    /// tenant with a very high generation number so that it will see the existing data.
+    pub(crate) async fn tenant_import(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantCreateResponse, ApiError> {
+        // Pick an arbitrary available pageserver to use for scanning the tenant in remote storage
+        let maybe_node = {
+            self.inner
+                .read()
+                .unwrap()
+                .nodes
+                .values()
+                .find(|n| n.is_available())
+                .cloned()
+        };
+        let Some(node) = maybe_node else {
+            return Err(ApiError::BadRequest(anyhow::anyhow!("No nodes available")));
+        };
+
+        let client = PageserverClient::new(
+            node.get_id(),
+            node.base_url(),
+            self.config.jwt_token.as_deref(),
+        );
+
+        let scan_result = client
+            .tenant_scan_remote_storage(tenant_id)
+            .await
+            .map_err(|e| passthrough_api_error(&node, e))?;
+
+        // A post-split tenant may contain a mixture of shard counts in remote storage: pick the highest count.
+        let Some(shard_count) = scan_result
+            .shards
+            .iter()
+            .map(|s| s.tenant_shard_id.shard_count)
+            .max()
+        else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("No shards found").into(),
+            ));
+        };
+
+        // Ideally we would set each newly imported shard's generation independently, but for correctness it is sufficient
+        // to
+        let generation = scan_result
+            .shards
+            .iter()
+            .map(|s| s.generation)
+            .max()
+            .expect("We already validated >0 shards");
+
+        // FIXME: we have no way to recover the shard stripe size from contents of remote storage: this will
+        // only work if they were using the default stripe size.
+        let stripe_size = ShardParameters::DEFAULT_STRIPE_SIZE;
+
+        let (response, waiters) = self
+            .do_tenant_create(TenantCreateRequest {
+                new_tenant_id: TenantShardId::unsharded(tenant_id),
+                generation,
+
+                shard_parameters: ShardParameters {
+                    count: shard_count,
+                    stripe_size,
+                },
+                placement_policy: Some(PlacementPolicy::Attached(0)), // No secondaries, for convenient debug/hacking
+
+                // There is no way to know what the tenant's config was: revert to defaults
+                config: TenantConfig::default(),
+            })
+            .await?;
+
+        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+            // Since this is a debug/support operation, all kinds of weird issues are possible (e.g. this
+            // tenant doesn't exist in the control plane), so don't fail the request if it can't fully
+            // reconcile, as reconciliation includes notifying compute.
+            tracing::warn!(%tenant_id, "Reconcile not done yet while importing tenant ({e})");
+        }
+
+        Ok(response)
+    }
+
     /// For debug/support: a full JSON dump of TenantShards.  Returns a response so that
     /// we don't have to make TenantShard clonable in the return path.
     pub(crate) fn tenants_dump(&self) -> Result<hyper::Response<hyper::Body>, ApiError> {
@@ -4084,7 +4192,7 @@ impl Service {
 
         let mut reconciles_spawned = 0;
         for (tenant_shard_id, shard) in tenants.iter_mut() {
-            if tenant_shard_id.is_zero() {
+            if tenant_shard_id.is_shard_zero() {
                 schedule_context = ScheduleContext::default();
             }
 
@@ -4134,9 +4242,10 @@ impl Service {
         let mut work = Vec::new();
 
         for (tenant_shard_id, shard) in tenants.iter() {
-            if tenant_shard_id.is_zero() {
+            if tenant_shard_id.is_shard_zero() {
                 // Reset accumulators on the first shard in a tenant
                 schedule_context = ScheduleContext::default();
+                schedule_context.mode = ScheduleMode::Speculative;
                 tenant_shards.clear();
             }
 

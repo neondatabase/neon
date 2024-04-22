@@ -6,7 +6,7 @@ use tracing::{field::display, info};
 use crate::{
     auth::{backend::ComputeCredentials, check_peer_addr_is_in_list, AuthError},
     compute,
-    config::ProxyConfig,
+    config::{AuthenticationConfig, ProxyConfig},
     console::{
         errors::{GetAuthInfoError, WakeComputeError},
         CachedNodeInfo,
@@ -27,6 +27,7 @@ impl PoolingBackend {
     pub async fn authenticate(
         &self,
         ctx: &mut RequestMonitoring,
+        config: &AuthenticationConfig,
         conn_info: &ConnInfo,
     ) -> Result<ComputeCredentials, AuthError> {
         let user_info = conn_info.user_info.clone();
@@ -43,6 +44,7 @@ impl PoolingBackend {
         let secret = match cached_secret.value.clone() {
             Some(secret) => self.config.authentication_config.check_rate_limit(
                 ctx,
+                config,
                 secret,
                 &user_info.endpoint,
                 true,

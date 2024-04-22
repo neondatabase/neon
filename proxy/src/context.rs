@@ -5,7 +5,7 @@ use once_cell::sync::OnceCell;
 use smol_str::SmolStr;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
-use tracing::{field::display, info_span, Span};
+use tracing::{field::display, info, info_span, Span};
 use uuid::Uuid;
 
 use crate::{
@@ -76,6 +76,7 @@ impl RequestMonitoring {
             ?session_id,
             %peer_addr,
             ep = tracing::field::Empty,
+            role = tracing::field::Empty,
         );
 
         Self {
@@ -157,6 +158,7 @@ impl RequestMonitoring {
     }
 
     pub fn set_user(&mut self, user: RoleName) {
+        self.span.record("role", display(&user));
         self.user = Some(user);
     }
 
@@ -164,8 +166,18 @@ impl RequestMonitoring {
         self.auth_method = Some(auth_method);
     }
 
+    pub fn has_private_peer_addr(&self) -> bool {
+        match self.peer_addr {
+            IpAddr::V4(ip) => ip.is_private(),
+            _ => false,
+        }
+    }
+
     pub fn set_error_kind(&mut self, kind: ErrorKind) {
-        Metrics::get().proxy.errors_total.inc(kind);
+        // Do not record errors from the private address to metrics.
+        if !self.has_private_peer_addr() {
+            Metrics::get().proxy.errors_total.inc(kind);
+        }
         if let Some(ep) = &self.endpoint_id {
             let metric = &Metrics::get().proxy.endpoints_affected_by_errors;
             let label = metric.with_labels(kind);
@@ -188,12 +200,25 @@ impl Drop for RequestMonitoring {
         } else {
             ConnectOutcome::Failed
         };
+        let rejected = self.rejected;
+        let ep = self
+            .endpoint_id
+            .as_ref()
+            .map(|x| x.as_str())
+            .unwrap_or_default();
+        // This makes sense only if cache is disabled
+        info!(
+            ?ep,
+            ?outcome,
+            ?rejected,
+            "check endpoint is valid with outcome"
+        );
         Metrics::get()
             .proxy
             .invalid_endpoints_total
             .inc(InvalidEndpointsGroup {
                 protocol: self.protocol,
-                rejected: self.rejected.into(),
+                rejected: rejected.into(),
                 outcome,
             });
         if let Some(tx) = self.sender.take() {

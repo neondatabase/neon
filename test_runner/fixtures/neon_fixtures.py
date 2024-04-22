@@ -1568,6 +1568,11 @@ class NeonCli(AbstractNeonCli):
         res.check_returncode()
         return tenant_id, timeline_id
 
+    def import_tenant(self, tenant_id: TenantId):
+        args = ["tenant", "import", "--tenant-id", str(tenant_id)]
+        res = self.raw_cli(args)
+        res.check_returncode()
+
     def set_default(self, tenant_id: TenantId):
         """
         Update default tenant for future operations that require tenant_id.
@@ -2200,6 +2205,13 @@ class NeonStorageController(MetricsGetter):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def tenant_import(self, tenant_id: TenantId):
+        self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/import",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def reconcile_all(self):
         r = self.request(
             "POST",
@@ -2449,10 +2461,12 @@ class NeonPageserver(PgProtocol):
                 if cur_line_no < skip_until_line_no:
                     cur_line_no += 1
                     continue
-                if contains_re.search(line):
+                elif contains_re.search(line):
                     # found it!
                     cur_line_no += 1
                     return (line, LogCursor(cur_line_no))
+                else:
+                    cur_line_no += 1
         return None
 
     def tenant_attach(
