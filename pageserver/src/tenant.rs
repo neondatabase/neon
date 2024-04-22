@@ -559,9 +559,10 @@ impl Tenant {
             // By doing what we do here, the index part upload is retried.
             // If control plane retries timeline creation in the meantime, the mgmt API handler
             // for timeline creation will coalesce on the upload we queue here.
+            // FIXME: this branch should be dead code as we no longer write local metadata.
             let rtc = timeline.remote_client.as_ref().unwrap();
             rtc.init_upload_queue_for_empty_remote(&metadata)?;
-            rtc.schedule_index_upload_for_metadata_update(&metadata)?;
+            rtc.schedule_index_upload_for_full_metadata_update(&metadata)?;
         }
 
         timeline
@@ -3027,7 +3028,7 @@ impl Tenant {
         // See also https://github.com/neondatabase/neon/issues/3865
         if let Some(remote_client) = new_timeline.remote_client.as_ref() {
             remote_client
-                .schedule_index_upload_for_metadata_update(&metadata)
+                .schedule_index_upload_for_full_metadata_update(&metadata)
                 .context("branch initial metadata upload")?;
         }
 
