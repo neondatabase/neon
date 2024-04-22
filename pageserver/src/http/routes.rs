@@ -1870,7 +1870,7 @@ async fn timeline_detach_ancestor_handler(
 
             match res {
                 Ok(()) => {
-                    // it would be best to wait until completed
+                    // TODO: it would be best to wait until completed
                     json_response(StatusCode::OK, detach_result)
                 }
                 Err(e) => Err(ApiError::InternalServerError(
