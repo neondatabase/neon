@@ -5,6 +5,7 @@ use crate::{
     models::ShardParameters,
 };
 use hex::FromHex;
+use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
 use utils::id::TenantId;
 
@@ -649,7 +650,13 @@ fn key_is_shard0(key: &Key) -> bool {
     // relation pages are distributed to shards other than shard zero. Everything else gets
     // stored on shard 0.  This guarantees that shard 0 can independently serve basebackup
     // requests, and any request other than those for particular blocks in relations.
-    !is_rel_block_key(key)
+    //
+    // The only exception to this rule is "initfork" data -- this relates to postgres's UNLOGGED table
+    // type. These are special relations, usually with only 0 or 1 blocks, and we store them on shard 0
+    // because they must be included in basebackups.
+    let is_initfork = key.field5 == INIT_FORKNUM;
+
+    !is_rel_block_key(key) || is_initfork
 }
 
 /// Provide the same result as the function in postgres `hashfn.h` with the same name
