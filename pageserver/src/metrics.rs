@@ -1518,7 +1518,8 @@ pub(crate) struct SecondaryModeMetrics {
     pub(crate) download_heatmap: IntCounter,
     pub(crate) download_layer: IntCounter,
 }
-pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
+    SecondaryModeMetrics {
     upload_heatmap: register_int_counter!(
         "pageserver_secondary_upload_heatmap",
         "Number of heatmaps written to remote storage by attached tenants"
@@ -1536,7 +1537,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
     .expect("failed to define a metric"),
     download_heatmap: register_int_counter!(
         "pageserver_secondary_download_heatmap",
-        "Number of downloads of heatmaps by secondary mode locations"
+        "Number of downloads of heatmaps by secondary mode locations, including when it hasn't changed"
     )
     .expect("failed to define a metric"),
     download_layer: register_int_counter!(
@@ -1544,6 +1545,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
         "Number of downloads of layers by secondary mode locations"
     )
     .expect("failed to define a metric"),
+}
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

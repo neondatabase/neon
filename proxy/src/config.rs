@@ -29,7 +29,6 @@ pub struct ProxyConfig {
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
     pub disable_ip_check_for_http: bool,
-    pub endpoint_rps_limit: Vec<RateBucketInfo>,
     pub redis_rps_limit: Vec<RateBucketInfo>,
     pub region: String,
     pub handshake_timeout: Duration,

@@ -274,7 +274,8 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     but imports the generation number.
     """
 
-    neon_env_builder.num_pageservers = 2
+    # One pageserver to simulate legacy environment, two to be managed by storage controller
+    neon_env_builder.num_pageservers = 3
 
     # Start services by hand so that we can skip registration on one of the pageservers
     env = neon_env_builder.init_configs()
@@ -289,10 +290,10 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     )
     origin_ps = env.pageservers[0]
 
-    # This is the pageserver managed by the sharding service, where the tenant
+    # These are the pageservers managed by the sharding service, where the tenant
     # will be attached after onboarding
     env.pageservers[1].start()
-    dest_ps = env.pageservers[1]
+    env.pageservers[2].start()
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 
     for sk in env.safekeepers:
@@ -331,6 +332,9 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
         )
 
         virtual_ps_http.tenant_secondary_download(tenant_id)
+        warm_up_ps = env.storage_controller.tenant_describe(tenant_id)["shards"][0][
+            "node_secondary"
+        ][0]
 
     # Call into storage controller to onboard the tenant
     generation += 1
@@ -344,6 +348,18 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
         },
     )
     assert len(r["shards"]) == 1
+
+    describe = env.storage_controller.tenant_describe(tenant_id)["shards"][0]
+    dest_ps_id = describe["node_attached"]
+    dest_ps = env.get_pageserver(dest_ps_id)
+    if warm_up:
+        # The storage controller should have attached the tenant to the same placce
+        # it had a secondary location, otherwise there was no point warming it up
+        assert dest_ps_id == warm_up_ps
+
+        # It should have been given a new secondary location as well
+        assert len(describe["node_secondary"]) == 1
+        assert describe["node_secondary"][0] != warm_up_ps
 
     # As if doing a live migration, detach the original pageserver
     origin_ps.http_client().tenant_location_conf(
@@ -416,6 +432,9 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
         dest_tenant_after_conf_change["generation"] == dest_tenant_before_conf_change["generation"]
     )
     dest_tenant_conf_after = dest_ps.http_client().tenant_config(tenant_id)
+
+    # Storage controller auto-sets heatmap period, ignore it for the comparison
+    del dest_tenant_conf_after.tenant_specific_overrides["heatmap_period"]
     assert dest_tenant_conf_after.tenant_specific_overrides == modified_tenant_conf
 
     env.storage_controller.consistency_check()

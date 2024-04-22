@@ -5,7 +5,7 @@ use tokio_stream::Stream;
 
 use crate::{list_objects_with_retries, RootTarget, S3Target, TenantShardTimelineId};
 use pageserver_api::shard::TenantShardId;
-use utils::id::TimelineId;
+use utils::id::{TenantId, TimelineId};
 
 /// Given an S3 bucket, output a stream of TenantIds discovered via ListObjectsv2
 pub fn stream_tenants<'a>(
@@ -43,6 +43,62 @@ pub fn stream_tenants<'a>(
             }
         }
     }
+}
+
+pub async fn stream_tenant_shards<'a>(
+    s3_client: &'a Client,
+    target: &'a RootTarget,
+    tenant_id: TenantId,
+) -> anyhow::Result<impl Stream<Item = Result<TenantShardId, anyhow::Error>> + 'a> {
+    let mut tenant_shard_ids: Vec<Result<TenantShardId, anyhow::Error>> = Vec::new();
+    let mut continuation_token = None;
+    let shards_target = target.tenant_root(&TenantShardId::unsharded(tenant_id));
+
+    loop {
+        tracing::info!("Listing in {}", shards_target.prefix_in_bucket);
+        let fetch_response =
+            list_objects_with_retries(s3_client, &shards_target, continuation_token.clone()).await;
+        let fetch_response = match fetch_response {
+            Err(e) => {
+                tenant_shard_ids.push(Err(e));
+                break;
+            }
+            Ok(r) => r,
+        };
+
+        let new_entry_ids = fetch_response
+            .common_prefixes()
+            .iter()
+            .filter_map(|prefix| prefix.prefix())
+            .filter_map(|prefix| -> Option<&str> {
+                prefix
+                    .strip_prefix(&target.tenants_root().prefix_in_bucket)?
+                    .strip_suffix('/')
+            })
+            .map(|entry_id_str| {
+                let first_part = entry_id_str.split('/').next().unwrap();
+
+                first_part
+                    .parse::<TenantShardId>()
+                    .with_context(|| format!("Incorrect entry id str: {first_part}"))
+            });
+
+        for i in new_entry_ids {
+            tenant_shard_ids.push(i);
+        }
+
+        match fetch_response.next_continuation_token {
+            Some(new_token) => continuation_token = Some(new_token),
+            None => break,
+        }
+    }
+
+    Ok(stream! {
+        for i in tenant_shard_ids {
+            let id = i?;
+            yield Ok(id);
+        }
+    })
 }
 
 /// Given a TenantShardId, output a stream of the timelines within that tenant, discovered

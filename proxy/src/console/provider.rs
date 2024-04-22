@@ -208,6 +208,9 @@ pub mod errors {
         #[error(transparent)]
         ApiError(ApiError),
 
+        #[error("Too many connections attempts")]
+        TooManyConnections,
+
         #[error("Timeout waiting to acquire wake compute lock")]
         TimeoutError,
     }
@@ -240,6 +243,8 @@ pub mod errors {
                 // However, API might return a meaningful error.
                 ApiError(e) => e.to_string_client(),
 
+                TooManyConnections => self.to_string(),
+
                 TimeoutError => "timeout while acquiring the compute resource lock".to_owned(),
             }
         }
@@ -250,6 +255,7 @@ pub mod errors {
             match self {
                 WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
                 WakeComputeError::ApiError(e) => e.get_error_kind(),
+                WakeComputeError::TooManyConnections => crate::error::ErrorKind::RateLimit,
                 WakeComputeError::TimeoutError => crate::error::ErrorKind::ServiceRateLimit,
             }
         }
