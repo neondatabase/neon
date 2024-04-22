@@ -1852,6 +1852,7 @@ mod tests {
             // Any version will do
             // but it should be consistent with the one in the tests
             crate::DEFAULT_PG_VERSION,
+            false,
         );
 
         // go through serialize + deserialize to fix the header, including checksum

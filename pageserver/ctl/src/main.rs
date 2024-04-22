@@ -245,7 +245,7 @@ fn handle_metadata(
             meta.latest_gc_cutoff_lsn(),
             meta.initdb_lsn(),
             meta.pg_version(),
-            meta.aux_file_v2()
+            meta.aux_file_v2(),
         );
         update_meta = true;
     }

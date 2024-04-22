@@ -3627,8 +3627,6 @@ impl Timeline {
             disk_consistent_lsn,
             ondisk_prev_record_lsn,
             *self.latest_gc_cutoff_lsn.read(),
-            self.initdb_lsn,
-            self.pg_version,
             self.aux_file_v2.load(AtomicOrdering::SeqCst),
         );
 

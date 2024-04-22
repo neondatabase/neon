@@ -85,6 +85,7 @@ struct TimelineMetadataBodyV1 {
 }
 
 impl TimelineMetadata {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         disk_consistent_lsn: Lsn,
         prev_record_lsn: Option<Lsn>,
@@ -239,6 +240,7 @@ impl TimelineMetadata {
             Lsn::from_hex("00000000").unwrap(),
             Lsn::from_hex("00000000").unwrap(),
             0,
+            false,
         );
         let bytes = instance.to_bytes().unwrap();
         Self::from_bytes(&bytes).unwrap()
@@ -248,6 +250,7 @@ impl TimelineMetadata {
         self.body.disk_consistent_lsn = update.disk_consistent_lsn;
         self.body.prev_record_lsn = update.prev_record_lsn;
         self.body.latest_gc_cutoff_lsn = update.latest_gc_cutoff_lsn;
+        self.body.aux_file_v2 = if update.aux_file_v2 { Some(true) } else { None };
     }
 }
 
@@ -278,6 +281,7 @@ pub(crate) struct MetadataUpdate {
     disk_consistent_lsn: Lsn,
     prev_record_lsn: Option<Lsn>,
     latest_gc_cutoff_lsn: Lsn,
+    aux_file_v2: bool,
 }
 
 impl MetadataUpdate {
@@ -285,11 +289,13 @@ impl MetadataUpdate {
         disk_consistent_lsn: Lsn,
         prev_record_lsn: Option<Lsn>,
         latest_gc_cutoff_lsn: Lsn,
+        aux_file_v2: bool,
     ) -> Self {
         Self {
             disk_consistent_lsn,
             prev_record_lsn,
             latest_gc_cutoff_lsn,
+            aux_file_v2,
         }
     }
 }
@@ -310,6 +316,7 @@ mod tests {
             Lsn(0),
             // Any version will do here, so use the default
             crate::DEFAULT_PG_VERSION,
+            true,
         );
 
         let metadata_bytes = original_metadata
@@ -384,6 +391,7 @@ mod tests {
             Lsn(0),
             Lsn(0),
             14, // All timelines created before this version had pg_version 14
+            true,
         );
 
         assert_eq!(
@@ -404,6 +412,7 @@ mod tests {
             Lsn(0),
             // Any version will do here, so use the default
             crate::DEFAULT_PG_VERSION,
+            true,
         );
         let metadata_bytes = original_metadata
             .to_bytes()
@@ -457,6 +466,7 @@ mod tests {
             Lsn(0),
             // Any version will do here, so use the default
             crate::DEFAULT_PG_VERSION,
+            true,
         );
         let expected_bytes = vec![
             /* bincode length encoding bytes */
