@@ -6005,7 +6005,7 @@ dependencies = [
 [[package]]
 name = "tikv-jemalloc-ctl"
 version = "0.5.4"
-source = "git+https://github.com/yuhao-su/jemallocator?rev=a0911601bb7bb263ca55c7ea161ef308fdc623f8#a0911601bb7bb263ca55c7ea161ef308fdc623f8"
+source = "git+https://github.com/yuhao-su/jemallocator?rev=5084726b0f15686d13e88bc54ce7cff4b4ed6d27#5084726b0f15686d13e88bc54ce7cff4b4ed6d27"
 dependencies = [
  "libc",
  "paste",
@@ -6015,7 +6015,7 @@ dependencies = [
 [[package]]
 name = "tikv-jemalloc-sys"
 version = "0.5.4+5.3.0-patched"
-source = "git+https://github.com/yuhao-su/jemallocator?rev=a0911601bb7bb263ca55c7ea161ef308fdc623f8#a0911601bb7bb263ca55c7ea161ef308fdc623f8"
+source = "git+https://github.com/yuhao-su/jemallocator?rev=5084726b0f15686d13e88bc54ce7cff4b4ed6d27#5084726b0f15686d13e88bc54ce7cff4b4ed6d27"
 dependencies = [
  "cc",
  "libc",
@@ -6024,7 +6024,7 @@ dependencies = [
 [[package]]
 name = "tikv-jemallocator"
 version = "0.5.4"
-source = "git+https://github.com/yuhao-su/jemallocator?rev=a0911601bb7bb263ca55c7ea161ef308fdc623f8#a0911601bb7bb263ca55c7ea161ef308fdc623f8"
+source = "git+https://github.com/yuhao-su/jemallocator?rev=5084726b0f15686d13e88bc54ce7cff4b4ed6d27#5084726b0f15686d13e88bc54ce7cff4b4ed6d27"
 dependencies = [
  "libc",
  "tikv-jemalloc-sys",
