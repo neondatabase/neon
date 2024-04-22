@@ -4359,6 +4359,7 @@ impl Timeline {
     pub(crate) async fn detach_from_ancestor(
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
+        options: AncestorDetachOptions,
         ctx: &RequestContext,
     ) -> Result<AncestorDetached, DetachFromAncestorError> {
         use DetachFromAncestorError::*;
@@ -4490,7 +4491,6 @@ impl Timeline {
             drop(layers);
         }
 
-        const BATCH_SIZE: usize = 10;
 
         if straddling_branchpoint.is_empty() {
             // as we flushed the inmem layer to disk, only reason:
@@ -4522,7 +4522,7 @@ impl Timeline {
 
                 wrote_any = true;
 
-                if i > 0 && i % BATCH_SIZE != 0 {
+                if i > 0 && (i % options.batch_size.get()) == 0 {
                     rtc.schedule_index_upload_for_file_changes()
                         .map_err(|_| ShuttingDown)?;
                 }
@@ -4542,12 +4542,16 @@ impl Timeline {
                     .fatal_err("VirtualFile::sync_all timeline dir");
                 rtc.schedule_index_upload_for_file_changes()
                     .map_err(|_| ShuttingDown)?;
+
+                fail::fail_point!("timeline-ancestor-after-rewrite-fsync", |_| {
+                    Err(Failpoint("timeline-ancestor-after-rewrite-fsync"))
+                });
             }
         }
 
         // because we hold the layers, they will not be removed from remote storage.
         let mut new_owned = Vec::with_capacity(rest_of_historic.len());
-        let mut chunks = rest_of_historic.chunks(BATCH_SIZE);
+        let mut chunks = rest_of_historic.chunks(options.batch_size.get());
 
         while let Some(layers) = chunks.next() {
             for adopted in layers {
@@ -4714,6 +4718,21 @@ pub(crate) enum DetachFromAncestorError {
     ReparetingsFailed,
     #[error("ancestor is already being detached by: {}", .0)]
     OtherTimelineDetachOngoing(TimelineId),
+}
+
+#[derive(Debug)]
+pub(crate) struct AncestorDetachOptions {
+    /// How often should remote `index_part.json` be updated for copied or deltas which had their
+    /// Lsn prefix truncated.
+    pub(crate) batch_size: std::num::NonZeroUsize,
+}
+
+impl Default for AncestorDetachOptions {
+    fn default() -> Self {
+        Self {
+            batch_size: std::num::NonZeroUsize::new(10).unwrap(),
+        }
+    }
 }
 
 /// Top-level failure to compact.

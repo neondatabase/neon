@@ -1831,9 +1831,18 @@ async fn timeline_detach_ancestor_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
+    use crate::tenant::timeline::AncestorDetachOptions;
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let mut options = AncestorDetachOptions::default();
+
+    let batch_size = parse_query_param::<_, std::num::NonZeroUsize>(&request, "batch_size")?;
+
+    if let Some(batch_size) = batch_size {
+        options.batch_size = batch_size;
+    }
 
     let state = get_state(&request);
 
@@ -1849,7 +1858,7 @@ async fn timeline_detach_ancestor_handler(
         .get_timeline(timeline_id, true)
         .map_err(|e| ApiError::NotFound(e.into()))?;
 
-    match timeline.detach_from_ancestor(&tenant, &ctx).await {
+    match timeline.detach_from_ancestor(&tenant, options, &ctx).await {
         Ok(detach_result) => {
             drop(timeline);
             drop(tenant);
