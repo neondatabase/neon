@@ -182,6 +182,16 @@ pub(crate) struct AuxFilesState {
     pub(crate) n_deltas: usize,
 }
 
+/// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
+/// ingestion considerably, because WAL ingestion needs to check on most records if the record
+/// implicitly extends the relation.  At startup, `complete_as_of` is initialized to the current end
+/// of the timeline (disk_consistent_lsn).  It's used on reads of relation sizes to check if the
+/// value can be used to also update the cache, see [`Timeline::update_cached_rel_size`].
+pub(crate) struct RelSizeCache {
+    pub(crate) complete_as_of: Lsn,
+    pub(crate) map: HashMap<RelTag, (Lsn, BlockNumber)>,
+}
+
 pub struct Timeline {
     conf: &'static PageServerConf,
     tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
@@ -324,7 +334,7 @@ pub struct Timeline {
     pub walreceiver: Mutex<Option<WalReceiver>>,
 
     /// Relation size cache
-    pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+    pub(crate) rel_size_cache: RwLock<RelSizeCache>,
 
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
@@ -1892,7 +1902,10 @@ impl Timeline {
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
 
                 last_received_wal: Mutex::new(None),
-                rel_size_cache: RwLock::new(HashMap::new()),
+                rel_size_cache: RwLock::new(RelSizeCache {
+                    complete_as_of: disk_consistent_lsn,
+                    map: HashMap::new(),
+                }),
 
                 download_all_remote_layers_task_info: RwLock::new(None),
 
