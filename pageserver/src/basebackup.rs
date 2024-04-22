@@ -13,7 +13,7 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
-use pageserver_api::key::{key_to_slru_block, Key};
+use pageserver_api::key::{key_to_slru_block, rel_block_to_key, Key};
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
@@ -295,6 +295,19 @@ where
                 // contents of UNLOGGED relations. Postgres copies it in
                 // `reinit.c` during recovery.
                 if rel.forknum == INIT_FORKNUM {
+                    // Workaround https://github.com/neondatabase/neon/issues/7451 -- if we have an unlogged relation
+                    // whose INIT_FORKNUM is not correctly on shard zero, then omit it in the basebackup.  This allows
+                    // postgres to start up.  The relation won't work, but it will be possible to DROP TABLE on it and
+                    // recreate.
+                    if !self
+                        .timeline
+                        .get_shard_identity()
+                        .is_key_local(&rel_block_to_key(rel, 0x0))
+                    {
+                        tracing::warn!("Omitting relation {rel} for issue #7451: drop and recreate this unlogged relation");
+                        continue;
+                    }
+
                     // I doubt we need _init fork itself, but having it at least
                     // serves as a marker relation is unlogged.
                     self.add_rel(rel, rel).await?;
