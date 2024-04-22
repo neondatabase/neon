@@ -824,6 +824,10 @@ impl Timeline {
     }
 
     pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
+    // If we are visiting more than 50 layers to reconstruct one value,
+    // it's likely that something is wrong with compaction. We print a
+    // rate limited warning in that case.
+    pub(crate) const LAYERS_VISITED_WARN_THRESHOLD: u64 = 50;
 
     /// Look up multiple page versions at a given LSN
     ///
@@ -975,8 +979,21 @@ impl Timeline {
         // Note that this is an approximation. Tracking the exact number of layers visited
         // per key requires virtually unbounded memory usage and is inefficient
         // (i.e. segment tree tracking each range queried from a layer)
-        crate::metrics::VEC_READ_NUM_LAYERS_VISITED
-            .observe(layers_visited as f64 / results.len() as f64);
+        let average_layers_visited = layers_visited as f64 / results.len() as f64;
+
+        crate::metrics::VEC_READ_NUM_LAYERS_VISITED.observe(average_layers_visited);
+
+        if average_layers_visited >= Self::LAYERS_VISITED_WARN_THRESHOLD as f64 {
+            use utils::rate_limit::RateLimit;
+            static LOGGED: Lazy<Mutex<RateLimit>> =
+                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+            let mut rate_limit = LOGGED.lock().unwrap();
+            let rate_limited = rate_limit.rate_limited();
+            rate_limit.call(|| {
+                warn!("Too many layers visited by vectored read: {} >= {}; rate limited {} occurences",
+                      average_layers_visited, Self::LAYERS_VISITED_WARN_THRESHOLD, rate_limited);
+            });
+        }
 
         Ok(results)
     }
@@ -2801,7 +2818,18 @@ impl Timeline {
         let mut timeline = self;
 
         let mut read_count = scopeguard::guard(0, |cnt| {
-            crate::metrics::READ_NUM_LAYERS_VISITED.observe(cnt as f64)
+            crate::metrics::READ_NUM_LAYERS_VISITED.observe(cnt as f64);
+            if cnt >= Self::LAYERS_VISITED_WARN_THRESHOLD {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                let rate_limited = rate_limit.rate_limited();
+                rate_limit.call(|| {
+                    warn!("Too many layers visited by non-vectored read: {} >= {}; rate limited {} occurences",
+                          cnt, Self::LAYERS_VISITED_WARN_THRESHOLD, rate_limited);
+                });
+            }
         });
 
         // For debugging purposes, collect the path of layers that we traversed
