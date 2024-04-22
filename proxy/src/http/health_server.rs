@@ -11,8 +11,7 @@ use std::{
     net::TcpListener,
     sync::{Arc, Mutex},
 };
-use tikv_jemalloc_ctl::{opt, prof};
-use tracing::{info, info_span};
+use tracing::{info, info_span, warn};
 use utils::http::{
     endpoint::{self, request_span},
     error::ApiError,
@@ -27,8 +26,8 @@ async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 }
 
 async fn prof_dump(_: Request<Body>) -> Result<Response<Body>, ApiError> {
-    static PROF_MIB: Lazy<prof::dump_mib> =
-        Lazy::new(|| prof::dump::mib().expect("could not create prof.dump MIB"));
+    static PROF_MIB: Lazy<jemalloc::dump_mib> =
+        Lazy::new(|| jemalloc::dump::mib().expect("could not create prof.dump MIB"));
     static PROF_DIR: Lazy<Utf8TempDir> =
         Lazy::new(|| camino_tempfile::tempdir().expect("could not create tempdir"));
     static PROF_FILE: Lazy<Utf8PathBuf> = Lazy::new(|| PROF_DIR.path().join("prof.dump"));
@@ -54,16 +53,21 @@ fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper::Body, ApiError> {
         metrics,
     }));
 
-    info!(enabled = opt::prof::read().unwrap(), "jemalloc profiling");
-    prof::active::write(true).unwrap();
-
-    endpoint::make_router()
+    let mut router = endpoint::make_router()
         .get("/metrics", move |r| {
             let state = state.clone();
             request_span(r, move |b| prometheus_metrics_handler(b, state))
         })
-        .get("/v1/status", status_handler)
-        .get("/v1/jemalloc/prof.dump", prof_dump)
+        .get("/v1/status", status_handler);
+
+    let prof_enabled = jemalloc::prof::read().unwrap_or_default();
+    if prof_enabled {
+        warn!("activating jemalloc profiling");
+        jemalloc::active::write(true).unwrap();
+        router = router.get("/v1/jemalloc/prof.dump", prof_dump);
+    }
+
+    router
 }
 
 pub async fn task_main(
