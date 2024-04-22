@@ -1,18 +1,12 @@
-use crate::compute;
+use crate::{compute, config::RetryConfig};
 use std::{error::Error, io};
 use tokio::time;
 
-/// Number of times we should retry the `/proxy_wake_compute` http request.
-/// Retry duration is BASE_RETRY_WAIT_DURATION * RETRY_WAIT_EXPONENT_BASE ^ n, where n starts at 0
-pub const NUM_RETRIES_CONNECT: u32 = 16;
-const BASE_RETRY_WAIT_DURATION: time::Duration = time::Duration::from_millis(25);
-const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
-
 pub trait ShouldRetry {
     fn could_retry(&self) -> bool;
-    fn should_retry(&self, num_retries: u32) -> bool {
+    fn should_retry(&self, num_retries: u32, config: RetryConfig) -> bool {
         match self {
-            _ if num_retries >= NUM_RETRIES_CONNECT => false,
+            _ if num_retries >= config.max_retries => false,
             err => err.could_retry(),
         }
     }
@@ -63,6 +57,8 @@ impl ShouldRetry for compute::ConnectionError {
     }
 }
 
-pub fn retry_after(num_retries: u32) -> time::Duration {
-    BASE_RETRY_WAIT_DURATION.mul_f64(RETRY_WAIT_EXPONENT_BASE.powi((num_retries as i32) - 1))
+pub fn retry_after(num_retries: u32, config: RetryConfig) -> time::Duration {
+    config
+        .base_delay
+        .mul_f64(config.backoff_factor.powi((num_retries as i32) - 1))
 }

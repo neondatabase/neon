@@ -3015,7 +3015,8 @@ impl Timeline {
                 break;
             }
 
-            cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
+            // Take the min to avoid reconstructing a page with data newer than request Lsn.
+            cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
             timeline_owned = timeline
                 .get_ready_ancestor_timeline(ctx)
                 .await
@@ -3571,7 +3572,7 @@ impl Timeline {
         &self,
         disk_consistent_lsn: Lsn,
         layers_to_upload: impl IntoIterator<Item = ResidentLayer>,
-    ) -> anyhow::Result<TimelineMetadata> {
+    ) -> anyhow::Result<()> {
         // We can only save a valid 'prev_record_lsn' value on disk if we
         // flushed *all* in-memory changes to disk. We only track
         // 'prev_record_lsn' in memory for the latest processed record, so we
@@ -3588,19 +3589,10 @@ impl Timeline {
             None
         };
 
-        let ancestor_timeline_id = self
-            .ancestor_timeline
-            .as_ref()
-            .map(|ancestor| ancestor.timeline_id);
-
-        let metadata = TimelineMetadata::new(
+        let update = crate::tenant::metadata::MetadataUpdate::new(
             disk_consistent_lsn,
             ondisk_prev_record_lsn,
-            ancestor_timeline_id,
-            self.ancestor_lsn,
             *self.latest_gc_cutoff_lsn.read(),
-            self.initdb_lsn,
-            self.pg_version,
         );
 
         fail_point!("checkpoint-before-saving-metadata", |x| bail!(
@@ -3612,10 +3604,10 @@ impl Timeline {
             for layer in layers_to_upload {
                 remote_client.schedule_layer_file_upload(layer)?;
             }
-            remote_client.schedule_index_upload_for_metadata_update(&metadata)?;
+            remote_client.schedule_index_upload_for_metadata_update(&update)?;
         }
 
-        Ok(metadata)
+        Ok(())
     }
 
     pub(crate) async fn preserve_initdb_archive(&self) -> anyhow::Result<()> {

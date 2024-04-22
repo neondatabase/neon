@@ -1417,6 +1417,7 @@ fn cli() -> Command {
         .subcommand(
             Command::new("timeline")
             .about("Manage timelines")
+            .arg_required_else_help(true)
             .subcommand(Command::new("list")
                 .about("List all timelines, available to this pageserver")
                 .arg(tenant_id_arg.clone()))

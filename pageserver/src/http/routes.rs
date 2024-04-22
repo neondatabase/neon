@@ -460,8 +460,12 @@ async fn reload_auth_validation_keys_handler(
             json_response(StatusCode::OK, ())
         }
         Err(e) => {
+            let err_msg = "Error reloading public keys";
             warn!("Error reloading public keys from {key_path:?}: {e:}");
-            json_response(StatusCode::INTERNAL_SERVER_ERROR, ())
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HttpErrorBody::from_msg(err_msg.to_string()),
+            )
         }
     }
 }
@@ -775,7 +779,9 @@ async fn get_timestamp_of_lsn_handler(
             let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
             json_response(StatusCode::OK, time)
         }
-        None => json_response(StatusCode::NOT_FOUND, ()),
+        None => Err(ApiError::NotFound(
+            anyhow::anyhow!("Timestamp for lsn {} not found", lsn).into(),
+        )),
     }
 }
 

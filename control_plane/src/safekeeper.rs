@@ -70,24 +70,31 @@ pub struct SafekeeperNode {
     pub pg_connection_config: PgConnectionConfig,
     pub env: LocalEnv,
     pub http_client: reqwest::Client,
+    pub listen_addr: String,
     pub http_base_url: String,
 }
 
 impl SafekeeperNode {
     pub fn from_env(env: &LocalEnv, conf: &SafekeeperConf) -> SafekeeperNode {
+        let listen_addr = if let Some(ref listen_addr) = conf.listen_addr {
+            listen_addr.clone()
+        } else {
+            "127.0.0.1".to_string()
+        };
         SafekeeperNode {
             id: conf.id,
             conf: conf.clone(),
-            pg_connection_config: Self::safekeeper_connection_config(conf.pg_port),
+            pg_connection_config: Self::safekeeper_connection_config(&listen_addr, conf.pg_port),
             env: env.clone(),
             http_client: reqwest::Client::new(),
-            http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
+            http_base_url: format!("http://{}:{}/v1", listen_addr, conf.http_port),
+            listen_addr,
         }
     }
 
     /// Construct libpq connection string for connecting to this safekeeper.
-    fn safekeeper_connection_config(port: u16) -> PgConnectionConfig {
-        PgConnectionConfig::new_host_port(url::Host::parse("127.0.0.1").unwrap(), port)
+    fn safekeeper_connection_config(addr: &str, port: u16) -> PgConnectionConfig {
+        PgConnectionConfig::new_host_port(url::Host::parse(addr).unwrap(), port)
     }
 
     pub fn datadir_path_by_id(env: &LocalEnv, sk_id: NodeId) -> PathBuf {
@@ -111,8 +118,8 @@ impl SafekeeperNode {
         );
         io::stdout().flush().unwrap();
 
-        let listen_pg = format!("127.0.0.1:{}", self.conf.pg_port);
-        let listen_http = format!("127.0.0.1:{}", self.conf.http_port);
+        let listen_pg = format!("{}:{}", self.listen_addr, self.conf.pg_port);
+        let listen_http = format!("{}:{}", self.listen_addr, self.conf.http_port);
         let id = self.id;
         let datadir = self.datadir_path();
 
@@ -139,7 +146,7 @@ impl SafekeeperNode {
             availability_zone,
         ];
         if let Some(pg_tenant_only_port) = self.conf.pg_tenant_only_port {
-            let listen_pg_tenant_only = format!("127.0.0.1:{}", pg_tenant_only_port);
+            let listen_pg_tenant_only = format!("{}:{}", self.listen_addr, pg_tenant_only_port);
             args.extend(["--listen-pg-tenant-only".to_owned(), listen_pg_tenant_only]);
         }
         if !self.conf.sync {
