@@ -4476,9 +4476,9 @@ impl Timeline {
             let mut wrote_any = false;
 
             for (i, layer) in straddling_branchpoint.into_iter().enumerate() {
-                let Some(copied) =
-                    detach_ancestor::copy_lsn_prefix(end_lsn, &layer, self, ctx).await?
-                else {
+                let copied = detach_ancestor::copy_lsn_prefix(end_lsn, &layer, self, ctx).await?;
+
+                let Some(copied) = copied else {
                     continue;
                 };
 
