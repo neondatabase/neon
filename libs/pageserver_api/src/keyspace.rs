@@ -32,6 +32,14 @@ pub struct ShardedRange<'a> {
     pub range: Range<Key>,
 }
 
+// Calculate the distance between two keys, assuming that they are somewhat close
+// together (i.e. we only account for field5 and field6)
+fn nearby_key_delta(start: &Key, end: &Key) -> u64 {
+    let start = (start.field5 as u64) << 32 | start.field6 as u64;
+    let end = (end.field5 as u64) << 32 | end.field6 as u64;
+    end - start
+}
+
 impl<'a> ShardedRange<'a> {
     pub fn new(range: Range<Key>, shard_identity: &'a ShardIdentity) -> Self {
         Self {
@@ -121,9 +129,10 @@ impl<'a> ShardedRange<'a> {
 
             // If this blocks in this stripe belong to us, add them to our count
             if !is_key_disposable {
-                let start = (stripe_start.field5 as u64) << 32 | stripe_start.field6 as u64;
-                let end = (stripe_end.field5 as u64) << 32 | stripe_end.field6 as u64;
-                result += end - start;
+                // Keys must be nearby because we earlier used raw_size and would have
+                // droped out with u32::MAX if they were distant.
+                let diff = nearby_key_delta(&stripe_start, &stripe_end);
+                result += diff;
             }
 
             stripe_start = next_stripe_start;
@@ -156,10 +165,8 @@ impl<'a> ShardedRange<'a> {
             return u32::MAX;
         }
 
-        let start = (start.field5 as u64) << 32 | start.field6 as u64;
-        let end = (end.field5 as u64) << 32 | end.field6 as u64;
-
-        let diff = end - start;
+        // The check above ensures that keys only differ in low fields (i.e. are nearby)
+        let diff = nearby_key_delta(&start, &end);
         if diff > u32::MAX as u64 {
             u32::MAX
         } else {
