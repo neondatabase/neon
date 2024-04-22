@@ -445,7 +445,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		return false;
 	}
 
-	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s'", connstr);
+	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
 	page_servers[shard_no].conn = conn;
 	page_servers[shard_no].wes = wes;
 
