@@ -4452,7 +4452,7 @@ impl Timeline {
 
         let end_lsn = ancestor_lsn + 1;
 
-        let (mut straddling_branchpoint, mut rest_of_historic) = {
+        let (filtered_layers, mut straddling_branchpoint, mut rest_of_historic) = {
             // we do not need to start from our layers, because they can only be layers that come
             // *after* our
             let layers = tokio::select! {
@@ -4468,9 +4468,7 @@ impl Timeline {
             let (later_by_lsn, straddling, rest) =
                 detach_ancestor::partition_work(ancestor_lsn, &layers);
 
-            tracing::debug!(%later_by_lsn, to_rewrite = straddling.len(), historic=%rest.len(), "collected layers");
-
-            (straddling, rest)
+            (later_by_lsn, straddling, rest)
         };
 
         {
@@ -4479,7 +4477,17 @@ impl Timeline {
                 _ = self.cancel.cancelled() => return Err(ShuttingDown),
             };
 
-            detach_ancestor::retain_missing_layers(&mut rest_of_historic, &layers);
+            // FIXME: missing: we need to purge any L0s before ancestor_lsn if they are no longer
+            // present on the ancestor. situation:
+            //
+            // 1. we start detach_ancestor operation, rewrite a L0
+            // 2. shutdown while copying historic layers (might have L0s)
+            // 3. compaction on ancestor before operation is retried
+            // 4. now we have conflicting L0(s) and proceed to rewrite the L1s
+            //
+            // with legacy compaction strategy we could just not rewrite such L1s if we already
+            // have covering L0s at the branchpoint, but with later compaction strategies this
+            // might not be feasible.
 
             detach_ancestor::retain_layers_to_copy_lsn_prefix(
                 end_lsn,
@@ -4488,9 +4496,10 @@ impl Timeline {
                 &layers,
             );
 
-            drop(layers);
+            detach_ancestor::retain_missing_layers(&mut rest_of_historic, &layers);
         }
 
+        tracing::info!(filtered=%filtered_layers, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
 
         if straddling_branchpoint.is_empty() {
             // as we flushed the inmem layer to disk, only reason:
