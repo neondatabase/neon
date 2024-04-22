@@ -77,10 +77,14 @@ impl ConnectionWithCredentialsProvider {
         }
     }
 
+    async fn ping(con: &mut MultiplexedConnection) -> RedisResult<()> {
+        redis::cmd("PING").query_async(con).await
+    }
+
     pub async fn connect(&mut self) -> anyhow::Result<()> {
         let _guard = self.mutex.lock().await;
         if let Some(con) = self.con.as_mut() {
-            match redis::cmd("PING").query_async(con).await {
+            match Self::ping(con).await {
                 Ok(()) => {
                     return Ok(());
                 }
@@ -96,7 +100,7 @@ impl ConnectionWithCredentialsProvider {
         if let Some(f) = self.refresh_token_task.take() {
             f.abort()
         }
-        let con = self
+        let mut con = self
             .get_client()
             .await?
             .get_multiplexed_tokio_connection()
@@ -108,6 +112,14 @@ impl ConnectionWithCredentialsProvider {
                 let _ = Self::keep_connection(con2, credentials_provider).await;
             });
             self.refresh_token_task = Some(f);
+        }
+        match Self::ping(&mut con).await {
+            Ok(()) => {
+                info!("Connection succesfully established");
+            }
+            Err(e) => {
+                error!("Connection is broken. Error during PING: {e:?}");
+            }
         }
         self.con = Some(con);
         Ok(())

@@ -156,6 +156,7 @@ pub struct SafekeeperConf {
     pub remote_storage: Option<String>,
     pub backup_threads: Option<u32>,
     pub auth_enabled: bool,
+    pub listen_addr: Option<String>,
 }
 
 impl Default for SafekeeperConf {
@@ -169,6 +170,7 @@ impl Default for SafekeeperConf {
             remote_storage: None,
             backup_threads: None,
             auth_enabled: false,
+            listen_addr: None,
         }
     }
 }

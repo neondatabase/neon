@@ -5,14 +5,92 @@ use crate::{
     models::ShardParameters,
 };
 use hex::FromHex;
+use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
 use utils::id::TenantId;
+
+/// See docs/rfcs/031-sharding-static.md for an overview of sharding.
+///
+/// This module contains a variety of types used to represent the concept of sharding
+/// a Neon tenant across multiple physical shards.  Since there are quite a few of these,
+/// we provide an summary here.
+///
+/// Types used to describe shards:
+/// - [`ShardCount`] describes how many shards make up a tenant, plus the magic `unsharded` value
+///   which identifies a tenant which is not shard-aware.  This means its storage paths do not include
+///   a shard suffix.
+/// - [`ShardNumber`] is simply the zero-based index of a shard within a tenant.
+/// - [`ShardIndex`] is the 2-tuple of `ShardCount` and `ShardNumber`, it's just like a `TenantShardId`
+///   without the tenant ID.  This is useful for things that are implicitly scoped to a particular
+///   tenant, such as layer files.
+/// - [`ShardIdentity`]` is the full description of a particular shard's parameters, in sufficient
+///   detail to convert a [`Key`] to a [`ShardNumber`] when deciding where to write/read.
+/// - The [`ShardSlug`] is a terse formatter for ShardCount and ShardNumber, written as
+///   four hex digits.  An unsharded tenant is `0000`.
+/// - [`TenantShardId`] is the unique ID of a particular shard within a particular tenant
+///
+/// Types used to describe the parameters for data distribution in a sharded tenant:
+/// - [`ShardStripeSize`] controls how long contiguous runs of [`Key`]s (stripes) are when distributed across
+///   multiple shards.  Its value is given in 8kiB pages.
+/// - [`ShardLayout`] describes the data distribution scheme, and at time of writing is
+///   always zero: this is provided for future upgrades that might introduce different
+///   data distribution schemes.
+///
+/// Examples:
+/// - A legacy unsharded tenant has one shard with ShardCount(0), ShardNumber(0), and its slug is 0000
+/// - A single sharded tenant has one shard with ShardCount(1), ShardNumber(0), and its slug is 0001
+/// - In a tenant with 4 shards, each shard has ShardCount(N), ShardNumber(i) where i in 0..N-1 (inclusive),
+///   and their slugs are 0004, 0104, 0204, and 0304.
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
 pub struct ShardNumber(pub u8);
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
 pub struct ShardCount(u8);
+
+/// Combination of ShardNumber and ShardCount.  For use within the context of a particular tenant,
+/// when we need to know which shard we're dealing with, but do not need to know the full
+/// ShardIdentity (because we won't be doing any page->shard mapping), and do not need to know
+/// the fully qualified TenantShardId.
+#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Hash)]
+pub struct ShardIndex {
+    pub shard_number: ShardNumber,
+    pub shard_count: ShardCount,
+}
+
+/// The ShardIdentity contains enough information to map a [`Key`] to a [`ShardNumber`],
+/// and to check whether that [`ShardNumber`] is the same as the current shard.
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardIdentity {
+    pub number: ShardNumber,
+    pub count: ShardCount,
+    pub stripe_size: ShardStripeSize,
+    layout: ShardLayout,
+}
+
+/// Formatting helper, for generating the `shard_id` label in traces.
+struct ShardSlug<'a>(&'a TenantShardId);
+
+/// TenantShardId globally identifies a particular shard in a particular tenant.
+///
+/// These are written as `<TenantId>-<ShardSlug>`, for example:
+///   # The second shard in a two-shard tenant
+///   072f1291a5310026820b2fe4b2968934-0102
+///
+/// If the `ShardCount` is _unsharded_, the `TenantShardId` is written without
+/// a shard suffix and is equivalent to the encoding of a `TenantId`: this enables
+/// an unsharded [`TenantShardId`] to be used interchangably with a [`TenantId`].
+///
+/// The human-readable encoding of an unsharded TenantShardId, such as used in API URLs,
+/// is both forward and backward compatible with TenantId: a legacy TenantId can be
+/// decoded as a TenantShardId, and when re-encoded it will be parseable
+/// as a TenantId.
+#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Hash)]
+pub struct TenantShardId {
+    pub tenant_id: TenantId,
+    pub shard_number: ShardNumber,
+    pub shard_count: ShardCount,
+}
 
 impl ShardCount {
     pub const MAX: Self = Self(u8::MAX);
@@ -38,6 +116,7 @@ impl ShardCount {
         self.0
     }
 
+    ///
     pub fn is_unsharded(&self) -> bool {
         self.0 == 0
     }
@@ -51,33 +130,6 @@ impl ShardCount {
 
 impl ShardNumber {
     pub const MAX: Self = Self(u8::MAX);
-}
-
-/// TenantShardId identify the units of work for the Pageserver.
-///
-/// These are written as `<tenant_id>-<shard number><shard-count>`, for example:
-///
-///   # The second shard in a two-shard tenant
-///   072f1291a5310026820b2fe4b2968934-0102
-///
-/// Historically, tenants could not have multiple shards, and were identified
-/// by TenantId.  To support this, TenantShardId has a special legacy
-/// mode where `shard_count` is equal to zero: this represents a single-sharded
-/// tenant which should be written as a TenantId with no suffix.
-///
-/// The human-readable encoding of TenantShardId, such as used in API URLs,
-/// is both forward and backward compatible: a legacy TenantId can be
-/// decoded as a TenantShardId, and when re-encoded it will be parseable
-/// as a TenantId.
-///
-/// Note that the binary encoding is _not_ backward compatible, because
-/// at the time sharding is introduced, there are no existing binary structures
-/// containing TenantId that we need to handle.
-#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Hash)]
-pub struct TenantShardId {
-    pub tenant_id: TenantId,
-    pub shard_number: ShardNumber,
-    pub shard_count: ShardCount,
 }
 
 impl TenantShardId {
@@ -111,10 +163,13 @@ impl TenantShardId {
     }
 
     /// Convenience for code that has special behavior on the 0th shard.
-    pub fn is_zero(&self) -> bool {
+    pub fn is_shard_zero(&self) -> bool {
         self.shard_number == ShardNumber(0)
     }
 
+    /// The "unsharded" value is distinct from simply having a single shard: it represents
+    /// a tenant which is not shard-aware at all, and whose storage paths will not include
+    /// a shard suffix.
     pub fn is_unsharded(&self) -> bool {
         self.shard_number == ShardNumber(0) && self.shard_count.is_unsharded()
     }
@@ -149,9 +204,6 @@ impl TenantShardId {
         child_shards
     }
 }
-
-/// Formatting helper
-struct ShardSlug<'a>(&'a TenantShardId);
 
 impl<'a> std::fmt::Display for ShardSlug<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -222,16 +274,6 @@ impl From<[u8; 18]> for TenantShardId {
     }
 }
 
-/// For use within the context of a particular tenant, when we need to know which
-/// shard we're dealing with, but do not need to know the full ShardIdentity (because
-/// we won't be doing any page->shard mapping), and do not need to know the fully qualified
-/// TenantShardId.
-#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Hash)]
-pub struct ShardIndex {
-    pub shard_number: ShardNumber,
-    pub shard_count: ShardCount,
-}
-
 impl ShardIndex {
     pub fn new(number: ShardNumber, count: ShardCount) -> Self {
         Self {
@@ -246,6 +288,9 @@ impl ShardIndex {
         }
     }
 
+    /// The "unsharded" value is distinct from simply having a single shard: it represents
+    /// a tenant which is not shard-aware at all, and whose storage paths will not include
+    /// a shard suffix.
     pub fn is_unsharded(&self) -> bool {
         self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
     }
@@ -313,6 +358,8 @@ impl Serialize for TenantShardId {
         if serializer.is_human_readable() {
             serializer.collect_str(self)
         } else {
+            // Note: while human encoding of [`TenantShardId`] is backward and forward
+            // compatible, this binary encoding is not.
             let mut packed: [u8; 18] = [0; 18];
             packed[0..16].clone_from_slice(&self.tenant_id.as_arr());
             packed[16] = self.shard_number.0;
@@ -390,16 +437,6 @@ const LAYOUT_BROKEN: ShardLayout = ShardLayout(255);
 /// Default stripe size in pages: 256MiB divided by 8kiB page size.
 const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 
-/// The ShardIdentity contains the information needed for one member of map
-/// to resolve a key to a shard, and then check whether that shard is ==self.
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
-pub struct ShardIdentity {
-    pub number: ShardNumber,
-    pub count: ShardCount,
-    pub stripe_size: ShardStripeSize,
-    layout: ShardLayout,
-}
-
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum ShardConfigError {
     #[error("Invalid shard count")]
@@ -439,6 +476,9 @@ impl ShardIdentity {
         }
     }
 
+    /// The "unsharded" value is distinct from simply having a single shard: it represents
+    /// a tenant which is not shard-aware at all, and whose storage paths will not include
+    /// a shard suffix.
     pub fn is_unsharded(&self) -> bool {
         self.number == ShardNumber(0) && self.count == ShardCount(0)
     }
@@ -487,6 +527,8 @@ impl ShardIdentity {
     }
 
     /// Return true if the key should be ingested by this shard
+    ///
+    /// Shards must ingest _at least_ keys which return true from this check.
     pub fn is_key_local(&self, key: &Key) -> bool {
         assert!(!self.is_broken());
         if self.count < ShardCount(2) || (key_is_shard0(key) && self.number == ShardNumber(0)) {
@@ -496,8 +538,28 @@ impl ShardIdentity {
         }
     }
 
+    /// Special case for issue `<https://github.com/neondatabase/neon/issues/7451>`
+    ///
+    /// When we fail to read a forknum block, this function tells us whether we may ignore the error
+    /// as a symptom of that issue.
+    pub fn is_key_buggy_forknum(&self, key: &Key) -> bool {
+        if !is_rel_block_key(key) || key.field5 != INIT_FORKNUM {
+            return false;
+        }
+
+        let mut hash = murmurhash32(key.field4);
+        hash = hash_combine(hash, murmurhash32(key.field6 / self.stripe_size.0));
+        let mapped_shard = ShardNumber((hash % self.count.0 as u32) as u8);
+
+        // The key may be affected by issue #7454: it is an initfork and it would not
+        // have mapped to shard 0 until we fixed that issue.
+        mapped_shard != ShardNumber(0)
+    }
+
     /// Return true if the key should be discarded if found in this shard's
-    /// data store, e.g. during compaction after a split
+    /// data store, e.g. during compaction after a split.
+    ///
+    /// Shards _may_ drop keys which return false here, but are not obliged to.
     pub fn is_key_disposable(&self, key: &Key) -> bool {
         if key_is_shard0(key) {
             // Q: Why can't we dispose of shard0 content if we're not shard 0?
@@ -523,7 +585,7 @@ impl ShardIdentity {
 
     /// Convenience for checking if this identity is the 0th shard in a tenant,
     /// for special cases on shard 0 such as ingesting relation sizes.
-    pub fn is_zero(&self) -> bool {
+    pub fn is_shard_zero(&self) -> bool {
         self.number == ShardNumber(0)
     }
 }
@@ -606,7 +668,13 @@ fn key_is_shard0(key: &Key) -> bool {
     // relation pages are distributed to shards other than shard zero. Everything else gets
     // stored on shard 0.  This guarantees that shard 0 can independently serve basebackup
     // requests, and any request other than those for particular blocks in relations.
-    !is_rel_block_key(key)
+    //
+    // The only exception to this rule is "initfork" data -- this relates to postgres's UNLOGGED table
+    // type. These are special relations, usually with only 0 or 1 blocks, and we store them on shard 0
+    // because they must be included in basebackups.
+    let is_initfork = key.field5 == INIT_FORKNUM;
+
+    !is_rel_block_key(key) || is_initfork
 }
 
 /// Provide the same result as the function in postgres `hashfn.h` with the same name

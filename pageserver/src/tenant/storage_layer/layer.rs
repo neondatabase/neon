@@ -116,6 +116,12 @@ impl AsLayerDesc for Layer {
     }
 }
 
+impl PartialEq for Layer {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
+    }
+}
+
 impl Layer {
     /// Creates a layer value for a file we know to not be resident.
     pub(crate) fn for_evicted(
@@ -604,9 +610,17 @@ enum Status {
 
 impl Drop for LayerInner {
     fn drop(&mut self) {
+        // if there was a pending eviction, mark it cancelled here to balance metrics
+        if let Some((ResidentOrWantedEvicted::WantedEvicted(..), _)) = self.inner.take_and_deinit()
+        {
+            // eviction has already been started
+            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
+
+            // eviction request is intentionally not honored as no one is present to wait for it
+            // and we could be delaying shutdown for nothing.
+        }
+
         if !*self.wanted_deleted.get_mut() {
-            // should we try to evict if the last wish was for eviction? seems more like a hazard
-            // than a clear win.
             return;
         }
 
@@ -1552,8 +1566,8 @@ impl Drop for DownloadedLayer {
         if let Some(owner) = self.owner.upgrade() {
             owner.on_downloaded_layer_drop(self.version);
         } else {
-            // no need to do anything, we are shutting down
-            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
+            // Layer::drop will handle cancelling the eviction; because of drop order and
+            // `DownloadedLayer` never leaking, we cannot know here if eviction was requested.
         }
     }
 }
@@ -1752,6 +1766,28 @@ impl ResidentLayer {
         }
     }
 
+    /// FIXME: truncate is bad name because we are not truncating anything, but copying the
+    /// filtered parts.
+    #[cfg(test)]
+    pub(super) async fn copy_delta_prefix(
+        &self,
+        writer: &mut super::delta_layer::DeltaLayerWriter,
+        truncate_at: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        use LayerKind::*;
+
+        let owner = &self.owner.0;
+
+        match self.downloaded.get(owner, ctx).await? {
+            Delta(ref d) => d
+                .copy_prefix(writer, truncate_at, ctx)
+                .await
+                .with_context(|| format!("truncate {self}")),
+            Image(_) => anyhow::bail!(format!("cannot truncate image layer {self}")),
+        }
+    }
+
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.owner.0.path
     }
@@ -1761,14 +1797,14 @@ impl ResidentLayer {
     }
 
     #[cfg(test)]
-    pub(crate) async fn get_inner_delta<'a>(
-        &'a self,
+    pub(crate) async fn as_delta(
+        &self,
         ctx: &RequestContext,
-    ) -> anyhow::Result<&'a delta_layer::DeltaLayerInner> {
-        let owner = &self.owner.0;
-        match self.downloaded.get(owner, ctx).await? {
-            LayerKind::Delta(d) => Ok(d),
-            LayerKind::Image(_) => Err(anyhow::anyhow!("Expected a delta layer")),
+    ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
+        use LayerKind::*;
+        match self.downloaded.get(&self.owner.0, ctx).await? {
+            Delta(ref d) => Ok(d),
+            Image(_) => Err(anyhow::anyhow!("image layer")),
         }
     }
 }

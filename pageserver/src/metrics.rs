@@ -1518,7 +1518,8 @@ pub(crate) struct SecondaryModeMetrics {
     pub(crate) download_heatmap: IntCounter,
     pub(crate) download_layer: IntCounter,
 }
-pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
+    SecondaryModeMetrics {
     upload_heatmap: register_int_counter!(
         "pageserver_secondary_upload_heatmap",
         "Number of heatmaps written to remote storage by attached tenants"
@@ -1536,7 +1537,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
     .expect("failed to define a metric"),
     download_heatmap: register_int_counter!(
         "pageserver_secondary_download_heatmap",
-        "Number of downloads of heatmaps by secondary mode locations"
+        "Number of downloads of heatmaps by secondary mode locations, including when it hasn't changed"
     )
     .expect("failed to define a metric"),
     download_layer: register_int_counter!(
@@ -1544,6 +1545,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
         "Number of downloads of layers by secondary mode locations"
     )
     .expect("failed to define a metric"),
+}
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1819,6 +1821,29 @@ impl Default for WalRedoProcessCounters {
 pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
     Lazy::new(WalRedoProcessCounters::default);
 
+#[cfg(not(test))]
+pub mod wal_redo {
+    use super::*;
+
+    static PROCESS_KIND: Lazy<std::sync::Mutex<UIntGaugeVec>> = Lazy::new(|| {
+        std::sync::Mutex::new(
+            register_uint_gauge_vec!(
+                "pageserver_wal_redo_process_kind",
+                "The configured process kind for walredo",
+                &["kind"],
+            )
+            .unwrap(),
+        )
+    });
+
+    pub fn set_process_kind_metric(kind: crate::walredo::ProcessKind) {
+        // use guard to avoid races around the next two steps
+        let guard = PROCESS_KIND.lock().unwrap();
+        guard.reset();
+        guard.with_label_values(&[&format!("{kind}")]).set(1);
+    }
+}
+
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
@@ -2089,7 +2114,7 @@ impl TimelineMetrics {
 
 pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
     // Only shard zero deals in synthetic sizes
-    if tenant_shard_id.is_zero() {
+    if tenant_shard_id.is_shard_zero() {
         let tid = tenant_shard_id.tenant_id.to_string();
         let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
     }

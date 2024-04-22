@@ -457,8 +457,12 @@ async fn reload_auth_validation_keys_handler(
             json_response(StatusCode::OK, ())
         }
         Err(e) => {
+            let err_msg = "Error reloading public keys";
             warn!("Error reloading public keys from {key_path:?}: {e:}");
-            json_response(StatusCode::INTERNAL_SERVER_ERROR, ())
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HttpErrorBody::from_msg(err_msg.to_string()),
+            )
         }
     }
 }
@@ -696,7 +700,7 @@ async fn get_lsn_by_timestamp_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -747,7 +751,7 @@ async fn get_timestamp_of_lsn_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -772,7 +776,9 @@ async fn get_timestamp_of_lsn_handler(
             let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
             json_response(StatusCode::OK, time)
         }
-        None => json_response(StatusCode::NOT_FOUND, ()),
+        None => Err(ApiError::NotFound(
+            anyhow::anyhow!("Timestamp for lsn {} not found", lsn).into(),
+        )),
     }
 }
 
@@ -1086,7 +1092,7 @@ async fn tenant_size_handler(
     let headers = request.headers();
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
         )));

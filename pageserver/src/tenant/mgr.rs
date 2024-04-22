@@ -678,12 +678,19 @@ pub async fn init_tenant_mgr(
                     }
                 }
             }
-            LocationMode::Secondary(secondary_conf) => TenantSlot::Secondary(SecondaryTenant::new(
-                tenant_shard_id,
-                shard_identity,
-                location_conf.tenant_conf,
-                &secondary_conf,
-            )),
+            LocationMode::Secondary(secondary_conf) => {
+                info!(
+                    tenant_id = %tenant_shard_id.tenant_id,
+                    shard_id = %tenant_shard_id.shard_slug(),
+                    "Starting secondary tenant"
+                );
+                TenantSlot::Secondary(SecondaryTenant::new(
+                    tenant_shard_id,
+                    shard_identity,
+                    location_conf.tenant_conf,
+                    &secondary_conf,
+                ))
+            }
         };
 
         tenants.insert(tenant_shard_id, slot);
@@ -1410,9 +1417,15 @@ impl TenantManager {
 
         match tenant.current_state() {
             TenantState::Broken { .. } | TenantState::Stopping { .. } => {
-                // If a tenant is broken or stopping, DeleteTenantFlow can
-                // handle it: broken tenants proceed to delete, stopping tenants
-                // are checked for deletion already in progress.
+                // If deletion is already in progress, return success (the semantics of this
+                // function are to rerturn success afterr deletion is spawned in background).
+                // Otherwise fall through and let [`DeleteTenantFlow`] handle this state.
+                if DeleteTenantFlow::is_in_progress(&tenant) {
+                    // The `delete_progress` lock is held: deletion is already happening
+                    // in the bacckground
+                    slot_guard.revert();
+                    return Ok(());
+                }
             }
             _ => {
                 tenant
