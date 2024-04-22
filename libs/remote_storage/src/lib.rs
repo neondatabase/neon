@@ -21,11 +21,13 @@ use std::{
     fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
+    str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use anyhow::{bail, Context};
+use aws_sdk_s3::types::StorageClass;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
@@ -619,6 +621,7 @@ pub struct S3Config {
     /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
     pub concurrency_limit: NonZeroUsize,
     pub max_keys_per_list_response: Option<i32>,
+    pub upload_storage_class: Option<StorageClass>,
 }
 
 impl Debug for S3Config {
@@ -747,6 +750,18 @@ impl RemoteStorageConfig {
                     endpoint,
                     concurrency_limit,
                     max_keys_per_list_response,
+                    upload_storage_class: toml
+                        .get("upload_storage_class")
+                        .map(|prefix_in_bucket| -> anyhow::Result<_> {
+                            let s = parse_toml_string("upload_storage_class", prefix_in_bucket)?;
+                            let storage_class = StorageClass::from_str(&s).expect("infallible");
+                            #[allow(deprecated)]
+                            if matches!(storage_class, StorageClass::Unknown(_)) {
+                                bail!("Specified storage class unknown to SDK: '{s}'. Allowed values: {:?}", StorageClass::values());
+                            }
+                            Ok(storage_class)
+                        })
+                        .transpose()?,
                 })
             }
             (_, _, _, Some(_), None) => {
