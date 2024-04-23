@@ -1,21 +1,38 @@
+use std::fmt::Display;
+use std::time::Instant;
 use std::{collections::HashMap, sync::Arc};
 
+use std::time::Duration;
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
+
+const LOCK_TIMEOUT_ALERT_THRESHOLD: Duration = Duration::from_secs(3);
 
 /// A wrapper around `OwnedRwLockWriteGuard` that when dropped changes the
 /// current holding operation in lock.
-pub struct WrappedWriteGuard<T> {
+pub struct WrappedWriteGuard<T: Display> {
     guard: OwnedRwLockWriteGuard<Option<T>>,
+    start: Instant,
 }
 
-impl<T> WrappedWriteGuard<T> {
+impl<T: Display> WrappedWriteGuard<T> {
     pub fn new(guard: OwnedRwLockWriteGuard<Option<T>>) -> Self {
-        Self { guard }
+        Self {
+            guard,
+            start: Instant::now(),
+        }
     }
 }
 
-impl<T> Drop for WrappedWriteGuard<T> {
+impl<T: Display> Drop for WrappedWriteGuard<T> {
     fn drop(&mut self) {
+        let duration = Instant::now() - self.start;
+        if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
+            tracing::warn!(
+                "Lock on: {} was held for: {:?}",
+                self.guard.as_ref().unwrap(),
+                duration
+            );
+        }
         *self.guard = None;
     }
 }
@@ -35,6 +52,7 @@ where
 impl<T, I> IdLockMap<T, I>
 where
     T: Eq + PartialEq + std::hash::Hash,
+    I: Display,
 {
     pub(crate) fn shared(
         &self,
@@ -82,7 +100,7 @@ where
 mod tests {
     use super::IdLockMap;
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Clone, Debug, strum_macros::Display, PartialEq)]
     enum Operations {
         Op1,
         Op2,
@@ -106,7 +124,7 @@ mod tests {
 
         {
             let _ex_lock = id_lock_map.exclusive(resource_id, Operations::Op1).await;
-            assert_eq!(_ex_lock.guard.unwrap(), Operations::Op1);
+            assert_eq!(_ex_lock.guard.clone().unwrap(), Operations::Op1);
 
             let _ex_lock_2 = tokio::time::timeout(
                 tokio::time::Duration::from_millis(1),
