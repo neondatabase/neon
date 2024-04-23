@@ -73,7 +73,7 @@ use crate::{
 };
 
 // For acquiring lock on operations
-const SHORT_LOCK_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(1);
+const SHORT_LOCK_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(3);
 
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -242,7 +242,7 @@ struct TenantShardSplitAbort {
     new_shard_count: ShardCount,
     new_stripe_size: Option<ShardStripeSize>,
     /// Until this abort op is complete, no other operations may be done on the tenant
-    _tenant_lock: WrappedWriteGuard<()>,
+    _tenant_lock: WrappedWriteGuard<&'static str>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -268,8 +268,7 @@ async fn request_lock_with_timeout<T: Clone + Display + Eq + PartialEq + std::ha
     op_locks: &IdLockMap<T>,
     key: T,
     operation: &'static str,
-) -> Result<WrappedWriteGuard<()>, ApiError> {
-    let current_holder = op_locks.get_operation(key.clone()).unwrap_or("None");
+) -> Result<WrappedWriteGuard<&'static str>, ApiError> {
     tokio::time::timeout(
         SHORT_LOCK_ACQUISITION_TIMEOUT,
         op_locks.exclusive(key.clone(), operation),
@@ -278,8 +277,8 @@ async fn request_lock_with_timeout<T: Clone + Display + Eq + PartialEq + std::ha
     .map_err(|_| {
         ApiError::Timeout(
             format!(
-                "Cannot grab ex lock on {}, currently holding {}",
-                key, current_holder
+                "Operation {} cannot grab an exclusive lock on {}",
+                operation, key
             )
             .into(),
         )
@@ -1307,7 +1306,7 @@ impl Service {
     async fn node_activate_reconcile(
         &self,
         mut node: Node,
-        _lock: &WrappedWriteGuard<()>,
+        _lock: &WrappedWriteGuard<&'static str>,
     ) -> Result<(), ApiError> {
         // This Node is a mutable local copy: we will set it active so that we can use its
         // API client to reconcile with the node.  The Node in [`Self::nodes`] will get updated
