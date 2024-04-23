@@ -14,6 +14,14 @@ impl<W> Writer<W> {
         }
     }
 
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_amount
+    }
+
+    pub fn as_inner(&self) -> &W {
+        &self.dst
+    }
+
     /// Returns the wrapped `VirtualFile` object as well as the number
     /// of bytes that were written to it through this object.
     pub fn into_inner(self) -> (u64, W) {

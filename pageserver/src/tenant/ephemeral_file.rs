@@ -21,7 +21,6 @@ pub struct EphemeralFile {
 }
 
 mod page_caching;
-mod zero_padded_buffer;
 mod zero_padded_read_write;
 
 impl EphemeralFile {

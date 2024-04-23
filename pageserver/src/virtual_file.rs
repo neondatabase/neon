@@ -37,8 +37,6 @@ pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
 
-use self::owned_buffers_io::write::OwnedAsyncWriter;
-
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
     //!

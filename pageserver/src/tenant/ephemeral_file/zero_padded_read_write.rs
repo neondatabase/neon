@@ -20,7 +20,6 @@ mod zero_padded_buffer;
 
 use crate::{
     page_cache::PAGE_SZ,
-    tenant::ephemeral_file::zero_padded_buffer,
     virtual_file::{
         owned_buffers_io::{self, write::Buffer},
         VirtualFile,
