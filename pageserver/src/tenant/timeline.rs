@@ -119,8 +119,8 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::{config::TenantConf, storage_layer::VectoredValueReconstructState};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -653,6 +653,19 @@ impl From<GetVectoredError> for CreateImageLayersError {
     }
 }
 
+impl From<GetVectoredError> for PageReconstructError {
+    fn from(e: GetVectoredError) -> Self {
+        match e {
+            GetVectoredError::Cancelled => PageReconstructError::Cancelled,
+            err @ GetVectoredError::Oversized(_) => PageReconstructError::Other(err.into()),
+            err @ GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(err.into()),
+            err @ GetVectoredError::MissingKey(_) => PageReconstructError::Other(err.into()),
+            GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
+            GetVectoredError::Other(err) => PageReconstructError::Other(err),
+        }
+    }
+}
+
 impl From<GetReadyAncestorError> for PageReconstructError {
     fn from(e: GetReadyAncestorError) -> Self {
         use GetReadyAncestorError::*;
@@ -762,31 +775,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         self.timeline_get_throttle.throttle(ctx, 1).await;
-        self.get_impl(key, lsn, ctx).await
-    }
-    /// Not subject to [`Self::timeline_get_throttle`].
-    async fn get_impl(
-        &self,
-        key: Key,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Result<Bytes, PageReconstructError> {
-        if !lsn.is_valid() {
-            return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
-        }
-
-        // This check is debug-only because of the cost of hashing, and because it's a double-check: we
-        // already checked the key against the shard_identity when looking up the Timeline from
-        // page_service.
-        debug_assert!(!self.shard_identity.is_key_disposable(&key));
-
-        // XXX: structured stats collection for layer eviction here.
-        trace!(
-            "get page request for {}@{} from task kind {:?}",
-            key,
-            lsn,
-            ctx.task_kind()
-        );
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
@@ -809,10 +797,84 @@ impl Timeline {
             None => None,
         };
 
-        let mut reconstruct_state = ValueReconstructState {
-            records: Vec::new(),
-            img: cached_page_img,
-        };
+        match self.conf.get_impl {
+            GetImpl::Legacy => {
+                let reconstruct_state = ValueReconstructState {
+                    records: Vec::new(),
+                    img: cached_page_img,
+                };
+
+                self.get_impl(key, lsn, reconstruct_state, ctx).await
+            }
+            GetImpl::Vectored => {
+                let keyspace = KeySpace {
+                    ranges: vec![key..key.next()],
+                };
+
+                // Initialise the reconstruct state for the key with the cache
+                // entry returned above.
+                let mut reconstruct_state = ValuesReconstructState::new();
+                let mut key_state = VectoredValueReconstructState::default();
+                key_state.img = cached_page_img;
+                reconstruct_state.keys.insert(key, Ok(key_state));
+
+                let mut key_values = self
+                    .get_vectored_impl(keyspace, lsn, reconstruct_state, ctx)
+                    .await?;
+                let key_value = key_values.pop_first();
+                match key_value {
+                    Some((got_key, value)) => {
+                        if got_key != key {
+                            error!(
+                                "Expected {}, but singular vectored get returned {}",
+                                key, got_key
+                            );
+                            Err(PageReconstructError::Other(anyhow!(
+                                "Singular vectored get returned wrong key"
+                            )))
+                        } else {
+                            value
+                        }
+                    }
+                    None => {
+                        error!(
+                            "Expected {}, but singular vectored get returned nothing",
+                            key
+                        );
+                        Err(PageReconstructError::Other(anyhow!(
+                            "Singular vectored get did not return a value for {}",
+                            key
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Not subject to [`Self::timeline_get_throttle`].
+    async fn get_impl(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        mut reconstruct_state: ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        if !lsn.is_valid() {
+            return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
+        }
+
+        // This check is debug-only because of the cost of hashing, and because it's a double-check: we
+        // already checked the key against the shard_identity when looking up the Timeline from
+        // page_service.
+        debug_assert!(!self.shard_identity.is_key_disposable(&key));
+
+        // XXX: structured stats collection for layer eviction here.
+        trace!(
+            "get page request for {}@{} from task kind {:?}",
+            key,
+            lsn,
+            ctx.task_kind()
+        );
 
         let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
             .for_get_kind(GetKind::Singular)
@@ -905,7 +967,9 @@ impl Timeline {
                 self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
             }
             GetVectoredImpl::Vectored => {
-                let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
+                let vectored_res = self
+                    .get_vectored_impl(keyspace.clone(), lsn, ValuesReconstructState::new(), ctx)
+                    .await;
 
                 if self.conf.validate_vectored_get {
                     self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
@@ -951,7 +1015,9 @@ impl Timeline {
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                let block = self.get_impl(key, lsn, ctx).await;
+                let block = self
+                    .get_impl(key, lsn, ValueReconstructState::default(), ctx)
+                    .await;
 
                 use PageReconstructError::*;
                 match block {
@@ -984,10 +1050,9 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
+        mut reconstruct_state: ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let mut reconstruct_state = ValuesReconstructState::new();
-
         let get_kind = if keyspace.total_size() == 1 {
             GetKind::Singular
         } else {
