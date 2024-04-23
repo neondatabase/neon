@@ -20,8 +20,11 @@ impl<const N: usize> Default for Buf<N> {
 impl<const N: usize> Buf<N> {
     #[inline(always)]
     fn invariants(&self) {
-        debug_assert!(self.written <= N, "{}", self.written);
-        debug_assert!(self.allocation[self.written..N].iter().all(|v| *v == 0));
+        // don't check by default, unoptimized is too expensive even for debug mode
+        if false {
+            debug_assert!(self.written <= N, "{}", self.written);
+            debug_assert!(self.allocation[self.written..N].iter().all(|v| *v == 0));
+        }
     }
 
     pub fn as_zero_padded_slice(&self) -> &[u8; N] {
