@@ -93,6 +93,23 @@ pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
 
+#[derive(Clone, strum_macros::Display)]
+enum TenantOperations {
+    Create,
+    LocationConfig,
+    ConfigSet,
+    TimeTravelRemoteStorage,
+    Delete,
+    UpdatePolicy,
+    ShardSplit,
+}
+
+#[derive(Clone, strum_macros::Display)]
+enum NodeOperations {
+    Register,
+    Configure,
+}
+
 // Top level state available to all HTTP handlers
 struct ServiceState {
     tenants: BTreeMap<TenantShardId, TenantShard>,
@@ -177,11 +194,11 @@ pub struct Service {
     // Locking on a tenant granularity (covers all shards in the tenant):
     // - Take exclusively for rare operations that mutate the tenant's persistent state (e.g. create/delete/split)
     // - Take in shared mode for operations that need the set of shards to stay the same to complete reliably (e.g. timeline CRUD)
-    tenant_op_locks: IdLockMap<TenantId>,
+    tenant_op_locks: IdLockMap<TenantId, TenantOperations>,
 
     // Locking for node-mutating operations: take exclusively for operations that modify the node's persistent state, or
     // that transition it to/from Active.
-    node_op_locks: IdLockMap<NodeId>,
+    node_op_locks: IdLockMap<NodeId, NodeOperations>,
 
     // Process shutdown will fire this token
     cancel: CancellationToken,
@@ -242,7 +259,7 @@ struct TenantShardSplitAbort {
     new_shard_count: ShardCount,
     new_stripe_size: Option<ShardStripeSize>,
     /// Until this abort op is complete, no other operations may be done on the tenant
-    _tenant_lock: WrappedWriteGuard<&'static str>,
+    _tenant_lock: WrappedWriteGuard<TenantOperations>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -264,14 +281,17 @@ struct ShardUpdate {
     generation: Option<Generation>,
 }
 
-async fn request_lock_with_timeout<T: Clone + Display + Eq + PartialEq + std::hash::Hash>(
-    op_locks: &IdLockMap<T>,
+async fn request_lock_with_timeout<
+    T: Clone + Display + Eq + PartialEq + std::hash::Hash,
+    I: Display + Clone,
+>(
+    op_locks: &IdLockMap<T, I>,
     key: T,
-    operation: &'static str,
-) -> Result<WrappedWriteGuard<&'static str>, ApiError> {
+    operation: I,
+) -> Result<WrappedWriteGuard<I>, ApiError> {
     tokio::time::timeout(
         SHORT_LOCK_ACQUISITION_TIMEOUT,
-        op_locks.exclusive(key.clone(), operation),
+        op_locks.exclusive(key.clone(), operation.clone()),
     )
     .await
     .map_err(|_| {
@@ -1306,7 +1326,7 @@ impl Service {
     async fn node_activate_reconcile(
         &self,
         mut node: Node,
-        _lock: &WrappedWriteGuard<&'static str>,
+        _lock: &WrappedWriteGuard<NodeOperations>,
     ) -> Result<(), ApiError> {
         // This Node is a mutable local copy: we will set it active so that we can use its
         // API client to reconcile with the node.  The Node in [`Self::nodes`] will get updated
@@ -1555,7 +1575,7 @@ impl Service {
         let _tenant_lock = request_lock_with_timeout(
             &self.tenant_op_locks,
             create_req.new_tenant_id.tenant_id,
-            "tenant_create",
+            TenantOperations::Create,
         )
         .await?;
         let (response, waiters) = self.do_tenant_create(create_req).await?;
@@ -1899,7 +1919,7 @@ impl Service {
         let _tenant_lock = request_lock_with_timeout(
             &self.tenant_op_locks,
             tenant_shard_id.tenant_id,
-            "tenant_location_config",
+            TenantOperations::LocationConfig,
         )
         .await?;
 
@@ -2019,9 +2039,12 @@ impl Service {
 
     pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
-        let _tenant_lock =
-            request_lock_with_timeout(&self.tenant_op_locks, req.tenant_id, "tenant_config_set")
-                .await?;
+        let _tenant_lock = request_lock_with_timeout(
+            &self.tenant_op_locks,
+            req.tenant_id,
+            TenantOperations::ConfigSet,
+        )
+        .await?;
 
         let tenant_id = req.tenant_id;
         let config = req.config;
@@ -2113,7 +2136,7 @@ impl Service {
         let _tenant_lock = request_lock_with_timeout(
             &self.tenant_op_locks,
             tenant_id,
-            "tenant_time_travel_remote_storage",
+            TenantOperations::TimeTravelRemoteStorage,
         )
         .await?;
 
@@ -2301,7 +2324,8 @@ impl Service {
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
         let _tenant_lock =
-            request_lock_with_timeout(&self.tenant_op_locks, tenant_id, "tenant_delete").await?;
+            request_lock_with_timeout(&self.tenant_op_locks, tenant_id, TenantOperations::Delete)
+                .await?;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -2401,9 +2425,12 @@ impl Service {
         req: TenantPolicyRequest,
     ) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
-        let _tenant_lock =
-            request_lock_with_timeout(&self.tenant_op_locks, tenant_id, "tenant_update_policy")
-                .await?;
+        let _tenant_lock = request_lock_with_timeout(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::UpdatePolicy,
+        )
+        .await?;
 
         let TenantPolicyRequest {
             placement,
@@ -3114,9 +3141,12 @@ impl Service {
     ) -> Result<TenantShardSplitResponse, ApiError> {
         // TODO: return 503 if we get stuck waiting for this lock
         // (issue https://github.com/neondatabase/neon/issues/7108)
-        let _tenant_lock =
-            request_lock_with_timeout(&self.tenant_op_locks, tenant_id, "tenant_shard_split")
-                .await?;
+        let _tenant_lock = request_lock_with_timeout(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::ShardSplit,
+        )
+        .await?;
 
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
@@ -3795,9 +3825,12 @@ impl Service {
         &self,
         register_req: NodeRegisterRequest,
     ) -> Result<(), ApiError> {
-        let _node_lock =
-            request_lock_with_timeout(&self.node_op_locks, register_req.node_id, "node_register")
-                .await?;
+        let _node_lock = request_lock_with_timeout(
+            &self.node_op_locks,
+            register_req.node_id,
+            NodeOperations::Register,
+        )
+        .await?;
 
         {
             let locked = self.inner.read().unwrap();
@@ -3886,7 +3919,8 @@ impl Service {
         scheduling: Option<NodeSchedulingPolicy>,
     ) -> Result<(), ApiError> {
         let _node_lock =
-            request_lock_with_timeout(&self.node_op_locks, node_id, "node_configure").await?;
+            request_lock_with_timeout(&self.node_op_locks, node_id, NodeOperations::Configure)
+                .await?;
 
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
