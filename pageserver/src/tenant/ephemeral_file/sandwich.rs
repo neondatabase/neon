@@ -1,4 +1,6 @@
-use crate::{page_cache::PAGE_SZ, virtual_file::VirtualFile};
+use crate::{
+    page_cache::PAGE_SZ, tenant::ephemeral_file::zero_padded_buffer, virtual_file::VirtualFile,
+};
 
 use super::size_tracker_borrowed;
 
@@ -34,9 +36,9 @@ impl Sandwich {
     }
 
     pub(crate) async fn read_blk(&self, blknum: u32) -> Result<ReadResult, std::io::Error> {
-        let buffered_offset = self.sandwich.buffered_offset();
         let flushed_offset = self.sandwich.flushed_offset();
-        assert!(buffered_offset >= flushed_offset);
+        let buffer = self.sandwich.buffered_writer.inspect_buffer();
+        let buffered_offset = flushed_offset + buffer.pending();
         let read_offset = (blknum as u64) * (PAGE_SZ as u64);
 
         assert_eq!(
@@ -73,9 +75,8 @@ impl Sandwich {
                 .checked_sub(flushed_offset)
                 .expect("would have taken `if` branch instead of this one");
             let read_offset_in_buffer = usize::try_from(read_offset_in_buffer).unwrap();
-            let page = self
-                .sandwich
-                .buffered_zero_padded_page_at(read_offset_in_buffer);
+            let zero_padded_buffer: &zero_padded_buffer::Buf<TAIL_SZ> = buffer.raw_iobuf();
+            let page = zero_padded_buffer[read_offset_in_buffer..(read_offset_in_buffer + PAGE_SZ)];
             Ok(ReadResult::ServedFromZeroPaddedMutableTail {
                 buffer: page
                     .try_into()

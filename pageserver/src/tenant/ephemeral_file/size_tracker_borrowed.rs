@@ -3,11 +3,11 @@ use crate::virtual_file::{owned_buffers_io, VirtualFile};
 use super::zero_padded_buffer;
 
 pub struct Writer<const TAIL_SZ: usize> {
-    buffered_writer: owned_buffers_io::write::BufferedWriter<
+    pub buffered_writer: owned_buffers_io::write::BufferedWriter<
         zero_padded_buffer::Buf<TAIL_SZ>,
         owned_buffers_io::util::size_tracking_writer::Writer<VirtualFile>,
     >,
-    bytes_amount: u64,
+    pub bytes_amount: u64,
 }
 
 impl<const TAIL_SZ: usize> Writer<TAIL_SZ> {

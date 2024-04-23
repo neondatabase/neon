@@ -39,7 +39,7 @@ unsafe impl<const N: usize> tokio_epoll_uring::IoBuf for Buf<N> {
     }
 
     fn bytes_init(&self) -> usize {
-        self.written
+        N
     }
 
     fn bytes_total(&self) -> usize {
