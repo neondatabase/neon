@@ -3399,7 +3399,11 @@ impl Tenant {
         // is in progress (which is not a common case).
         //
         // See more for on the issue #2748 condenced out of the initial PR review.
-        let mut shared_cache = self.cached_logical_sizes.lock().await;
+        let mut shared_cache = tokio::select! {
+            locked = self.cached_logical_sizes.lock() => locked,
+            _ = cancel.cancelled() => anyhow::bail!("cancelled"),
+            _ = self.cancel.cancelled() => anyhow::bail!("tenant is shutting down"),
+        };
 
         size::gather_inputs(
             self,
