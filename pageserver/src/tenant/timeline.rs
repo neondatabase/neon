@@ -3251,11 +3251,6 @@ impl Timeline {
                             let layer_map_search_timer = Instant::now();
 
                             let results = layers.range_search(range.clone(), cont_lsn);
-                            tracing::info!(
-                                "Range search at {} found {:?}",
-                                cont_lsn,
-                                results.found
-                            );
 
                             ctx.read_path_stats
                                 .inner
