@@ -256,7 +256,14 @@ fn update_rusage_metrics() {
     DISK_IO_BYTES
         .with_label_values(&["write"])
         .set(rusage_stats.ru_oublock * BYTES_IN_BLOCK);
-    MAXRSS_KB.set(rusage_stats.ru_maxrss);
+    #[cfg(target_os = "macos")]
+    {
+        MAXRSS_KB.set(rusage_stats.ru_maxrss / 1024);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        MAXRSS_KB.set(rusage_stats.ru_maxrss);
+    }
 }
 
 fn get_rusage_stats() -> libc::rusage {
