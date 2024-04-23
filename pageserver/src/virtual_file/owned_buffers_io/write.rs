@@ -47,6 +47,15 @@ where
         }
     }
 
+    pub fn as_inner(&self) -> &W {
+        &self.writer
+    }
+
+    /// Panics if used after any of the write paths returned an error
+    pub fn inspect_buffer(&self) -> &B {
+        self.buf()
+    }
+
     pub async fn flush_and_into_inner(mut self) -> std::io::Result<W> {
         self.flush().await?;
         let Self { buf, writer } = self;
@@ -98,6 +107,28 @@ where
         }
         assert!(slice.is_empty(), "by now we should have drained the chunk");
         Ok((chunk_len, chunk.into_inner()))
+    }
+
+    /// Strictly less performant variant of [`Self::write_buffered`] that allows writing borrowed data.
+    ///
+    /// It is less performant because we always have to copy the borrowed data into the internal buffer
+    /// before we can do the IO. The [`Self::write_buffered`] can avoid this, which is more performant
+    /// for large writes.
+    pub async fn write_buffered_borrowed(&mut self, mut chunk: &[u8]) -> std::io::Result<usize> {
+        let chunk_len = chunk.len();
+        while !chunk.is_empty() {
+            let buf = self.buf.as_mut().expect("must not use after an error");
+            let need = buf.cap() - buf.pending();
+            let have = chunk.len();
+            let n = std::cmp::min(need, have);
+            buf.extend_from_slice(&chunk[..n]);
+            chunk = &chunk[n..];
+            if buf.pending() >= buf.cap() {
+                assert_eq!(buf.pending(), buf.cap());
+                self.flush().await?;
+            }
+        }
+        Ok(chunk_len)
     }
 
     async fn flush(&mut self) -> std::io::Result<()> {
@@ -263,6 +294,33 @@ mod tests {
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"a"), Vec::from(b"bc"), Vec::from(b"de")]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_all_borrowed_always_goes_through_buffer() -> std::io::Result<()> {
+        let recorder = RecorderWriter::default();
+        let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
+
+        writer.write_buffered_borrowed(b"abc").await?;
+        writer.write_buffered_borrowed(b"d").await?;
+        writer.write_buffered_borrowed(b"e").await?;
+        writer.write_buffered_borrowed(b"fg").await?;
+        writer.write_buffered_borrowed(b"hi").await?;
+        writer.write_buffered_borrowed(b"j").await?;
+        writer.write_buffered_borrowed(b"klmno").await?;
+
+        let recorder = writer.flush_and_into_inner().await?;
+        assert_eq!(
+            recorder.writes,
+            {
+                let expect: &[&[u8]] = &[b"ab", b"cd", b"ef", b"gh", b"ij", b"kl", b"mn", b"o"];
+                expect
+            }
+            .iter()
+            .map(|v| v[..].to_vec())
+            .collect::<Vec<_>>()
         );
         Ok(())
     }
