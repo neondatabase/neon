@@ -468,7 +468,12 @@ impl RemoteStorage for S3Bucket {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
             .map(|p| self.relative_path_to_s3_object(p))
-            .or_else(|| self.prefix_in_bucket.clone().map(|s| s + "/"));
+            .or_else(|| {
+                self.prefix_in_bucket.clone().map(|mut s| {
+                    s.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
+                    s
+                })
+            });
 
         let _permit = self.permit(kind, cancel).await?;
 
