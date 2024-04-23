@@ -1,3 +1,4 @@
+use bytes::{Buf, BufMut};
 use pageserver_api::key::{Key, AUX_KEY_PREFIX, METADATA_KEY_SIZE};
 use tracing::warn;
 
@@ -59,6 +60,48 @@ pub fn encode_aux_file_key(path: &str) -> Key {
         }
         aux_hash_to_metadata_key(AUX_DIR_PG_UNKNOWN, 0xFF, path.as_bytes())
     }
+}
+
+const AUX_FILE_ENCODING_VERSION: u8 = 0x01;
+
+pub fn decode_file_value(val: &[u8]) -> anyhow::Result<Vec<(&str, &[u8])>> {
+    let mut ptr = &val[..];
+    assert_eq!(
+        ptr.get_u8(),
+        AUX_FILE_ENCODING_VERSION,
+        "unsupported aux file value"
+    );
+    let mut files = vec![];
+    while ptr.has_remaining() {
+        let key_len = ptr.get_u32() as usize;
+        let key = &ptr[..key_len];
+        ptr.advance(key_len);
+        let val_len = ptr.get_u32() as usize;
+        let content = &ptr[..val_len];
+        ptr.advance(val_len);
+
+        let path = std::str::from_utf8(key)?;
+        files.push((path, content));
+    }
+    Ok(files)
+}
+
+pub fn encode_file_value(files: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
+    let mut encoded = vec![];
+    encoded.put_u8(AUX_FILE_ENCODING_VERSION);
+    for (path, content) in files {
+        if path.len() > u32::MAX as usize {
+            anyhow::bail!("{} exceeds path size limit", path);
+        }
+        encoded.put_u32(path.len() as u32);
+        encoded.put_slice(path.as_bytes());
+        if content.len() > u32::MAX as usize {
+            anyhow::bail!("{} exceeds content size limit", path);
+        }
+        encoded.put_u32(content.len() as u32);
+        encoded.put_slice(content);
+    }
+    Ok(encoded)
 }
 
 #[cfg(test)]
