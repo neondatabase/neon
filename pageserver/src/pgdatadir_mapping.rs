@@ -10,9 +10,9 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::WAL_INGEST;
-use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
+use crate::{aux_file, repository::*};
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
@@ -1404,6 +1404,37 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        const AUX_FILES_V2: bool = false; // disable for now until we settle down the feature flag for aux file v2
+        if AUX_FILES_V2 {
+            let key = aux_file::encode_aux_file_key(path);
+            // retrieve the key from the engine
+            let old_val = match self.get(key, ctx).await {
+                Ok(val) => Some(val),
+                Err(PageReconstructError::MissingKey(_)) => None,
+                Err(e) => return Err(e.into()),
+            };
+            let files = if let Some(ref old_val) = old_val {
+                aux_file::decode_file_value(old_val)?
+            } else {
+                Vec::new()
+            };
+            let new_files = if content.is_empty() {
+                files
+                    .into_iter()
+                    .filter(|(p, _)| &path != p)
+                    .collect::<Vec<_>>()
+            } else {
+                files
+                    .into_iter()
+                    .filter(|(p, _)| &path != p)
+                    .chain(std::iter::once((path, content)))
+                    .collect::<Vec<_>>()
+            };
+            let new_val = aux_file::encode_file_value(&new_files)?;
+            self.put(key, Value::Image(new_val.into()));
+            return Ok(());
+        }
+
         let file_path = path.to_string();
         let content = if content.is_empty() {
             None
