@@ -86,11 +86,20 @@ pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static READ_NUM_FS_LAYERS: Lazy<Histogram> = Lazy::new(|| {
+pub(crate) static READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
-        "pageserver_read_num_fs_layers",
-        "Number of persistent layers accessed for processing a read request, including those in the cache",
-        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 50.0, 100.0],
+        "pageserver_layers_visited_per_read_global",
+        "Number of layers visited to reconstruct one key",
+        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_layers_visited_per_vectored_read_global",
+        "Average number of layers visited to reconstruct one key",
+        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
     )
     .expect("failed to define a metric")
 });
@@ -1518,7 +1527,8 @@ pub(crate) struct SecondaryModeMetrics {
     pub(crate) download_heatmap: IntCounter,
     pub(crate) download_layer: IntCounter,
 }
-pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
+    SecondaryModeMetrics {
     upload_heatmap: register_int_counter!(
         "pageserver_secondary_upload_heatmap",
         "Number of heatmaps written to remote storage by attached tenants"
@@ -1536,7 +1546,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
     .expect("failed to define a metric"),
     download_heatmap: register_int_counter!(
         "pageserver_secondary_download_heatmap",
-        "Number of downloads of heatmaps by secondary mode locations"
+        "Number of downloads of heatmaps by secondary mode locations, including when it hasn't changed"
     )
     .expect("failed to define a metric"),
     download_layer: register_int_counter!(
@@ -1544,6 +1554,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
         "Number of downloads of layers by secondary mode locations"
     )
     .expect("failed to define a metric"),
+}
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1818,6 +1829,29 @@ impl Default for WalRedoProcessCounters {
 
 pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
     Lazy::new(WalRedoProcessCounters::default);
+
+#[cfg(not(test))]
+pub mod wal_redo {
+    use super::*;
+
+    static PROCESS_KIND: Lazy<std::sync::Mutex<UIntGaugeVec>> = Lazy::new(|| {
+        std::sync::Mutex::new(
+            register_uint_gauge_vec!(
+                "pageserver_wal_redo_process_kind",
+                "The configured process kind for walredo",
+                &["kind"],
+            )
+            .unwrap(),
+        )
+    });
+
+    pub fn set_process_kind_metric(kind: crate::walredo::ProcessKind) {
+        // use guard to avoid races around the next two steps
+        let guard = PROCESS_KIND.lock().unwrap();
+        guard.reset();
+        guard.with_label_values(&[&format!("{kind}")]).set(1);
+    }
+}
 
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub(crate) struct StorageTimeMetricsTimer {
@@ -2746,7 +2780,8 @@ pub fn preinitialize_metrics() {
 
     // histograms
     [
-        &READ_NUM_FS_LAYERS,
+        &READ_NUM_LAYERS_VISITED,
+        &VEC_READ_NUM_LAYERS_VISITED,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,

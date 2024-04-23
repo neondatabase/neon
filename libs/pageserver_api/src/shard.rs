@@ -5,6 +5,7 @@ use crate::{
     models::ShardParameters,
 };
 use hex::FromHex;
+use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
 use utils::id::TenantId;
 
@@ -537,6 +538,24 @@ impl ShardIdentity {
         }
     }
 
+    /// Special case for issue `<https://github.com/neondatabase/neon/issues/7451>`
+    ///
+    /// When we fail to read a forknum block, this function tells us whether we may ignore the error
+    /// as a symptom of that issue.
+    pub fn is_key_buggy_forknum(&self, key: &Key) -> bool {
+        if !is_rel_block_key(key) || key.field5 != INIT_FORKNUM {
+            return false;
+        }
+
+        let mut hash = murmurhash32(key.field4);
+        hash = hash_combine(hash, murmurhash32(key.field6 / self.stripe_size.0));
+        let mapped_shard = ShardNumber((hash % self.count.0 as u32) as u8);
+
+        // The key may be affected by issue #7454: it is an initfork and it would not
+        // have mapped to shard 0 until we fixed that issue.
+        mapped_shard != ShardNumber(0)
+    }
+
     /// Return true if the key should be discarded if found in this shard's
     /// data store, e.g. during compaction after a split.
     ///
@@ -649,7 +668,13 @@ fn key_is_shard0(key: &Key) -> bool {
     // relation pages are distributed to shards other than shard zero. Everything else gets
     // stored on shard 0.  This guarantees that shard 0 can independently serve basebackup
     // requests, and any request other than those for particular blocks in relations.
-    !is_rel_block_key(key)
+    //
+    // The only exception to this rule is "initfork" data -- this relates to postgres's UNLOGGED table
+    // type. These are special relations, usually with only 0 or 1 blocks, and we store them on shard 0
+    // because they must be included in basebackups.
+    let is_initfork = key.field5 == INIT_FORKNUM;
+
+    !is_rel_block_key(key) || is_initfork
 }
 
 /// Provide the same result as the function in postgres `hashfn.h` with the same name

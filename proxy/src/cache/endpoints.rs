@@ -13,6 +13,7 @@ use redis::{
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tracing::info;
 
 use crate::{
     config::EndpointCacheConfig,
@@ -69,17 +70,14 @@ impl EndpointsCache {
         if !self.ready.load(Ordering::Acquire) {
             return true;
         }
-        // If cache is disabled, just collect the metrics and return.
-        if self.config.disable_cache {
-            ctx.set_rejected(self.should_reject(endpoint));
-            return true;
-        }
-        // If the limiter allows, we don't need to check the cache.
-        if self.limiter.lock().await.check() {
-            return true;
-        }
         let rejected = self.should_reject(endpoint);
         ctx.set_rejected(rejected);
+        info!(?rejected, "check endpoint is valid, disabled cache");
+        // If cache is disabled, just collect the metrics and return or
+        // If the limiter allows, we don't need to check the cache.
+        if self.config.disable_cache || self.limiter.lock().await.check() {
+            return true;
+        }
         !rejected
     }
     fn should_reject(&self, endpoint: &EndpointId) -> bool {
@@ -171,6 +169,9 @@ impl EndpointsCache {
 
             if res.keys.is_empty() {
                 if return_when_finish {
+                    if total != 0 {
+                        break;
+                    }
                     anyhow::bail!(
                         "Redis stream {} is empty, cannot be used to filter endpoints",
                         self.config.stream_name

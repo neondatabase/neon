@@ -429,6 +429,7 @@ pub struct StatusResponse {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantLocationConfigRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<TenantShardId>,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
@@ -748,9 +749,17 @@ pub struct TimelineGcRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalRedoManagerProcessStatus {
+    pub pid: u32,
+    /// The strum-generated `into::<&'static str>()` for `pageserver::walredo::ProcessKind`.
+    /// `ProcessKind` are a transitory thing, so, they have no enum representation in `pageserver_api`.
+    pub kind: Cow<'static, str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRedoManagerStatus {
     pub last_redo_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub pid: Option<u32>,
+    pub process: Option<WalRedoManagerProcessStatus>,
 }
 
 /// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating

@@ -12,6 +12,7 @@ use crate::{
     console::messages::ColdStartInfo,
     http,
     metrics::{CacheOutcome, Metrics},
+    rate_limiter::EndpointRateLimiter,
     scram, Normalize,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
@@ -25,6 +26,7 @@ pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
     pub locks: &'static ApiLocks,
+    pub endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     jwt: String,
 }
 
@@ -34,6 +36,7 @@ impl Api {
         endpoint: http::Endpoint,
         caches: &'static ApiCaches,
         locks: &'static ApiLocks,
+        endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> Self {
         let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
             Ok(v) => v,
@@ -43,6 +46,7 @@ impl Api {
             endpoint,
             caches,
             locks,
+            endpoint_rate_limiter,
             jwt,
         }
     }
@@ -275,6 +279,14 @@ impl super::Api for Api {
             info!(key = &*key, "found cached compute node info");
             ctx.set_project(cached.aux.clone());
             return Ok(cached);
+        }
+
+        // check rate limit
+        if !self
+            .endpoint_rate_limiter
+            .check(user_info.endpoint.normalize().into(), 1)
+        {
+            return Err(WakeComputeError::TooManyConnections);
         }
 
         let permit = self.locks.get_wake_compute_permit(&key).await?;

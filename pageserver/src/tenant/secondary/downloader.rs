@@ -312,7 +312,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                     (detail.last_download, detail.next_download.unwrap())
                 };
 
-                if now < next_download {
+                if now > next_download {
                     Some(PendingDownload {
                         secondary_state: secondary_tenant,
                         last_download,
@@ -647,6 +647,12 @@ impl<'a> TenantDownloader<'a> {
                 progress.bytes_downloaded += layer_byte_count;
                 progress.layers_downloaded += layer_count;
             }
+
+            for delete_timeline in &delete_timelines {
+                // We haven't removed from disk yet, but optimistically remove from in-memory state: if removal
+                // from disk fails that will be a fatal error.
+                detail.timelines.remove(delete_timeline);
+            }
         }
 
         // Execute accumulated deletions
@@ -710,13 +716,14 @@ impl<'a> TenantDownloader<'a> {
                     .await
                     .map_err(UpdateError::from)?;
 
+                SECONDARY_MODE.download_heatmap.inc();
+
                 if Some(&download.etag) == prev_etag {
                     Ok(HeatMapDownload::Unmodified)
                 } else {
                     let mut heatmap_bytes = Vec::new();
                     let mut body = tokio_util::io::StreamReader::new(download.download_stream);
                     let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
-                    SECONDARY_MODE.download_heatmap.inc();
                     Ok(HeatMapDownload::Modified(HeatMapModified {
                         etag: download.etag,
                         last_modified: download.last_modified,

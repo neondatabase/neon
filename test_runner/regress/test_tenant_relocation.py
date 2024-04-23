@@ -16,7 +16,6 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
     wait_tenant_status_404,
 )
-from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     LocalFsStorage,
     RemoteStorageKind,
@@ -24,7 +23,6 @@ from fixtures.remote_storage import (
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     query_scalar,
-    subprocess_capture,
     wait_until,
 )
 
@@ -184,20 +182,14 @@ def post_migration_check(endpoint: Endpoint, sum_before_migration: int, old_loca
         # A minor migration involves no storage breaking changes.
         # It is done by attaching the tenant to a new pageserver.
         "minor",
-        # A major migration involves exporting a postgres datadir
-        # basebackup and importing it into the new pageserver.
-        # This kind of migration can tolerate breaking changes
-        # to storage format
-        "major",
+        # In the unlikely and unfortunate event that we have to break
+        # the storage format, extend this test with the param below.
+        # "major",
     ],
 )
 @pytest.mark.parametrize("with_load", ["with_load", "without_load"])
 def test_tenant_relocation(
     neon_env_builder: NeonEnvBuilder,
-    port_distributor: PortDistributor,
-    test_output_dir: Path,
-    neon_binpath: Path,
-    base_dir: Path,
     method: str,
     with_load: str,
 ):
@@ -299,40 +291,7 @@ def test_tenant_relocation(
         current_lsn=current_lsn_second,
     )
 
-    # Migrate either by attaching from s3 or import/export basebackup
-    if method == "major":
-        cmd = [
-            "poetry",
-            "run",
-            "python",
-            str(base_dir / "scripts/export_import_between_pageservers.py"),
-            "--tenant-id",
-            str(tenant_id),
-            "--from-host",
-            "localhost",
-            "--from-http-port",
-            str(origin_http.port),
-            "--from-pg-port",
-            str(origin_ps.service_port.pg),
-            "--to-host",
-            "localhost",
-            "--to-http-port",
-            str(destination_http.port),
-            "--to-pg-port",
-            str(destination_ps.service_port.pg),
-            "--pg-distrib-dir",
-            str(neon_env_builder.pg_distrib_dir),
-            "--work-dir",
-            str(test_output_dir),
-            "--tmp-pg-port",
-            str(port_distributor.get_port()),
-        ]
-        subprocess_capture(test_output_dir, cmd, check=True)
-
-        destination_ps.allowed_errors.append(
-            ".*ignored .* unexpected bytes after the tar archive.*"
-        )
-    elif method == "minor":
+    if method == "minor":
         # call to attach timeline to new pageserver
         destination_ps.tenant_attach(tenant_id)
 

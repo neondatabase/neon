@@ -63,6 +63,7 @@ pub enum HandshakeData<S> {
 pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<&TlsConfig>,
+    record_handshake_error: bool,
 ) -> Result<HandshakeData<S>, HandshakeError> {
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
@@ -95,7 +96,9 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         if !read_buf.is_empty() {
                             return Err(HandshakeError::EarlyData);
                         }
-                        let tls_stream = raw.upgrade(tls.to_server_config()).await?;
+                        let tls_stream = raw
+                            .upgrade(tls.to_server_config(), record_handshake_error)
+                            .await?;
 
                         let (_, tls_server_end_point) = tls
                             .cert_resolver

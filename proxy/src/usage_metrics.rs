@@ -495,7 +495,7 @@ mod tests {
     use url::Url;
 
     use super::*;
-    use crate::{http, rate_limiter::RateLimiterConfig, BranchId, EndpointId};
+    use crate::{http, BranchId, EndpointId};
 
     #[tokio::test]
     async fn metrics() {
@@ -525,7 +525,7 @@ mod tests {
         tokio::spawn(server);
 
         let metrics = Metrics::default();
-        let client = http::new_client(RateLimiterConfig::default());
+        let client = http::new_client();
         let endpoint = Url::parse(&format!("http://{addr}")).unwrap();
         let now = Utc::now();
 
