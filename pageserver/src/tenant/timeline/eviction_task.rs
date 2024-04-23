@@ -188,14 +188,16 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
-        let _permit = self.acquire_imitation_permit(cancel, ctx).await?;
-
-        match self
-            .imitate_layer_accesses(tenant, p, cancel, gate, ctx)
-            .await
         {
-            ControlFlow::Break(()) => return ControlFlow::Break(()),
-            ControlFlow::Continue(()) => (),
+            let _permit = self.acquire_imitation_permit(cancel, ctx).await?;
+
+            match self
+                .imitate_layer_accesses(tenant, p, cancel, gate, ctx)
+                .await
+            {
+                ControlFlow::Break(()) => return ControlFlow::Break(()),
+                ControlFlow::Continue(()) => (),
+            }
         }
 
         #[derive(Debug, Default)]
