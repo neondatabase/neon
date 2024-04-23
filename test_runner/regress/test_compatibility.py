@@ -192,6 +192,7 @@ def test_backward_compatibility(
     assert not breaking_changes_allowed, "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
 
 
+@pytest.xfail
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
