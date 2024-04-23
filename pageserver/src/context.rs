@@ -145,7 +145,7 @@ impl std::fmt::Display for ReadPathStatsInner {
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.fringe_fondle_time
                 .load(std::sync::atomic::Ordering::Relaxed),
-            self.layer_search_time
+            self.layer_map_search_time
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.buffer_cache_hits
                 .load(std::sync::atomic::Ordering::Relaxed),
@@ -173,7 +173,7 @@ impl ReadPathStatsInner {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.fringe_fondle_time
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.layer_search_time
+        self.layer_map_search_time
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.buffer_cache_hits
             .store(0, std::sync::atomic::Ordering::Relaxed);
