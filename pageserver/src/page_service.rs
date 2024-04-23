@@ -1206,6 +1206,10 @@ impl PageServerHandler {
         ))
     }
 
+    /// Note on "fullbackup":
+    /// Full basebackups should only be used for debugging purposes.
+    /// Originally, it was introduced to enable breaking storage format changes,
+    /// but that is not applicable anymore.
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(shard_id, ?lsn, ?prev_lsn, %full_backup))]
     async fn handle_basebackup_request<IO>(
