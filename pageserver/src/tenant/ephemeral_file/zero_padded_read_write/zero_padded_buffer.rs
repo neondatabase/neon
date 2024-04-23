@@ -41,7 +41,7 @@ impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Bu
 
     fn extend_from_slice(&mut self, other: &[u8]) {
         self.invariants();
-        let remaining = self.cap() - other.len();
+        let remaining = self.allocation.len() - self.written;
         if other.len() > remaining {
             panic!("calling extend_from_slice() with insufficient remaining capacity");
         }
