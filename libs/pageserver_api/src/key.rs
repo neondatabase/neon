@@ -48,11 +48,11 @@ impl Key {
         }
     }
 
-    pub fn next(&self) -> Key {
+    pub const fn next(&self) -> Key {
         self.add(1)
     }
 
-    pub fn add(&self, x: u32) -> Key {
+    pub const fn add(&self, x: u32) -> Key {
         let mut key = *self;
 
         let r = key.field6.overflowing_add(x);
@@ -475,12 +475,14 @@ pub const AUX_FILES_KEY: Key = Key {
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
 
+pub const NON_INHERITED_RANGE: Range<Key> = AUX_FILES_KEY..AUX_FILES_KEY.next();
+
 // AUX_FILES currently stores only data for logical replication (slots etc), and
 // we don't preserve these on a branch because safekeepers can't follow timeline
 // switch (and generally it likely should be optional), so ignore these.
 #[inline(always)]
 pub fn is_inherited_key(key: Key) -> bool {
-    key != AUX_FILES_KEY
+    !NON_INHERITED_RANGE.contains(&key)
 }
 
 #[inline(always)]
