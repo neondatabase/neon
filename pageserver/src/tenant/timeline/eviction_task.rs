@@ -326,7 +326,7 @@ impl Timeline {
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> ControlFlow<(), impl Drop> {
+    ) -> ControlFlow<(), tokio::sync::SemaphorePermit<'static>> {
         let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
             BackgroundLoopKind::Eviction,
             ctx,
@@ -370,7 +370,7 @@ impl Timeline {
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
-        _permit: impl Drop,
+        permit: tokio::sync::SemaphorePermit<'static>,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_shard_zero() {
