@@ -126,6 +126,12 @@ enum Command {
         #[arg(long)]
         tenant_id: TenantId,
     },
+    /// Uncleanly drop a tenant from the storage controller: this doesn't delete anything from pageservers. Appropriate
+    /// if you e.g. used `tenant-warmup` by mistake on a tenant ID that doesn't really exist, or is in some other region.
+    TenantDrop {
+        #[arg(long)]
+        tenant_id: TenantId,
+    },
 }
 
 #[derive(Parser)]
@@ -674,6 +680,15 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Command::TenantDrop { tenant_id } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::POST,
+                    format!("debug/v1/tenant/{tenant_id}/drop"),
+                    None,
+                )
+                .await?;
         }
     }
 
