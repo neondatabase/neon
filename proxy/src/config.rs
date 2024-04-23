@@ -29,11 +29,12 @@ pub struct ProxyConfig {
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
     pub disable_ip_check_for_http: bool,
-    pub endpoint_rps_limit: Vec<RateBucketInfo>,
     pub redis_rps_limit: Vec<RateBucketInfo>,
     pub region: String,
     pub handshake_timeout: Duration,
     pub aws_region: String,
+    pub wake_compute_retry_config: RetryConfig,
+    pub connect_to_compute_retry_config: RetryConfig,
 }
 
 #[derive(Debug)]
@@ -515,6 +516,59 @@ impl FromStr for ProjectInfoCacheOptions {
     fn from_str(options: &str) -> Result<Self, Self::Err> {
         let error = || format!("failed to parse cache options '{options}'");
         Self::parse(options).with_context(error)
+    }
+}
+
+/// This is a config for connect to compute and wake compute.
+#[derive(Clone, Copy, Debug)]
+pub struct RetryConfig {
+    /// Number of times we should retry.
+    pub max_retries: u32,
+    /// Retry duration is base_delay * backoff_factor ^ n, where n starts at 0
+    pub base_delay: tokio::time::Duration,
+    /// Exponential base for retry wait duration
+    pub backoff_factor: f64,
+}
+
+impl RetryConfig {
+    /// Default options for RetryConfig.
+
+    /// Total delay for 4 retries with 1s base delay and 2.0 backoff factor is 7s.
+    pub const CONNECT_TO_COMPUTE_DEFAULT_VALUES: &'static str =
+        "num_retries=4,base_retry_wait_duration=1s,retry_wait_exponent_base=2.0";
+    /// Total delay for 4 retries with 1s base delay and 2.0 backoff factor is 7s.
+    /// Cplane has timeout of 60s on each request.
+    pub const WAKE_COMPUTE_DEFAULT_VALUES: &'static str =
+        "num_retries=4,base_retry_wait_duration=1s,retry_wait_exponent_base=2.0";
+
+    /// Parse retry options passed via cmdline.
+    /// Example: [`Self::CONNECT_TO_COMPUTE_DEFAULT_VALUES`].
+    pub fn parse(options: &str) -> anyhow::Result<Self> {
+        let mut num_retries = None;
+        let mut base_retry_wait_duration = None;
+        let mut retry_wait_exponent_base = None;
+
+        for option in options.split(',') {
+            let (key, value) = option
+                .split_once('=')
+                .with_context(|| format!("bad key-value pair: {option}"))?;
+
+            match key {
+                "num_retries" => num_retries = Some(value.parse()?),
+                "base_retry_wait_duration" => {
+                    base_retry_wait_duration = Some(humantime::parse_duration(value)?)
+                }
+                "retry_wait_exponent_base" => retry_wait_exponent_base = Some(value.parse()?),
+                unknown => bail!("unknown key: {unknown}"),
+            }
+        }
+
+        Ok(Self {
+            max_retries: num_retries.context("missing `num_retries`")?,
+            base_delay: base_retry_wait_duration.context("missing `base_retry_wait_duration`")?,
+            backoff_factor: retry_wait_exponent_base
+                .context("missing `retry_wait_exponent_base`")?,
+        })
     }
 }
 

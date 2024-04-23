@@ -129,7 +129,7 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     "pageserver_getpage_reconstruct_seconds_sum",
     *[f"pageserver_basebackup_query_seconds_{x}" for x in ["bucket", "count", "sum"]],
     *histogram("pageserver_smgr_query_seconds_global"),
-    *histogram("pageserver_read_num_fs_layers"),
+    *histogram("pageserver_layers_visited_per_read_global"),
     *histogram("pageserver_getpage_get_reconstruct_data_seconds"),
     *histogram("pageserver_wait_lsn_seconds"),
     *histogram("pageserver_remote_operation_seconds"),

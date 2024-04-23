@@ -160,6 +160,9 @@ impl From<PageReconstructError> for ApiError {
     fn from(pre: PageReconstructError) -> ApiError {
         match pre {
             PageReconstructError::Other(pre) => ApiError::InternalServerError(pre),
+            PageReconstructError::MissingKey(e) => {
+                ApiError::InternalServerError(anyhow::anyhow!("{e}"))
+            }
             PageReconstructError::Cancelled => {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
             }

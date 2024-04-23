@@ -118,6 +118,7 @@ pub(crate) struct ValuesReconstructState {
     pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
 
     keys_done: KeySpaceRandomAccum,
+    layers_visited: u32,
 }
 
 impl ValuesReconstructState {
@@ -125,6 +126,7 @@ impl ValuesReconstructState {
         Self {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),
+            layers_visited: 0,
         }
     }
 
@@ -136,6 +138,14 @@ impl ValuesReconstructState {
                 self.keys_done.add_key(key);
             }
         }
+    }
+
+    pub(crate) fn on_layer_visited(&mut self) {
+        self.layers_visited += 1;
+    }
+
+    pub(crate) fn get_layers_visited(&self) -> u32 {
+        self.layers_visited
     }
 
     /// Update the state collected for a given key.

@@ -874,6 +874,11 @@ impl PageServerHandler {
             // walsender completes the authentication and starts streaming the
             // WAL.
             if lsn <= last_record_lsn {
+                // It might be better to use max(lsn, latest_gc_cutoff_lsn) instead
+                // last_record_lsn. That would give the same result, since we know
+                // that there haven't been modifications since 'lsn'. Using an older
+                // LSN might be faster, because that could allow skipping recent
+                // layers when finding the page.
                 lsn = last_record_lsn;
             } else {
                 timeline
@@ -1201,6 +1206,10 @@ impl PageServerHandler {
         ))
     }
 
+    /// Note on "fullbackup":
+    /// Full basebackups should only be used for debugging purposes.
+    /// Originally, it was introduced to enable breaking storage format changes,
+    /// but that is not applicable anymore.
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(shard_id, ?lsn, ?prev_lsn, %full_backup))]
     async fn handle_basebackup_request<IO>(

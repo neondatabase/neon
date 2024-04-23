@@ -19,9 +19,8 @@ use crate::{
     metrics::{Metrics, NumClientConnectionsGuard},
     protocol2::WithClientIp,
     proxy::handshake::{handshake, HandshakeData},
-    rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
-    EndpointCacheKey, Normalize,
+    EndpointCacheKey,
 };
 use futures::TryFutureExt;
 use itertools::Itertools;
@@ -61,7 +60,6 @@ pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_handler: Arc<CancellationHandlerMain>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
@@ -86,7 +84,6 @@ pub async fn task_main(
 
         let session_id = uuid::Uuid::new_v4();
         let cancellation_handler = Arc::clone(&cancellation_handler);
-        let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
         tracing::info!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
@@ -128,7 +125,6 @@ pub async fn task_main(
                 cancellation_handler,
                 socket,
                 ClientMode::Tcp,
-                endpoint_rate_limiter,
                 conn_gauge,
             )
             .instrument(span.clone())
@@ -242,7 +238,6 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     mode: ClientMode,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
     info!(
@@ -288,15 +283,6 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         Err(e) => stream.throw_error(e).await?,
     };
 
-    // check rate limit
-    if let Some(ep) = user_info.get_endpoint() {
-        if !endpoint_rate_limiter.check(ep.normalize(), 1) {
-            return stream
-                .throw_error(auth::AuthError::too_many_connections())
-                .await?;
-        }
-    }
-
     let user = user_info.get_user().to_owned();
     let user_info = match user_info
         .authenticate(
@@ -322,6 +308,8 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         &TcpMechanism { params: &params },
         &user_info,
         mode.allow_self_signed_compute(config),
+        config.wake_compute_retry_config,
+        config.connect_to_compute_retry_config,
     )
     .or_else(|e| stream.throw_error(e))
     .await?;

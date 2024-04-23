@@ -1,10 +1,14 @@
+use crate::config::RetryConfig;
 use crate::console::{errors::WakeComputeError, provider::CachedNodeInfo};
 use crate::context::RequestMonitoring;
-use crate::metrics::{ConnectionFailuresBreakdownGroup, Metrics, WakeupFailureKind};
+use crate::metrics::{
+    ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
+    WakeupFailureKind,
+};
 use crate::proxy::retry::retry_after;
 use hyper::StatusCode;
 use std::ops::ControlFlow;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use super::connect_compute::ComputeConnectBackend;
 use super::retry::ShouldRetry;
@@ -13,23 +17,42 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
     ctx: &mut RequestMonitoring,
     api: &B,
+    config: RetryConfig,
 ) -> Result<CachedNodeInfo, WakeComputeError> {
+    let retry_type = RetryType::WakeCompute;
     loop {
         let wake_res = api.wake_compute(ctx).await;
-        match handle_try_wake(wake_res, *num_retries) {
+        match handle_try_wake(wake_res, *num_retries, config) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
                 report_error(&e, false);
+                Metrics::get().proxy.retries_metric.observe(
+                    RetriesMetricGroup {
+                        outcome: ConnectOutcome::Failed,
+                        retry_type,
+                    },
+                    (*num_retries).into(),
+                );
                 return Err(e);
             }
             Ok(ControlFlow::Continue(e)) => {
                 warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
                 report_error(&e, true);
             }
-            Ok(ControlFlow::Break(n)) => return Ok(n),
+            Ok(ControlFlow::Break(n)) => {
+                Metrics::get().proxy.retries_metric.observe(
+                    RetriesMetricGroup {
+                        outcome: ConnectOutcome::Success,
+                        retry_type,
+                    },
+                    (*num_retries).into(),
+                );
+                info!(?num_retries, "compute node woken up after");
+                return Ok(n);
+            }
         }
 
-        let wait_duration = retry_after(*num_retries);
+        let wait_duration = retry_after(*num_retries, config);
         *num_retries += 1;
         tokio::time::sleep(wait_duration).await;
     }
@@ -42,10 +65,11 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
 pub fn handle_try_wake(
     result: Result<CachedNodeInfo, WakeComputeError>,
     num_retries: u32,
+    config: RetryConfig,
 ) -> Result<ControlFlow<CachedNodeInfo, WakeComputeError>, WakeComputeError> {
     match result {
         Err(err) => match &err {
-            WakeComputeError::ApiError(api) if api.should_retry(num_retries) => {
+            WakeComputeError::ApiError(api) if api.should_retry(num_retries, config) => {
                 Ok(ControlFlow::Continue(err))
             }
             _ => Err(err),
@@ -90,6 +114,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
         WakeComputeError::ApiError(ApiError::Console { .. }) => {
             WakeupFailureKind::ApiConsoleOtherError
         }
+        WakeComputeError::TooManyConnections => WakeupFailureKind::ApiConsoleLocked,
         WakeComputeError::TimeoutError => WakeupFailureKind::TimeoutError,
     };
     Metrics::get()

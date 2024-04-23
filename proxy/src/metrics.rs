@@ -4,8 +4,8 @@ use lasso::ThreadedRodeo;
 use measured::{
     label::StaticLabelSet,
     metric::{histogram::Thresholds, name::MetricName},
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
-    LabelGroup, MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
+    MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 
@@ -20,9 +20,6 @@ pub struct Metrics {
 
     #[metric(namespace = "wake_compute_lock")]
     pub wake_compute_lock: ApiLockMetrics,
-
-    // the one metric not called proxy_....
-    pub semaphore_control_plane_limit: GaugeVec<StaticLabelSet<RateLimit>>,
 }
 
 impl Metrics {
@@ -31,7 +28,6 @@ impl Metrics {
         SELF.get_or_init(|| Metrics {
             proxy: ProxyMetrics::default(),
             wake_compute_lock: ApiLockMetrics::new(),
-            semaphore_control_plane_limit: GaugeVec::default(),
         })
     }
 }
@@ -123,6 +119,10 @@ pub struct ProxyMetrics {
 
     /// Number of invalid endpoints (per protocol, per rejected).
     pub invalid_endpoints_total: CounterVec<InvalidEndpointsSet>,
+
+    /// Number of retries (per outcome, per retry_type).
+    #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]))]
+    pub retries_metric: HistogramVec<RetriesMetricSet, 9>,
 }
 
 #[derive(MetricGroup)]
@@ -284,13 +284,6 @@ pub struct ComputeConnectionLatencyGroup {
 pub enum LatencyExclusions {
     Client,
     ClientAndCplane,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "limit")]
-pub enum RateLimit {
-    Actual,
-    Expected,
 }
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]
@@ -490,4 +483,17 @@ pub struct InvalidEndpointsGroup {
     pub protocol: Protocol,
     pub rejected: Bool,
     pub outcome: ConnectOutcome,
+}
+
+#[derive(LabelGroup)]
+#[label(set = RetriesMetricSet)]
+pub struct RetriesMetricGroup {
+    pub outcome: ConnectOutcome,
+    pub retry_type: RetryType,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+pub enum RetryType {
+    WakeCompute,
+    ConnectToCompute,
 }

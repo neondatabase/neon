@@ -28,7 +28,9 @@ jobs:
       - name: Get build-tools image tag for the current commit
         id: get-build-tools-tag
         env:
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Usually, for COMMIT_SHA, we use `github.event.pull_request.head.sha || github.sha`, but here, even for PRs,
+          # we want to use `github.sha` i.e. point to a phantom merge commit to determine the image tag correctly.
+          COMMIT_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LAST_BUILD_TOOLS_SHA=$(

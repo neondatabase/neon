@@ -192,6 +192,14 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Like [`Guard::take_and_deinit`], but will return `None` if this OnceCell was never
+    /// initialized.
+    pub fn take_and_deinit(&mut self) -> Option<(T, InitPermit)> {
+        let inner = self.inner.get_mut().unwrap();
+
+        inner.take_and_deinit()
+    }
+
     /// Return the number of [`Self::get_or_init`] calls waiting for initialization to complete.
     pub fn initializer_count(&self) -> usize {
         self.initializers.load(Ordering::Relaxed)
@@ -246,15 +254,23 @@ impl<'a, T> Guard<'a, T> {
     /// The permit will be on a semaphore part of the new internal value, and any following
     /// [`OnceCell::get_or_init`] will wait on it to complete.
     pub fn take_and_deinit(mut self) -> (T, InitPermit) {
+        self.0
+            .take_and_deinit()
+            .expect("guard is not created unless value has been initialized")
+    }
+}
+
+impl<T> Inner<T> {
+    pub fn take_and_deinit(&mut self) -> Option<(T, InitPermit)> {
+        let value = self.value.take()?;
+
         let mut swapped = Inner::default();
         let sem = swapped.init_semaphore.clone();
         // acquire and forget right away, moving the control over to InitPermit
         sem.try_acquire().expect("we just created this").forget();
-        std::mem::swap(&mut *self.0, &mut swapped);
-        swapped
-            .value
-            .map(|v| (v, InitPermit(sem)))
-            .expect("guard is not created unless value has been initialized")
+        let permit = InitPermit(sem);
+        std::mem::swap(self, &mut swapped);
+        Some((value, permit))
     }
 }
 
@@ -262,6 +278,13 @@ impl<'a, T> Guard<'a, T> {
 ///
 /// On drop, this type will return the permit.
 pub struct InitPermit(Arc<tokio::sync::Semaphore>);
+
+impl std::fmt::Debug for InitPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ptr = Arc::as_ptr(&self.0) as *const ();
+        f.debug_tuple("InitPermit").field(&ptr).finish()
+    }
+}
 
 impl Drop for InitPermit {
     fn drop(&mut self) {
@@ -558,5 +581,23 @@ mod tests {
         target.set(11, permit);
 
         assert_eq!(*target.get().unwrap(), 11);
+    }
+
+    #[tokio::test]
+    async fn take_and_deinit_on_mut() {
+        use std::convert::Infallible;
+
+        let mut target = OnceCell::<u32>::default();
+        assert!(target.take_and_deinit().is_none());
+
+        target
+            .get_or_init(|permit| async move { Ok::<_, Infallible>((42, permit)) })
+            .await
+            .unwrap();
+
+        let again = target.take_and_deinit();
+        assert!(matches!(again, Some((42, _))), "{again:?}");
+
+        assert!(target.take_and_deinit().is_none());
     }
 }

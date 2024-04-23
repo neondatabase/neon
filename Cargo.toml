@@ -157,7 +157,8 @@ socket2 = "0.5"
 strum = "0.24"
 strum_macros = "0.24"
 "subtle"  = "2.5.0"
-svg_fmt = "0.4.1"
+# https://github.com/nical/rust_debug/pull/4
+svg_fmt = { git = "https://github.com/neondatabase/fork--nical--rust_debug", branch = "neon" }
 sync_wrapper = "0.1.2"
 tar = "0.4"
 task-local-extensions = "0.1.4"
