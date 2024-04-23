@@ -5,6 +5,7 @@ use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
 use std::sync::Arc;
+use std::time::Duration;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
@@ -245,6 +246,8 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations
+    Persistence::await_connection(&secrets.database_url, Duration::from_secs(5)).await?;
+
     migration_run(&secrets.database_url)
         .await
         .context("Running database migrations")?;

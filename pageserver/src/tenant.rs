@@ -2870,20 +2870,23 @@ impl Tenant {
                 }
             }
 
-            if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
-                let branchpoints: Vec<Lsn> = all_branchpoints
-                    .range((
-                        Included((timeline_id, Lsn(0))),
-                        Included((timeline_id, Lsn(u64::MAX))),
-                    ))
-                    .map(|&x| x.1)
-                    .collect();
-                timeline
-                    .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
-                    .await?;
+            let cutoff = timeline
+                .get_last_record_lsn()
+                .checked_sub(horizon)
+                .unwrap_or(Lsn(0));
 
-                gc_timelines.push(timeline);
-            }
+            let branchpoints: Vec<Lsn> = all_branchpoints
+                .range((
+                    Included((timeline_id, Lsn(0))),
+                    Included((timeline_id, Lsn(u64::MAX))),
+                ))
+                .map(|&x| x.1)
+                .collect();
+            timeline
+                .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
+                .await?;
+
+            gc_timelines.push(timeline);
         }
         drop(gc_cs);
         Ok(gc_timelines)
@@ -3859,6 +3862,7 @@ mod tests {
     use crate::DEFAULT_PG_VERSION;
     use bytes::BytesMut;
     use hex_literal::hex;
+    use pageserver_api::key::NON_INHERITED_RANGE;
     use pageserver_api::keyspace::KeySpace;
     use rand::{thread_rng, Rng};
     use tests::timeline::{GetVectoredError, ShutdownMode};
@@ -4653,6 +4657,62 @@ mod tests {
             tline
                 .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
                 .await;
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_vectored_aux_files() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_get_vectored_aux_files")?;
+
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        let tline = tline.raw_timeline().unwrap();
+
+        let mut modification = tline.begin_modification(Lsn(0x1000));
+        modification.put_file("foo/bar1", b"content1", &ctx).await?;
+        modification.set_lsn(Lsn(0x1008))?;
+        modification.put_file("foo/bar2", b"content2", &ctx).await?;
+        modification.commit(&ctx).await?;
+
+        let child_timeline_id = TimelineId::generate();
+        tenant
+            .branch_timeline_test(
+                tline,
+                child_timeline_id,
+                Some(tline.get_last_record_lsn()),
+                &ctx,
+            )
+            .await?;
+
+        let child_timeline = tenant
+            .get_timeline(child_timeline_id, true)
+            .expect("Should have the branched timeline");
+
+        let aux_keyspace = KeySpace {
+            ranges: vec![NON_INHERITED_RANGE],
+        };
+        let read_lsn = child_timeline.get_last_record_lsn();
+
+        let vectored_res = child_timeline
+            .get_vectored_impl(aux_keyspace.clone(), read_lsn, &ctx)
+            .await;
+
+        child_timeline
+            .validate_get_vectored_impl(&vectored_res, aux_keyspace, read_lsn, &ctx)
+            .await;
+
+        let images = vectored_res?;
+        let mut key = NON_INHERITED_RANGE.start;
+        while key < NON_INHERITED_RANGE.end {
+            assert!(matches!(
+                images[&key],
+                Err(PageReconstructError::MissingKey(_))
+            ));
+            key = key.next();
         }
 
         Ok(())

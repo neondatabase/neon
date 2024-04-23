@@ -3658,6 +3658,7 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "twox-hash",
  "url",
  "utils",
  "walkdir",
@@ -5830,8 +5831,7 @@ checksum = "81cdd64d312baedb58e21336b31bc043b77e01cc99033ce76ef539f78e965ebc"
 [[package]]
 name = "svg_fmt"
 version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f83ba502a3265efb76efb89b0a2f7782ad6f2675015d4ce37e4b547dda42b499"
+source = "git+https://github.com/neondatabase/fork--nical--rust_debug?branch=neon#b9501105e746629004bc6d0473639320939dbe10"
 
 [[package]]
 name = "syn"

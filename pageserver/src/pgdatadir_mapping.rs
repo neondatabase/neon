@@ -252,16 +252,8 @@ impl Timeline {
         let mut buf = version.get(self, key, ctx).await?;
         let nblocks = buf.get_u32_le();
 
-        if latest {
-            // Update relation size cache only if "latest" flag is set.
-            // This flag is set by compute when it is working with most recent version of relation.
-            // Typically master compute node always set latest=true.
-            // Please notice, that even if compute node "by mistake" specifies old LSN but set
-            // latest=true, then it can not cause cache corruption, because with latest=true
-            // pageserver choose max(request_lsn, last_written_lsn) and so cached value will be
-            // associated with most recent value of LSN.
-            self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
-        }
+        self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
+
         Ok(nblocks)
     }
 
@@ -817,7 +809,7 @@ impl Timeline {
     /// Get cached size of relation if it not updated after specified LSN
     pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
         let rel_size_cache = self.rel_size_cache.read().unwrap();
-        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
+        if let Some((cached_lsn, nblocks)) = rel_size_cache.map.get(tag) {
             if lsn >= *cached_lsn {
                 return Some(*nblocks);
             }
@@ -828,7 +820,16 @@ impl Timeline {
     /// Update cached relation size if there is no more recent update
     pub fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        match rel_size_cache.entry(tag) {
+
+        if lsn < rel_size_cache.complete_as_of {
+            // Do not cache old values. It's safe to cache the size on read, as long as
+            // the read was at an LSN since we started the WAL ingestion. Reasoning: we
+            // never evict values from the cache, so if the relation size changed after
+            // 'lsn', the new value is already in the cache.
+            return;
+        }
+
+        match rel_size_cache.map.entry(tag) {
             hash_map::Entry::Occupied(mut entry) => {
                 let cached_lsn = entry.get_mut();
                 if lsn >= cached_lsn.0 {
@@ -844,13 +845,13 @@ impl Timeline {
     /// Store cached relation size
     pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.insert(tag, (lsn, nblocks));
+        rel_size_cache.map.insert(tag, (lsn, nblocks));
     }
 
     /// Remove cached relation size
     pub fn remove_cached_rel_size(&self, tag: &RelTag) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.remove(tag);
+        rel_size_cache.map.remove(tag);
     }
 }
 
@@ -1401,7 +1402,7 @@ impl<'a> DatadirModification<'a> {
         let n_files;
         let mut aux_files = self.tline.aux_files.lock().await;
         if let Some(mut dir) = aux_files.dir.take() {
-            // We already updated aux files in `self`: emit a delta and update our latest value
+            // We already updated aux files in `self`: emit a delta and update our latest value.
             dir.upsert(file_path.clone(), content.clone());
             n_files = dir.files.len();
             if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
@@ -1446,10 +1447,14 @@ impl<'a> DatadirModification<'a> {
                     // reset the map.
                     return Err(e.into());
                 }
-                // FIXME: PageReconstructError doesn't have an explicit variant for key-not-found, so
-                // we are assuming that all _other_ possible errors represents a missing key.  If some
-                // other error occurs, we may incorrectly reset the map of aux files.
-                Err(PageReconstructError::Other(_) | PageReconstructError::WalRedo(_)) => {
+                // Note: we added missing key error variant in https://github.com/neondatabase/neon/pull/7393 but
+                // the original code assumes all other errors are missing keys. Therefore, we keep the code path
+                // the same for now, though in theory, we should only match the `MissingKey` variant.
+                Err(
+                    PageReconstructError::Other(_)
+                    | PageReconstructError::WalRedo(_)
+                    | PageReconstructError::MissingKey { .. },
+                ) => {
                     // Key is missing, we must insert an image as the basis for subsequent deltas.
 
                     let mut dir = AuxFilesDirectory {

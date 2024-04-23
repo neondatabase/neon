@@ -9,18 +9,45 @@
 //! Coordinates in both axis are compressed for better readability.
 //! (see <https://medium.com/algorithms-digest/coordinate-compression-2fff95326fb>)
 //!
-//! Example use:
+//! The plain text API was chosen so that we can easily work with filenames from various
+//! sources; see the Usage section below for examples.
+//!
+//! # Usage
+//!
+//! ## Producing the SVG
+//!
 //! ```bash
-//! $ ls test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE | \
-//! $   grep "__" | cargo run --release --bin pagectl draw-timeline-dir > out.svg
-//! $ firefox out.svg
+//!
+//! # local timeline dir
+//! ls test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE | \
+//!     grep "__" | cargo run --release --bin pagectl draw-timeline-dir > out.svg
+//!
+//! # Layer map dump from `/v1/tenant/$TENANT/timeline/$TIMELINE/layer`
+//! (jq -r '.historic_layers[] | .layer_file_name' | cargo  run -p pagectl draw-timeline) < layer-map.json > out.svg
+//!
+//! # From an `index_part.json` in S3
+//! (jq -r '.layer_metadata | keys[]' | cargo  run -p pagectl draw-timeline ) < index_part.json-00000016 > out.svg
+//!
 //! ```
 //!
-//! This API was chosen so that we can easily work with filenames extracted from ssh,
-//! or from pageserver log files.
+//! ## Viewing
 //!
-//! TODO Consider shipping this as a grafana panel plugin:
-//!      <https://grafana.com/tutorials/build-a-panel-plugin/>
+//! **Inkscape** is better than the built-in viewers in browsers.
+//!
+//! After selecting a layer file rectangle, use "Open XML Editor" (Ctrl|Cmd + Shift + X)
+//! to see the layer file name in the comment field.
+//!
+//! ```bash
+//!
+//! # Linux
+//! inkscape out.svg
+//!
+//! # macOS
+//! /Applications/Inkscape.app/Contents/MacOS/inkscape out.svg
+//!
+//! ```
+//!
+
 use anyhow::Result;
 use pageserver::repository::Key;
 use pageserver::METADATA_FILE_NAME;
@@ -65,7 +92,12 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
 
 pub fn main() -> Result<()> {
     // Parse layer filenames from stdin
-    let mut ranges: Vec<(Range<Key>, Range<Lsn>)> = vec![];
+    struct Layer {
+        filename: String,
+        key_range: Range<Key>,
+        lsn_range: Range<Lsn>,
+    }
+    let mut files: Vec<Layer> = vec![];
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = line.unwrap();
@@ -76,14 +108,23 @@ pub fn main() -> Result<()> {
             // Don't try and parse "metadata" like a key-lsn range
             continue;
         }
-        let range = parse_filename(filename);
-        ranges.push(range);
+        let (key_range, lsn_range) = parse_filename(filename);
+        files.push(Layer {
+            filename: filename.to_owned(),
+            key_range,
+            lsn_range,
+        });
     }
 
     // Collect all coordinates
     let mut keys: Vec<Key> = vec![];
     let mut lsns: Vec<Lsn> = vec![];
-    for (keyr, lsnr) in &ranges {
+    for Layer {
+        key_range: keyr,
+        lsn_range: lsnr,
+        ..
+    } in &files
+    {
         keys.push(keyr.start);
         keys.push(keyr.end);
         lsns.push(lsnr.start);
@@ -107,7 +148,12 @@ pub fn main() -> Result<()> {
             h: stretch * lsn_map.len() as f32
         }
     );
-    for (keyr, lsnr) in &ranges {
+    for Layer {
+        filename,
+        key_range: keyr,
+        lsn_range: lsnr,
+    } in &files
+    {
         let key_start = *key_map.get(&keyr.start).unwrap();
         let key_end = *key_map.get(&keyr.end).unwrap();
         let key_diff = key_end - key_start;
@@ -151,6 +197,7 @@ pub fn main() -> Result<()> {
             .fill(fill)
             .stroke(Stroke::Color(rgb(0, 0, 0), 0.1))
             .border_radius(0.4)
+            .comment(filename)
         );
     }
     println!("{}", EndSvg);

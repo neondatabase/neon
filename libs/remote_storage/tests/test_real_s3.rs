@@ -12,8 +12,8 @@ use anyhow::Context;
 use camino::Utf8Path;
 use futures_util::StreamExt;
 use remote_storage::{
-    DownloadError, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
-    S3Config,
+    DownloadError, GenericRemoteStorage, ListingMode, RemotePath, RemoteStorageConfig,
+    RemoteStorageKind, S3Config,
 };
 use test_context::test_context;
 use test_context::AsyncTestContext;
@@ -75,11 +75,14 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
         client: &Arc<GenericRemoteStorage>,
         cancel: &CancellationToken,
     ) -> anyhow::Result<HashSet<RemotePath>> {
-        Ok(retry(|| client.list_files(None, None, cancel))
-            .await
-            .context("list root files failure")?
-            .into_iter()
-            .collect::<HashSet<_>>())
+        Ok(
+            retry(|| client.list(None, ListingMode::NoDelimiter, None, cancel))
+                .await
+                .context("list root files failure")?
+                .keys
+                .into_iter()
+                .collect::<HashSet<_>>(),
+        )
     }
 
     let cancel = CancellationToken::new();
@@ -294,10 +297,6 @@ impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
     }
 }
 
-// NOTE: the setups for the list_prefixes test and the list_files test are very similar
-// However, they are not idential. The list_prefixes function is concerned with listing prefixes,
-// whereas the list_files function is concerned with listing files.
-// See `RemoteStorage::list_files` documentation for more details
 enum MaybeEnabledStorageWithSimpleTestBlobs {
     Enabled(S3WithSimpleTestBlobs),
     Disabled,
