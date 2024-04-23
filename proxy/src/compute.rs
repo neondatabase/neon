@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::{
     tls::{MakeTlsConnect, NoTlsError},
-    Connection,
+    Connection, SocketConfig,
 };
 use tracing::{error, info, warn};
 
@@ -304,8 +304,15 @@ impl ConnCfg {
         let tls = MakeTlsConnect::<TcpStream>::make_tls_connect(&mut tls, host)?;
 
         // connect_raw() will not use TLS if sslmode is "disable"
-        let (client, connection) = self.0.connect_raw(stream, tls).await?;
+        let (mut client, connection) = self.0.connect_raw(stream, tls).await?;
         tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
+
+        client.set_socket_config(SocketConfig {
+            host: tokio_postgres::config::Host::Tcp(host.to_owned()),
+            socket_addr,
+            connect_timeout: None,
+            keepalive: None,
+        });
 
         info!(
             cold_start_info = ctx.cold_start_info.as_str(),
