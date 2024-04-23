@@ -973,6 +973,7 @@ impl Timeline {
             .await?;
 
         let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
+        let layers_visited = reconstruct_state.get_layers_visited();
         for (key, res) in reconstruct_state.keys {
             match res {
                 Err(err) => {
@@ -986,6 +987,12 @@ impl Timeline {
                 }
             }
         }
+
+        // Note that this is an approximation. Tracking the exact number of layers visited
+        // per key requires virtually unbounded memory usage and is inefficient
+        // (i.e. segment tree tracking each range queried from a layer)
+        crate::metrics::VEC_READ_NUM_LAYERS_VISITED
+            .observe(layers_visited as f64 / results.len() as f64);
 
         Ok(results)
     }
@@ -2813,7 +2820,7 @@ impl Timeline {
         let mut timeline = self;
 
         let mut read_count = scopeguard::guard(0, |cnt| {
-            crate::metrics::READ_NUM_FS_LAYERS.observe(cnt as f64)
+            crate::metrics::READ_NUM_LAYERS_VISITED.observe(cnt as f64)
         });
 
         // For debugging purposes, collect the path of layers that we traversed
@@ -2928,7 +2935,7 @@ impl Timeline {
                         Err(e) => return Err(PageReconstructError::from(e)),
                     };
                     cont_lsn = lsn_floor;
-                    // metrics: open_layer does not count as fs access, so we are not updating `read_count`
+                    *read_count += 1;
                     traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
                     continue 'outer;
                 }
@@ -2955,7 +2962,7 @@ impl Timeline {
                         Err(e) => return Err(PageReconstructError::from(e)),
                     };
                     cont_lsn = lsn_floor;
-                    // metrics: open_layer does not count as fs access, so we are not updating `read_count`
+                    *read_count += 1;
                     traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
                     continue 'outer;
                 }
@@ -3183,6 +3190,8 @@ impl Timeline {
 
                 unmapped_keyspace = keyspace_to_read;
                 cont_lsn = next_cont_lsn;
+
+                reconstruct_state.on_layer_visited();
             } else {
                 break;
             }
