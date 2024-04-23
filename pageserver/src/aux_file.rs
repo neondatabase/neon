@@ -26,7 +26,7 @@ const AUX_DIR_PG_UNKNOWN: u8 = 0xFF;
 /// * pg_logical/mappings -> 0x0101
 /// * pg_logical/snapshots -> 0x0102
 /// * pg_logical/replorigin_checkpoint -> 0x0103
-/// * pg_logical/<other things> -> 0x01FF
+/// * pg_logical/others -> 0x01FF
 /// * pg_replslot/ -> 0x0201
 /// * others -> 0xFFFF
 ///
