@@ -18,6 +18,7 @@ use proxy::config::HttpConfig;
 use proxy::config::ProjectInfoCacheOptions;
 use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
+use proxy::dns::Dns;
 use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
@@ -400,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(metrics_config) = &config.metric_collection {
         // TODO: Add gc regardles of the metric collection being enabled.
-        maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
+        maintenance_tasks.spawn(usage_metrics::task_main(config.dns.clone(), metrics_config));
         client_tasks.spawn(usage_metrics::task_backup(
             &metrics_config.backup_metric_collection_config,
             cancellation_token.clone(),
@@ -497,6 +498,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         bail!("dynamic rate limiter should be disabled");
     }
 
+    let dns = Dns::new();
+
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
@@ -537,7 +540,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             tokio::spawn(locks.garbage_collect_worker());
 
             let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client());
+            let endpoint = http::Endpoint::new(url, http::new_client(dns.clone()));
 
             let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
             RateBucketInfo::validate(&mut endpoint_rps_limit)?;
@@ -581,6 +584,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     RateBucketInfo::validate(&mut redis_rps_limit)?;
 
     let config = Box::leak(Box::new(ProxyConfig {
+        dns,
         tls_config,
         auth_backend,
         metric_collection,

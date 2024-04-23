@@ -31,6 +31,7 @@ git-version.workspace = true
 hashbrown.workspace = true
 hashlink.workspace = true
 hex.workspace = true
+hickory-resolver = "0.24.1"
 hmac.workspace = true
 hostname.workspace = true
 http.workspace = true
