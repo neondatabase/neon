@@ -41,7 +41,7 @@ pub enum ReadResult<'a> {
 }
 
 impl RW {
-    const TAIL_SZ: usize = PAGE_SZ;
+    const TAIL_SZ: usize = 64 * 1024;
 
     pub fn new(file: VirtualFile) -> Self {
         let bytes_flushed_tracker = owned_buffers_io::util::size_tracking_writer::Writer::new(file);
