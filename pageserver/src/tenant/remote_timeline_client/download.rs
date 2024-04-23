@@ -195,7 +195,7 @@ async fn download_object<'a>(
                 // There's chunks_vectored() on the stream.
                 let (bytes_amount, destination_file) = async {
                     let size_tracking = size_tracking_writer::Writer::new(destination_file);
-                    let mut buffered = owned_buffers_io::write::BufferedWriter::new(
+                    let mut buffered = owned_buffers_io::write::BufferedWriter::<BytesMut, _>::new(
                         size_tracking,
                         BytesMut::with_capacity(super::BUFFER_SIZE),
                     );

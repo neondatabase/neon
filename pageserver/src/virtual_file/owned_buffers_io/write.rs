@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 /// A trait for doing owned-buffer write IO.
@@ -9,61 +10,44 @@ pub trait OwnedAsyncWriter {
     ) -> std::io::Result<(usize, B::Buf)>;
 }
 
-struct Buffer<B> {
-    pending: usize,
-    iobuf: B,
+pub trait Buffer {
+    type IoBuf: IoBuf;
+
+    fn cap(&self) -> usize;
+    fn extend_from_slice(&mut self, other: &[u8]);
+    fn pending(&self) -> usize;
+    fn flush(self) -> Slice<Self::IoBuf>;
+    fn reconstruct_after_flush(iobuf: Self::IoBuf) -> Self;
 }
 
-impl<B> Buffer<B>
-where
-    B: tokio_epoll_uring::IoBufMut,
-{
-    pub fn new(iobuf: B) -> Self {
-        Self { pending: 0, iobuf }
+impl Buffer for BytesMut {
+    type IoBuf = BytesMut;
+
+    #[inline(always)]
+    fn cap(&self) -> usize {
+        self.capacity()
+    }
+
+    fn extend_from_slice(&mut self, other: &[u8]) {
+        BytesMut::extend_from_slice(self, other)
     }
 
     #[inline(always)]
-    fn invariants(&self) {
-        debug_assert!(self.pending <= self.iobuf.bytes_total());
-        debug_assert!(self.pending <= self.iobuf.bytes_init());
+    fn pending(&self) -> usize {
+        self.len()
     }
 
-    #[inline(always)]
-    pub fn cap(&self) -> usize {
-        self.iobuf.bytes_total()
-    }
-
-    #[inline(always)]
-    pub fn pending(&self) -> usize {
-        self.pending
-    }
-
-    pub fn flush(self) -> Slice<B> {
-        self.invariants();
-        self.iobuf.slice(0..self.pending)
-    }
-
-    pub fn extend_from_slice(&mut self, other: &[u8]) {
-        self.invariants();
-        let remaining = self.iobuf.bytes_total() - self.pending;
-        if other.len() > remaining {
-            panic!("extend_from_slice() would extend beyond buffer capacity; cap={} self.len={} other.len()={}", self.iobuf.bytes_total(), self.pending, other.len());
+    fn flush(self) -> Slice<BytesMut> {
+        if self.len() == 0 {
+            return self.slice_full();
         }
-        // SAFETY: we did bounds-checking above; non-overlapping is guaranteed by Rust borrowing
-        // (self is borrowed mut, so `other` can't reference self or anything in it).
-        unsafe {
-            self.iobuf
-                .stable_mut_ptr()
-                .add(self.pending)
-                .copy_from_nonoverlapping(other.as_ptr(), other.len());
-            self.iobuf.set_init(self.pending + other.len());
-        }
-        self.pending += other.len();
-        self.invariants();
+        let len = self.len();
+        self.slice(0..len)
     }
 
-    pub fn raw_iobuf(&self) -> &B {
-        &self.iobuf
+    fn reconstruct_after_flush(mut iobuf: BytesMut) -> Self {
+        iobuf.clear();
+        iobuf
     }
 }
 
@@ -89,18 +73,19 @@ pub struct BufferedWriter<B, W> {
     // - while IO is ongoing => goes back to Some() once the IO completed successfully
     // - after an IO error => stays `None` forever
     // In these exceptional cases, it's `None`.
-    buf: Option<Buffer<B>>,
+    buf: Option<B>,
 }
 
-impl<B, W> BufferedWriter<B, W>
+impl<B, Buf, W> BufferedWriter<B, W>
 where
-    B: tokio_epoll_uring::IoBufMut + Send,
+    B: Buffer<IoBuf = Buf> + Send,
+    Buf: IoBuf + Send,
     W: OwnedAsyncWriter,
 {
-    pub fn new(writer: W, iobuf: B) -> Self {
+    pub fn new(writer: W, buf: B) -> Self {
         Self {
             writer,
-            buf: Some(Buffer::new(iobuf)),
+            buf: Some(buf),
         }
     }
 
@@ -109,7 +94,7 @@ where
     }
 
     /// Panics if used after any of the write paths returned an error
-    pub fn inspect_buffer(&self) -> &Buffer<B> {
+    pub fn inspect_buffer(&self) -> &B {
         self.buf()
     }
 
@@ -121,7 +106,7 @@ where
     }
 
     #[inline(always)]
-    fn buf(&self) -> &Buffer<B> {
+    fn buf(&self) -> &B {
         self.buf
             .as_ref()
             .expect("must not use after we returned an error")
@@ -191,9 +176,13 @@ where
     async fn flush(&mut self) -> std::io::Result<()> {
         let buf = self.buf.take().expect("must not use after an error");
         let buf_len = buf.pending();
-        let (nwritten, mut io_buf) = self.writer.write_all(buf.flush()).await?;
+        if buf_len == 0 {
+            self.buf = Some(buf);
+            return Ok(());
+        }
+        let (nwritten, io_buf) = self.writer.write_all(buf.flush()).await?;
         assert_eq!(nwritten, buf_len);
-        self.buf = Some(Buffer::new(io_buf));
+        self.buf = Some(Buffer::reconstruct_after_flush(io_buf));
         Ok(())
     }
 }

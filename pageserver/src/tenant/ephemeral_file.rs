@@ -22,7 +22,6 @@ pub struct EphemeralFile {
 
 mod page_caching_sandwich;
 mod sandwich;
-mod size_tracker_borrowed;
 mod zero_padded_buffer;
 
 impl EphemeralFile {

@@ -29,9 +29,56 @@ impl<const N: usize> Buf<N> {
     }
 }
 
+impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Buf<N> {
+    type IoBuf = Self;
+
+    fn cap(&self) -> usize {
+        self.allocation.len()
+    }
+
+    fn extend_from_slice(&mut self, other: &[u8]) {
+        self.invariants();
+        let remaining = self.cap() - other.len();
+        if other.len() > remaining {
+            panic!("calling extend_from_slice() with insufficient remaining capacity");
+        }
+        self.allocation[self.written..(self.written + other.len())].copy_from_slice(other);
+        self.written += other.len();
+        self.invariants();
+    }
+
+    fn pending(&self) -> usize {
+        self.written
+    }
+
+    fn flush(self) -> tokio_epoll_uring::Slice<Self> {
+        self.invariants();
+        let written = self.written;
+        tokio_epoll_uring::BoundedBuf::slice(self, 0..written)
+    }
+
+    fn reconstruct_after_flush(this: Self::IoBuf) -> Self {
+        let Self {
+            mut allocation,
+            written,
+        } = this;
+        allocation[0..written].fill(0);
+        let new = Self {
+            allocation,
+            written: 0,
+        };
+        new.invariants();
+        new
+    }
+}
+
+/// We have this implementation so that Buf<N> can be used with [`crate::virtual_file::owned_buffers_io::BufferedWriter`].
+///
+///
 /// SAFETY:
 ///
 /// The [`Self::allocation`] is stable becauses boxes are stable.
+/// The memory is zero-initialized, so, bytes_init is always N.
 ///
 unsafe impl<const N: usize> tokio_epoll_uring::IoBuf for Buf<N> {
     fn stable_ptr(&self) -> *const u8 {
@@ -44,24 +91,5 @@ unsafe impl<const N: usize> tokio_epoll_uring::IoBuf for Buf<N> {
 
     fn bytes_total(&self) -> usize {
         N
-    }
-}
-
-/// SAFETY:
-///
-/// The [`Self::allocation`] is stable becauses boxes are stable.
-///
-unsafe impl<const N: usize> tokio_epoll_uring::IoBufMut for Buf<N> {
-    fn stable_mut_ptr(&mut self) -> *mut u8 {
-        self.allocation.as_mut_ptr()
-    }
-
-    unsafe fn set_init(&mut self, pos: usize) {
-        self.invariants();
-        if pos < self.written {
-            self.allocation[pos..self.written].fill(0);
-        }
-        self.written = pos;
-        self.invariants();
     }
 }

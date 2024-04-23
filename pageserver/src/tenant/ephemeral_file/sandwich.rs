@@ -1,11 +1,17 @@
 use crate::{
-    page_cache::PAGE_SZ, tenant::ephemeral_file::zero_padded_buffer, virtual_file::VirtualFile,
+    page_cache::PAGE_SZ,
+    tenant::ephemeral_file::zero_padded_buffer,
+    virtual_file::{
+        owned_buffers_io::{self, write::Buffer},
+        VirtualFile,
+    },
 };
 
-use super::size_tracker_borrowed;
-
 pub struct Sandwich {
-    sandwich: size_tracker_borrowed::Writer<{ Self::TAIL_SZ }>,
+    buffered_writer: owned_buffers_io::write::BufferedWriter<
+        zero_padded_buffer::Buf<{ Self::TAIL_SZ }>,
+        owned_buffers_io::util::size_tracking_writer::Writer<VirtualFile>,
+    >,
 }
 
 pub enum ReadResult<'a> {
@@ -17,28 +23,35 @@ impl Sandwich {
     const TAIL_SZ: usize = 64 * 1024;
 
     pub fn new(file: VirtualFile) -> Self {
-        let size_borrowed_tracker = size_tracker_borrowed::Writer::new(file);
-        Self {
-            sandwich: size_borrowed_tracker,
-        }
+        let bytes_flushed_tracker = owned_buffers_io::util::size_tracking_writer::Writer::new(file);
+        let buffered_writer = owned_buffers_io::write::BufferedWriter::new(
+            bytes_flushed_tracker,
+            zero_padded_buffer::Buf::default(),
+        );
+        Self { buffered_writer }
     }
 
     pub(crate) fn as_inner_virtual_file(&self) -> &VirtualFile {
-        self.sandwich.as_inner_virtual_file()
+        self.buffered_writer.as_inner().as_inner()
     }
 
     pub async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.sandwich.write_all_borrowed(buf).await
+        self.buffered_writer.write_buffered_borrowed(buf).await
     }
 
     pub fn bytes_written(&self) -> u64 {
-        self.sandwich.buffered_offset()
+        let flushed_offset = self.buffered_writer.as_inner().bytes_written();
+        let buffer: &zero_padded_buffer::Buf<{ Self::TAIL_SZ }> =
+            self.buffered_writer.inspect_buffer();
+        let buffered_offset = flushed_offset + u64::try_from(buffer.pending()).unwrap();
+        buffered_offset
     }
 
     pub(crate) async fn read_blk(&self, blknum: u32) -> Result<ReadResult, std::io::Error> {
-        let flushed_offset = self.sandwich.flushed_offset();
-        let buffer = self.sandwich.buffered_writer.inspect_buffer();
-        let buffered_offset = flushed_offset + buffer.pending();
+        let flushed_offset = self.buffered_writer.as_inner().bytes_written();
+        let buffer: &zero_padded_buffer::Buf<{ Self::TAIL_SZ }> =
+            self.buffered_writer.inspect_buffer();
+        let buffered_offset = flushed_offset + u64::try_from(buffer.pending()).unwrap();
         let read_offset = (blknum as u64) * (PAGE_SZ as u64);
 
         assert_eq!(
@@ -75,8 +88,8 @@ impl Sandwich {
                 .checked_sub(flushed_offset)
                 .expect("would have taken `if` branch instead of this one");
             let read_offset_in_buffer = usize::try_from(read_offset_in_buffer).unwrap();
-            let zero_padded_buffer: &zero_padded_buffer::Buf<TAIL_SZ> = buffer.raw_iobuf();
-            let page = zero_padded_buffer[read_offset_in_buffer..(read_offset_in_buffer + PAGE_SZ)];
+            let zero_padded_slice = buffer.as_zero_padded_slice();
+            let page = &zero_padded_slice[read_offset_in_buffer..(read_offset_in_buffer + PAGE_SZ)];
             Ok(ReadResult::ServedFromZeroPaddedMutableTail {
                 buffer: page
                     .try_into()
