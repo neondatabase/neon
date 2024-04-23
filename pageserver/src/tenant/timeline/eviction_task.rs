@@ -188,12 +188,10 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
-        {
-            let _permit = self.acquire_imitation_permit(cancel, ctx).await?;
+        let permit = self.acquire_imitation_permit(cancel, ctx).await?;
 
-            self.imitate_layer_accesses(tenant, p, cancel, gate, ctx)
-                .await?;
-        }
+        self.imitate_layer_accesses(tenant, p, cancel, gate, permit, ctx)
+            .await?;
 
         #[derive(Debug, Default)]
         struct EvictionStats {
@@ -318,9 +316,9 @@ impl Timeline {
         gate: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
-        let _permit = self.acquire_imitation_permit(cancel, ctx).await?;
+        let permit = self.acquire_imitation_permit(cancel, ctx).await?;
 
-        self.imitate_layer_accesses(tenant, p, cancel, gate, ctx)
+        self.imitate_layer_accesses(tenant, p, cancel, gate, _permit, ctx)
             .await
     }
 
@@ -372,6 +370,7 @@ impl Timeline {
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
+        _permit: impl Drop,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_shard_zero() {
