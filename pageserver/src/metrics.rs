@@ -90,7 +90,7 @@ pub(crate) static READ_NUM_FS_LAYERS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_read_num_fs_layers",
         "Number of persistent layers accessed for processing a read request, including those in the cache",
-        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 50.0, 100.0],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0],
     )
     .expect("failed to define a metric")
 });
