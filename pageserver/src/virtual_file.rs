@@ -32,11 +32,10 @@ pub use io_engine::feature_test as io_engine_feature_test;
 pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
+use self::owned_buffers_io::write::OwnedAsyncWriter;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
-
-use self::owned_buffers_io::write::OwnedAsyncWriter;
 
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
