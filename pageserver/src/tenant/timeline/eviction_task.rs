@@ -318,7 +318,7 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let permit = self.acquire_imitation_permit(cancel, ctx).await?;
 
-        self.imitate_layer_accesses(tenant, p, cancel, gate, _permit, ctx)
+        self.imitate_layer_accesses(tenant, p, cancel, gate, permit, ctx)
             .await
     }
 
