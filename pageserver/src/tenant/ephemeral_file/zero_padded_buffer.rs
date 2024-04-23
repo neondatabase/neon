@@ -75,7 +75,7 @@ impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Bu
     }
 }
 
-/// We have this implementation so that Buf<N> can be used with [`crate::virtual_file::owned_buffers_io::BufferedWriter`].
+/// We have this implementation so that [`Buf<N>`] can be used with [`crate::virtual_file::owned_buffers_io::write::BufferedWriter`].
 ///
 ///
 /// SAFETY:

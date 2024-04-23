@@ -43,8 +43,7 @@ impl Sandwich {
         let flushed_offset = self.buffered_writer.as_inner().bytes_written();
         let buffer: &zero_padded_buffer::Buf<{ Self::TAIL_SZ }> =
             self.buffered_writer.inspect_buffer();
-        let buffered_offset = flushed_offset + u64::try_from(buffer.pending()).unwrap();
-        buffered_offset
+        flushed_offset + u64::try_from(buffer.pending()).unwrap()
     }
 
     pub(crate) async fn read_blk(&self, blknum: u32) -> Result<ReadResult, std::io::Error> {

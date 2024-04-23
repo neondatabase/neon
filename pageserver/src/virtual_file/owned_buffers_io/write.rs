@@ -38,7 +38,7 @@ impl Buffer for BytesMut {
     }
 
     fn flush(self) -> Slice<BytesMut> {
-        if self.len() == 0 {
+        if self.is_empty() {
             return self.slice_full();
         }
         let len = self.len();
