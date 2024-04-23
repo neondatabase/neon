@@ -119,6 +119,9 @@ pub struct ReadPathStatsInner {
     pub sort_reconstruct_data_time: AtomicU32,
     pub layer_search_time: AtomicU32,
     pub keyspace_manipulation_time: AtomicU32,
+    pub in_mem_layer_find_time: AtomicU32,
+    pub fringe_fondle_time: AtomicU32,
+    pub layer_map_search_time: AtomicU32,
     pub buffer_cache_hits: AtomicU32,
     pub layers_visited: AtomicU32,
 }
@@ -127,7 +130,7 @@ impl std::fmt::Display for ReadPathStatsInner {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "get_reconstruct_data_time={} plan_read_time={} read_time={} sort_time={} layer_search_time={} keyspace_manipulation_time={} buffer_cache_hits={} layers_visited={}",
+            "get_reconstruct_data_time={} plan_read_time={} read_time={} sort_time={} layer_search_time={} keyspace_manipulation_time={} in_mem_layer_find_time={} fringe_fondle_time={} layer_map_search_time={} buffer_cache_hits={} layers_visited={}",
             self.get_reconstruct_data_time.load(std::sync::atomic::Ordering::Relaxed),
             self.plan_read_time
                 .load(std::sync::atomic::Ordering::Relaxed),
@@ -137,6 +140,12 @@ impl std::fmt::Display for ReadPathStatsInner {
             self.layer_search_time
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.keyspace_manipulation_time
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.in_mem_layer_find_time
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.fringe_fondle_time
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.layer_search_time
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.buffer_cache_hits
                 .load(std::sync::atomic::Ordering::Relaxed),
@@ -159,6 +168,12 @@ impl ReadPathStatsInner {
         self.layer_search_time
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.keyspace_manipulation_time
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.in_mem_layer_find_time
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.fringe_fondle_time
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.layer_search_time
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.buffer_cache_hits
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -203,6 +218,27 @@ impl ReadPathStatsInner {
 
     pub fn add_keyspace_manipulation_timer(&self, dur: Duration) {
         self.keyspace_manipulation_time.fetch_add(
+            dur.as_micros().try_into().unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn add_in_mem_layer_find_timer(&self, dur: Duration) {
+        self.in_mem_layer_find_time.fetch_add(
+            dur.as_micros().try_into().unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn add_fringe_fondle_time(&self, dur: Duration) {
+        self.fringe_fondle_time.fetch_add(
+            dur.as_micros().try_into().unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn add_layer_map_search_time(&self, dur: Duration) {
+        self.layer_map_search_time.fetch_add(
             dur.as_micros().try_into().unwrap(),
             std::sync::atomic::Ordering::Relaxed,
         );

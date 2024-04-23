@@ -2969,6 +2969,7 @@ impl Timeline {
 
             // Check the open and frozen in-memory layers first, in order from newest
             // to oldest.
+            let in_mem_layer_find_timer = Instant::now();
             if let Some(open_layer) = &layers.open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
@@ -2979,6 +2980,10 @@ impl Timeline {
 
                     let open_layer = open_layer.clone();
                     drop(guard);
+
+                    ctx.read_path_stats
+                        .inner
+                        .add_in_mem_layer_find_timer(in_mem_layer_find_timer.elapsed());
 
                     result = match open_layer
                         .get_value_reconstruct_data(
@@ -3011,6 +3016,10 @@ impl Timeline {
                     let frozen_layer = frozen_layer.clone();
                     drop(guard);
 
+                    ctx.read_path_stats
+                        .inner
+                        .add_in_mem_layer_find_timer(in_mem_layer_find_timer.elapsed());
+
                     result = match frozen_layer
                         .get_value_reconstruct_data(
                             key,
@@ -3034,7 +3043,12 @@ impl Timeline {
                 }
             }
 
+            let layer_map_search_timer = Instant::now();
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
+                ctx.read_path_stats
+                    .inner
+                    .add_layer_map_search_time(layer_map_search_timer.elapsed());
+
                 let layer = guard.get_from_desc(&layer);
                 drop(guard);
 
@@ -3060,11 +3074,19 @@ impl Timeline {
                 ));
                 continue 'outer;
             } else if timeline.ancestor_timeline.is_some() {
+                ctx.read_path_stats
+                    .inner
+                    .add_layer_map_search_time(layer_map_search_timer.elapsed());
+
                 // Nothing on this timeline. Traverse to parent
                 result = ValueReconstructResult::Continue;
                 cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
                 continue 'outer;
             } else {
+                ctx.read_path_stats
+                    .inner
+                    .add_layer_map_search_time(layer_map_search_timer.elapsed());
+
                 // Nothing found
                 result = ValueReconstructResult::Missing;
                 continue 'outer;
@@ -3200,28 +3222,46 @@ impl Timeline {
                 let guard = timeline.layers.read().await;
                 let layers = guard.layer_map();
 
+                let in_mem_layer_find_timer = Instant::now();
                 let in_memory_layer = layers.find_in_memory_layer(|l| {
                     let start_lsn = l.get_lsn_range().start;
                     cont_lsn > start_lsn
                 });
+                ctx.read_path_stats
+                    .inner
+                    .add_in_mem_layer_find_timer(in_mem_layer_find_timer.elapsed());
 
                 match in_memory_layer {
                     Some(l) => {
                         let lsn_range = l.get_lsn_range().start..cont_lsn;
+
+                        let fringe_fondle_timer = Instant::now();
+
                         fringe.update(
                             ReadableLayer::InMemoryLayer(l),
                             unmapped_keyspace.clone(),
                             lsn_range,
                         );
+                        ctx.read_path_stats
+                            .inner
+                            .add_fringe_fondle_time(fringe_fondle_timer.elapsed());
                     }
                     None => {
                         for range in unmapped_keyspace.ranges.iter() {
+                            let layer_map_search_timer = Instant::now();
+
                             let results = layers.range_search(range.clone(), cont_lsn);
                             tracing::info!(
                                 "Range search at {} found {:?}",
                                 cont_lsn,
                                 results.found
                             );
+
+                            ctx.read_path_stats
+                                .inner
+                                .add_layer_map_search_time(layer_map_search_timer.elapsed());
+
+                            let fringe_fondle_timer = Instant::now();
 
                             results
                                 .found
@@ -3236,6 +3276,10 @@ impl Timeline {
                                 .for_each(|(layer, keyspace, lsn_range)| {
                                     fringe.update(layer, keyspace, lsn_range)
                                 });
+
+                            ctx.read_path_stats
+                                .inner
+                                .add_fringe_fondle_time(fringe_fondle_timer.elapsed());
                         }
                     }
                 }
