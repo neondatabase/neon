@@ -31,8 +31,13 @@ impl<const TAIL_SZ: usize> Writer<TAIL_SZ> {
         self.buffered_writer.as_inner().bytes_written()
     }
 
-    pub fn inspect_buffer(&self) -> &zero_padded_buffer::Buf<TAIL_SZ> {
-        self.buffered_writer.inspect_buffer()
+    pub fn buffered_zero_padded_page_at(
+        &self,
+        offset_in_buffer: usize,
+    ) -> &[u8; crate::page_cache::PAGE_SZ] {
+        let bufio_buffer = self.buffered_writer.inspect_buffer();
+        let zero_padded_buffer: &zero_padded_buffer::Buf<TAIL_SZ> = bufio_buffer.as_inner();
+        zero_padded_buffer[offset_in_buffer..(offset_in_buffer + crate::page_cache::PAGE_SZ)]
     }
 
     pub(crate) fn as_inner_virtual_file(&self) -> &VirtualFile {

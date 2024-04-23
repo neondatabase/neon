@@ -69,14 +69,13 @@ impl Sandwich {
                     )
                 }
             }
-            let buffer: &[u8; Self::TAIL_SZ] =
-                self.sandwich.inspect_buffer().as_zero_padded_slice();
             let read_offset_in_buffer = read_offset
                 .checked_sub(flushed_offset)
                 .expect("would have taken `if` branch instead of this one");
-
             let read_offset_in_buffer = usize::try_from(read_offset_in_buffer).unwrap();
-            let page = &buffer[read_offset_in_buffer..(read_offset_in_buffer + PAGE_SZ)];
+            let page = self
+                .sandwich
+                .buffered_zero_padded_page_at(read_offset_in_buffer);
             Ok(ReadResult::ServedFromZeroPaddedMutableTail {
                 buffer: page
                     .try_into()

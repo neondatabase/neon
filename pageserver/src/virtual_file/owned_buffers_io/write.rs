@@ -9,36 +9,62 @@ pub trait OwnedAsyncWriter {
     ) -> std::io::Result<(usize, B::Buf)>;
 }
 
-pub trait IoBufMutExt: tokio_epoll_uring::IoBufMut {
-    fn clear(&mut self);
-    fn extend_from_slice(&mut self, other: &[u8]);
+struct Buffer<B> {
+    len: usize,
+    buf: B,
 }
 
-impl<T> IoBufMutExt for T
+impl<B> Buffer<B>
 where
-    T: tokio_epoll_uring::IoBufMut,
+    B: tokio_epoll_uring::IoBufMut,
 {
-    fn clear(&mut self) {
-        // SAFETY: setting to 0 is always safe
-        unsafe { self.set_init(0) }
+    pub fn new(buf: B) -> Self {
+        Self { len: 0, buf }
     }
 
-    fn extend_from_slice(&mut self, other: &[u8]) {
-        let remaining = self
-            .bytes_total()
-            .checked_sub(self.bytes_init())
-            .expect("no method on self should allow bytes_init() to exceed bytes_total()");
+    #[inline(always)]
+    fn invariants(&self) {
+        debug_assert!(self.len <= self.buf.bytes_total());
+        debug_assert!(self.len <= self.buf.bytes_init());
+    }
+
+    #[inline(always)]
+    pub fn cap(&self) -> usize {
+        self.buf.bytes_total()
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn clear(&mut self) {
+        self.invariants();
+        self.len = 0;
+        self.invariants();
+    }
+
+    pub fn extend_from_slice(&mut self, other: &[u8]) {
+        self.invariants();
+        let remaining = self.buf.bytes_total() - self.len;
         if other.len() > remaining {
-            panic!("extend_from_slice() would extend beyond buffer capacity; remaining={} other.len()={}", remaining, other.len());
+            panic!("extend_from_slice() would extend beyond buffer capacity; cap={} self.len={} other.len()={}", self.buf.bytes_total(), self.len, other.len());
         }
         // SAFETY: we did bounds-checking above; non-overlapping is guaranteed by Rust borrowing
         // (self is borrowed mut, so `other` can't reference self or anything in it).
         unsafe {
-            self.stable_mut_ptr()
-                .add(self.bytes_init())
+            self.buf
+                .stable_mut_ptr()
+                .add(self.len)
                 .copy_from_nonoverlapping(other.as_ptr(), other.len());
-            self.set_init(self.bytes_init() + other.len());
+            self.buf.set_init(self.len + other.len());
         }
+        self.len += other.len();
+        self.invariants();
+    }
+
+    pub fn as_inner(&self) -> &B {
+        &self.buf
     }
 }
 
@@ -64,18 +90,18 @@ pub struct BufferedWriter<B, W> {
     // - while IO is ongoing => goes back to Some() once the IO completed successfully
     // - after an IO error => stays `None` forever
     // In these exceptional cases, it's `None`.
-    buf: Option<B>,
+    buf: Option<Buffer<B>>,
 }
 
 impl<B, W> BufferedWriter<B, W>
 where
-    B: IoBufMutExt + Send,
+    B: tokio_epoll_uring::IoBufMut + Send,
     W: OwnedAsyncWriter,
 {
-    pub fn new(writer: W, buffer: B) -> Self {
+    pub fn new(writer: W, iobuf: B) -> Self {
         Self {
             writer,
-            buf: Some(buffer),
+            buf: Some(Buffer::new(iobuf)),
         }
     }
 
@@ -84,7 +110,7 @@ where
     }
 
     /// Panics if used after any of the write paths returned an error
-    pub fn inspect_buffer(&self) -> &B {
+    pub fn inspect_buffer(&self) -> &Buffer<B> {
         self.buf.as_ref().expect("must not use after an error")
     }
 
@@ -96,7 +122,7 @@ where
     }
 
     #[inline(always)]
-    fn buf(&self) -> &B {
+    fn buf(&self) -> &Buffer<B> {
         self.buf
             .as_ref()
             .expect("must not use after we returned an error")
@@ -106,28 +132,34 @@ where
     where
         S: IoBuf + Send,
     {
-        let chunk_len = chunk.bytes_init();
+        let chunk_len = chunk.len();
         // avoid memcpy for the middle of the chunk
-        if chunk.bytes_init() >= self.buf().bytes_total() {
+        if chunk.len() >= self.buf().cap() {
             self.flush().await?;
             // do a big write, bypassing `buf`
-            assert_eq!(self.buf().bytes_init(), 0);
+            assert_eq!(
+                self.buf
+                    .as_ref()
+                    .expect("must not use after an error")
+                    .len(),
+                0
+            );
             let (nwritten, chunk) = self.writer.write_all(chunk).await?;
             assert_eq!(nwritten, chunk_len);
             return Ok((nwritten, chunk));
         }
         // in-memory copy the < BUFFER_SIZED tail of the chunk
-        assert!(chunk.len() < self.buf().bytes_total());
+        assert!(chunk.len() < self.buf().cap());
         let mut slice = &chunk[..];
         while !slice.is_empty() {
             let buf = self.buf.as_mut().expect("must not use after an error");
-            let need = buf.bytes_total() - buf.bytes_init();
+            let need = buf.cap() - buf.len();
             let have = slice.len();
             let n = std::cmp::min(need, have);
             buf.extend_from_slice(&slice[..n]);
             slice = &slice[n..];
-            if buf.bytes_init() >= buf.bytes_total() {
-                assert_eq!(buf.bytes_init(), buf.bytes_total());
+            if buf.len() >= buf.cap() {
+                assert_eq!(buf.len(), buf.cap());
                 self.flush().await?;
             }
         }
@@ -144,13 +176,13 @@ where
         let chunk_len = chunk.len();
         while !chunk.is_empty() {
             let buf = self.buf.as_mut().expect("must not use after an error");
-            let need = buf.bytes_total() - buf.bytes_init();
+            let need = buf.cap() - buf.len();
             let have = chunk.len();
             let n = std::cmp::min(need, have);
             buf.extend_from_slice(&chunk[..n]);
             chunk = &chunk[n..];
-            if buf.bytes_init() >= buf.bytes_total() {
-                assert_eq!(buf.bytes_init(), buf.bytes_total());
+            if buf.len() >= buf.cap() {
+                assert_eq!(buf.len(), buf.cap());
                 self.flush().await?;
             }
         }
@@ -159,15 +191,14 @@ where
 
     async fn flush(&mut self) -> std::io::Result<()> {
         let buf = self.buf.take().expect("must not use after an error");
-        if buf.bytes_init() == 0 {
+        if buf.len() == 0 {
             self.buf = Some(buf);
             return std::io::Result::Ok(());
         }
-        let buf_len = buf.bytes_init();
-        let (nwritten, mut buf) = self.writer.write_all(buf).await?;
+        let buf_len = buf.len();
+        let (nwritten, mut io_buf) = self.writer.write_all(buf.buf.slice(0..buf_len)).await?;
         assert_eq!(nwritten, buf_len);
-        buf.clear();
-        self.buf = Some(buf);
+        self.buf = Some(Buffer::new(io_buf));
         Ok(())
     }
 }
