@@ -1402,7 +1402,7 @@ impl<'a> DatadirModification<'a> {
         let n_files;
         let mut aux_files = self.tline.aux_files.lock().await;
         if let Some(mut dir) = aux_files.dir.take() {
-            // We already updated aux files in `self`: emit a delta and update our latest value
+            // We already updated aux files in `self`: emit a delta and update our latest value.
             dir.upsert(file_path.clone(), content.clone());
             n_files = dir.files.len();
             if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
