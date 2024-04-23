@@ -188,16 +188,7 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
-        let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
-            BackgroundLoopKind::Eviction,
-            ctx,
-        );
-
-        let _permit = tokio::select! {
-            permit = acquire_permit => permit,
-            _ = cancel.cancelled() => return ControlFlow::Break(()),
-            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
-        };
+        let _permit = self.acquire_imitation_permit(cancel, ctx).await?;
 
         match self
             .imitate_layer_accesses(tenant, p, cancel, gate, ctx)
@@ -330,19 +321,27 @@ impl Timeline {
         gate: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
+        let _permit = self.acquire_imitation_permit(cancel, ctx).await?;
+
+        self.imitate_layer_accesses(tenant, p, cancel, gate, ctx)
+            .await
+    }
+
+    async fn acquire_imitation_permit(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> ControlFlow<(), impl Drop> {
         let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
             BackgroundLoopKind::Eviction,
             ctx,
         );
 
-        let _permit = tokio::select! {
-            permit = acquire_permit => permit,
-            _ = cancel.cancelled() => return ControlFlow::Break(()),
-            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
-        };
-
-        self.imitate_layer_accesses(tenant, p, cancel, gate, ctx)
-            .await
+        tokio::select! {
+            permit = acquire_permit => ControlFlow::Continue(permit),
+            _ = cancel.cancelled() => ControlFlow::Break(()),
+            _ = self.cancel.cancelled() => ControlFlow::Break(()),
+        }
     }
 
     /// If we evict layers but keep cached values derived from those layers, then
