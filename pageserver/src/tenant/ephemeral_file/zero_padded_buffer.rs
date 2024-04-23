@@ -1,7 +1,5 @@
 use std::mem::MaybeUninit;
 
-use crate::virtual_file::owned_buffers_io;
-
 pub struct Buf<const N: usize> {
     allocation: Box<[u8; N]>,
     written: usize,
@@ -23,6 +21,7 @@ impl<const N: usize> Buf<N> {
     #[inline(always)]
     fn invariants(&self) {
         debug_assert!(self.written <= N, "{}", self.written);
+        debug_assert!(self.allocation[self.written..N].iter().all(|v| *v == 0));
     }
 
     pub fn as_zero_padded_slice(&self) -> &[u8; N] {
@@ -44,32 +43,25 @@ unsafe impl<const N: usize> tokio_epoll_uring::IoBuf for Buf<N> {
     }
 
     fn bytes_total(&self) -> usize {
-        self.written // ?
+        N
     }
 }
 
-impl<const N: usize> owned_buffers_io::write::Buffer for Buf<N> {
-    const BUFFER_SIZE: usize = N;
-
-    /// panics if there's not enough capacity left
-    fn extend_from_slice(&mut self, buf: &[u8]) {
-        self.invariants();
-        let can = N - self.written;
-        let want = buf.len();
-        assert!(want <= can, "{:x} {:x}", want, can);
-        self.allocation[self.written..(self.written + want)].copy_from_slice(buf);
-        self.written += want;
-        self.invariants();
+/// SAFETY:
+///
+/// The [`Self::allocation`] is stable becauses boxes are stable.
+///
+unsafe impl<const N: usize> tokio_epoll_uring::IoBufMut for Buf<N> {
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        self.allocation.as_mut_ptr()
     }
 
-    fn len(&self) -> usize {
-        self.written
-    }
-
-    fn clear(&mut self) {
+    unsafe fn set_init(&mut self, pos: usize) {
         self.invariants();
-        self.written = 0;
-        self.allocation[..].fill(0);
+        if pos < self.written {
+            self.allocation[pos..self.written].fill(0);
+        }
+        self.written = pos;
         self.invariants();
     }
 }

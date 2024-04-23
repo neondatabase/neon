@@ -1,4 +1,3 @@
-use bytes::BytesMut;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 /// A trait for doing owned-buffer write IO.
@@ -10,53 +9,35 @@ pub trait OwnedAsyncWriter {
     ) -> std::io::Result<(usize, B::Buf)>;
 }
 
-pub trait Buffer {
-    const BUFFER_SIZE: usize;
-
-    fn len(&self) -> usize;
+pub trait IoBufMutExt: tokio_epoll_uring::IoBufMut {
     fn clear(&mut self);
     fn extend_from_slice(&mut self, other: &[u8]);
 }
 
-pub struct BytesMutBuffer<const BUFFER_SIZE: usize> {
-    buf: BytesMut,
-}
-
-/// SAFETY: just forwards to the pre-existing impl for BytesMut
-unsafe impl<const BUFFER_SIZE: usize> IoBuf for BytesMutBuffer<BUFFER_SIZE> {
-    fn stable_ptr(&self) -> *const u8 {
-        IoBuf::stable_ptr(&self.buf)
-    }
-
-    fn bytes_init(&self) -> usize {
-        IoBuf::bytes_init(&self.buf)
-    }
-
-    fn bytes_total(&self) -> usize {
-        IoBuf::bytes_total(&self.buf)
-    }
-}
-
-impl<const BUFFER_SIZE: usize> Buffer for BytesMutBuffer<BUFFER_SIZE> {
-    const BUFFER_SIZE: usize = BUFFER_SIZE;
-
-    fn len(&self) -> usize {
-        self.buf.len()
-    }
-
+impl<T> IoBufMutExt for T
+where
+    T: tokio_epoll_uring::IoBufMut,
+{
     fn clear(&mut self) {
-        self.buf.clear()
+        // SAFETY: setting to 0 is always safe
+        unsafe { self.set_init(0) }
     }
 
     fn extend_from_slice(&mut self, other: &[u8]) {
-        self.buf.extend_from_slice(other)
-    }
-}
-
-impl<const BUFFER_SIZE: usize> BytesMutBuffer<BUFFER_SIZE> {
-    pub fn new() -> Self {
-        BytesMutBuffer {
-            buf: BytesMut::with_capacity(BUFFER_SIZE),
+        let remaining = self
+            .bytes_total()
+            .checked_sub(self.bytes_init())
+            .expect("no method on self should allow bytes_init() to exceed bytes_total()");
+        if other.len() > remaining {
+            panic!("extend_from_slice() would extend beyond buffer capacity; remaining={} other.len()={}", remaining, other.len());
+        }
+        // SAFETY: we did bounds-checking above; non-overlapping is guaranteed by Rust borrowing
+        // (self is borrowed mut, so `other` can't reference self or anything in it).
+        unsafe {
+            self.stable_mut_ptr()
+                .add(self.bytes_init())
+                .copy_from_nonoverlapping(other.as_ptr(), other.len());
+            self.set_init(self.bytes_init() + other.len());
         }
     }
 }
@@ -88,7 +69,7 @@ pub struct BufferedWriter<B, W> {
 
 impl<B, W> BufferedWriter<B, W>
 where
-    B: Buffer + IoBuf + Send,
+    B: IoBufMutExt + Send,
     W: OwnedAsyncWriter,
 {
     pub fn new(writer: W, buffer: B) -> Self {
@@ -114,38 +95,39 @@ where
         Ok(writer)
     }
 
+    #[inline(always)]
+    fn buf(&self) -> &B {
+        self.buf
+            .as_ref()
+            .expect("must not use after we returned an error")
+    }
+
     pub async fn write_buffered<S: IoBuf>(&mut self, chunk: Slice<S>) -> std::io::Result<(usize, S)>
     where
         S: IoBuf + Send,
     {
-        let chunk_len = chunk.len();
+        let chunk_len = chunk.bytes_init();
         // avoid memcpy for the middle of the chunk
-        if chunk.len() >= B::BUFFER_SIZE {
+        if chunk.bytes_init() >= self.buf().bytes_total() {
             self.flush().await?;
             // do a big write, bypassing `buf`
-            assert_eq!(
-                self.buf
-                    .as_ref()
-                    .expect("must not use after an error")
-                    .len(),
-                0
-            );
+            assert_eq!(self.buf().bytes_init(), 0);
             let (nwritten, chunk) = self.writer.write_all(chunk).await?;
             assert_eq!(nwritten, chunk_len);
             return Ok((nwritten, chunk));
         }
         // in-memory copy the < BUFFER_SIZED tail of the chunk
-        assert!(chunk.len() < B::BUFFER_SIZE);
+        assert!(chunk.len() < self.buf().bytes_total());
         let mut slice = &chunk[..];
         while !slice.is_empty() {
             let buf = self.buf.as_mut().expect("must not use after an error");
-            let need = B::BUFFER_SIZE - buf.len();
+            let need = buf.bytes_total() - buf.bytes_init();
             let have = slice.len();
             let n = std::cmp::min(need, have);
             buf.extend_from_slice(&slice[..n]);
             slice = &slice[n..];
-            if buf.len() >= B::BUFFER_SIZE {
-                assert_eq!(buf.len(), B::BUFFER_SIZE);
+            if buf.bytes_init() >= buf.bytes_total() {
+                assert_eq!(buf.bytes_init(), buf.bytes_total());
                 self.flush().await?;
             }
         }
@@ -162,13 +144,13 @@ where
         let chunk_len = chunk.len();
         while !chunk.is_empty() {
             let buf = self.buf.as_mut().expect("must not use after an error");
-            let need = B::BUFFER_SIZE - buf.len();
+            let need = buf.bytes_total() - buf.bytes_init();
             let have = chunk.len();
             let n = std::cmp::min(need, have);
             buf.extend_from_slice(&chunk[..n]);
             chunk = &chunk[n..];
-            if buf.len() >= B::BUFFER_SIZE {
-                assert_eq!(buf.len(), B::BUFFER_SIZE);
+            if buf.bytes_init() >= buf.bytes_total() {
+                assert_eq!(buf.bytes_init(), buf.bytes_total());
                 self.flush().await?;
             }
         }
@@ -181,7 +163,7 @@ where
             self.buf = Some(buf);
             return std::io::Result::Ok(());
         }
-        let buf_len = buf.len();
+        let buf_len = buf.bytes_init();
         let (nwritten, mut buf) = self.writer.write_all(buf).await?;
         assert_eq!(nwritten, buf_len);
         buf.clear();
@@ -207,6 +189,8 @@ impl OwnedAsyncWriter for Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+
     use super::*;
 
     #[derive(Default)]
@@ -240,7 +224,7 @@ mod tests {
     #[tokio::test]
     async fn test_buffered_writes_only() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::new(recorder, BytesMutBuffer::<2>::new());
+        let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
         write!(writer, b"a");
         write!(writer, b"b");
         write!(writer, b"c");
@@ -257,7 +241,7 @@ mod tests {
     #[tokio::test]
     async fn test_passthrough_writes_only() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::new(recorder, BytesMutBuffer::<2>::new());
+        let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
         write!(writer, b"abc");
         write!(writer, b"de");
         write!(writer, b"");
@@ -273,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn test_passthrough_write_with_nonempty_buffer() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::new(recorder, BytesMutBuffer::<2>::new());
+        let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
         write!(writer, b"a");
         write!(writer, b"bc");
         write!(writer, b"d");
@@ -289,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_all_borrowed_always_goes_through_buffer() -> std::io::Result<()> {
         let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::new(recorder, BytesMutBuffer::<2>::new());
+        let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
 
         writer.write_buffered_borrowed(b"abc").await?;
         writer.write_buffered_borrowed(b"d").await?;
