@@ -7,8 +7,9 @@ use pageserver_api::{
         TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
-        LocationConfigSecondary, ShardParameters, TenantConfig, TenantConfigRequest,
-        TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
+        EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
+        ShardParameters, TenantConfig, TenantConfigRequest, TenantCreateRequest,
+        TenantShardSplitRequest, TenantShardSplitResponse,
     },
     shard::{ShardStripeSize, TenantShardId},
 };
@@ -124,6 +125,28 @@ enum Command {
     TenantWarmup {
         #[arg(long)]
         tenant_id: TenantId,
+    },
+    /// Uncleanly drop a tenant from the storage controller: this doesn't delete anything from pageservers. Appropriate
+    /// if you e.g. used `tenant-warmup` by mistake on a tenant ID that doesn't really exist, or is in some other region.
+    TenantDrop {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        unclean: bool,
+    },
+    NodeDrop {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        unclean: bool,
+    },
+    TenantSetTimeBasedEviction {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        period: humantime::Duration,
+        #[arg(long)]
+        threshold: humantime::Duration,
     },
 }
 
@@ -673,6 +696,66 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Command::TenantDrop { tenant_id, unclean } => {
+            if !unclean {
+                anyhow::bail!("This command is not a tenant deletion, and uncleanly drops all controller state for the tenant.  If you know what you're doing, add `--unclean` to proceed.")
+            }
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::POST,
+                    format!("debug/v1/tenant/{tenant_id}/drop"),
+                    None,
+                )
+                .await?;
+        }
+        Command::NodeDrop { node_id, unclean } => {
+            if !unclean {
+                anyhow::bail!("This command is not a clean node decommission, and uncleanly drops all controller state for the node, without checking if any tenants still refer to it.  If you know what you're doing, add `--unclean` to proceed.")
+            }
+            storcon_client
+                .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
+                .await?;
+        }
+        Command::TenantSetTimeBasedEviction {
+            tenant_id,
+            period,
+            threshold,
+        } => {
+            vps_client
+                .tenant_config(&TenantConfigRequest {
+                    tenant_id,
+                    config: TenantConfig {
+                        checkpoint_distance: None,
+                        checkpoint_timeout: None,
+                        compaction_target_size: None,
+                        compaction_period: None,
+                        compaction_threshold: None,
+                        compaction_algorithm: None,
+                        gc_horizon: None,
+                        gc_period: None,
+                        image_creation_threshold: None,
+                        pitr_interval: None,
+                        walreceiver_connect_timeout: None,
+                        lagging_wal_timeout: None,
+                        max_lsn_wal_lag: None,
+                        trace_read_requests: None,
+                        eviction_policy: Some(EvictionPolicy::LayerAccessThreshold(
+                            EvictionPolicyLayerAccessThreshold {
+                                period: period.into(),
+                                threshold: threshold.into(),
+                            },
+                        )),
+                        min_resident_size_override: None,
+                        evictions_low_residence_duration_metric_threshold: None,
+                        heatmap_period: None,
+                        lazy_slru_download: None,
+                        timeline_get_throttle: None,
+                        image_layer_creation_check_threshold: None,
+                        switch_aux_file_policy: None,
+                    },
+                })
+                .await?;
         }
     }
 
