@@ -7491,6 +7491,8 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-core",
+ "unicode-bidi",
+ "unicode-normalization",
  "url",
  "uuid",
  "zeroize",
