@@ -27,7 +27,7 @@ impl<T: Display> Drop for WrappedWriteGuard<T> {
         let duration = Instant::now() - self.start;
         if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
             tracing::warn!(
-                "Lock on: {} was held for: {:?}",
+                "Lock on {} was held for {:?}",
                 self.guard.as_ref().unwrap(),
                 duration
             );
