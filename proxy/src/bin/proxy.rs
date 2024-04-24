@@ -428,6 +428,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    maintenance_tasks.spawn(async {
+        loop {
+            info!("I am writing really a lot of logs here!!!!!");
+        }
+    });
+
     let maintenance = loop {
         // get one complete task
         match futures::future::select(
