@@ -427,12 +427,18 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-
-    maintenance_tasks.spawn(async {
-        loop {
-            info!("I am writing really a lot of logs here!!!!!");
-        }
-    });
+    tokio::spawn(tokio::time::timeout(
+        args.scram_protocol_timeout,
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                for _ in 0..3000 {
+                    info!("I am writing really a lot of logs here!!!!!");
+                }
+            }
+        },
+    ));
 
     let maintenance = loop {
         // get one complete task
