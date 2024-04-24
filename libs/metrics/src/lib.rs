@@ -256,6 +256,8 @@ fn update_rusage_metrics() {
     DISK_IO_BYTES
         .with_label_values(&["write"])
         .set(rusage_stats.ru_oublock * BYTES_IN_BLOCK);
+
+    // On macOS, the unit of maxrss is bytes; on Linux, it's kilobytes. https://stackoverflow.com/a/59915669
     #[cfg(target_os = "macos")]
     {
         MAXRSS_KB.set(rusage_stats.ru_maxrss / 1024);
