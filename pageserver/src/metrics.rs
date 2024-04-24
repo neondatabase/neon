@@ -106,12 +106,7 @@ pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
 
 // Metrics collected on operations on the storage repository.
 #[derive(
-    Clone,
-    Copy,
-    enum_map::Enum,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    strum_macros::IntoStaticStr,
+    Clone, Copy, enum_map::Enum, strum_macros::EnumString, strum_macros::Display, IntoStaticStr,
 )]
 pub(crate) enum GetKind {
     Singular,
