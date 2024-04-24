@@ -2233,10 +2233,19 @@ class NeonStorageController(MetricsGetter):
     def reconcile_until_idle(self, timeout_secs=30):
         start_at = time.time()
         n = 1
+        delay_sec = 0.5
+        delay_max = 10
         while n > 0:
             n = self.reconcile_all()
             if time.time() - start_at > timeout_secs:
                 raise RuntimeError("Timeout in reconcile_until_idle")
+            elif n > 0:
+                # Don't call again right away: if we're waiting for many reconciles that
+                # are blocked on the concurrency limit, it slows things down to call
+                # reconcile_all frequently.
+                time.sleep(delay_sec)
+                delay_sec *= 2
+                delay_sec = min(delay_sec, delay_max)
 
     def consistency_check(self):
         """
