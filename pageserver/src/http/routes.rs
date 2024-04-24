@@ -1918,14 +1918,15 @@ async fn timeline_collect_keyspace(
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
         let at_lsn = at_lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
-        let (dense_ks, sparse_ks) = timeline
+        let (dense_ks, _) = timeline
             .collect_keyspace(at_lsn, &ctx)
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
-        let mut keys = dense_ks;
-        keys.merge(&sparse_ks);
 
-        let res = pageserver_api::models::partitioning::Partitioning { keys, at_lsn };
+        // This API is currently used by pagebench. Pagebench will iterate all keys within the keyspace.
+        // Therefore, we only return dense keyspace for now.
+
+        let res = pageserver_api::models::partitioning::Partitioning { keys: dense_ks, at_lsn };
 
         json_response(StatusCode::OK, res)
     }
