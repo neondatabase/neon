@@ -597,14 +597,17 @@ impl InMemoryLayer {
         }
     }
 
-    /// Write this frozen in-memory layer to disk.
+    /// Write this frozen in-memory layer to disk. If `key_range` is set, the delta
+    /// layer will only contain the key range the user specifies, and may return `None`
+    /// if there are no matching keys.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
     pub(crate) async fn write_to_disk(
         &self,
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> Result<ResidentLayer> {
+        key_range: Option<Range<Key>>,
+    ) -> Result<Option<ResidentLayer>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -617,6 +620,26 @@ impl InMemoryLayer {
         let inner = self.inner.read().await;
 
         let end_lsn = *self.end_lsn.get().unwrap();
+
+        // Sort the keys because delta layer writer expects them sorted.
+        //
+        // NOTE: this sort can take up significant time if the layer has millions of
+        //       keys. To speed up all the comparisons we convert the key to i128 and
+        //       keep the value as a reference.
+        let mut keys: Vec<_> = if let Some(key_range) = key_range {
+            inner
+                .index
+                .iter()
+                .filter(|(k, _)| key_range.contains(k))
+                .map(|(k, m)| (k.to_i128(), m))
+                .collect()
+        } else {
+            inner.index.iter().map(|(k, m)| (k.to_i128(), m)).collect()
+        };
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        keys.sort_unstable_by_key(|k| k.0);
 
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
@@ -649,6 +672,6 @@ impl InMemoryLayer {
 
         // MAX is used here because we identify L0 layers by full key range
         let delta_layer = delta_layer_writer.finish(Key::MAX, timeline).await?;
-        Ok(delta_layer)
+        Ok(Some(delta_layer))
     }
 }

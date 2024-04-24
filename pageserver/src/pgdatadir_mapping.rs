@@ -730,11 +730,13 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
+    ///
+    /// The return value is (dense keyspace, sparse keyspace).
     pub(crate) async fn collect_keyspace(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<KeySpace, CollectKeySpaceError> {
+    ) -> Result<(KeySpace, KeySpace), CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -806,7 +808,11 @@ impl Timeline {
         if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
             result.add_key(AUX_FILES_KEY);
         }
-        Ok(result.to_keyspace())
+
+        Ok((
+            result.to_keyspace(),
+            /* AUX sparse key space */ KeySpace::single(Key::metadata_aux_key_range()),
+        ))
     }
 
     /// Get cached size of relation if it not updated after specified LSN
