@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use dashmap::DashSet;
@@ -13,6 +14,7 @@ use redis::{
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
@@ -111,15 +113,21 @@ impl EndpointsCache {
     pub async fn do_read(
         &self,
         mut con: ConnectionWithCredentialsProvider,
+        cancellation_token: CancellationToken,
     ) -> anyhow::Result<Infallible> {
         let mut last_id = "0-0".to_string();
         loop {
-            self.ready.store(false, Ordering::Release);
             if let Err(e) = con.connect().await {
                 tracing::error!("error connecting to redis: {:?}", e);
+                self.ready.store(false, Ordering::Release);
             }
             if let Err(e) = self.read_from_stream(&mut con, &mut last_id).await {
                 tracing::error!("error reading from redis: {:?}", e);
+                self.ready.store(false, Ordering::Release);
+            }
+            if cancellation_token.is_cancelled() {
+                tokio::time::sleep(Duration::from_secs(60 * 60 * 24 * 7)).await;
+                // 1 week.
             }
             tokio::time::sleep(self.config.retry_interval).await;
         }
