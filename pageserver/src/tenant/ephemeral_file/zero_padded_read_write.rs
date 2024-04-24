@@ -21,29 +21,35 @@ mod zero_padded_buffer;
 use crate::{
     page_cache::PAGE_SZ,
     virtual_file::{
-        owned_buffers_io::{self, write::Buffer},
-        VirtualFile,
+        owned_buffers_io::{
+            self,
+            write::{Buffer, OwnedAsyncWriter},
+        },
     },
 };
 
+const TAIL_SZ: usize = PAGE_SZ;
+
 /// See module-level comment.
-pub struct RW {
+pub struct RW<W: OwnedAsyncWriter> {
     buffered_writer: owned_buffers_io::write::BufferedWriter<
-        zero_padded_buffer::Buf<{ Self::TAIL_SZ }>,
-        owned_buffers_io::util::size_tracking_writer::Writer<VirtualFile>,
+        zero_padded_buffer::Buf<TAIL_SZ>,
+        owned_buffers_io::util::size_tracking_writer::Writer<W>,
     >,
 }
 
-pub enum ReadResult<'a> {
-    NeedsReadFromVirtualFile { virtual_file: &'a VirtualFile },
+pub enum ReadResult<'a, W> {
+    NeedsReadFromWriter { writer: &'a W },
     ServedFromZeroPaddedMutableTail { buffer: &'a [u8; PAGE_SZ] },
 }
 
-impl RW {
-    const TAIL_SZ: usize = PAGE_SZ;
-
-    pub fn new(file: VirtualFile) -> Self {
-        let bytes_flushed_tracker = owned_buffers_io::util::size_tracking_writer::Writer::new(file);
+impl<W> RW<W>
+where
+    W: OwnedAsyncWriter,
+{
+    pub fn new(writer: W) -> Self {
+        let bytes_flushed_tracker =
+            owned_buffers_io::util::size_tracking_writer::Writer::new(writer);
         let buffered_writer = owned_buffers_io::write::BufferedWriter::new(
             bytes_flushed_tracker,
             zero_padded_buffer::Buf::default(),
@@ -51,7 +57,7 @@ impl RW {
         Self { buffered_writer }
     }
 
-    pub(crate) fn as_inner_virtual_file(&self) -> &VirtualFile {
+    pub(crate) fn as_writer(&self) -> &W {
         self.buffered_writer.as_inner().as_inner()
     }
 
@@ -61,15 +67,13 @@ impl RW {
 
     pub fn bytes_written(&self) -> u64 {
         let flushed_offset = self.buffered_writer.as_inner().bytes_written();
-        let buffer: &zero_padded_buffer::Buf<{ Self::TAIL_SZ }> =
-            self.buffered_writer.inspect_buffer();
+        let buffer: &zero_padded_buffer::Buf<{ TAIL_SZ }> = self.buffered_writer.inspect_buffer();
         flushed_offset + u64::try_from(buffer.pending()).unwrap()
     }
 
-    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<ReadResult, std::io::Error> {
+    pub(crate) async fn read_blk(&self, blknum: u32) -> Result<ReadResult<'_, W>, std::io::Error> {
         let flushed_offset = self.buffered_writer.as_inner().bytes_written();
-        let buffer: &zero_padded_buffer::Buf<{ Self::TAIL_SZ }> =
-            self.buffered_writer.inspect_buffer();
+        let buffer: &zero_padded_buffer::Buf<{ TAIL_SZ }> = self.buffered_writer.inspect_buffer();
         let buffered_offset = flushed_offset + u64::try_from(buffer.pending()).unwrap();
         let read_offset = (blknum as u64) * (PAGE_SZ as u64);
 
@@ -91,7 +95,7 @@ impl RW {
 
         // assertions for the `if-else` below
         assert_eq!(
-            flushed_offset % (Self::TAIL_SZ as u64), 0,
+            flushed_offset % (TAIL_SZ as u64), 0,
             "we only use write_buffered_borrowed to write to the buffered writer, so it's guaranteed that flushes happen buffer.cap()-sized chunks"
         );
         assert_eq!(
@@ -101,12 +105,9 @@ impl RW {
         );
 
         if read_offset < flushed_offset {
-            assert!(
-                read_offset + (PAGE_SZ as u64) <= flushed_offset,
-                "we would read past the end of VirtualFile"
-            );
-            Ok(ReadResult::NeedsReadFromVirtualFile {
-                virtual_file: self.as_inner_virtual_file(),
+            assert!(read_offset + (PAGE_SZ as u64) <= flushed_offset);
+            Ok(ReadResult::NeedsReadFromWriter {
+                writer: self.as_writer(),
             })
         } else {
             let read_offset_in_buffer = read_offset

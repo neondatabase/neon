@@ -361,6 +361,8 @@ pub enum TaskKind {
 
     DebugTool,
 
+    Todo,
+
     #[cfg(test)]
     UnitTest,
 }
