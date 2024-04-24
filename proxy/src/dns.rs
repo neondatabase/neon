@@ -5,7 +5,10 @@ use std::{
     sync::Arc,
 };
 
+use aws_sdk_iam::error::BoxError;
 use hickory_resolver::{error::ResolveError, proto::rr::RData};
+use hyper::client::connect::dns::Name;
+use reqwest::dns::Addrs;
 use tokio::time::Instant;
 use tracing::trace;
 
@@ -61,8 +64,25 @@ impl Dns {
     }
 }
 
+impl hyper::service::Service<Name> for Dns {
+    type Response = Addrs;
+    type Error = BoxError;
+    type Future = reqwest::dns::Resolving;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Name) -> Self::Future {
+        reqwest::dns::Resolve::resolve(self, req)
+    }
+}
+
 impl reqwest::dns::Resolve for Dns {
-    fn resolve(&self, name: hyper::client::connect::dns::Name) -> reqwest::dns::Resolving {
+    fn resolve(&self, name: Name) -> reqwest::dns::Resolving {
         let this = self.clone();
         Box::pin(async move {
             match this.resolve(name.as_str()).await {

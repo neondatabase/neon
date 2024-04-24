@@ -595,7 +595,7 @@ dependencies = [
  "http 0.2.9",
  "http-body 0.4.5",
  "hyper 0.14.26",
- "hyper-rustls",
+ "hyper-rustls 0.24.0",
  "once_cell",
  "pin-project-lite",
  "pin-utils",
@@ -2583,6 +2583,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyper-rustls"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "399c78f9338483cb7e630c8474b07268983c6bd5acee012e4211f9f7bb21b070"
+dependencies = [
+ "futures-util",
+ "http 0.2.9",
+ "hyper 0.14.26",
+ "log",
+ "rustls 0.22.4",
+ "rustls-native-certs 0.7.0",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.25.0",
+]
+
+[[package]]
 name = "hyper-timeout"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4387,6 +4404,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-iam",
  "aws-sigv4",
+ "aws-smithy-runtime",
  "aws-types",
  "base64 0.13.1",
  "bstr",
@@ -4412,6 +4430,7 @@ dependencies = [
  "humantime",
  "hyper 0.14.26",
  "hyper 1.2.0",
+ "hyper-rustls 0.25.0",
  "hyper-tungstenite",
  "hyper-util",
  "ipnet",
@@ -4787,7 +4806,7 @@ dependencies = [
  "http 0.2.9",
  "http-body 0.4.5",
  "hyper 0.14.26",
- "hyper-rustls",
+ "hyper-rustls 0.24.0",
  "hyper-tls",
  "ipnet",
  "js-sys",
