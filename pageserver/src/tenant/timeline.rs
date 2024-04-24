@@ -4082,7 +4082,7 @@ impl Timeline {
             let img_range = start..partition.ranges.last().unwrap().end;
 
             if partition.overlaps(&Key::metadata_key_range()) {
-                // The next patch will correctly create image layers for metadata keys, and it would be a
+                // TODO(chi): The next patch will correctly create image layers for metadata keys, and it would be a
                 // rather big change. Keep this patch small for now.
                 match mode {
                     ImageLayerCreationMode::Force | ImageLayerCreationMode::Try => {

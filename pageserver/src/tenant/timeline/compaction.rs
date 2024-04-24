@@ -779,7 +779,7 @@ impl Timeline {
         }
 
         let (dense_ks, _sparse_ks) = self.collect_keyspace(end_lsn, ctx).await?;
-        // ignore sparse_keyspace for now, compact it in the future.
+        // TODO(chi): ignore sparse_keyspace for now, compact it in the future.
         let mut adaptor = TimelineAdaptor::new(self, (end_lsn, dense_ks));
 
         pageserver_compaction::compact_tiered::compact_tiered(
