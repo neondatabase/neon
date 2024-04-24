@@ -73,6 +73,24 @@ impl RW {
         let buffered_offset = flushed_offset + u64::try_from(buffer.pending()).unwrap();
         let read_offset = (blknum as u64) * (PAGE_SZ as u64);
 
+        // The trailing page ("block") might only be partially filled,
+        // yet the blob_io code relies on us to return a full PAGE_SZed slice anyway.
+        // Moreover, it has to be zero-padded, because when we still had
+        // a write-back page cache, it provided pre-zeroed pages, and blob_io came to rely on it.
+        // DeltaLayer probably has the same issue, not sure why it needs no special treatment.
+        // => check here that the read doesn't go beyond this potentially trailing
+        // => the zero-padding is done in the `else` branch below
+        let blocks_written = if buffered_offset % (PAGE_SZ as u64) == 0 {
+            buffered_offset / (PAGE_SZ as u64)
+        } else {
+            (buffered_offset / (PAGE_SZ as u64)) + 1
+        };
+        if (blknum as u64) >= blocks_written {
+            // TODO: treat this as error. Pre-existing issue before this patch.
+            panic!("return IO error: read past end of file: read=0x{read_offset:x} buffered=0x{buffered_offset:x} flushed=0x{flushed_offset}");
+        }
+
+        // assertions for the `if-else` below
         assert_eq!(
             flushed_offset % (Self::TAIL_SZ as u64), 0,
             "we only use write_buffered_borrowed to write to the buffered writer, so it's guaranteed that flushes happen buffer.cap()-sized chunks"
@@ -86,27 +104,12 @@ impl RW {
         if read_offset < flushed_offset {
             assert!(
                 read_offset + (PAGE_SZ as u64) <= flushed_offset,
-                "this impl can't deal with pages spread across flushed & buffered part"
+                "we would read past the end of VirtualFile"
             );
             Ok(ReadResult::NeedsReadFromVirtualFile {
                 virtual_file: self.as_inner_virtual_file(),
             })
         } else {
-            let read_until_offset = read_offset + (PAGE_SZ as u64);
-            if !(0..buffered_offset).contains(&read_until_offset) {
-                // The blob_io code relies on the reader allowing reads past
-                // the end of what was written, up to end of the current PAGE_SZ chunk.
-                // This is a relict of the past where we would get a pre-zeroed page from the page cache.
-                //
-                // DeltaLayer probably has the same issue, not sure why it needs no special treatment.
-                let nbytes_past_end = read_until_offset.checked_sub(buffered_offset).unwrap();
-                if nbytes_past_end >= (PAGE_SZ as u64) {
-                    // TODO: treat this as error. Pre-existing issue before this patch.
-                    panic!(
-                        "return IO error: read past end of file: read=0x{read_offset:x} buffered=0x{buffered_offset:x} flushed=0x{flushed_offset}"
-                    )
-                }
-            }
             let read_offset_in_buffer = read_offset
                 .checked_sub(flushed_offset)
                 .expect("would have taken `if` branch instead of this one");
