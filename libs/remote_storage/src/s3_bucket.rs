@@ -56,14 +56,13 @@ pub(super) mod metrics;
 use self::metrics::AttemptOutcome;
 pub(super) use self::metrics::RequestKind;
 
-const UPLOAD_STORAGE_CLASS: Option<StorageClass> = Some(StorageClass::IntelligentTiering);
-
 /// AWS S3 storage.
 pub struct S3Bucket {
     client: Client,
     bucket_name: String,
     prefix_in_bucket: Option<String>,
     max_keys_per_list_response: Option<i32>,
+    upload_storage_class: Option<StorageClass>,
     concurrency_limiter: ConcurrencyLimiter,
     // Per-request timeout. Accessible for tests.
     pub timeout: Duration,
@@ -156,6 +155,7 @@ impl S3Bucket {
             max_keys_per_list_response: aws_config.max_keys_per_list_response,
             prefix_in_bucket,
             concurrency_limiter: ConcurrencyLimiter::new(aws_config.concurrency_limit.get()),
+            upload_storage_class: aws_config.upload_storage_class.clone(),
             timeout,
         })
     }
@@ -584,7 +584,7 @@ impl RemoteStorage for S3Bucket {
             .bucket(self.bucket_name.clone())
             .key(self.relative_path_to_s3_object(to))
             .set_metadata(metadata.map(|m| m.0))
-            .set_storage_class(UPLOAD_STORAGE_CLASS)
+            .set_storage_class(self.upload_storage_class.clone())
             .content_length(from_size_bytes.try_into()?)
             .body(bytes_stream)
             .send();
@@ -636,7 +636,7 @@ impl RemoteStorage for S3Bucket {
             .copy_object()
             .bucket(self.bucket_name.clone())
             .key(self.relative_path_to_s3_object(to))
-            .set_storage_class(UPLOAD_STORAGE_CLASS)
+            .set_storage_class(self.upload_storage_class.clone())
             .copy_source(copy_source)
             .send();
 
@@ -894,7 +894,7 @@ impl RemoteStorage for S3Bucket {
                                     .copy_object()
                                     .bucket(self.bucket_name.clone())
                                     .key(key)
-                                    .set_storage_class(UPLOAD_STORAGE_CLASS)
+                                    .set_storage_class(self.upload_storage_class.clone())
                                     .copy_source(&source_id)
                                     .send();
 
@@ -1078,6 +1078,7 @@ mod tests {
                 endpoint: None,
                 concurrency_limit: NonZeroUsize::new(100).unwrap(),
                 max_keys_per_list_response: Some(5),
+                upload_storage_class: None,
             };
             let storage =
                 S3Bucket::new(&config, std::time::Duration::ZERO).expect("remote storage init");
