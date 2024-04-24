@@ -433,7 +433,7 @@ async fn main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                for _ in 0..3000 {
+                for _ in 0..12000 {
                     info!("I am writing really a lot of logs here!!!!!");
                 }
             }
