@@ -916,7 +916,7 @@ mod tests {
         assert_eq!(lhs, rhs);
     }
 
-    #[deprecated]
+    #[cfg(test)]
     fn brute_force_range_search(
         layer_map: &LayerMap,
         key_range: Range<Key>,
