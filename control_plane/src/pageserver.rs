@@ -93,6 +93,7 @@ impl PageServerNode {
             virtual_file_io_engine,
             get_vectored_impl,
             get_impl,
+            validate_vectored_get,
         } = &self.conf;
 
         let id = format!("id={}", id);
@@ -117,6 +118,11 @@ impl PageServerNode {
         } else {
             String::new()
         };
+        let validate_vectored_get = if let Some(validate_vectored_get) = validate_vectored_get {
+            format!("validate_vectored_get={validate_vectored_get}")
+        } else {
+            String::new()
+        };
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
@@ -131,6 +137,7 @@ impl PageServerNode {
             virtual_file_io_engine,
             get_vectored_impl,
             get_impl,
+            validate_vectored_get,
         ];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
