@@ -1737,6 +1737,15 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
+    #[allow(dead_code)]
+    pub(crate) fn get_switch_to_aux_file_v2(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .switch_to_aux_file_v2
+            .unwrap_or(self.conf.default_tenant_conf.switch_to_aux_file_v2)
+    }
+
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf

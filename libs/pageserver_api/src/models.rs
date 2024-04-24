@@ -303,6 +303,7 @@ pub struct TenantConfig {
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
+    pub switch_to_aux_file_v2: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
