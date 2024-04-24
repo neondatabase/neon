@@ -862,7 +862,7 @@ impl TenantShard {
             active_nodes_dirty || dirty_observed || self.pending_compute_notification;
 
         if !do_reconcile {
-            tracing::info!("Not dirty, no reconciliation needed.");
+            tracing::debug!("Not dirty, no reconciliation needed.");
             return None;
         }
 

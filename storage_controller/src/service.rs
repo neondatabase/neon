@@ -3978,7 +3978,7 @@ impl Service {
                 // TODO: in the background, we should balance work back onto this pageserver
             }
             AvailabilityTransition::Unchanged => {
-                tracing::info!("Node {} no change during config", node_id);
+                tracing::debug!("Node {} no change during config", node_id);
             }
         }
 
@@ -4250,6 +4250,13 @@ impl Service {
 
         let waiter_count = waiters.len();
         self.await_waiters(waiters, RECONCILE_TIMEOUT).await?;
+
+        tracing::info!(
+            "{} reconciles in reconcile_all, {} waiters",
+            reconciles_spawned,
+            waiter_count
+        );
+
         Ok(waiter_count)
     }
 
