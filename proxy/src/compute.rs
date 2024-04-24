@@ -11,12 +11,7 @@ use crate::{
 use futures::TryFutureExt;
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use std::{
-    io,
-    net::{IpAddr, SocketAddr},
-    str::FromStr,
-    time::Duration,
-};
+use std::{io, net::SocketAddr, time::Duration};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::{
@@ -187,14 +182,10 @@ impl ConnCfg {
 
         // wrap TcpStream::connect with timeout
         let connect_with_timeout = |host, port| async move {
-            let addrs = if let Ok(ip) = IpAddr::from_str(host) {
-                vec![ip]
-            } else {
-                dns.resolve(host)
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-                    .collect()
-            };
+            let addrs = dns
+                .resolve(host)
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
             let timeout = timeout / addrs.len() as u32;
 
@@ -318,7 +309,8 @@ impl ConnCfg {
 
         client.set_socket_config(SocketConfig {
             host: tokio_postgres::config::Host::Tcp(host.to_owned()),
-            socket_addr,
+            port: socket_addr.port(),
+            socket_addr: tokio_postgres::SocketAddr::Tcp(socket_addr),
             connect_timeout: None,
             keepalive: None,
         });

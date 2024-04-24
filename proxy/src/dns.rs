@@ -1,11 +1,11 @@
 //! Async dns resolvers
 
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
 
-use hickory_resolver::error::ResolveError;
+use hickory_resolver::{error::ResolveError, proto::rr::RData};
 use tokio::time::Instant;
 use tracing::trace;
 
@@ -30,15 +30,34 @@ impl Dns {
         Self { resolver }
     }
 
-    pub async fn resolve(&self, name: &str) -> Result<impl Iterator<Item = IpAddr>, ResolveError> {
+    pub async fn resolve(&self, name: &str) -> Result<Vec<IpAddr>, ResolveError> {
         let start = Instant::now();
+
+        // try to parse the host as a regular IP address first
+        if let Ok(addr) = name.parse::<Ipv4Addr>() {
+            return Ok(vec![IpAddr::V4(addr)]);
+        }
+
+        if let Ok(addr) = name.parse::<Ipv6Addr>() {
+            return Ok(vec![IpAddr::V6(addr)]);
+        }
 
         let res = self.resolver.lookup_ip(name).await;
 
         let resolve_duration = start.elapsed();
         trace!(duration = ?resolve_duration, addr = %name, "resolve host complete");
 
-        Ok(res?.into_iter())
+        Ok(res?
+            .as_lookup()
+            .records()
+            .iter()
+            .filter_map(|r| r.data())
+            .filter_map(|rdata| match rdata {
+                RData::A(ip) => Some(IpAddr::from(ip.0)),
+                RData::AAAA(ip) => Some(IpAddr::from(ip.0)),
+                _ => None,
+            })
+            .collect())
     }
 }
 
@@ -47,7 +66,9 @@ impl reqwest::dns::Resolve for Dns {
         let this = self.clone();
         Box::pin(async move {
             match this.resolve(name.as_str()).await {
-                Ok(iter) => Ok(Box::new(iter.map(|ip| SocketAddr::new(ip, 0))) as Box<_>),
+                Ok(iter) => {
+                    Ok(Box::new(iter.into_iter().map(|ip| SocketAddr::new(ip, 0))) as Box<_>)
+                }
                 Err(e) => Err(e.into()),
             }
         })
