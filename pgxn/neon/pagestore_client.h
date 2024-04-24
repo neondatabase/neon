@@ -299,6 +299,13 @@ extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
+extern bool start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
+extern bool is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum);
+extern bool stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum);
+extern void resume_unlogged_build(void);
+
+
+
 /* functions for local file cache */
 #if PG_MAJORVERSION_NUM < 16
 extern void lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,

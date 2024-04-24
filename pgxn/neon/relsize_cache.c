@@ -39,7 +39,8 @@ typedef struct
 typedef struct
 {
 	RelTag		tag;
-	BlockNumber size;
+	BlockNumber size : 31;
+	BlockNumber unlogged : 1;
 	dlist_node	lru_node;		/* LRU list node */
 } RelSizeEntry;
 
@@ -156,6 +157,7 @@ set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 		entry->size = size;
 		if (!found)
 		{
+			entry->unlogged = false;
 			if (++relsize_ctl->size == relsize_hash_size)
 			{
 				/*
@@ -191,10 +193,10 @@ update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
 		entry = hash_search(relsize_hash, &tag, HASH_ENTER, &found);
-		if (!found || entry->size < size)
+		if (!found) {
+			entry->unlogged = false;
 			entry->size = size;
-		if (!found)
-		{
+
 			if (++relsize_ctl->size == relsize_hash_size)
 			{
 				RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
@@ -204,6 +206,9 @@ update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 		}
 		else
 		{
+			if (entry->size < size)
+				entry->size = size;
+
 			dlist_delete(&entry->lru_node);
 		}
 		relsize_ctl->writes += 1;
@@ -231,6 +236,128 @@ forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
 		LWLockRelease(relsize_lock);
 	}
 }
+
+bool
+start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
+{
+	bool start = false;
+	if (relsize_hash_size > 0)
+	{
+		RelTag		tag;
+		RelSizeEntry *entry;
+		bool		found;
+
+		tag.rinfo = rinfo;
+		tag.forknum = forknum;
+		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
+		entry = hash_search(relsize_hash, &tag, HASH_ENTER, &found);
+		if (!found) {
+			entry->size = size;
+			start = true;
+
+			if (++relsize_ctl->size == relsize_hash_size)
+			{
+				RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
+				hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
+				relsize_ctl->size -= 1;
+			}
+		}
+		else
+		{
+			start = !entry->unlogged;
+
+			if (entry->size < size)
+				entry->size = size;
+
+			dlist_delete(&entry->lru_node);
+		}
+		entry->unlogged = true;
+		relsize_ctl->writes += 1;
+		dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+		if (!start)
+			LWLockRelease(relsize_lock);
+		else
+			elog(LOG, "Start unlogged build for %u/%u/%u.%u",
+				 RelFileInfoFmt(rinfo), forknum);
+
+	}
+	return start;
+}
+
+bool
+is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
+{
+	bool		unlogged = false;
+
+	if (relsize_hash_size > 0)
+	{
+		RelTag		tag;
+		RelSizeEntry *entry;
+
+		tag.rinfo = rinfo;
+		tag.forknum = forknum;
+		LWLockAcquire(relsize_lock, LW_SHARED);
+		entry = hash_search(relsize_hash, &tag, HASH_FIND, NULL);
+		if (entry != NULL)
+		{
+			unlogged = entry->unlogged;
+			relsize_ctl->hits += 1;
+			/* Move entry to the LRU list tail */
+			dlist_delete(&entry->lru_node);
+			dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+		}
+		else
+		{
+			relsize_ctl->misses += 1;
+		}
+		if (!unlogged)
+			LWLockRelease(relsize_lock);
+	}
+	return unlogged;
+}
+
+bool
+stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
+{
+	bool		unlogged = false;
+
+	if (relsize_hash_size > 0)
+	{
+		RelTag		tag;
+		RelSizeEntry *entry;
+
+		tag.rinfo = rinfo;
+		tag.forknum = forknum;
+		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
+		entry = hash_search(relsize_hash, &tag, HASH_FIND, NULL);
+		if (entry != NULL)
+		{
+			unlogged = entry->unlogged;
+			if (unlogged)
+				elog(LOG, "Stop unlogged build for %u/%u/%u.%u",
+					 RelFileInfoFmt(rinfo), forknum);
+			entry->unlogged = false;
+			relsize_ctl->hits += 1;
+			/* Move entry to the LRU list tail */
+			dlist_delete(&entry->lru_node);
+			dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+			/* use isRedo == true, so that we drop it immediately */
+		}
+		else
+		{
+			relsize_ctl->misses += 1;
+		}
+		LWLockRelease(relsize_lock);
+	}
+	return unlogged;
+}
+
+void
+resume_unlogged_build(void)
+{
+	LWLockRelease(relsize_lock);
+}
+
 
 void
 relsize_hash_init(void)
