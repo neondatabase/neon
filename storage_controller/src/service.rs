@@ -4266,7 +4266,11 @@ impl Service {
             }
 
             // Skip checking if this shard is already enqueued for reconciliation
-            if shard.delayed_reconcile {
+            if shard.delayed_reconcile && self.reconciler_concurrency.available_permits() == 0 {
+                // If there is something delayed, then return a nonzero count so that
+                // callers like reconcile_all_now do not incorrectly get the impression
+                // that the system is in a quiescent state.
+                reconciles_spawned = std::cmp::max(1, reconciles_spawned);
                 continue;
             }
 
@@ -4451,7 +4455,7 @@ impl Service {
             waiter_count
         );
 
-        Ok(waiter_count)
+        Ok(std::cmp::max(waiter_count, reconciles_spawned))
     }
 
     pub async fn shutdown(&self) {
