@@ -3127,7 +3127,11 @@ impl Timeline {
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
 
-            if unmapped_keyspace.start().is_some() {
+            // Do not descent any further if the last layer we visited
+            // completed all keys in the keyspace it inspected. This is not
+            // required for correctness, but avoids visiting extra layers
+            // which turns out to be a perf bottleneck in some cases.
+            if !unmapped_keyspace.is_empty() {
                 let guard = timeline.layers.read().await;
                 let layers = guard.layer_map();
 
