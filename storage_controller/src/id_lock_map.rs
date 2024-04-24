@@ -24,7 +24,7 @@ impl<T: Display> WrappedWriteGuard<T> {
 
 impl<T: Display> Drop for WrappedWriteGuard<T> {
     fn drop(&mut self) {
-        let duration = Instant::now() - self.start;
+        let duration = self.start.elapsed();
         if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
             tracing::warn!(
                 "Lock on {} was held for {:?}",
@@ -106,11 +106,12 @@ pub async fn trace_exclusive_lock<
     let start = Instant::now();
     let guard = op_locks.exclusive(key.clone(), operation.clone()).await;
 
-    let duration = start - Instant::now();
+    let duration = start.elapsed();
     if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
         tracing::warn!(
-            "Operation {} has waited {:?} for exclusive lock",
+            "Operation {} on key {} has waited {:?} for exclusive lock",
             operation,
+            key,
             duration
         );
     }
@@ -118,19 +119,23 @@ pub async fn trace_exclusive_lock<
     guard
 }
 
-pub async fn trace_shared_lock<T: Display + Eq + PartialEq + std::hash::Hash, I: Display>(
+pub async fn trace_shared_lock<
+    T: Clone + Display + Eq + PartialEq + std::hash::Hash,
+    I: Display,
+>(
     op_locks: &IdLockMap<T, I>,
     key: T,
     operation: I,
 ) -> tokio::sync::OwnedRwLockReadGuard<Option<I>> {
     let start = Instant::now();
-    let guard = op_locks.shared(key).await;
+    let guard = op_locks.shared(key.clone()).await;
 
-    let duration = start - Instant::now();
+    let duration = start.elapsed();
     if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
         tracing::warn!(
-            "Operation {} has waited {:?} for shared lock",
+            "Operation {} on key {} has waited {:?} for shared lock",
             operation,
+            key,
             duration
         );
     }
