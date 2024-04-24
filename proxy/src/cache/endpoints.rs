@@ -117,7 +117,6 @@ impl EndpointsCache {
             self.ready.store(false, Ordering::Release);
             if let Err(e) = con.connect().await {
                 tracing::error!("error connecting to redis: {:?}", e);
-                continue;
             }
             if let Err(e) = self.read_from_stream(&mut con, &mut last_id).await {
                 tracing::error!("error reading from redis: {:?}", e);
