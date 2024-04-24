@@ -126,6 +126,7 @@ impl EndpointsCache {
                 self.ready.store(false, Ordering::Release);
             }
             if cancellation_token.is_cancelled() {
+                info!("cancellation token is cancelled, exiting");
                 tokio::time::sleep(Duration::from_secs(60 * 60 * 24 * 7)).await;
                 // 1 week.
             }
