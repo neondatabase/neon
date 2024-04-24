@@ -2,14 +2,13 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
-    fmt::Display,
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use crate::{
-    id_lock_map::{IdLockMap, WrappedWriteGuard},
+    id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, WrappedWriteGuard},
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::ReconcileError,
     scheduler::ScheduleContext,
@@ -72,9 +71,6 @@ use crate::{
     },
 };
 
-// For acquiring lock on operations
-const SHORT_LOCK_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(3);
-
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -102,6 +98,9 @@ enum TenantOperations {
     Delete,
     UpdatePolicy,
     ShardSplit,
+    SecondaryDownload,
+    TimelineCreate,
+    TimelineDelete,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -279,30 +278,6 @@ struct ShardUpdate {
 
     /// If this is None, generation is not updated.
     generation: Option<Generation>,
-}
-
-async fn request_lock_with_timeout<
-    T: Clone + Display + Eq + PartialEq + std::hash::Hash,
-    I: Display + Clone,
->(
-    op_locks: &IdLockMap<T, I>,
-    key: T,
-    operation: I,
-) -> Result<WrappedWriteGuard<I>, ApiError> {
-    tokio::time::timeout(
-        SHORT_LOCK_ACQUISITION_TIMEOUT,
-        op_locks.exclusive(key.clone(), operation.clone()),
-    )
-    .await
-    .map_err(|_| {
-        ApiError::Timeout(
-            format!(
-                "Operation {} cannot grab an exclusive lock on {}",
-                operation, key
-            )
-            .into(),
-        )
-    })
 }
 
 impl Service {
@@ -1572,12 +1547,12 @@ impl Service {
         let tenant_id = create_req.new_tenant_id.tenant_id;
 
         // Exclude any concurrent attempts to create/access the same tenant ID
-        let _tenant_lock = request_lock_with_timeout(
+        let _tenant_lock = trace_exclusive_lock(
             &self.tenant_op_locks,
             create_req.new_tenant_id.tenant_id,
             TenantOperations::Create,
         )
-        .await?;
+        .await;
         let (response, waiters) = self.do_tenant_create(create_req).await?;
 
         if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
@@ -1916,12 +1891,12 @@ impl Service {
         req: TenantLocationConfigRequest,
     ) -> Result<TenantLocationConfigResponse, ApiError> {
         // We require an exclusive lock, because we are updating both persistent and in-memory state
-        let _tenant_lock = request_lock_with_timeout(
+        let _tenant_lock = trace_exclusive_lock(
             &self.tenant_op_locks,
             tenant_shard_id.tenant_id,
             TenantOperations::LocationConfig,
         )
-        .await?;
+        .await;
 
         if !tenant_shard_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
@@ -2039,12 +2014,12 @@ impl Service {
 
     pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
-        let _tenant_lock = request_lock_with_timeout(
+        let _tenant_lock = trace_exclusive_lock(
             &self.tenant_op_locks,
             req.tenant_id,
             TenantOperations::ConfigSet,
         )
-        .await?;
+        .await;
 
         let tenant_id = req.tenant_id;
         let config = req.config;
@@ -2133,12 +2108,12 @@ impl Service {
         timestamp: Cow<'_, str>,
         done_if_after: Cow<'_, str>,
     ) -> Result<(), ApiError> {
-        let _tenant_lock = request_lock_with_timeout(
+        let _tenant_lock = trace_exclusive_lock(
             &self.tenant_op_locks,
             tenant_id,
             TenantOperations::TimeTravelRemoteStorage,
         )
-        .await?;
+        .await;
 
         let node = {
             let locked = self.inner.read().unwrap();
@@ -2229,7 +2204,12 @@ impl Service {
         tenant_id: TenantId,
         wait: Option<Duration>,
     ) -> Result<(StatusCode, SecondaryProgress), ApiError> {
-        let _tenant_lock = self.tenant_op_locks.shared(tenant_id).await;
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::SecondaryDownload,
+        )
+        .await;
 
         // Acquire lock and yield the collection of shard-node tuples which we will send requests onward to
         let targets = {
@@ -2324,8 +2304,7 @@ impl Service {
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
         let _tenant_lock =
-            request_lock_with_timeout(&self.tenant_op_locks, tenant_id, TenantOperations::Delete)
-                .await?;
+            trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -2425,12 +2404,12 @@ impl Service {
         req: TenantPolicyRequest,
     ) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
-        let _tenant_lock = request_lock_with_timeout(
+        let _tenant_lock = trace_exclusive_lock(
             &self.tenant_op_locks,
             tenant_id,
             TenantOperations::UpdatePolicy,
         )
-        .await?;
+        .await;
 
         let TenantPolicyRequest {
             placement,
@@ -2484,7 +2463,12 @@ impl Service {
             create_req.new_timeline_id,
         );
 
-        let _tenant_lock = self.tenant_op_locks.shared(tenant_id).await;
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineCreate,
+        )
+        .await;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -2609,7 +2593,12 @@ impl Service {
         timeline_id: TimelineId,
     ) -> Result<StatusCode, ApiError> {
         tracing::info!("Deleting timeline {}/{}", tenant_id, timeline_id,);
-        let _tenant_lock = self.tenant_op_locks.shared(tenant_id).await;
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineDelete,
+        )
+        .await;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -3141,12 +3130,12 @@ impl Service {
     ) -> Result<TenantShardSplitResponse, ApiError> {
         // TODO: return 503 if we get stuck waiting for this lock
         // (issue https://github.com/neondatabase/neon/issues/7108)
-        let _tenant_lock = request_lock_with_timeout(
+        let _tenant_lock = trace_exclusive_lock(
             &self.tenant_op_locks,
             tenant_id,
             TenantOperations::ShardSplit,
         )
-        .await?;
+        .await;
 
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
@@ -3825,12 +3814,12 @@ impl Service {
         &self,
         register_req: NodeRegisterRequest,
     ) -> Result<(), ApiError> {
-        let _node_lock = request_lock_with_timeout(
+        let _node_lock = trace_exclusive_lock(
             &self.node_op_locks,
             register_req.node_id,
             NodeOperations::Register,
         )
-        .await?;
+        .await;
 
         {
             let locked = self.inner.read().unwrap();
@@ -3919,8 +3908,7 @@ impl Service {
         scheduling: Option<NodeSchedulingPolicy>,
     ) -> Result<(), ApiError> {
         let _node_lock =
-            request_lock_with_timeout(&self.node_op_locks, node_id, NodeOperations::Configure)
-                .await?;
+            trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Configure).await;
 
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before

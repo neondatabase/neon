@@ -3,19 +3,18 @@ use std::time::Instant;
 use std::{collections::HashMap, sync::Arc};
 
 use std::time::Duration;
-use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 const LOCK_TIMEOUT_ALERT_THRESHOLD: Duration = Duration::from_secs(3);
 
 /// A wrapper around `OwnedRwLockWriteGuard` that when dropped changes the
 /// current holding operation in lock.
 pub struct WrappedWriteGuard<T: Display> {
-    guard: OwnedRwLockWriteGuard<Option<T>>,
+    guard: tokio::sync::OwnedRwLockWriteGuard<Option<T>>,
     start: Instant,
 }
 
 impl<T: Display> WrappedWriteGuard<T> {
-    pub fn new(guard: OwnedRwLockWriteGuard<Option<T>>) -> Self {
+    pub fn new(guard: tokio::sync::OwnedRwLockWriteGuard<Option<T>>) -> Self {
         Self {
             guard,
             start: Instant::now(),
@@ -46,7 +45,7 @@ where
     T: Eq + PartialEq + std::hash::Hash,
 {
     /// A synchronous lock for getting/setting the async locks that our callers will wait on.
-    entities: std::sync::Mutex<std::collections::HashMap<T, Arc<RwLock<Option<I>>>>>,
+    entities: std::sync::Mutex<std::collections::HashMap<T, Arc<tokio::sync::RwLock<Option<I>>>>>,
 }
 
 impl<T, I> IdLockMap<T, I>
@@ -94,6 +93,49 @@ where
             entities: std::sync::Mutex::new(HashMap::new()),
         }
     }
+}
+
+pub async fn trace_exclusive_lock<
+    T: Clone + Display + Eq + PartialEq + std::hash::Hash,
+    I: Display + Clone,
+>(
+    op_locks: &IdLockMap<T, I>,
+    key: T,
+    operation: I,
+) -> WrappedWriteGuard<I> {
+    let start = Instant::now();
+    let guard = op_locks.exclusive(key.clone(), operation.clone()).await;
+
+    let duration = start - Instant::now();
+    if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
+        tracing::warn!(
+            "Operation {} has waited {:?} for exclusive lock",
+            operation,
+            duration
+        );
+    }
+
+    guard
+}
+
+pub async fn trace_shared_lock<T: Display + Eq + PartialEq + std::hash::Hash, I: Display>(
+    op_locks: &IdLockMap<T, I>,
+    key: T,
+    operation: I,
+) -> tokio::sync::OwnedRwLockReadGuard<Option<I>> {
+    let start = Instant::now();
+    let guard = op_locks.shared(key).await;
+
+    let duration = start - Instant::now();
+    if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
+        tracing::warn!(
+            "Operation {} has waited {:?} for shared lock",
+            operation,
+            duration
+        );
+    }
+
+    guard
 }
 
 #[cfg(test)]
