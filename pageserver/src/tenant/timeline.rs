@@ -86,7 +86,7 @@ use crate::{
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::{
-    TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
+    GetKind, TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
@@ -797,7 +797,9 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
+        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(GetKind::Singular)
+            .start_timer();
         let path = self
             .get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
@@ -807,7 +809,7 @@ impl Timeline {
         let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
         let elapsed = start.elapsed();
         crate::metrics::RECONSTRUCT_TIME
-            .for_result(&res)
+            .for_get_kind(GetKind::Singular)
             .observe(elapsed.as_secs_f64());
 
         if cfg!(feature = "testing") && res.is_err() {
@@ -969,9 +971,22 @@ impl Timeline {
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let mut reconstruct_state = ValuesReconstructState::new();
 
+        let get_kind = if keyspace.total_size() == 1 {
+            GetKind::Singular
+        } else {
+            GetKind::Vectored
+        };
+
+        let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
             .await?;
+        get_data_timer.stop_and_record();
 
+        let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
         for (key, res) in reconstruct_state.keys {
@@ -987,6 +1002,7 @@ impl Timeline {
                 }
             }
         }
+        reconstruct_timer.stop_and_record();
 
         // Note that this is an approximation. Tracking the exact number of layers visited
         // per key requires virtually unbounded memory usage and is inefficient
