@@ -3731,15 +3731,12 @@ impl Timeline {
                     1,
                     "aux file keyspace should be a single range"
                 );
-                println!("create delta layer on metadata keys");
-                let delta_layer = self
-                    .create_delta_layer(
-                        &frozen_layer,
-                        ctx,
-                        Some(metadata_keyspace.ranges[0].clone()),
-                    )
-                    .await?;
-                delta_layer
+                self.create_delta_layer(
+                    &frozen_layer,
+                    ctx,
+                    Some(metadata_keyspace.ranges[0].clone()),
+                )
+                .await?
             } else {
                 None
             };
@@ -3757,7 +3754,6 @@ impl Timeline {
             );
 
             if let Some(delta_layer) = delta_layer {
-                println!("upload delta layer on metadata keys");
                 layers_to_upload.push(delta_layer.clone());
                 (layers_to_upload, Some(delta_layer))
             } else {
@@ -4086,6 +4082,8 @@ impl Timeline {
             let img_range = start..partition.ranges.last().unwrap().end;
 
             if partition.overlaps(&Key::metadata_key_range()) {
+                // The next patch will correctly create image layers for metadata keys, and it would be a
+                // rather big change. Keep this patch small for now.
                 match mode {
                     ImageLayerCreationMode::Force | ImageLayerCreationMode::Try => {
                         // skip image layer creation anyways for metadata keys.
@@ -4096,30 +4094,14 @@ impl Timeline {
                         return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
                     }
                 }
-            } else {
-                if let ImageLayerCreationMode::Try = mode {
-                    if !check_for_image_layers
-                        || (check_for_image_layers
-                            && !self.time_for_new_image_layer(partition, lsn).await)
-                    {
-                        start = img_range.end;
-                        continue;
-                    }
+            } else if let ImageLayerCreationMode::Try = mode {
+                if !check_for_image_layers
+                    || (check_for_image_layers
+                        && !self.time_for_new_image_layer(partition, lsn).await)
+                {
+                    start = img_range.end;
+                    continue;
                 }
-            }
-
-            if partition.overlaps(&Key::metadata_key_range()) {
-                // The next patch will correctly create image layers for metadata keys, and it would be a
-                // rather big change. Keep this patch small for now.
-            }
-            if partition.ranges.last().unwrap().end.is_metadata_key() {
-                assert!(
-                    partition.ranges.first().unwrap().start.is_metadata_key(),
-                    "metadata key should always be a separate partition"
-                );
-                // skip generating image layers for now until we find a better way to do it
-                start = img_range.end;
-                continue;
             }
 
             let mut image_layer_writer = ImageLayerWriter::new(
