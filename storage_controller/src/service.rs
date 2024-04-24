@@ -830,11 +830,15 @@ impl Service {
 
         // Maybe some other work can proceed now that this job finished.
         if self.reconciler_concurrency.available_permits() > 0 {
-            if let Ok(tenant_shard_id) = locked.delayed_reconcile_rx.try_recv() {
+            while let Ok(tenant_shard_id) = locked.delayed_reconcile_rx.try_recv() {
                 let (nodes, tenants, _scheduler) = locked.parts_mut();
                 if let Some(shard) = tenants.get_mut(&tenant_shard_id) {
                     shard.delayed_reconcile = false;
                     self.maybe_reconcile_shard(shard, nodes);
+                }
+
+                if self.reconciler_concurrency.available_permits() == 0 {
+                    break;
                 }
             }
         }
@@ -4120,18 +4124,20 @@ impl Service {
             Err(_) => {
                 tracing::info!(tenant_id=%shard.tenant_shard_id.tenant_id, shard_id=%shard.tenant_shard_id.shard_slug(),
                     "Concurrency limited: enqueued for reconcile later");
-                match self.delayed_reconcile_tx.try_send(shard.tenant_shard_id) {
-                    Err(TrySendError::Closed(_)) => {
-                        // Weird mid-shutdown case?
-                    }
-                    Err(TrySendError::Full(_)) => {
-                        // It is safe to skip sending our ID in the channel: we will eventually get retried by the background reconcile task.
-                        tracing::warn!(
-                            "Many shards are waiting to reconcile: delayed_reconcile queue is full"
-                        );
-                    }
-                    Ok(()) => {
-                        shard.delayed_reconcile = true;
+                if !shard.delayed_reconcile {
+                    match self.delayed_reconcile_tx.try_send(shard.tenant_shard_id) {
+                        Err(TrySendError::Closed(_)) => {
+                            // Weird mid-shutdown case?
+                        }
+                        Err(TrySendError::Full(_)) => {
+                            // It is safe to skip sending our ID in the channel: we will eventually get retried by the background reconcile task.
+                            tracing::warn!(
+                                "Many shards are waiting to reconcile: delayed_reconcile queue is full"
+                            );
+                        }
+                        Ok(()) => {
+                            shard.delayed_reconcile = true;
+                        }
                     }
                 }
 
