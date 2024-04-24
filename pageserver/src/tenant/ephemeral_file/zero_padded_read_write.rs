@@ -86,8 +86,7 @@ impl RW {
             (buffered_offset / (PAGE_SZ as u64)) + 1
         };
         if (blknum as u64) >= blocks_written {
-            // TODO: treat this as error. Pre-existing issue before this patch.
-            panic!("return IO error: read past end of file: read=0x{read_offset:x} buffered=0x{buffered_offset:x} flushed=0x{flushed_offset}");
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!("read past end of ephemeral_file: read=0x{read_offset:x} buffered=0x{buffered_offset:x} flushed=0x{flushed_offset}")));
         }
 
         // assertions for the `if-else` below
