@@ -85,27 +85,27 @@ mod tests {
         // To correct retrieve AUX files, the generated keys for the same file must be the same for all versions
         // of the page server.
         assert_eq!(
-            "8200000101E5B20C5F8DD5AA3289D6D9EAFA",
+            "4200000101E5B20C5F8DD5AA3289D6D9EAFA",
             encode_aux_file_key("pg_logical/mappings/test1").to_string()
         );
         assert_eq!(
-            "820000010239AAC544893139B26F501B97E6",
+            "420000010239AAC544893139B26F501B97E6",
             encode_aux_file_key("pg_logical/snapshots/test2").to_string()
         );
         assert_eq!(
-            "820000010300000000000000000000000000",
+            "420000010300000000000000000000000000",
             encode_aux_file_key("pg_logical/replorigin_checkpoint").to_string()
         );
         assert_eq!(
-            "82000001FF8635AF2134B7266EC5B4189FD6",
+            "42000001FF8635AF2134B7266EC5B4189FD6",
             encode_aux_file_key("pg_logical/unsupported").to_string()
         );
         assert_eq!(
-            "8200000201772D0E5D71DE14DA86142A1619",
+            "4200000201772D0E5D71DE14DA86142A1619",
             encode_aux_file_key("pg_replslot/test3").to_string()
         );
         assert_eq!(
-            "820000FFFF1866EBEB53B807B26A2416F317",
+            "420000FFFF1866EBEB53B807B26A2416F317",
             encode_aux_file_key("other_file_not_supported").to_string()
         );
     }
