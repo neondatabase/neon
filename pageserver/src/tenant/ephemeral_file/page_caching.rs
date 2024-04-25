@@ -174,7 +174,7 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
         }
 
         // Pre-warm page cache with the contents.
-        // At least in isolated bulk ingest benchmarks (test_bulk_ingest.py), the pre-warming
+        // At least in isolated bulk ingest benchmarks (test_bulk_insert.py), the pre-warming
         // benefits the code that writes InMemoryLayer=>L0 layers.
         let nblocks = buflen / PAGE_SZ;
         let nblocks32 = u32::try_from(nblocks).unwrap();
