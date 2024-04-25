@@ -936,7 +936,7 @@ impl PageServerHandler {
                 .await?;
 
         let exists = timeline
-            .get_rel_exists(req.rel, Version::Lsn(lsn), req.latest, ctx)
+            .get_rel_exists(req.rel, Version::Lsn(lsn), ctx)
             .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
@@ -964,7 +964,7 @@ impl PageServerHandler {
                 .await?;
 
         let n_blocks = timeline
-            .get_rel_size(req.rel, Version::Lsn(lsn), req.latest, ctx)
+            .get_rel_size(req.rel, Version::Lsn(lsn), ctx)
             .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
@@ -992,13 +992,7 @@ impl PageServerHandler {
                 .await?;
 
         let total_blocks = timeline
-            .get_db_size(
-                DEFAULTTABLESPACE_OID,
-                req.dbnode,
-                Version::Lsn(lsn),
-                req.latest,
-                ctx,
-            )
+            .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, Version::Lsn(lsn), ctx)
             .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
@@ -1170,7 +1164,7 @@ impl PageServerHandler {
                 .await?;
 
         let page = timeline
-            .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), req.latest, ctx)
+            .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), ctx)
             .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
