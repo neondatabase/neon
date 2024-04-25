@@ -1,13 +1,12 @@
 import json
 import threading
+import requests
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Union
 
 import pytest
-import requests
-from fixtures.failures import Failure, NodeStop, PageserverFailpoint, StorageControllerFailpoint
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -814,6 +813,44 @@ def test_storage_controller_tenant_conf(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.consistency_check()
 
 
+class Failure:
+    pageserver_id: int
+
+    def apply(self, env: NeonEnv):
+        raise NotImplementedError()
+
+    def clear(self, env: NeonEnv):
+        raise NotImplementedError()
+
+
+class NodeStop(Failure):
+    def __init__(self, pageserver_id, immediate):
+        self.pageserver_id = pageserver_id
+        self.immediate = immediate
+
+    def apply(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.stop(immediate=self.immediate)
+
+    def clear(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.start()
+
+
+class PageserverFailpoint(Failure):
+    def __init__(self, failpoint, pageserver_id):
+        self.failpoint = failpoint
+        self.pageserver_id = pageserver_id
+
+    def apply(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.http_client().configure_failpoints((self.failpoint, "return(1)"))
+
+    def clear(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.http_client().configure_failpoints((self.failpoint, "off"))
+
+
 def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
     tenants = env.storage_controller.tenant_list()
 
@@ -1203,6 +1240,47 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.reconcile_until_idle(timeout_secs=10)
     env.storage_controller.consistency_check()
 
+
+class StorageControllerFailpoint(Failure):
+    def __init__(self, failpoint, action):
+        self.failpoint = failpoint
+        self.pageserver_id = None
+        self.action = action
+
+    def apply(self, env: NeonEnv):
+        env.storage_controller.configure_failpoints((self.failpoint, self.action))
+
+    def clear(self, env: NeonEnv):
+        if "panic" in self.action:
+            log.info("Restarting storage controller after panic")
+            env.storage_controller.stop()
+            env.storage_controller.start()
+        else:
+            env.storage_controller.configure_failpoints((self.failpoint, "off"))
+
+    def expect_available(self):
+        # Controller panics _do_ leave pageservers available, but our test code relies
+        # on using the locate API to update configurations in Workload, so we must skip
+        # these actions when the controller has been panicked.
+        return "panic" not in self.action
+
+    def can_mitigate(self):
+        return False
+
+    def fails_forward(self, env):
+        # Edge case: the very last failpoint that simulates a DB connection error, where
+        # the abort path will fail-forward and result in a complete split.
+        fail_forward = self.failpoint == "shard-split-post-complete"
+
+        # If the failure was a panic, then if we expect split to eventually (after restart)
+        # complete, we must restart before checking that.
+        if fail_forward and "panic" in self.action:
+            log.info("Restarting storage controller after panic")
+            env.storage_controller.stop()
+            env.storage_controller.start()
+
+        return fail_forward
+
     def expect_exception(self):
         if "panic" in self.action:
             return requests.exceptions.ConnectionError
@@ -1217,18 +1295,12 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     """
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
-    env.storage_controller.allowed_errors.extend(
-        [
-            ".*Lock on*.",
-            ".*Scheduling is disabled by policy.*",
-            f".*Operation TimelineCreate on key {tenant_id} has waited.*",
-        ]
-    )
+    env.storage_controller.allowed_errors.extend([".*Lock on*.", ".*Scheduling is disabled by policy.*", f".*Operation TimelineCreate on key {tenant_id} has waited.*"])
 
-    # Take exclusive lock on tenant for 5 seconds
     failure = StorageControllerFailpoint("tenant-update-policy-exclusive-lock", "return(5000)")
     failure.apply(env)
 
+    # This will hold the exclusive for enough time to cause an warning
     def update_tenent_policy():
         env.storage_controller.tenant_policy_update(
             tenant_id=tenant_id,
@@ -1240,14 +1312,13 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     thread_update_tenant_policy = threading.Thread(target=update_tenent_policy)
     thread_update_tenant_policy.start()
 
-    # Since the exclusive lock is being held for log time this should generate warning
+    # This will not be able to access and will log a warning
     timeline_id = TimelineId.generate()
     env.storage_controller.pageserver_api().timeline_create(
         pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
     )
-    thread_update_tenant_policy.join(timeout=10)
+    thread_update_tenant_policy.join(timeout=5)
 
     env.storage_controller.assert_log_contains("Lock on UpdatePolicy was held for")
-    env.storage_controller.assert_log_contains(
-        f"Operation TimelineCreate on key {tenant_id} has waited"
-    )
+    env.storage_controller.assert_log_contains(f"Operation TimelineCreate on key {tenant_id} has waited")
+

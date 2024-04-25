@@ -2247,6 +2247,48 @@ class NeonStorageController(MetricsGetter):
         log.info(f"Got failpoints request response code {res.status_code}")
         res.raise_for_status()
 
+    @property
+    def workdir(self) -> Path:
+        return self.env.repo_dir
+
+    def assert_log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Tuple[str, LogCursor]:
+        """Convenient for use inside wait_until()"""
+
+        res = self.log_contains(pattern, offset=offset)
+        assert res is not None
+        return res
+
+    def log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Optional[Tuple[str, LogCursor]]:
+        """Check that the storage controller log contains a line that matches the given regex"""
+        logfile = self.workdir / "storage_controller.log"
+        if not logfile.exists():
+            log.warning(f"Skipping log check: {logfile} does not exist")
+            return None
+
+        contains_re = re.compile(pattern)
+
+        # XXX: Our rust logging machinery buffers the messages, so if you
+        # call this function immediately after it's been logged, there is
+        # no guarantee it is already present in the log file. This hasn't
+        # been a problem in practice, our python tests are not fast enough
+        # to hit that race condition.
+        skip_until_line_no = 0 if offset is None else offset._line_no
+        cur_line_no = 0
+        with logfile.open("r") as f:
+            for line in f:
+                if cur_line_no < skip_until_line_no:
+                    cur_line_no += 1
+                    continue
+                if contains_re.search(line):
+                    # found it!
+                    cur_line_no += 1
+                    return (line, LogCursor(cur_line_no))
+        return None
+
     def __enter__(self) -> "NeonStorageController":
         return self
 
