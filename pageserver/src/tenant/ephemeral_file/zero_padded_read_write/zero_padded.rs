@@ -6,12 +6,12 @@
 use std::mem::MaybeUninit;
 
 /// See module-level comment.
-pub struct Buf<const N: usize> {
+pub struct Buffer<const N: usize> {
     allocation: Box<[u8; N]>,
     written: usize,
 }
 
-impl<const N: usize> Default for Buf<N> {
+impl<const N: usize> Default for Buffer<N> {
     fn default() -> Self {
         Self {
             allocation: Box::new(
@@ -23,7 +23,7 @@ impl<const N: usize> Default for Buf<N> {
     }
 }
 
-impl<const N: usize> Buf<N> {
+impl<const N: usize> Buffer<N> {
     #[inline(always)]
     fn invariants(&self) {
         // don't check by default, unoptimized is too expensive even for debug mode
@@ -38,7 +38,7 @@ impl<const N: usize> Buf<N> {
     }
 }
 
-impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Buf<N> {
+impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Buffer<N> {
     type IoBuf = Self;
 
     fn cap(&self) -> usize {
@@ -92,7 +92,7 @@ impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Bu
 ///
 /// The [`Self::allocation`] is stable becauses boxes are stable.
 /// The memory is zero-initialized, so, bytes_init is always N.
-unsafe impl<const N: usize> tokio_epoll_uring::IoBuf for Buf<N> {
+unsafe impl<const N: usize> tokio_epoll_uring::IoBuf for Buffer<N> {
     fn stable_ptr(&self) -> *const u8 {
         self.allocation.as_ptr()
     }

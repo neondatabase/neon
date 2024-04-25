@@ -16,15 +16,13 @@
 //! The current caller is [`super::page_caching::RW`]. In case it gets redirected to read from
 //! [`VirtualFile`], it consults the [`crate::page_cache`] first.
 
-mod zero_padded_buffer;
+mod zero_padded;
 
 use crate::{
     page_cache::PAGE_SZ,
-    virtual_file::{
-        owned_buffers_io::{
-            self,
-            write::{Buffer, OwnedAsyncWriter},
-        },
+    virtual_file::owned_buffers_io::{
+        self,
+        write::{Buffer, OwnedAsyncWriter},
     },
 };
 
@@ -33,7 +31,7 @@ const TAIL_SZ: usize = PAGE_SZ;
 /// See module-level comment.
 pub struct RW<W: OwnedAsyncWriter> {
     buffered_writer: owned_buffers_io::write::BufferedWriter<
-        zero_padded_buffer::Buf<TAIL_SZ>,
+        zero_padded::Buffer<TAIL_SZ>,
         owned_buffers_io::util::size_tracking_writer::Writer<W>,
     >,
 }
@@ -52,7 +50,7 @@ where
             owned_buffers_io::util::size_tracking_writer::Writer::new(writer);
         let buffered_writer = owned_buffers_io::write::BufferedWriter::new(
             bytes_flushed_tracker,
-            zero_padded_buffer::Buf::default(),
+            zero_padded::Buffer::default(),
         );
         Self { buffered_writer }
     }
@@ -67,13 +65,13 @@ where
 
     pub fn bytes_written(&self) -> u64 {
         let flushed_offset = self.buffered_writer.as_inner().bytes_written();
-        let buffer: &zero_padded_buffer::Buf<{ TAIL_SZ }> = self.buffered_writer.inspect_buffer();
+        let buffer: &zero_padded::Buffer<TAIL_SZ> = self.buffered_writer.inspect_buffer();
         flushed_offset + u64::try_from(buffer.pending()).unwrap()
     }
 
     pub(crate) async fn read_blk(&self, blknum: u32) -> Result<ReadResult<'_, W>, std::io::Error> {
         let flushed_offset = self.buffered_writer.as_inner().bytes_written();
-        let buffer: &zero_padded_buffer::Buf<{ TAIL_SZ }> = self.buffered_writer.inspect_buffer();
+        let buffer: &zero_padded::Buffer<TAIL_SZ> = self.buffered_writer.inspect_buffer();
         let buffered_offset = flushed_offset + u64::try_from(buffer.pending()).unwrap();
         let read_offset = (blknum as u64) * (PAGE_SZ as u64);
 

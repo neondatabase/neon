@@ -6,7 +6,8 @@ use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::BlockLease;
 use crate::virtual_file::VirtualFile;
 
-use std::io;
+use once_cell::sync::Lazy;
+use std::io::{self, ErrorKind};
 use tokio_epoll_uring::BoundedBuf;
 use tracing::*;
 
@@ -15,7 +16,7 @@ use super::zero_padded_read_write;
 /// See module-level comment.
 pub struct RW {
     page_cache_file_id: page_cache::FileId,
-    rw: super::zero_padded_read_write::RW<PageCachingWriter>,
+    rw: super::zero_padded_read_write::RW<PreWarmingWriter>,
 }
 
 impl RW {
@@ -23,7 +24,7 @@ impl RW {
         let page_cache_file_id = page_cache::next_file_id();
         Self {
             page_cache_file_id,
-            rw: super::zero_padded_read_write::RW::new(PageCachingWriter::new(
+            rw: super::zero_padded_read_write::RW::new(PreWarmingWriter::new(
                 page_cache_file_id,
                 file,
             )),
@@ -110,13 +111,13 @@ impl Drop for RW {
     }
 }
 
-struct PageCachingWriter {
+struct PreWarmingWriter {
     nwritten_blocks: u32,
     page_cache_file_id: page_cache::FileId,
     file: VirtualFile,
 }
 
-impl PageCachingWriter {
+impl PreWarmingWriter {
     fn new(page_cache_file_id: page_cache::FileId, file: VirtualFile) -> Self {
         Self {
             nwritten_blocks: 0,
@@ -126,7 +127,7 @@ impl PageCachingWriter {
     }
 }
 
-impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PageCachingWriter {
+impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmingWriter {
     async fn write_all<
         B: tokio_epoll_uring::BoundedBuf<Buf = Buf>,
         Buf: tokio_epoll_uring::IoBuf + Send,
@@ -134,52 +135,75 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PageCach
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)> {
-        let buf = buf.slice(..); // TODO: review this is correct
-        let check_bounds_stuff_works = if cfg!(debug_assertions) {
-            let to_write: &[u8] = &*buf;
-            let mut pre = Vec::with_capacity(to_write.len());
-            pre.extend_from_slice(&to_write);
-            Some(pre)
+        let buf = buf.slice(..); // the resulting Slice derefs to &[u8] of [0..buf.bytes_init()]
+        let saved_bounds = buf.bounds(); // save for reconstructing buf from iobuf after the IO is done
+        let check_bounds_stuff_works = if cfg!(test) && cfg!(debug_assertions) {
+            Some(buf.to_vec())
         } else {
             None
         };
-        let saved_bounds = buf.bounds();
-        let (n, iobuf) = crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter::write_all(
-            &mut self.file,
-            buf,
-        )
-        .await?;
+        let buflen = buf.len();
+        assert_eq!(
+            buflen % PAGE_SZ,
+            0,
+            "{buflen} ; we know TAIL_SZ is a PAGE_SZ multiple, and write_buffered_borrowed is used"
+        );
+
+        // do the IO
+        let iobuf = match self.file.write_all(buf).await {
+            (iobuf, Ok(nwritten)) => {
+                assert_eq!(nwritten, buflen);
+                iobuf
+            }
+            (_, Err(e)) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::Other,
+                    // order error before path because path is long and error is short
+                    format!(
+                        "ephemeral_file: write_blob: write-back tail self.nwritten_blocks={}, buflen={}, {:#}: {}",
+                        self.nwritten_blocks, buflen, e, self.file.path,
+                    ),
+                ));
+            }
+        };
+
+        // reconstruct buf, as the write path IO consumes the Slice and returns the underlying IoBuf
         let buf = tokio_epoll_uring::Slice::from_buf_bounds(iobuf, saved_bounds);
-        if cfg!(debug_assertions) {
-            assert_eq!(check_bounds_stuff_works.as_deref().unwrap(), &*buf);
+        if let Some(check_bounds_stuff_works) = check_bounds_stuff_works {
+            assert_eq!(&check_bounds_stuff_works, &*buf);
         }
 
-        assert_eq!(n % PAGE_SZ, 0, "{n}");
-        let nblocks = n / PAGE_SZ;
+        // pre-warm page cache with buf contents
+        // At least in isolated bulk ingest benchmarks (test_bulk_ingest.py), the pre-warming
+        // benefits the code that writes InMemoryLayer=>L0 layers.
+        let nblocks = buflen / PAGE_SZ;
         let nblocks32 = u32::try_from(nblocks).unwrap();
         let cache = page_cache::get();
-        let ctx = RequestContext::new(
-            crate::task_mgr::TaskKind::Todo,
-            crate::context::DownloadBehavior::Error,
-        );
+        static CTX: Lazy<RequestContext> = Lazy::new(|| {
+            RequestContext::new(
+                crate::task_mgr::TaskKind::EphemeralFilePreWarmPageCache,
+                crate::context::DownloadBehavior::Error,
+            )
+        });
         for blknum_in_buffer in 0..nblocks {
             let blk_in_buffer = &buf[blknum_in_buffer * PAGE_SZ..(blknum_in_buffer + 1) * PAGE_SZ];
+            let blknum = self
+                .nwritten_blocks
+                .checked_add(blknum_in_buffer as u32)
+                .unwrap();
             match cache
-                .read_immutable_buf(
-                    self.page_cache_file_id,
-                    self.nwritten_blocks
-                        .checked_add(blknum_in_buffer as u32)
-                        .unwrap(),
-                    &ctx,
-                )
+                .read_immutable_buf(self.page_cache_file_id, blknum, &CTX)
                 .await
             {
                 Err(e) => {
-                    warn!("ephemeral_file: error evicting page for warm-up: {e:#}");
+                    error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
+                    // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
                 }
                 Ok(v) => match v {
-                    page_cache::ReadBufResult::Found(guard) => {
-                        debug_assert_eq!(blk_in_buffer, &*guard);
+                    page_cache::ReadBufResult::Found(_guard) => {
+                        // This function takes &mut self, so, it shouldn't be possible to reach this point.
+                        unreachable!("we just wrote block {blknum} to the VirtualFile, which is owned by Self, \
+                                      and this function takes &mut self, so, no concurrent read_blk is possible");
                     }
                     page_cache::ReadBufResult::NotFound(mut write_guard) => {
                         write_guard.copy_from_slice(blk_in_buffer);
@@ -189,6 +213,6 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PageCach
             }
         }
         self.nwritten_blocks = self.nwritten_blocks.checked_add(nblocks32).unwrap();
-        Ok((n, buf.into_inner()))
+        Ok((buflen, buf.into_inner()))
     }
 }

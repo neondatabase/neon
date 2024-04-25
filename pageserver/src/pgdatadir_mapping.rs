@@ -448,6 +448,11 @@ impl Timeline {
         // include physical changes from later commits that will be marked
         // as aborted, and will need to be vacuumed away.
         let commit_lsn = Lsn((low - 1) * 8);
+        // This maxing operation is for the edge case that the search above did
+        // set found_smaller to true but it never increased the lsn. Then, low
+        // is still the old min_lsn the subtraction above could possibly give a value
+        // below the anchestor_lsn.
+        let commit_lsn = commit_lsn.max(min_lsn);
         match (found_smaller, found_larger) {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
@@ -1402,7 +1407,7 @@ impl<'a> DatadirModification<'a> {
         let n_files;
         let mut aux_files = self.tline.aux_files.lock().await;
         if let Some(mut dir) = aux_files.dir.take() {
-            // We already updated aux files in `self`: emit a delta and update our latest value
+            // We already updated aux files in `self`: emit a delta and update our latest value.
             dir.upsert(file_path.clone(), content.clone());
             n_files = dir.files.len();
             if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {

@@ -202,7 +202,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath, TimeoutOrCancel};
+use remote_storage::{
+    DownloadError, GenericRemoteStorage, ListingMode, RemotePath, TimeoutOrCancel,
+};
 use std::ops::DerefMut;
 use tracing::{debug, error, info, instrument, warn};
 use tracing::{info_span, Instrument};
@@ -1145,7 +1147,7 @@ impl RemoteTimelineClient {
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
         let timeline_storage_path = remote_timeline_path(&self.tenant_shard_id, &self.timeline_id);
 
-        // Execute all pending deletions, so that when we proceed to do a list_prefixes below, we aren't
+        // Execute all pending deletions, so that when we proceed to do a listing below, we aren't
         // taking the burden of listing all the layers that we already know we should delete.
         self.flush_deletion_queue().await?;
 
@@ -1154,14 +1156,20 @@ impl RemoteTimelineClient {
         let remaining = download_retry(
             || async {
                 self.storage_impl
-                    .list_files(Some(&timeline_storage_path), None, &cancel)
+                    .list(
+                        Some(&timeline_storage_path),
+                        ListingMode::NoDelimiter,
+                        None,
+                        &cancel,
+                    )
                     .await
             },
             "list remaining files",
             &cancel,
         )
         .await
-        .context("list files remaining files")?;
+        .context("list files remaining files")?
+        .keys;
 
         // We will delete the current index_part object last, since it acts as a deletion
         // marker via its deleted_at attribute
