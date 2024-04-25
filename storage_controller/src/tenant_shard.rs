@@ -7,6 +7,7 @@ use std::{
 use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
+    reconciler::ReconcileUnits,
     scheduler::{AffinityScore, MaySchedule, ScheduleContext},
 };
 use pageserver_api::controller_api::{PlacementPolicy, ShardSchedulingPolicy};
@@ -22,7 +23,7 @@ use utils::{
     generation::Generation,
     id::NodeId,
     seqwait::{SeqWait, SeqWaitError},
-    sync::gate::Gate,
+    sync::gate::GateGuard,
 };
 
 use crate::{
@@ -95,6 +96,10 @@ pub(crate) struct TenantShard {
     /// reconciliation, and timeline creation.
     pub(crate) splitting: SplitState,
 
+    /// If a tenant was enqueued for later reconcile due to hitting concurrency limit, this flag
+    /// is set. This flag is cleared when the tenant is popped off the delay queue.
+    pub(crate) delayed_reconcile: bool,
+
     /// Optionally wait for reconciliation to complete up to a particular
     /// sequence number.
     #[serde(skip)]
@@ -113,8 +118,8 @@ pub(crate) struct TenantShard {
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<String>>,
 
     /// If we have a pending compute notification that for some reason we weren't able to send,
-    /// set this to true. If this is set, calls to [`Self::maybe_reconcile`] will run a task to retry
-    /// sending it.  This is the mechanism by which compute notifications are included in the scope
+    /// set this to true. If this is set, calls to [`Self::get_reconcile_needed`] will return Yes
+    /// and trigger a Reconciler run.  This is the mechanism by which compute notifications are included in the scope
     /// of state that we publish externally in an eventually consistent way.
     pub(crate) pending_compute_notification: bool,
 
@@ -353,6 +358,17 @@ pub(crate) struct ReconcilerHandle {
     cancel: CancellationToken,
 }
 
+pub(crate) enum ReconcileNeeded {
+    /// shard either doesn't need reconciliation, or is forbidden from spawning a reconciler
+    /// in its current state (e.g. shard split in progress, or ShardSchedulingPolicy forbids it)
+    No,
+    /// shard has a reconciler running, and its intent hasn't changed since that one was
+    /// spawned: wait for the existing reconciler rather than spawning a new one.
+    WaitExisting(ReconcilerWaiter),
+    /// shard needs reconciliation: call into [`TenantShard::spawn_reconciler`]
+    Yes,
+}
+
 /// When a reconcile task completes, it sends this result object
 /// to be applied to the primary TenantShard.
 pub(crate) struct ReconcileResult {
@@ -396,6 +412,7 @@ impl TenantShard {
             reconciler: None,
             splitting: SplitState::Idle,
             sequence: Sequence(1),
+            delayed_reconcile: false,
             waiter: Arc::new(SeqWait::new(Sequence(0))),
             error_waiter: Arc::new(SeqWait::new(Sequence(0))),
             last_error: Arc::default(),
@@ -831,16 +848,10 @@ impl TenantShard {
 
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
-    pub(crate) fn maybe_reconcile(
+    pub(crate) fn get_reconcile_needed(
         &mut self,
-        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
         pageservers: &Arc<HashMap<NodeId, Node>>,
-        compute_hook: &Arc<ComputeHook>,
-        service_config: &service::Config,
-        persistence: &Arc<Persistence>,
-        gate: &Gate,
-        cancel: &CancellationToken,
-    ) -> Option<ReconcilerWaiter> {
+    ) -> ReconcileNeeded {
         // If there are any ambiguous observed states, and the nodes they refer to are available,
         // we should reconcile to clean them up.
         let mut dirty_observed = false;
@@ -863,7 +874,7 @@ impl TenantShard {
 
         if !do_reconcile {
             tracing::info!("Not dirty, no reconciliation needed.");
-            return None;
+            return ReconcileNeeded::No;
         }
 
         // If we are currently splitting, then never start a reconciler task: the splitting logic
@@ -871,7 +882,7 @@ impl TenantShard {
         // up top, so that we only log this message if we would otherwise have done a reconciliation.
         if !matches!(self.splitting, SplitState::Idle) {
             tracing::info!("Refusing to reconcile, splitting in progress");
-            return None;
+            return ReconcileNeeded::No;
         }
 
         // Reconcile already in flight for the current sequence?
@@ -881,7 +892,7 @@ impl TenantShard {
                     "Reconciliation already in progress for sequence {:?}",
                     self.sequence,
                 );
-                return Some(ReconcilerWaiter {
+                return ReconcileNeeded::WaitExisting(ReconcilerWaiter {
                     tenant_shard_id: self.tenant_shard_id,
                     seq_wait: self.waiter.clone(),
                     error_seq_wait: self.error_waiter.clone(),
@@ -900,9 +911,66 @@ impl TenantShard {
                 // We only reach this point if there is work to do and we're going to skip
                 // doing it: warn it obvious why this tenant isn't doing what it ought to.
                 tracing::warn!("Skipping reconcile for policy {:?}", self.scheduling_policy);
-                return None;
+                return ReconcileNeeded::No;
             }
         }
+
+        ReconcileNeeded::Yes
+    }
+
+    /// Ensure the sequence number is set to a value where waiting for this value will make us wait
+    /// for the next reconcile: i.e. it is ahead of all completed or running reconcilers.
+    ///
+    /// Constructing a ReconcilerWaiter with the resulting sequence number gives the property
+    /// that the waiter will not complete until some future Reconciler is constructed and run.
+    fn ensure_sequence_ahead(&mut self) {
+        // Find the highest sequence for which a Reconciler has previously run or is currently
+        // running
+        let max_seen = std::cmp::max(
+            self.reconciler
+                .as_ref()
+                .map(|r| r.sequence)
+                .unwrap_or(Sequence(0)),
+            std::cmp::max(self.waiter.load(), self.error_waiter.load()),
+        );
+
+        if self.sequence <= max_seen {
+            self.sequence = max_seen.next();
+        }
+    }
+
+    /// Create a waiter that will wait for some future Reconciler that hasn't been spawned yet.
+    ///
+    /// This is appropriate when you can't spawn a recociler (e.g. due to resource limits), but
+    /// you would like to wait until one gets spawned in the background.
+    pub(crate) fn future_reconcile_waiter(&mut self) -> ReconcilerWaiter {
+        self.ensure_sequence_ahead();
+
+        ReconcilerWaiter {
+            tenant_shard_id: self.tenant_shard_id,
+            seq_wait: self.waiter.clone(),
+            error_seq_wait: self.error_waiter.clone(),
+            error: self.last_error.clone(),
+            seq: self.sequence,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
+    pub(crate) fn spawn_reconciler(
+        &mut self,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
+        pageservers: &Arc<HashMap<NodeId, Node>>,
+        compute_hook: &Arc<ComputeHook>,
+        service_config: &service::Config,
+        persistence: &Arc<Persistence>,
+        units: ReconcileUnits,
+        gate_guard: GateGuard,
+        cancel: &CancellationToken,
+    ) -> Option<ReconcilerWaiter> {
+        // Reconcile in flight for a stale sequence?  Our sequence's task will wait for it before
+        // doing our sequence's work.
+        let old_handle = self.reconciler.take();
 
         // Build list of nodes from which the reconciler should detach
         let mut detach = Vec::new();
@@ -919,18 +987,9 @@ impl TenantShard {
             }
         }
 
-        // Reconcile in flight for a stale sequence?  Our sequence's task will wait for it before
-        // doing our sequence's work.
-        let old_handle = self.reconciler.take();
-
-        let Ok(gate_guard) = gate.enter() else {
-            // Shutting down, don't start a reconciler
-            return None;
-        };
-
         // Advance the sequence before spawning a reconciler, so that sequence waiters
         // can distinguish between before+after the reconcile completes.
-        self.sequence = self.sequence.next();
+        self.ensure_sequence_ahead();
 
         let reconciler_cancel = cancel.child_token();
         let reconciler_intent = TargetState::from_intent(pageservers, &self.intent);
@@ -945,6 +1004,7 @@ impl TenantShard {
             compute_hook: compute_hook.clone(),
             service_config: service_config.clone(),
             _gate_guard: gate_guard,
+            _resource_units: units,
             cancel: reconciler_cancel.clone(),
             persistence: persistence.clone(),
             compute_notify_failure: false,
@@ -1011,16 +1071,18 @@ impl TenantShard {
                         status: outcome_label,
                     });
 
-                result_tx
-                    .send(ReconcileResult {
-                        sequence: reconcile_seq,
-                        result,
-                        tenant_shard_id: reconciler.tenant_shard_id,
-                        generation: reconciler.generation,
-                        observed: reconciler.observed,
-                        pending_compute_notification: reconciler.compute_notify_failure,
-                    })
-                    .ok();
+                // Constructing result implicitly drops Reconciler, freeing any ReconcileUnits before the Service might
+                // try and schedule more work in response to our result.
+                let result = ReconcileResult {
+                    sequence: reconcile_seq,
+                    result,
+                    tenant_shard_id: reconciler.tenant_shard_id,
+                    generation: reconciler.generation,
+                    observed: reconciler.observed,
+                    pending_compute_notification: reconciler.compute_notify_failure,
+                };
+
+                result_tx.send(result).ok();
             }
             .instrument(reconciler_span),
         );
@@ -1111,6 +1173,7 @@ impl TenantShard {
             error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
             last_error: Arc::default(),
             pending_compute_notification: false,
+            delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
         })
     }

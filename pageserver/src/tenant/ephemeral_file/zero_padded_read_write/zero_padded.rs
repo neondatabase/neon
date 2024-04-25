@@ -1,11 +1,17 @@
+//! A [`crate::virtual_file::owned_buffers_io::write::Buffer`] whose
+//! unwritten range is guaranteed to be zero-initialized.
+//! This is used by [`crate::tenant::ephemeral_file::zero_padded_read_write::RW::read_blk`]
+//! to serve page-sized reads of the trailing page when the trailing page has only been partially filled.
+
 use std::mem::MaybeUninit;
 
-pub struct Buf<const N: usize> {
+/// See module-level comment.
+pub struct Buffer<const N: usize> {
     allocation: Box<[u8; N]>,
     written: usize,
 }
 
-impl<const N: usize> Default for Buf<N> {
+impl<const N: usize> Default for Buffer<N> {
     fn default() -> Self {
         Self {
             allocation: Box::new(
@@ -17,7 +23,7 @@ impl<const N: usize> Default for Buf<N> {
     }
 }
 
-impl<const N: usize> Buf<N> {
+impl<const N: usize> Buffer<N> {
     #[inline(always)]
     fn invariants(&self) {
         // don't check by default, unoptimized is too expensive even for debug mode
@@ -32,7 +38,7 @@ impl<const N: usize> Buf<N> {
     }
 }
 
-impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Buf<N> {
+impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Buffer<N> {
     type IoBuf = Self;
 
     fn cap(&self) -> usize {
@@ -75,20 +81,24 @@ impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Bu
     }
 }
 
-/// We have this implementation so that [`Buf<N>`] can be used with [`crate::virtual_file::owned_buffers_io::write::BufferedWriter`].
+/// We have this trait impl so that the `flush` method in the `Buffer` impl above can produce a
+/// [`tokio_epoll_uring::BoundedBuf::slice`] of the [`Self::written`] range of the data.
 ///
+/// Remember that bytes_init is generally _not_ a tracker of the amount
+/// of valid data in the io buffer; we use `Slice` for that.
+/// The `IoBuf` is _only_ for keeping track of uninitialized memory, a bit like MaybeUninit.
 ///
 /// SAFETY:
 ///
 /// The [`Self::allocation`] is stable becauses boxes are stable.
 /// The memory is zero-initialized, so, bytes_init is always N.
-///
-unsafe impl<const N: usize> tokio_epoll_uring::IoBuf for Buf<N> {
+unsafe impl<const N: usize> tokio_epoll_uring::IoBuf for Buffer<N> {
     fn stable_ptr(&self) -> *const u8 {
         self.allocation.as_ptr()
     }
 
     fn bytes_init(&self) -> usize {
+        // Yes, N, not self.written; Read the full comment of this impl block!
         N
     }
 

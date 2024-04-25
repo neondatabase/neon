@@ -86,7 +86,7 @@ use crate::{
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::{
-    TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
+    GetKind, TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
@@ -797,7 +797,9 @@ impl Timeline {
             img: cached_page_img,
         };
 
-        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
+        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(GetKind::Singular)
+            .start_timer();
         let path = self
             .get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
@@ -807,7 +809,7 @@ impl Timeline {
         let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
         let elapsed = start.elapsed();
         crate::metrics::RECONSTRUCT_TIME
-            .for_result(&res)
+            .for_get_kind(GetKind::Singular)
             .observe(elapsed.as_secs_f64());
 
         if cfg!(feature = "testing") && res.is_err() {
@@ -969,9 +971,22 @@ impl Timeline {
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let mut reconstruct_state = ValuesReconstructState::new();
 
+        let get_kind = if keyspace.total_size() == 1 {
+            GetKind::Singular
+        } else {
+            GetKind::Vectored
+        };
+
+        let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
             .await?;
+        get_data_timer.stop_and_record();
 
+        let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
         for (key, res) in reconstruct_state.keys {
@@ -987,6 +1002,7 @@ impl Timeline {
                 }
             }
         }
+        reconstruct_timer.stop_and_record();
 
         // Note that this is an approximation. Tracking the exact number of layers visited
         // per key requires virtually unbounded memory usage and is inefficient
@@ -3127,55 +3143,61 @@ impl Timeline {
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
 
-            let guard = timeline.layers.read().await;
-            let layers = guard.layer_map();
+            // Do not descent any further if the last layer we visited
+            // completed all keys in the keyspace it inspected. This is not
+            // required for correctness, but avoids visiting extra layers
+            // which turns out to be a perf bottleneck in some cases.
+            if !unmapped_keyspace.is_empty() {
+                let guard = timeline.layers.read().await;
+                let layers = guard.layer_map();
 
-            let in_memory_layer = layers.find_in_memory_layer(|l| {
-                let start_lsn = l.get_lsn_range().start;
-                cont_lsn > start_lsn
-            });
+                let in_memory_layer = layers.find_in_memory_layer(|l| {
+                    let start_lsn = l.get_lsn_range().start;
+                    cont_lsn > start_lsn
+                });
 
-            match in_memory_layer {
-                Some(l) => {
-                    let lsn_range = l.get_lsn_range().start..cont_lsn;
-                    fringe.update(
-                        ReadableLayer::InMemoryLayer(l),
-                        unmapped_keyspace.clone(),
-                        lsn_range,
-                    );
-                }
-                None => {
-                    for range in unmapped_keyspace.ranges.iter() {
-                        let results = layers.range_search(range.clone(), cont_lsn);
+                match in_memory_layer {
+                    Some(l) => {
+                        let lsn_range = l.get_lsn_range().start..cont_lsn;
+                        fringe.update(
+                            ReadableLayer::InMemoryLayer(l),
+                            unmapped_keyspace.clone(),
+                            lsn_range,
+                        );
+                    }
+                    None => {
+                        for range in unmapped_keyspace.ranges.iter() {
+                            let results = layers.range_search(range.clone(), cont_lsn);
 
-                        results
-                            .found
-                            .into_iter()
-                            .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                                (
-                                    ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
-                                    keyspace_accum.to_keyspace(),
-                                    lsn_floor..cont_lsn,
-                                )
-                            })
-                            .for_each(|(layer, keyspace, lsn_range)| {
-                                fringe.update(layer, keyspace, lsn_range)
-                            });
+                            results
+                                .found
+                                .into_iter()
+                                .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                                    (
+                                        ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
+                                        keyspace_accum.to_keyspace(),
+                                        lsn_floor..cont_lsn,
+                                    )
+                                })
+                                .for_each(|(layer, keyspace, lsn_range)| {
+                                    fringe.update(layer, keyspace, lsn_range)
+                                });
+                        }
                     }
                 }
-            }
 
-            // It's safe to drop the layer map lock after planning the next round of reads.
-            // The fringe keeps readable handles for the layers which are safe to read even
-            // if layers were compacted or flushed.
-            //
-            // The more interesting consideration is: "Why is the read algorithm still correct
-            // if the layer map changes while it is operating?". Doing a vectored read on a
-            // timeline boils down to pushing an imaginary lsn boundary downwards for each range
-            // covered by the read. The layer map tells us how to move the lsn downwards for a
-            // range at *a particular point in time*. It is fine for the answer to be different
-            // at two different time points.
-            drop(guard);
+                // It's safe to drop the layer map lock after planning the next round of reads.
+                // The fringe keeps readable handles for the layers which are safe to read even
+                // if layers were compacted or flushed.
+                //
+                // The more interesting consideration is: "Why is the read algorithm still correct
+                // if the layer map changes while it is operating?". Doing a vectored read on a
+                // timeline boils down to pushing an imaginary lsn boundary downwards for each range
+                // covered by the read. The layer map tells us how to move the lsn downwards for a
+                // range at *a particular point in time*. It is fine for the answer to be different
+                // at two different time points.
+                drop(guard);
+            }
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
                 let next_cont_lsn = lsn_range.start;
@@ -4244,9 +4266,8 @@ impl Timeline {
                 *self.get_latest_gc_cutoff_lsn()
             }
         } else {
-            // No time-based retention was configured. Set time-based cutoff to
-            // same as LSN based.
-            cutoff_horizon
+            // No time-based retention was configured. Interpret this as "keep no history".
+            self.get_last_record_lsn()
         };
 
         // Grab the lock and update the values
