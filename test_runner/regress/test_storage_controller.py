@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Union
 
 import pytest
-import requests
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -1241,53 +1240,6 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.consistency_check()
 
 
-class StorageControllerFailpoint(Failure):
-    def __init__(self, failpoint, action):
-        self.failpoint = failpoint
-        self.pageserver_id = 0
-        self.action = action
-
-    def apply(self, env: NeonEnv):
-        env.storage_controller.configure_failpoints((self.failpoint, self.action))
-
-    def clear(self, env: NeonEnv):
-        if "panic" in self.action:
-            log.info("Restarting storage controller after panic")
-            env.storage_controller.stop()
-            env.storage_controller.start()
-        else:
-            env.storage_controller.configure_failpoints((self.failpoint, "off"))
-
-    def expect_available(self):
-        # Controller panics _do_ leave pageservers available, but our test code relies
-        # on using the locate API to update configurations in Workload, so we must skip
-        # these actions when the controller has been panicked.
-        return "panic" not in self.action
-
-    def can_mitigate(self):
-        return False
-
-    def fails_forward(self, env):
-        # Edge case: the very last failpoint that simulates a DB connection error, where
-        # the abort path will fail-forward and result in a complete split.
-        fail_forward = self.failpoint == "shard-split-post-complete"
-
-        # If the failure was a panic, then if we expect split to eventually (after restart)
-        # complete, we must restart before checking that.
-        if fail_forward and "panic" in self.action:
-            log.info("Restarting storage controller after panic")
-            env.storage_controller.stop()
-            env.storage_controller.start()
-
-        return fail_forward
-
-    def expect_exception(self):
-        if "panic" in self.action:
-            return requests.exceptions.ConnectionError
-        else:
-            return StorageControllerApiException
-
-
 def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     """
     Check that when lock on resource (tenants, nodes) is held for too long it is
@@ -1304,8 +1256,9 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     )
 
     # Apply failpoint
-    failure = StorageControllerFailpoint("tenant-update-policy-exclusive-lock", "return(5000)")
-    failure.apply(env)
+    env.storage_controller.configure_failpoints(
+        ("tenant-update-policy-exclusive-lock", "return(5000)")
+    )
 
     # This will hold the exclusive for enough time to cause an warning
     def update_tenent_policy():
