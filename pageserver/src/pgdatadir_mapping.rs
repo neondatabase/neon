@@ -9,6 +9,7 @@
 use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
+use crate::metrics::WAL_INGEST;
 use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
@@ -1551,6 +1552,8 @@ impl<'a> DatadirModification<'a> {
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut writer = self.tline.writer().await;
 
+        let timer = WAL_INGEST.time_spent_on_ingest.start_timer();
+
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
@@ -1589,6 +1592,8 @@ impl<'a> DatadirModification<'a> {
         for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
             writer.update_directory_entries_count(kind, count as u64);
         }
+
+        timer.observe_duration();
 
         Ok(())
     }
