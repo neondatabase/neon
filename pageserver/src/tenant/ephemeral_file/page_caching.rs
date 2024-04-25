@@ -135,8 +135,8 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
         &mut self,
         buf: B,
     ) -> std::io::Result<(usize, B::Buf)> {
-        let buf = buf.slice(..); // the resulting Slice derefs to &[u8] of [0..buf.bytes_init()]
-        let saved_bounds = buf.bounds(); // save for reconstructing buf from iobuf after the IO is done
+        let buf = buf.slice(..);
+        let saved_bounds = buf.bounds(); // save for reconstructing the Slice from iobuf after the IO is done
         let check_bounds_stuff_works = if cfg!(test) && cfg!(debug_assertions) {
             Some(buf.to_vec())
         } else {
@@ -149,7 +149,7 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
             "{buflen} ; we know TAIL_SZ is a PAGE_SZ multiple, and write_buffered_borrowed is used"
         );
 
-        // do the IO
+        // Do the IO.
         let iobuf = match self.file.write_all(buf).await {
             (iobuf, Ok(nwritten)) => {
                 assert_eq!(nwritten, buflen);
@@ -167,13 +167,13 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
             }
         };
 
-        // reconstruct buf, as the write path IO consumes the Slice and returns the underlying IoBuf
+        // Reconstruct the Slice (the write path consumed the Slice and returned us the underlying IoBuf)
         let buf = tokio_epoll_uring::Slice::from_buf_bounds(iobuf, saved_bounds);
         if let Some(check_bounds_stuff_works) = check_bounds_stuff_works {
             assert_eq!(&check_bounds_stuff_works, &*buf);
         }
 
-        // pre-warm page cache with buf contents
+        // Pre-warm page cache with the contents.
         // At least in isolated bulk ingest benchmarks (test_bulk_ingest.py), the pre-warming
         // benefits the code that writes InMemoryLayer=>L0 layers.
         let nblocks = buflen / PAGE_SZ;
