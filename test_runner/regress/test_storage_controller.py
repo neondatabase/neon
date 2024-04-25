@@ -1,12 +1,12 @@
 import json
 import threading
-import requests
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Union
 
 import pytest
+import requests
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -1244,7 +1244,7 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
 class StorageControllerFailpoint(Failure):
     def __init__(self, failpoint, action):
         self.failpoint = failpoint
-        self.pageserver_id = None
+        self.pageserver_id = 0
         self.action = action
 
     def apply(self, env: NeonEnv):
@@ -1295,8 +1295,15 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     """
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
-    env.storage_controller.allowed_errors.extend([".*Lock on*.", ".*Scheduling is disabled by policy.*", f".*Operation TimelineCreate on key {tenant_id} has waited.*"])
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Lock on*.",
+            ".*Scheduling is disabled by policy.*",
+            f".*Operation TimelineCreate on key {tenant_id} has waited.*",
+        ]
+    )
 
+    # Apply failpoint
     failure = StorageControllerFailpoint("tenant-update-policy-exclusive-lock", "return(5000)")
     failure.apply(env)
 
@@ -1312,13 +1319,16 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     thread_update_tenant_policy = threading.Thread(target=update_tenent_policy)
     thread_update_tenant_policy.start()
 
+    # Make sure the update policy thread has started
+    time.sleep(1)
     # This will not be able to access and will log a warning
     timeline_id = TimelineId.generate()
     env.storage_controller.pageserver_api().timeline_create(
         pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
     )
-    thread_update_tenant_policy.join(timeout=5)
+    thread_update_tenant_policy.join(timeout=10)
 
     env.storage_controller.assert_log_contains("Lock on UpdatePolicy was held for")
-    env.storage_controller.assert_log_contains(f"Operation TimelineCreate on key {tenant_id} has waited")
-
+    env.storage_controller.assert_log_contains(
+        f"Operation TimelineCreate on key {tenant_id} has waited"
+    )
