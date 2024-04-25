@@ -16,7 +16,7 @@
 //! The current caller is [`super::page_caching::RW`]. In case it gets redirected to read from
 //! [`VirtualFile`], it consults the [`crate::page_cache`] first.
 
-mod zero_padded_buffer;
+mod zero_padded;
 
 use crate::{
     page_cache::PAGE_SZ,
@@ -29,7 +29,7 @@ use crate::{
 /// See module-level comment.
 pub struct RW {
     buffered_writer: owned_buffers_io::write::BufferedWriter<
-        zero_padded_buffer::Buf<{ Self::TAIL_SZ }>,
+        zero_padded::Buffer<{ Self::TAIL_SZ }>,
         owned_buffers_io::util::size_tracking_writer::Writer<VirtualFile>,
     >,
 }
@@ -46,7 +46,7 @@ impl RW {
         let bytes_flushed_tracker = owned_buffers_io::util::size_tracking_writer::Writer::new(file);
         let buffered_writer = owned_buffers_io::write::BufferedWriter::new(
             bytes_flushed_tracker,
-            zero_padded_buffer::Buf::default(),
+            zero_padded::Buffer::default(),
         );
         Self { buffered_writer }
     }
@@ -61,15 +61,13 @@ impl RW {
 
     pub fn bytes_written(&self) -> u64 {
         let flushed_offset = self.buffered_writer.as_inner().bytes_written();
-        let buffer: &zero_padded_buffer::Buf<{ Self::TAIL_SZ }> =
-            self.buffered_writer.inspect_buffer();
+        let buffer: &zero_padded::Buffer<{ Self::TAIL_SZ }> = self.buffered_writer.inspect_buffer();
         flushed_offset + u64::try_from(buffer.pending()).unwrap()
     }
 
     pub(crate) async fn read_blk(&self, blknum: u32) -> Result<ReadResult, std::io::Error> {
         let flushed_offset = self.buffered_writer.as_inner().bytes_written();
-        let buffer: &zero_padded_buffer::Buf<{ Self::TAIL_SZ }> =
-            self.buffered_writer.inspect_buffer();
+        let buffer: &zero_padded::Buffer<{ Self::TAIL_SZ }> = self.buffered_writer.inspect_buffer();
         let buffered_offset = flushed_offset + u64::try_from(buffer.pending()).unwrap();
         let read_offset = (blknum as u64) * (PAGE_SZ as u64);
 
