@@ -41,6 +41,8 @@ use utils::{bin_ser::BeSer, lsn::Lsn};
 
 const MAX_AUX_FILE_DELTAS: usize = 1024;
 
+pub const AUX_FILES_V2: bool = true; // Set it to true to see if e2e test passes. Will change to tenant-level flag + have a test matrix after getting early review feedbacks.
+
 #[derive(Debug)]
 pub enum LsnForTimestamp {
     /// Found commits both before and after the given timestamp
@@ -675,15 +677,31 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        match self.get(AUX_FILES_KEY, lsn, ctx).await {
-            Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
-                Ok(dir) => Ok(dir.files),
-                Err(e) => Err(PageReconstructError::from(e)),
-            },
-            Err(e) => {
-                // This is expected: historical databases do not have the key.
-                debug!("Failed to get info about AUX files: {}", e);
-                Ok(HashMap::new())
+        if AUX_FILES_V2 {
+            let kv = self
+                .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
+                .await
+                .context("scan")?;
+            let mut result = HashMap::new();
+            for (_, v) in kv {
+                let v = v.context("get value")?;
+                let v = aux_file::decode_file_value(&v).context("value decode")?;
+                for (fname, content) in v {
+                    result.insert(fname.to_string(), content.to_vec().into());
+                }
+            }
+            Ok(result)
+        } else {
+            match self.get(AUX_FILES_KEY, lsn, ctx).await {
+                Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
+                    Ok(dir) => Ok(dir.files),
+                    Err(e) => Err(PageReconstructError::from(e)),
+                },
+                Err(e) => {
+                    // This is expected: historical databases do not have the key.
+                    debug!("Failed to get info about AUX files: {}", e);
+                    Ok(HashMap::new())
+                }
             }
         }
     }
@@ -1404,7 +1422,6 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        const AUX_FILES_V2: bool = false; // disable for now until we settle down the feature flag for aux file v2
         if AUX_FILES_V2 {
             let key = aux_file::encode_aux_file_key(path);
             // retrieve the key from the engine

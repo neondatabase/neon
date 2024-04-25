@@ -65,7 +65,7 @@ pub fn encode_aux_file_key(path: &str) -> Key {
 const AUX_FILE_ENCODING_VERSION: u8 = 0x01;
 
 pub fn decode_file_value(val: &[u8]) -> anyhow::Result<Vec<(&str, &[u8])>> {
-    let mut ptr = &val[..];
+    let mut ptr = val;
     assert_eq!(
         ptr.get_u8(),
         AUX_FILE_ENCODING_VERSION,
