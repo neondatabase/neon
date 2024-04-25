@@ -173,7 +173,9 @@ def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
     # which changes the LSN on the page.
     cur.execute("select get_raw_page( 'vmtest_lock', 'vm', 0 )")
     vm_page_in_cache = (cur.fetchall()[0][0])[8:100].hex()
-    cur.execute("select get_raw_page_at_lsn( 'vmtest_lock', 'vm', 0, pg_current_wal_insert_lsn() )")
+    cur.execute(
+        "select get_raw_page_at_lsn( 'vmtest_lock', 'vm', 0, pg_current_wal_insert_lsn(), NULL )"
+    )
     vm_page_at_pageserver = (cur.fetchall()[0][0])[8:100].hex()
 
     assert vm_page_at_pageserver == vm_page_in_cache
