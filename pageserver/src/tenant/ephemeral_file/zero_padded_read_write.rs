@@ -3,18 +3,19 @@
 //! # Writes
 //!
 //! [`super::EphemeralFile`] writes small, borrowed buffers using [`RW::write_all_borrowed`].
-//! The [`RW`] batches these into [`RW::TAIL_SZ`] bigger writes, using [`owned_buffers_io::write::BufferedWriter`].
+//! The [`RW`] batches these into [`TAIL_SZ`] bigger writes, using [`owned_buffers_io::write::BufferedWriter`].
 //!
 //! # Reads
 //!
 //! [`super::EphemeralFile`] always reads full [`PAGE_SZ`]ed blocks using [`RW::read_blk`].
 //!
 //! The [`RW`] serves these reads either from the buffered writer's in-memory buffer
-//! or redirects the caller to read from the underlying [`VirtualFile`]` if they have already
-//! been flushed.
+//! or redirects the caller to read from the underlying [`OwnedAsyncWriter`]
+//! if the read is for the prefix that has already been flushed.
 //!
-//! The current caller is [`super::page_caching::RW`]. In case it gets redirected to read from
-//! [`VirtualFile`], it consults the [`crate::page_cache`] first.
+//! # Current Usage
+//!
+//! The current user of this module is [`super::page_caching::RW`].
 
 mod zero_padded;
 
