@@ -31,6 +31,7 @@ use pageserver_api::{
     },
     models::{SecondaryProgress, TenantConfigRequest},
 };
+use tracing::instrument;
 
 use crate::pageserver_client::PageserverClient;
 use pageserver_api::{
@@ -49,9 +50,9 @@ use pageserver_api::{
 };
 use pageserver_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
 use utils::{
     completion::Barrier,
+    failpoint_support,
     generation::Generation,
     http::error::ApiError,
     id::{NodeId, TenantId, TimelineId},
@@ -2410,6 +2411,8 @@ impl Service {
             TenantOperations::UpdatePolicy,
         )
         .await;
+
+        failpoint_support::sleep_millis_async!("tenant-update-policy-exclusive-lock");
 
         let TenantPolicyRequest {
             placement,
