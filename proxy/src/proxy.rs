@@ -17,7 +17,7 @@ use crate::{
     context::RequestMonitoring,
     error::ReportableError,
     metrics::{Metrics, NumClientConnectionsGuard},
-    protocol2::WithClientIp,
+    protocol2::read_proxy_protocol,
     proxy::handshake::{handshake, HandshakeData},
     stream::{PqStream, Stream},
     EndpointCacheKey,
@@ -88,20 +88,18 @@ pub async fn task_main(
         tracing::info!(protocol = "tcp", %session_id, "accepted new TCP connection");
 
         connections.spawn(async move {
-            let mut socket = WithClientIp::new(socket);
-            let mut peer_addr = peer_addr.ip();
-            match socket.wait_for_addr().await {
-                Ok(Some(addr)) => peer_addr = addr.ip(),
+            let (socket, peer_addr) = match read_proxy_protocol(socket).await{
+                Ok((socket, Some(addr))) => (socket, addr.ip()),
                 Err(e) => {
                     error!("per-client task finished with an error: {e:#}");
                     return;
                 }
-                Ok(None) if config.require_client_ip => {
+                Ok((_socket, None)) if config.require_client_ip => {
                     error!("missing required client IP");
                     return;
                 }
-                Ok(None) => {}
-            }
+                Ok((socket, None)) => (socket, peer_addr.ip())
+            };
 
             match socket.inner.set_nodelay(true) {
                 Ok(()) => {},

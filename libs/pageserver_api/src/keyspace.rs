@@ -162,6 +162,10 @@ impl KeySpace {
             .sum()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.total_size() == 0
+    }
+
     fn overlaps_at(&self, range: &Range<Key>) -> Option<usize> {
         match self.ranges.binary_search_by_key(&range.end, |r| r.start) {
             Ok(0) => None,
@@ -177,6 +181,11 @@ impl KeySpace {
     ///
     pub fn overlaps(&self, range: &Range<Key>) -> bool {
         self.overlaps_at(range).is_some()
+    }
+
+    /// Check if the keyspace contains a key
+    pub fn contains(&self, key: &Key) -> bool {
+        self.overlaps(&(*key..key.next()))
     }
 }
 

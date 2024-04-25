@@ -9,7 +9,9 @@ use std::time::Duration;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
-use storage_controller::service::{Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT};
+use storage_controller::service::{
+    Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+};
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
@@ -64,6 +66,10 @@ struct Cli {
     /// Grace period before marking unresponsive pageserver offline
     #[arg(long)]
     max_unavailable_interval: Option<humantime::Duration>,
+
+    /// Maximum number of reconcilers that may run in parallel
+    #[arg(long)]
+    reconciler_concurrency: Option<usize>,
 }
 
 enum StrictMode {
@@ -243,6 +249,9 @@ async fn async_main() -> anyhow::Result<()> {
             .max_unavailable_interval
             .map(humantime::Duration::into)
             .unwrap_or(MAX_UNAVAILABLE_INTERVAL_DEFAULT),
+        reconciler_concurrency: args
+            .reconciler_concurrency
+            .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations

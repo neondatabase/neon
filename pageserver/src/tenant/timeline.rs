@@ -86,7 +86,7 @@ use crate::{
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::{
-    TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
+    GetKind, TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
@@ -119,8 +119,8 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::{config::TenantConf, storage_layer::VectoredValueReconstructState};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -653,6 +653,19 @@ impl From<GetVectoredError> for CreateImageLayersError {
     }
 }
 
+impl From<GetVectoredError> for PageReconstructError {
+    fn from(e: GetVectoredError) -> Self {
+        match e {
+            GetVectoredError::Cancelled => PageReconstructError::Cancelled,
+            GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(anyhow!("Invalid LSN")),
+            err @ GetVectoredError::Oversized(_) => PageReconstructError::Other(err.into()),
+            err @ GetVectoredError::MissingKey(_) => PageReconstructError::Other(err.into()),
+            GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
+            GetVectoredError::Other(err) => PageReconstructError::Other(err),
+        }
+    }
+}
+
 impl From<GetReadyAncestorError> for PageReconstructError {
     fn from(e: GetReadyAncestorError) -> Self {
         use GetReadyAncestorError::*;
@@ -679,6 +692,23 @@ impl From<GetReadyAncestorError> for PageReconstructError {
 #[strum(serialize_all = "kebab-case")]
 pub enum GetVectoredImpl {
     Sequential,
+    Vectored,
+}
+
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum GetImpl {
+    Legacy,
     Vectored,
 }
 
@@ -744,16 +774,6 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
-        self.timeline_get_throttle.throttle(ctx, 1).await;
-        self.get_impl(key, lsn, ctx).await
-    }
-    /// Not subject to [`Self::timeline_get_throttle`].
-    async fn get_impl(
-        &self,
-        key: Key,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Result<Bytes, PageReconstructError> {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
@@ -763,13 +783,7 @@ impl Timeline {
         // page_service.
         debug_assert!(!self.shard_identity.is_key_disposable(&key));
 
-        // XXX: structured stats collection for layer eviction here.
-        trace!(
-            "get page request for {}@{} from task kind {:?}",
-            key,
-            lsn,
-            ctx.task_kind()
-        );
+        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
@@ -792,12 +806,85 @@ impl Timeline {
             None => None,
         };
 
-        let mut reconstruct_state = ValueReconstructState {
-            records: Vec::new(),
-            img: cached_page_img,
-        };
+        match self.conf.get_impl {
+            GetImpl::Legacy => {
+                let reconstruct_state = ValueReconstructState {
+                    records: Vec::new(),
+                    img: cached_page_img,
+                };
 
-        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
+                self.get_impl(key, lsn, reconstruct_state, ctx).await
+            }
+            GetImpl::Vectored => {
+                let keyspace = KeySpace {
+                    ranges: vec![key..key.next()],
+                };
+
+                // Initialise the reconstruct state for the key with the cache
+                // entry returned above.
+                let mut reconstruct_state = ValuesReconstructState::new();
+                let mut key_state = VectoredValueReconstructState::default();
+                key_state.img = cached_page_img;
+                reconstruct_state.keys.insert(key, Ok(key_state));
+
+                let vectored_res = self
+                    .get_vectored_impl(keyspace.clone(), lsn, reconstruct_state, ctx)
+                    .await;
+
+                if self.conf.validate_vectored_get {
+                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
+                        .await;
+                }
+
+                let key_value = vectored_res?.pop_first();
+                match key_value {
+                    Some((got_key, value)) => {
+                        if got_key != key {
+                            error!(
+                                "Expected {}, but singular vectored get returned {}",
+                                key, got_key
+                            );
+                            Err(PageReconstructError::Other(anyhow!(
+                                "Singular vectored get returned wrong key"
+                            )))
+                        } else {
+                            value
+                        }
+                    }
+                    None => {
+                        error!(
+                            "Expected {}, but singular vectored get returned nothing",
+                            key
+                        );
+                        Err(PageReconstructError::Other(anyhow!(
+                            "Singular vectored get did not return a value for {}",
+                            key
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Not subject to [`Self::timeline_get_throttle`].
+    async fn get_impl(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        mut reconstruct_state: ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        // XXX: structured stats collection for layer eviction here.
+        trace!(
+            "get page request for {}@{} from task kind {:?}",
+            key,
+            lsn,
+            ctx.task_kind()
+        );
+
+        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(GetKind::Singular)
+            .start_timer();
         let path = self
             .get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
@@ -807,7 +894,7 @@ impl Timeline {
         let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
         let elapsed = start.elapsed();
         crate::metrics::RECONSTRUCT_TIME
-            .for_result(&res)
+            .for_get_kind(GetKind::Singular)
             .observe(elapsed.as_secs_f64());
 
         if cfg!(feature = "testing") && res.is_err() {
@@ -886,7 +973,9 @@ impl Timeline {
                 self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
             }
             GetVectoredImpl::Vectored => {
-                let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
+                let vectored_res = self
+                    .get_vectored_impl(keyspace.clone(), lsn, ValuesReconstructState::new(), ctx)
+                    .await;
 
                 if self.conf.validate_vectored_get {
                     self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
@@ -932,7 +1021,9 @@ impl Timeline {
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                let block = self.get_impl(key, lsn, ctx).await;
+                let block = self
+                    .get_impl(key, lsn, ValueReconstructState::default(), ctx)
+                    .await;
 
                 use PageReconstructError::*;
                 match block {
@@ -950,6 +1041,23 @@ impl Timeline {
                         // level error.
                         return Err(GetVectoredError::MissingKey(key));
                     }
+                    Err(Other(err))
+                        if err
+                            .to_string()
+                            .contains("downloading evicted layer file failed") =>
+                    {
+                        return Err(GetVectoredError::Other(err))
+                    }
+                    Err(Other(err))
+                        if err
+                            .chain()
+                            .any(|cause| cause.to_string().contains("layer loading failed")) =>
+                    {
+                        // The intent here is to achieve error parity with the vectored read path.
+                        // When vectored read fails to load a layer it fails the whole read, hence
+                        // we mimic this behaviour here to keep the validation happy.
+                        return Err(GetVectoredError::Other(err));
+                    }
                     _ => {
                         values.insert(key, block);
                         key = key.next();
@@ -965,13 +1073,25 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
+        mut reconstruct_state: ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let get_kind = if keyspace.total_size() == 1 {
+            GetKind::Singular
+        } else {
+            GetKind::Vectored
+        };
 
+        let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
             .await?;
+        get_data_timer.stop_and_record();
 
+        let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
         for (key, res) in reconstruct_state.keys {
@@ -987,6 +1107,7 @@ impl Timeline {
                 }
             }
         }
+        reconstruct_timer.stop_and_record();
 
         // Note that this is an approximation. Tracking the exact number of layers visited
         // per key requires virtually unbounded memory usage and is inefficient
@@ -3127,55 +3248,61 @@ impl Timeline {
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
 
-            let guard = timeline.layers.read().await;
-            let layers = guard.layer_map();
+            // Do not descent any further if the last layer we visited
+            // completed all keys in the keyspace it inspected. This is not
+            // required for correctness, but avoids visiting extra layers
+            // which turns out to be a perf bottleneck in some cases.
+            if !unmapped_keyspace.is_empty() {
+                let guard = timeline.layers.read().await;
+                let layers = guard.layer_map();
 
-            let in_memory_layer = layers.find_in_memory_layer(|l| {
-                let start_lsn = l.get_lsn_range().start;
-                cont_lsn > start_lsn
-            });
+                let in_memory_layer = layers.find_in_memory_layer(|l| {
+                    let start_lsn = l.get_lsn_range().start;
+                    cont_lsn > start_lsn
+                });
 
-            match in_memory_layer {
-                Some(l) => {
-                    let lsn_range = l.get_lsn_range().start..cont_lsn;
-                    fringe.update(
-                        ReadableLayer::InMemoryLayer(l),
-                        unmapped_keyspace.clone(),
-                        lsn_range,
-                    );
-                }
-                None => {
-                    for range in unmapped_keyspace.ranges.iter() {
-                        let results = layers.range_search(range.clone(), cont_lsn);
+                match in_memory_layer {
+                    Some(l) => {
+                        let lsn_range = l.get_lsn_range().start..cont_lsn;
+                        fringe.update(
+                            ReadableLayer::InMemoryLayer(l),
+                            unmapped_keyspace.clone(),
+                            lsn_range,
+                        );
+                    }
+                    None => {
+                        for range in unmapped_keyspace.ranges.iter() {
+                            let results = layers.range_search(range.clone(), cont_lsn);
 
-                        results
-                            .found
-                            .into_iter()
-                            .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                                (
-                                    ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
-                                    keyspace_accum.to_keyspace(),
-                                    lsn_floor..cont_lsn,
-                                )
-                            })
-                            .for_each(|(layer, keyspace, lsn_range)| {
-                                fringe.update(layer, keyspace, lsn_range)
-                            });
+                            results
+                                .found
+                                .into_iter()
+                                .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                                    (
+                                        ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
+                                        keyspace_accum.to_keyspace(),
+                                        lsn_floor..cont_lsn,
+                                    )
+                                })
+                                .for_each(|(layer, keyspace, lsn_range)| {
+                                    fringe.update(layer, keyspace, lsn_range)
+                                });
+                        }
                     }
                 }
-            }
 
-            // It's safe to drop the layer map lock after planning the next round of reads.
-            // The fringe keeps readable handles for the layers which are safe to read even
-            // if layers were compacted or flushed.
-            //
-            // The more interesting consideration is: "Why is the read algorithm still correct
-            // if the layer map changes while it is operating?". Doing a vectored read on a
-            // timeline boils down to pushing an imaginary lsn boundary downwards for each range
-            // covered by the read. The layer map tells us how to move the lsn downwards for a
-            // range at *a particular point in time*. It is fine for the answer to be different
-            // at two different time points.
-            drop(guard);
+                // It's safe to drop the layer map lock after planning the next round of reads.
+                // The fringe keeps readable handles for the layers which are safe to read even
+                // if layers were compacted or flushed.
+                //
+                // The more interesting consideration is: "Why is the read algorithm still correct
+                // if the layer map changes while it is operating?". Doing a vectored read on a
+                // timeline boils down to pushing an imaginary lsn boundary downwards for each range
+                // covered by the read. The layer map tells us how to move the lsn downwards for a
+                // range at *a particular point in time*. It is fine for the answer to be different
+                // at two different time points.
+                drop(guard);
+            }
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
                 let next_cont_lsn = lsn_range.start;
@@ -4244,9 +4371,8 @@ impl Timeline {
                 *self.get_latest_gc_cutoff_lsn()
             }
         } else {
-            // No time-based retention was configured. Set time-based cutoff to
-            // same as LSN based.
-            cutoff_horizon
+            // No time-based retention was configured. Interpret this as "keep no history".
+            self.get_last_record_lsn()
         };
 
         // Grab the lock and update the values

@@ -9,6 +9,7 @@
 use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
+use crate::metrics::WAL_INGEST;
 use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
@@ -448,6 +449,11 @@ impl Timeline {
         // include physical changes from later commits that will be marked
         // as aborted, and will need to be vacuumed away.
         let commit_lsn = Lsn((low - 1) * 8);
+        // This maxing operation is for the edge case that the search above did
+        // set found_smaller to true but it never increased the lsn. Then, low
+        // is still the old min_lsn the subtraction above could possibly give a value
+        // below the anchestor_lsn.
+        let commit_lsn = commit_lsn.max(min_lsn);
         match (found_smaller, found_larger) {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
@@ -1546,6 +1552,8 @@ impl<'a> DatadirModification<'a> {
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut writer = self.tline.writer().await;
 
+        let timer = WAL_INGEST.time_spent_on_ingest.start_timer();
+
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
@@ -1584,6 +1592,8 @@ impl<'a> DatadirModification<'a> {
         for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
             writer.update_directory_entries_count(kind, count as u64);
         }
+
+        timer.observe_duration();
 
         Ok(())
     }

@@ -105,31 +105,39 @@ pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
 });
 
 // Metrics collected on operations on the storage repository.
+#[derive(
+    Clone, Copy, enum_map::Enum, strum_macros::EnumString, strum_macros::Display, IntoStaticStr,
+)]
+pub(crate) enum GetKind {
+    Singular,
+    Vectored,
+}
 
 pub(crate) struct ReconstructTimeMetrics {
-    ok: Histogram,
-    err: Histogram,
+    singular: Histogram,
+    vectored: Histogram,
 }
 
 pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value (reconstruct a page from deltas)",
-        &["result"],
+        &["get_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric");
+
     ReconstructTimeMetrics {
-        ok: inner.get_metric_with_label_values(&["ok"]).unwrap(),
-        err: inner.get_metric_with_label_values(&["err"]).unwrap(),
+        singular: inner.with_label_values(&[GetKind::Singular.into()]),
+        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
     }
 });
 
 impl ReconstructTimeMetrics {
-    pub(crate) fn for_result<T, E>(&self, result: &Result<T, E>) -> &Histogram {
-        match result {
-            Ok(_) => &self.ok,
-            Err(_) => &self.err,
+    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
+        match get_kind {
+            GetKind::Singular => &self.singular,
+            GetKind::Vectored => &self.vectored,
         }
     }
 }
@@ -142,13 +150,33 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::n
     .expect("failed to define a metric")
 });
 
-pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+pub(crate) struct ReconstructDataTimeMetrics {
+    singular: Histogram,
+    vectored: Histogram,
+}
+
+impl ReconstructDataTimeMetrics {
+    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
+        match get_kind {
+            GetKind::Singular => &self.singular,
+            GetKind::Vectored => &self.vectored,
+        }
+    }
+}
+
+pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<ReconstructDataTimeMetrics> = Lazy::new(|| {
+    let inner = register_histogram_vec!(
         "pageserver_getpage_get_reconstruct_data_seconds",
         "Time spent in get_reconstruct_value_data",
+        &["get_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
-    .expect("failed to define a metric")
+    .expect("failed to define a metric");
+
+    ReconstructDataTimeMetrics {
+        singular: inner.with_label_values(&[GetKind::Singular.into()]),
+        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
+    }
 });
 
 pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
@@ -1491,35 +1519,6 @@ pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
 }
 });
 
-pub(crate) struct WalIngestMetrics {
-    pub(crate) bytes_received: IntCounter,
-    pub(crate) records_received: IntCounter,
-    pub(crate) records_committed: IntCounter,
-    pub(crate) records_filtered: IntCounter,
-}
-
-pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
-    bytes_received: register_int_counter!(
-        "pageserver_wal_ingest_bytes_received",
-        "Bytes of WAL ingested from safekeepers",
-    )
-    .unwrap(),
-    records_received: register_int_counter!(
-        "pageserver_wal_ingest_records_received",
-        "Number of WAL records received from safekeepers"
-    )
-    .expect("failed to define a metric"),
-    records_committed: register_int_counter!(
-        "pageserver_wal_ingest_records_committed",
-        "Number of WAL records which resulted in writes to pageserver storage"
-    )
-    .expect("failed to define a metric"),
-    records_filtered: register_int_counter!(
-        "pageserver_wal_ingest_records_filtered",
-        "Number of WAL records filtered out due to sharding"
-    )
-    .expect("failed to define a metric"),
-});
 pub(crate) struct SecondaryModeMetrics {
     pub(crate) upload_heatmap: IntCounter,
     pub(crate) upload_heatmap_errors: IntCounter,
@@ -1720,6 +1719,43 @@ macro_rules! redo_bytes_histogram_count_buckets {
         ]
     };
 }
+
+pub(crate) struct WalIngestMetrics {
+    pub(crate) bytes_received: IntCounter,
+    pub(crate) records_received: IntCounter,
+    pub(crate) records_committed: IntCounter,
+    pub(crate) records_filtered: IntCounter,
+    pub(crate) time_spent_on_ingest: Histogram,
+}
+
+pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
+    bytes_received: register_int_counter!(
+        "pageserver_wal_ingest_bytes_received",
+        "Bytes of WAL ingested from safekeepers",
+    )
+    .unwrap(),
+    records_received: register_int_counter!(
+        "pageserver_wal_ingest_records_received",
+        "Number of WAL records received from safekeepers"
+    )
+    .expect("failed to define a metric"),
+    records_committed: register_int_counter!(
+        "pageserver_wal_ingest_records_committed",
+        "Number of WAL records which resulted in writes to pageserver storage"
+    )
+    .expect("failed to define a metric"),
+    records_filtered: register_int_counter!(
+        "pageserver_wal_ingest_records_filtered",
+        "Number of WAL records filtered out due to sharding"
+    )
+    .expect("failed to define a metric"),
+    time_spent_on_ingest: register_histogram!(
+        "pageserver_wal_ingest_put_value_seconds",
+        "Actual time spent on ingesting a record",
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric"),
+});
 
 pub(crate) static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(

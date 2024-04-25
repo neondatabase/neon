@@ -2870,20 +2870,23 @@ impl Tenant {
                 }
             }
 
-            if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
-                let branchpoints: Vec<Lsn> = all_branchpoints
-                    .range((
-                        Included((timeline_id, Lsn(0))),
-                        Included((timeline_id, Lsn(u64::MAX))),
-                    ))
-                    .map(|&x| x.1)
-                    .collect();
-                timeline
-                    .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
-                    .await?;
+            let cutoff = timeline
+                .get_last_record_lsn()
+                .checked_sub(horizon)
+                .unwrap_or(Lsn(0));
 
-                gc_timelines.push(timeline);
-            }
+            let branchpoints: Vec<Lsn> = all_branchpoints
+                .range((
+                    Included((timeline_id, Lsn(0))),
+                    Included((timeline_id, Lsn(u64::MAX))),
+                ))
+                .map(|&x| x.1)
+                .collect();
+            timeline
+                .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
+                .await?;
+
+            gc_timelines.push(timeline);
         }
         drop(gc_cs);
         Ok(gc_timelines)
@@ -3862,6 +3865,7 @@ mod tests {
     use pageserver_api::key::NON_INHERITED_RANGE;
     use pageserver_api::keyspace::KeySpace;
     use rand::{thread_rng, Rng};
+    use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
 
     static TEST_KEY: Lazy<Key> =
@@ -4650,7 +4654,9 @@ mod tests {
         for read in reads {
             info!("Doing vectored read on {:?}", read);
 
-            let vectored_res = tline.get_vectored_impl(read.clone(), reads_lsn, &ctx).await;
+            let vectored_res = tline
+                .get_vectored_impl(read.clone(), reads_lsn, ValuesReconstructState::new(), &ctx)
+                .await;
             tline
                 .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
                 .await;
@@ -4695,7 +4701,12 @@ mod tests {
         let read_lsn = child_timeline.get_last_record_lsn();
 
         let vectored_res = child_timeline
-            .get_vectored_impl(aux_keyspace.clone(), read_lsn, &ctx)
+            .get_vectored_impl(
+                aux_keyspace.clone(),
+                read_lsn,
+                ValuesReconstructState::new(),
+                &ctx,
+            )
             .await;
 
         child_timeline
@@ -4843,7 +4854,12 @@ mod tests {
             ranges: vec![key_near_gap..gap_at_key.next(), key_near_end..current_key],
         };
         let results = child_timeline
-            .get_vectored_impl(read.clone(), current_lsn, &ctx)
+            .get_vectored_impl(
+                read.clone(),
+                current_lsn,
+                ValuesReconstructState::new(),
+                &ctx,
+            )
             .await?;
 
         for (key, img_res) in results {
@@ -4976,6 +4992,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
+                    ValuesReconstructState::new(),
                     &ctx,
                 )
                 .await;
