@@ -533,9 +533,9 @@ pub struct RetryConfig {
 impl RetryConfig {
     /// Default options for RetryConfig.
 
-    /// Total delay for 4 retries with 1s base delay and 2.0 backoff factor is 7s.
+    /// Total delay for 8 retries with 100ms base delay and 1.6 backoff factor is about 7s.
     pub const CONNECT_TO_COMPUTE_DEFAULT_VALUES: &'static str =
-        "num_retries=4,base_retry_wait_duration=1s,retry_wait_exponent_base=2.0";
+        "num_retries=8,base_retry_wait_duration=100ms,retry_wait_exponent_base=1.6";
     /// Total delay for 4 retries with 1s base delay and 2.0 backoff factor is 7s.
     /// Cplane has timeout of 60s on each request.
     pub const WAKE_COMPUTE_DEFAULT_VALUES: &'static str =
