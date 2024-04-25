@@ -7,7 +7,9 @@ use std::{
     io::BufReader,
 };
 
-use pageserver_api::models::{PagestreamFeMessage, PagestreamGetPageRequest};
+use pageserver_api::models::{
+    PagestreamFeMessage, PagestreamGetPageRequest, PagestreamProtocolVersion,
+};
 use utils::id::{ConnectionId, TenantId, TimelineId};
 
 use clap::{Parser, Subcommand};
@@ -56,7 +58,7 @@ fn analyze_trace<R: std::io::Read>(mut reader: R) {
     let mut prev: Option<PagestreamGetPageRequest> = None;
 
     // Compute stats
-    while let Ok(msg) = PagestreamFeMessage::parse(&mut reader) {
+    while let Ok(msg) = PagestreamFeMessage::parse(&mut reader, PagestreamProtocolVersion::V2) {
         match msg {
             PagestreamFeMessage::Exists(_) => {}
             PagestreamFeMessage::Nblocks(_) => {}
@@ -89,7 +91,7 @@ fn analyze_trace<R: std::io::Read>(mut reader: R) {
 }
 
 fn dump_trace<R: std::io::Read>(mut reader: R) {
-    while let Ok(msg) = PagestreamFeMessage::parse(&mut reader) {
+    while let Ok(msg) = PagestreamFeMessage::parse(&mut reader, PagestreamProtocolVersion::V2) {
         println!("{msg:?}");
     }
 }
