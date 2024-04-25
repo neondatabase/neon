@@ -3891,9 +3891,18 @@ impl Timeline {
 
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
-            if !force
-                && (!check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await)
-            {
+
+            let do_it = if force {
+                true
+            } else if check_for_image_layers {
+                // [`Self::time_for_new_image_layer`] is CPU expensive,
+                // so skip if we've not collected enough WAL since the last time
+                self.time_for_new_image_layer(partition, lsn).await
+            } else {
+                false
+            };
+
+            if !do_it {
                 start = img_range.end;
                 continue;
             }
