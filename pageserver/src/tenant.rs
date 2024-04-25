@@ -559,9 +559,10 @@ impl Tenant {
             // By doing what we do here, the index part upload is retried.
             // If control plane retries timeline creation in the meantime, the mgmt API handler
             // for timeline creation will coalesce on the upload we queue here.
+            // FIXME: this branch should be dead code as we no longer write local metadata.
             let rtc = timeline.remote_client.as_ref().unwrap();
             rtc.init_upload_queue_for_empty_remote(&metadata)?;
-            rtc.schedule_index_upload_for_metadata_update(&metadata)?;
+            rtc.schedule_index_upload_for_full_metadata_update(&metadata)?;
         }
 
         timeline
@@ -2869,20 +2870,23 @@ impl Tenant {
                 }
             }
 
-            if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
-                let branchpoints: Vec<Lsn> = all_branchpoints
-                    .range((
-                        Included((timeline_id, Lsn(0))),
-                        Included((timeline_id, Lsn(u64::MAX))),
-                    ))
-                    .map(|&x| x.1)
-                    .collect();
-                timeline
-                    .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
-                    .await?;
+            let cutoff = timeline
+                .get_last_record_lsn()
+                .checked_sub(horizon)
+                .unwrap_or(Lsn(0));
 
-                gc_timelines.push(timeline);
-            }
+            let branchpoints: Vec<Lsn> = all_branchpoints
+                .range((
+                    Included((timeline_id, Lsn(0))),
+                    Included((timeline_id, Lsn(u64::MAX))),
+                ))
+                .map(|&x| x.1)
+                .collect();
+            timeline
+                .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
+                .await?;
+
+            gc_timelines.push(timeline);
         }
         drop(gc_cs);
         Ok(gc_timelines)
@@ -3027,7 +3031,7 @@ impl Tenant {
         // See also https://github.com/neondatabase/neon/issues/3865
         if let Some(remote_client) = new_timeline.remote_client.as_ref() {
             remote_client
-                .schedule_index_upload_for_metadata_update(&metadata)
+                .schedule_index_upload_for_full_metadata_update(&metadata)
                 .context("branch initial metadata upload")?;
         }
 
@@ -3848,6 +3852,8 @@ pub(crate) mod harness {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::{Key, Value};
@@ -3856,9 +3862,10 @@ mod tests {
     use crate::DEFAULT_PG_VERSION;
     use bytes::BytesMut;
     use hex_literal::hex;
+    use pageserver_api::key::NON_INHERITED_RANGE;
     use pageserver_api::keyspace::KeySpace;
     use rand::{thread_rng, Rng};
-    use tests::timeline::ShutdownMode;
+    use tests::timeline::{GetVectoredError, ShutdownMode};
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -4655,6 +4662,62 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_get_vectored_aux_files() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_get_vectored_aux_files")?;
+
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        let tline = tline.raw_timeline().unwrap();
+
+        let mut modification = tline.begin_modification(Lsn(0x1000));
+        modification.put_file("foo/bar1", b"content1", &ctx).await?;
+        modification.set_lsn(Lsn(0x1008))?;
+        modification.put_file("foo/bar2", b"content2", &ctx).await?;
+        modification.commit(&ctx).await?;
+
+        let child_timeline_id = TimelineId::generate();
+        tenant
+            .branch_timeline_test(
+                tline,
+                child_timeline_id,
+                Some(tline.get_last_record_lsn()),
+                &ctx,
+            )
+            .await?;
+
+        let child_timeline = tenant
+            .get_timeline(child_timeline_id, true)
+            .expect("Should have the branched timeline");
+
+        let aux_keyspace = KeySpace {
+            ranges: vec![NON_INHERITED_RANGE],
+        };
+        let read_lsn = child_timeline.get_last_record_lsn();
+
+        let vectored_res = child_timeline
+            .get_vectored_impl(aux_keyspace.clone(), read_lsn, &ctx)
+            .await;
+
+        child_timeline
+            .validate_get_vectored_impl(&vectored_res, aux_keyspace, read_lsn, &ctx)
+            .await;
+
+        let images = vectored_res?;
+        let mut key = NON_INHERITED_RANGE.start;
+        while key < NON_INHERITED_RANGE.end {
+            assert!(matches!(
+                images[&key],
+                Err(PageReconstructError::MissingKey(_))
+            ));
+            key = key.next();
+        }
+
+        Ok(())
+    }
+
     // Test that vectored get handles layer gaps correctly
     // by advancing into the next ancestor timeline if required.
     //
@@ -4789,6 +4852,166 @@ mod tests {
         for (key, img_res) in results {
             let expected = test_img(&format!("{} at {}", key, latest_lsns[&key]));
             assert_eq!(img_res?, expected);
+        }
+
+        Ok(())
+    }
+
+    // Test that vectored get descends into ancestor timelines correctly and
+    // does not return an image that's newer than requested.
+    //
+    // The diagram below ilustrates an interesting case. We have a parent timeline
+    // (top of the Lsn range) and a child timeline. The request key cannot be reconstructed
+    // from the child timeline, so the parent timeline must be visited. When advacing into
+    // the child timeline, the read path needs to remember what the requested Lsn was in
+    // order to avoid returning an image that's too new. The test below constructs such
+    // a timeline setup and does a few queries around the Lsn of each page image.
+    // ```
+    //    LSN
+    //     ^
+    //     |
+    //     |
+    // 500 | --------------------------------------> branch point
+    // 400 |        X
+    // 300 |        X
+    // 200 | --------------------------------------> requested lsn
+    // 100 |        X
+    //     |---------------------------------------> Key
+    //              |
+    //              ------> requested key
+    //
+    // Legend:
+    // * X - page images
+    // ```
+    #[tokio::test]
+    async fn test_get_vectored_ancestor_descent() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_get_vectored_on_lsn_axis")?;
+        let (tenant, ctx) = harness.load().await;
+
+        let start_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let end_key = start_key.add(1000);
+        let child_gap_at_key = start_key.add(500);
+        let mut parent_gap_lsns: BTreeMap<Lsn, String> = BTreeMap::new();
+
+        let mut current_lsn = Lsn(0x10);
+
+        let timeline_id = TimelineId::generate();
+        let parent_timeline = tenant
+            .create_test_timeline(timeline_id, current_lsn, DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        current_lsn += 0x100;
+
+        for _ in 0..3 {
+            let mut key = start_key;
+            while key < end_key {
+                current_lsn += 0x10;
+
+                let image_value = format!("{} at {}", child_gap_at_key, current_lsn);
+
+                let mut writer = parent_timeline.writer().await;
+                writer
+                    .put(
+                        key,
+                        current_lsn,
+                        &Value::Image(test_img(&image_value)),
+                        &ctx,
+                    )
+                    .await?;
+                writer.finish_write(current_lsn);
+
+                if key == child_gap_at_key {
+                    parent_gap_lsns.insert(current_lsn, image_value);
+                }
+
+                key = key.next();
+            }
+
+            parent_timeline.freeze_and_flush().await?;
+        }
+
+        let child_timeline_id = TimelineId::generate();
+
+        let child_timeline = tenant
+            .branch_timeline_test(&parent_timeline, child_timeline_id, Some(current_lsn), &ctx)
+            .await?;
+
+        let mut key = start_key;
+        while key < end_key {
+            if key == child_gap_at_key {
+                key = key.next();
+                continue;
+            }
+
+            current_lsn += 0x10;
+
+            let mut writer = child_timeline.writer().await;
+            writer
+                .put(
+                    key,
+                    current_lsn,
+                    &Value::Image(test_img(&format!("{} at {}", key, current_lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(current_lsn);
+
+            key = key.next();
+        }
+
+        child_timeline.freeze_and_flush().await?;
+
+        let lsn_offsets: [i64; 5] = [-10, -1, 0, 1, 10];
+        let mut query_lsns = Vec::new();
+        for image_lsn in parent_gap_lsns.keys().rev() {
+            for offset in lsn_offsets {
+                query_lsns.push(Lsn(image_lsn
+                    .0
+                    .checked_add_signed(offset)
+                    .expect("Shouldn't overflow")));
+            }
+        }
+
+        for query_lsn in query_lsns {
+            let results = child_timeline
+                .get_vectored_impl(
+                    KeySpace {
+                        ranges: vec![child_gap_at_key..child_gap_at_key.next()],
+                    },
+                    query_lsn,
+                    &ctx,
+                )
+                .await;
+
+            let expected_item = parent_gap_lsns
+                .iter()
+                .rev()
+                .find(|(lsn, _)| **lsn <= query_lsn);
+
+            info!(
+                "Doing vectored read at LSN {}. Expecting image to be: {:?}",
+                query_lsn, expected_item
+            );
+
+            match expected_item {
+                Some((_, img_value)) => {
+                    let key_results = results.expect("No vectored get error expected");
+                    let key_result = &key_results[&child_gap_at_key];
+                    let returned_img = key_result
+                        .as_ref()
+                        .expect("No page reconstruct error expected");
+
+                    info!(
+                        "Vectored read at LSN {} returned image {}",
+                        query_lsn,
+                        std::str::from_utf8(returned_img)?
+                    );
+                    assert_eq!(*returned_img, test_img(img_value));
+                }
+                None => {
+                    assert!(matches!(results, Err(GetVectoredError::MissingKey(_))));
+                }
+            }
         }
 
         Ok(())

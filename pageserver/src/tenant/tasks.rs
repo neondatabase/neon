@@ -62,7 +62,7 @@ impl BackgroundLoopKind {
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
-) -> impl Drop {
+) -> tokio::sync::SemaphorePermit<'static> {
     let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE
         .with_label_values(&[loop_kind.as_static_str()])
         .guard();

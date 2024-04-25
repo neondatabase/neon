@@ -119,6 +119,10 @@ pub struct ProxyMetrics {
 
     /// Number of invalid endpoints (per protocol, per rejected).
     pub invalid_endpoints_total: CounterVec<InvalidEndpointsSet>,
+
+    /// Number of retries (per outcome, per retry_type).
+    #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]))]
+    pub retries_metric: HistogramVec<RetriesMetricSet, 9>,
 }
 
 #[derive(MetricGroup)]
@@ -479,4 +483,17 @@ pub struct InvalidEndpointsGroup {
     pub protocol: Protocol,
     pub rejected: Bool,
     pub outcome: ConnectOutcome,
+}
+
+#[derive(LabelGroup)]
+#[label(set = RetriesMetricSet)]
+pub struct RetriesMetricGroup {
+    pub outcome: ConnectOutcome,
+    pub retry_type: RetryType,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+pub enum RetryType {
+    WakeCompute,
+    ConnectToCompute,
 }
