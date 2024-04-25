@@ -2870,20 +2870,23 @@ impl Tenant {
                 }
             }
 
-            if let Some(cutoff) = timeline.get_last_record_lsn().checked_sub(horizon) {
-                let branchpoints: Vec<Lsn> = all_branchpoints
-                    .range((
-                        Included((timeline_id, Lsn(0))),
-                        Included((timeline_id, Lsn(u64::MAX))),
-                    ))
-                    .map(|&x| x.1)
-                    .collect();
-                timeline
-                    .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
-                    .await?;
+            let cutoff = timeline
+                .get_last_record_lsn()
+                .checked_sub(horizon)
+                .unwrap_or(Lsn(0));
 
-                gc_timelines.push(timeline);
-            }
+            let branchpoints: Vec<Lsn> = all_branchpoints
+                .range((
+                    Included((timeline_id, Lsn(0))),
+                    Included((timeline_id, Lsn(u64::MAX))),
+                ))
+                .map(|&x| x.1)
+                .collect();
+            timeline
+                .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
+                .await?;
+
+            gc_timelines.push(timeline);
         }
         drop(gc_cs);
         Ok(gc_timelines)

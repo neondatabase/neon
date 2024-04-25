@@ -18,7 +18,7 @@ use std::time::Duration;
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
-use remote_storage::{GenericRemoteStorage, RemotePath, StorageMetadata};
+use remote_storage::{GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata};
 use tokio::fs::File;
 
 use tokio::select;
@@ -601,12 +601,18 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     backoff::retry(
         || async {
             // Do list-delete in batch_size batches to make progress even if there a lot of files.
-            // Alternatively we could make list_files return iterator, but it is more complicated and
+            // Alternatively we could make remote storage list return iterator, but it is more complicated and
             // I'm not sure deleting while iterating is expected in s3.
             loop {
                 let files = storage
-                    .list_files(Some(&remote_path), Some(batch_size), &cancel)
-                    .await?;
+                    .list(
+                        Some(&remote_path),
+                        ListingMode::NoDelimiter,
+                        Some(batch_size),
+                        &cancel,
+                    )
+                    .await?
+                    .keys;
                 if files.is_empty() {
                     return Ok(()); // done
                 }
@@ -666,8 +672,9 @@ pub async fn copy_s3_segments(
     let cancel = CancellationToken::new();
 
     let files = storage
-        .list_files(Some(&remote_path), None, &cancel)
-        .await?;
+        .list(Some(&remote_path), ListingMode::NoDelimiter, None, &cancel)
+        .await?
+        .keys;
 
     let uploaded_segments = &files
         .iter()

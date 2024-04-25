@@ -403,7 +403,7 @@ async fn main() -> anyhow::Result<()> {
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
         client_tasks.spawn(usage_metrics::task_backup(
             &metrics_config.backup_metric_collection_config,
-            cancellation_token,
+            cancellation_token.clone(),
         ));
     }
 
@@ -423,7 +423,10 @@ async fn main() -> anyhow::Result<()> {
                 let cache = api.caches.endpoints_cache.clone();
                 let con = regional_redis_client;
                 let span = tracing::info_span!("endpoints_cache");
-                maintenance_tasks.spawn(async move { cache.do_read(con).await }.instrument(span));
+                maintenance_tasks.spawn(
+                    async move { cache.do_read(con, cancellation_token.clone()).await }
+                        .instrument(span),
+                );
             }
         }
     }
