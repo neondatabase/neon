@@ -923,7 +923,7 @@ impl TenantShard {
     ///
     /// Constructing a ReconcilerWaiter with the resulting sequence number gives the property
     /// that the waiter will not complete until some future Reconciler is constructed and run.
-    fn advance_sequence(&mut self) {
+    fn ensure_sequence_ahead(&mut self) {
         // Find the highest sequence for which a Reconciler has previously run or is currently
         // running
         let max_seen = std::cmp::max(
@@ -935,12 +935,16 @@ impl TenantShard {
         );
 
         if self.sequence <= max_seen {
-            self.sequence = self.sequence.next();
+            self.sequence = max_seen.next();
         }
     }
 
-    pub(crate) fn await_next_reconcile(&mut self) -> ReconcilerWaiter {
-        self.advance_sequence();
+    /// Create a waiter that will wait for some future Reconciler that hasn't been spawned yet.
+    ///
+    /// This is appropriate when you can't spawn a recociler (e.g. due to resource limits), but
+    /// you would like to wait until one gets spawned in the background.
+    pub(crate) fn future_reconcile_waiter(&mut self) -> ReconcilerWaiter {
+        self.ensure_sequence_ahead();
 
         ReconcilerWaiter {
             tenant_shard_id: self.tenant_shard_id,
@@ -985,7 +989,7 @@ impl TenantShard {
 
         // Advance the sequence before spawning a reconciler, so that sequence waiters
         // can distinguish between before+after the reconcile completes.
-        self.advance_sequence();
+        self.ensure_sequence_ahead();
 
         let reconciler_cancel = cancel.child_token();
         let reconciler_intent = TargetState::from_intent(pageservers, &self.intent);

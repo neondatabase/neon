@@ -93,6 +93,11 @@ pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
 
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 
+// Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
+// This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
+// than they're being pushed onto the queue.
+const MAX_DELAYED_RECONCILES: usize = 10000;
+
 // Top level state available to all HTTP handlers
 struct ServiceState {
     tenants: BTreeMap<TenantShardId, TenantShard>,
@@ -1024,10 +1029,8 @@ impl Service {
 
         let (startup_completion, startup_complete) = utils::completion::channel();
 
-        // This channel is finite-size to avoid OOM'ing if we get into a state where reconciles are finishing more slowly
-        // than they're being pushed onto the queue (this queue is not unique wrt shard ID, so shards will keep pushing themselves).
-        // The size is chosen to enable reconciles to proceed promptly for reasonably sized workloads.
-        let (delayed_reconcile_tx, delayed_reconcile_rx) = tokio::sync::mpsc::channel(10000);
+        let (delayed_reconcile_tx, delayed_reconcile_rx) =
+            tokio::sync::mpsc::channel(MAX_DELAYED_RECONCILES);
 
         let cancel = CancellationToken::new();
         let heartbeater = Heartbeater::new(
@@ -4144,7 +4147,7 @@ impl Service {
                 // We won't spawn a reconciler, but we will construct a waiter that waits for the shard's sequence
                 // number to advance.  When this function is eventually called again and succeeds in getting units,
                 // it will spawn a reconciler that makes this waiter complete.
-                return Some(shard.await_next_reconcile());
+                return Some(shard.future_reconcile_waiter());
             }
         };
 
