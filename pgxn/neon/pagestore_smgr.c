@@ -1535,6 +1535,11 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 	SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
 }
 
+/*
+ * Check if unlogged build is in progress for specified relation
+ * and stop it if so. It is used as callback for log_newpage_range( function
+ * which is called at the end of unlogged build.
+ */
 static void
 neon_log_newpage_range_callback(Relation rel, ForkNumber forknum)
 {
@@ -1546,6 +1551,8 @@ neon_log_newpage_range_callback(Relation rel, ForkNumber forknum)
 		mdunlink(InfoBFromSMgrRel(smgr), forknum, true);
 	}
 }
+
+
 
 
 /*

@@ -118,9 +118,12 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 			*size = entry->size;
 			relsize_ctl->hits += 1;
 			found = true;
-			/* Move entry to the LRU list tail */
-			dlist_delete(&entry->lru_node);
-			dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+			if (!entry->unlogged) /* entries of relation involved in unlogged build are pinned */
+			{
+				/* Move entry to the LRU list tail */
+				dlist_delete(&entry->lru_node);
+				dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+			}
 		}
 		else
 		{
@@ -149,32 +152,52 @@ set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 		 */
 		while ((entry = hash_search(relsize_hash, &tag, HASH_ENTER_NULL, &found)) == NULL)
 		{
-			RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
-			hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
-			Assert(relsize_ctl->size > 0);
-			relsize_ctl->size -= 1;
+			if (dlist_is_empty(&relsize_ctl->lru))
+			{
+				elog(FATAL, "No more free relsize cache entries");
+			}
+			else
+			{
+				RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
+				hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
+				Assert(relsize_ctl->size > 0);
+				relsize_ctl->size -= 1;
+			}
 		}
 		entry->size = size;
 		if (!found)
 		{
 			entry->unlogged = false;
-			if (++relsize_ctl->size == relsize_hash_size)
+			if (relsize_ctl->size+1 == relsize_hash_size)
 			{
 				/*
 				 * Remove least recently used elment from the hash.
 				 * Hash size after is becomes `relsize_hash_size-1`.
 				 * But it is not considered to be a problem, because size of this hash is expecrted large enough and +-1 doesn't matter.
 				 */
-				RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
-				hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
-				relsize_ctl->size -= 1;
+				if (dlist_is_empty(&relsize_ctl->lru))
+				{
+					elog(FATAL, "No more free relsize cache entries");
+				}
+				else
+				{
+					RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
+					hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
+				}
+			}
+			else
+			{
+				relsize_ctl->size += 1;
 			}
 		}
-		else
+		else if (!entry->unlogged) /* entries of relation involved in unlogged build are pinned */
 		{
 			dlist_delete(&entry->lru_node);
 		}
-		dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+		if (!entry->unlogged) /* entries of relation involved in unlogged build are pinned */
+		{
+			dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+		}
 		relsize_ctl->writes += 1;
 		LWLockRelease(relsize_lock);
 	}
@@ -197,11 +220,21 @@ update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 			entry->unlogged = false;
 			entry->size = size;
 
-			if (++relsize_ctl->size == relsize_hash_size)
+			if (relsize_ctl->size+1 == relsize_hash_size)
 			{
-				RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
-				hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
-				relsize_ctl->size -= 1;
+				if (dlist_is_empty(&relsize_ctl->lru))
+				{
+					elog(FATAL, "No more free relsize cache entries");
+				}
+				else
+				{
+					RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
+					hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
+				}
+			}
+			else
+			{
+				relsize_ctl->size += 1;
 			}
 		}
 		else
@@ -209,10 +242,16 @@ update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 			if (entry->size < size)
 				entry->size = size;
 
-			dlist_delete(&entry->lru_node);
+			if (!entry->unlogged) /* entries of relation involved in unlogged build are pinned */
+			{
+				dlist_delete(&entry->lru_node);
+			}
 		}
 		relsize_ctl->writes += 1;
-		dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+		if (!entry->unlogged) /* entries of relation involved in unlogged build are pinned */
+		{
+			dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+		}
 		LWLockRelease(relsize_lock);
 	}
 }
@@ -230,13 +269,28 @@ forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
 		entry = hash_search(relsize_hash, &tag, HASH_REMOVE, NULL);
 		if (entry)
 		{
-			dlist_delete(&entry->lru_node);
+			if (!entry->unlogged)
+			{
+				/* Entried of relations involved in unlogged build are pinned */
+				dlist_delete(&entry->lru_node);
+			}
 			relsize_ctl->size -= 1;
 		}
 		LWLockRelease(relsize_lock);
 	}
 }
 
+/*
+ * This function starts unlogged build if it was not yet started.
+ * The criteria for starting iunlogged build is writing page without normal LSN.
+ * It can happen in any backend when page is evicted from shared buffers.
+ * Or can not happen at all if index fits in shared buffers.
+ *
+ * If this function really starts unlogged build, then it returns true, remove entry from LRU list
+ * (protecting it from eviction until the end of unlogged build) and keeps lock on relsize hash.
+ * This lock should be later released using resume_unlogged_build(). It allows caller to perform some actions
+ * in critical section, for example right now it create relation on the disk using mdcreate
+ */
 bool
 start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
@@ -255,11 +309,21 @@ start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 			entry->size = size;
 			start = true;
 
-			if (++relsize_ctl->size == relsize_hash_size)
+			if (relsize_ctl->size+1 == relsize_hash_size)
 			{
-				RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
-				hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
-				relsize_ctl->size -= 1;
+				if (dlist_is_empty(&relsize_ctl->lru))
+				{
+					elog(FATAL, "No more free relsize cache entries");
+				}
+				else
+				{
+					RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
+					hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
+				}
+			}
+			else
+			{
+				relsize_ctl->size += 1;
 			}
 		}
 		else
@@ -269,11 +333,19 @@ start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 			if (entry->size < size)
 				entry->size = size;
 
-			dlist_delete(&entry->lru_node);
+			if (start)
+			{
+				/* relation involved in unlogged build are pinned until the end of the build */
+				dlist_delete(&entry->lru_node);
+			}
 		}
 		entry->unlogged = true;
 		relsize_ctl->writes += 1;
-		dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+
+		/*
+		 * We are not putting entry in LRU least to prevent it fro eviction until the end of unlogged build
+		 */
+
 		if (!start)
 			LWLockRelease(relsize_lock);
 		else
@@ -284,6 +356,12 @@ start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 	return start;
 }
 
+/*
+ * Check if unlogged build is in progress.
+ * If so, true is returns and lock on relsize cache is hold.
+ * It should be later released by called using resume_unlogged_build().
+ * It allows to read page from local file without risk that it is removed by stop_unlogged_build by some other backend.
+ */
 bool
 is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 {
@@ -302,9 +380,6 @@ is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 		{
 			unlogged = entry->unlogged;
 			relsize_ctl->hits += 1;
-			/* Move entry to the LRU list tail */
-			dlist_delete(&entry->lru_node);
-			dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
 		}
 		else
 		{
@@ -316,6 +391,9 @@ is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 	return unlogged;
 }
 
+/*
+ * Check if unlogged build is in progress and if so, clear th flag, return entry to LRU list and return true.
+ */
 bool
 stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 {
@@ -333,15 +411,15 @@ stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 		if (entry != NULL)
 		{
 			unlogged = entry->unlogged;
-			if (unlogged)
-				elog(LOG, "Stop unlogged build for %u/%u/%u.%u",
-					 RelFileInfoFmt(rinfo), forknum);
 			entry->unlogged = false;
 			relsize_ctl->hits += 1;
-			/* Move entry to the LRU list tail */
-			dlist_delete(&entry->lru_node);
-			dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
-			/* use isRedo == true, so that we drop it immediately */
+			if (unlogged)
+			{
+				elog(LOG, "Stop unlogged build for %u/%u/%u.%u",
+					 RelFileInfoFmt(rinfo), forknum);
+				/* Return entry to the LRU list */
+				dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+			}
 		}
 		else
 		{
@@ -352,6 +430,9 @@ stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 	return unlogged;
 }
 
+/*
+ * Release lock obtained by start_unlogged_build or is_unlogged-build functions
+ */
 void
 resume_unlogged_build(void)
 {
