@@ -539,7 +539,7 @@ impl RetryConfig {
     /// Total delay for 8 retries with 100ms base delay and 1.6 backoff factor is about 7s.
     /// Cplane has timeout of 60s on each request. 8m7s in total.
     pub const WAKE_COMPUTE_DEFAULT_VALUES: &'static str =
-    "num_retries=8,base_retry_wait_duration=100ms,retry_wait_exponent_base=1.6";
+        "num_retries=8,base_retry_wait_duration=100ms,retry_wait_exponent_base=1.6";
 
     /// Parse retry options passed via cmdline.
     /// Example: [`Self::CONNECT_TO_COMPUTE_DEFAULT_VALUES`].
