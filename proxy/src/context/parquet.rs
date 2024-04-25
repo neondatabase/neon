@@ -413,6 +413,7 @@ mod tests {
                     )
                     .unwrap(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+                    upload_storage_class: None,
                 }),
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             })

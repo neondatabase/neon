@@ -1557,6 +1557,7 @@ broker_endpoint = '{broker_endpoint}'
                         endpoint: Some(endpoint.clone()),
                         concurrency_limit: s3_concurrency_limit,
                         max_keys_per_list_response: None,
+                        upload_storage_class: None,
                     }),
                     timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
                 },

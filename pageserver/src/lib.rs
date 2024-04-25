@@ -12,6 +12,7 @@ pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
 pub use pageserver_api::keyspace;
+pub mod aux_file;
 pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
