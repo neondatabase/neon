@@ -51,6 +51,10 @@ pub(super) struct Reconciler {
     /// so that we can set [`crate::tenant_shard::TenantShard::pending_compute_notification`] to ensure a later retry.
     pub(crate) compute_notify_failure: bool,
 
+    /// Reconciler is responsible for keeping alive semaphore units that limit concurrency on how many
+    /// we will spawn.
+    pub(crate) _resource_units: ReconcileUnits,
+
     /// A means to abort background reconciliation: it is essential to
     /// call this when something changes in the original TenantShard that
     /// will make this reconciliation impossible or unnecessary, for
@@ -64,6 +68,19 @@ pub(super) struct Reconciler {
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
+}
+
+/// RAII resource units granted to a Reconciler, which it should keep alive until it finishes doing I/O
+pub(crate) struct ReconcileUnits {
+    _sem_units: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl ReconcileUnits {
+    pub(crate) fn new(sem_units: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self {
+            _sem_units: sem_units,
+        }
+    }
 }
 
 /// This is a snapshot of [`crate::tenant_shard::IntentState`], but it does not do any

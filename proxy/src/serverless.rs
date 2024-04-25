@@ -33,7 +33,7 @@ use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::Metrics;
-use crate::protocol2::WithClientIp;
+use crate::protocol2::read_proxy_protocol;
 use crate::proxy::run_until_cancelled;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
@@ -158,9 +158,8 @@ async fn connection_handler(
         .guard(crate::metrics::Protocol::Http);
 
     // handle PROXY protocol
-    let mut conn = WithClientIp::new(conn);
-    let peer = match conn.wait_for_addr().await {
-        Ok(peer) => peer,
+    let (conn, peer) = match read_proxy_protocol(conn).await {
+        Ok(c) => c,
         Err(e) => {
             tracing::error!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
             return;
