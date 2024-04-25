@@ -4264,11 +4264,7 @@ impl Service {
                 // because some other change superceded it.  We will return a nonzero number,
                 // so the caller knows they might have to call again to quiesce the system.
             }
-            Err(ReconcileWaitError::Failed(_, reconcile_error)) => {
-                tracing::error!("Reconcile error in reconcile_all_now: Failed but not Cancel: {reconcile_error}");
-            }
             Err(e) => {
-                tracing::error!("Reconcile error in reconcile_all_now: {e}");
                 return Err(e);
             }
         };
