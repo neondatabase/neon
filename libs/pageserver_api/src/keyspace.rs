@@ -32,12 +32,34 @@ pub struct ShardedRange<'a> {
     pub range: Range<Key>,
 }
 
-// Calculate the distance between two keys, assuming that they are somewhat close
-// together (i.e. we only account for field5 and field6)
-fn nearby_key_delta(start: &Key, end: &Key) -> u64 {
-    let start = (start.field5 as u64) << 32 | start.field6 as u64;
-    let end = (end.field5 as u64) << 32 | end.field6 as u64;
-    end - start
+// Calculate the size of a range within the blocks of the same relation, or spanning only the
+// top page in the previous relation's space.
+fn contiguous_range_len(range: &Range<Key>) -> u32 {
+    debug_assert!(is_contiguous_range(range));
+    if range.start.field6 == 0xffffffff {
+        range.end.field6 + 1
+    } else {
+        range.end.field6 - range.start.field6
+    }
+}
+
+/// Return true if this key range includes only keys in the same relation's data blocks, or
+/// just spanning one relation and the logical size (0xffffffff) block of the relation before it.
+///
+/// Contiguous in this context means we know the keys are in use _somewhere_, but it might not
+/// be on our shard.  Later in ShardedRange we do the extra work to figure out how much
+/// of a given contiguous range is present on one shard.
+///
+/// This matters, because:
+/// - Within such ranges, keys are used contiguously.  Outside such ranges it is sparse.
+/// - Within such ranges, we may calculate distances using simple subtraction of field6.
+fn is_contiguous_range(range: &Range<Key>) -> bool {
+    range.start.field1 == range.end.field1
+        && range.start.field2 == range.end.field2
+        && range.start.field3 == range.end.field3
+        && range.start.field4 == range.end.field4
+        && (range.start.field5 == range.end.field5
+            || (range.start.field6 == 0xffffffff && range.start.field5 + 1 == range.end.field5))
 }
 
 impl<'a> ShardedRange<'a> {
@@ -63,11 +85,7 @@ impl<'a> ShardedRange<'a> {
             )];
         }
 
-        if self.range.end.field1 != self.range.start.field1
-            || self.range.end.field2 != self.range.start.field2
-            || self.range.end.field3 != self.range.start.field3
-            || self.range.end.field4 != self.range.start.field4
-        {
+        if !is_contiguous_range(&self.range) {
             // Ranges that span relations are not fragmented.  We only get these ranges as a result
             // of operations that act on existing layers, so we trust that the existing range is
             // reasonably small.
@@ -136,21 +154,23 @@ impl<'a> ShardedRange<'a> {
     /// Estimate the physical pages that are within this range, on this shard.  This returns
     /// u32::MAX if the range spans relations: this return value should be interpreted as "large".
     pub fn page_count(&self) -> u32 {
-        let raw_size = Self::raw_size(&self.range);
-        if raw_size == u32::MAX {
+        // Special cases for single keys like logical sizes
+        if self.range.end == self.range.start.add(1) {
+            return if self.shard_identity.is_key_disposable(&self.range.start) {
+                0
+            } else {
+                1
+            };
+        }
+
+        // We can only do an authentic calculation of contiguous key ranges
+        if !is_contiguous_range(&self.range) {
             return u32::MAX;
         }
 
         // Special case for single sharded tenants: our logical and physical sizes are the same
         if self.shard_identity.count < ShardCount::new(2) {
-            return raw_size;
-        }
-
-        // Special cases for single keys like logical sizes
-        if self.range.end == self.range.start.add(1)
-            && self.shard_identity.is_key_local(&self.range.start)
-        {
-            return 1;
+            return contiguous_range_len(&self.range);
         }
 
         // Normal path: step through stripes and part-stripes in the range, evaluate whether each one belongs
@@ -169,9 +189,6 @@ impl<'a> ShardedRange<'a> {
             cursor = cursor.add(advance_by);
         }
 
-        // Sharding should always decrease the number of pages we estimate, never increase it
-        debug_assert!(result <= raw_size as u64);
-
         if result > u32::MAX as u64 {
             u32::MAX
         } else {
@@ -182,11 +199,16 @@ impl<'a> ShardedRange<'a> {
     /// Advance the cursor to the next potential fragment boundary: this is either
     /// a stripe boundary, or the end of the range.
     fn distance_to_next_boundary(&self, cursor: Key) -> u32 {
-        let distance_to_range_end = nearby_key_delta(&cursor, &self.range.end);
+        let distance_to_range_end = contiguous_range_len(&(cursor..self.range.end));
 
         if self.shard_identity.count < ShardCount::new(2) {
             // Optimization: don't bother stepping through stripes if the tenant isn't sharded.
-            return distance_to_range_end as u32;
+            return distance_to_range_end;
+        }
+
+        if cursor.field6 == 0xffffffff {
+            // We are wrapping from one relation's logical size to the next relation's first data block
+            return 1;
         }
 
         let stripe_index = cursor.field6 / self.shard_identity.stripe_size.0;
@@ -202,10 +224,11 @@ impl<'a> ShardedRange<'a> {
                     && next_cursor.field2 == cursor.field2
                     && next_cursor.field3 == cursor.field3
                     && next_cursor.field4 == cursor.field4
+                    && next_cursor.field5 == cursor.field5
             )
         }
 
-        std::cmp::min(stripe_remainder as u64, distance_to_range_end) as u32
+        std::cmp::min(stripe_remainder, distance_to_range_end)
     }
 
     /// Whereas `page_count` estimates the number of pages physically in this range on this shard,
@@ -214,23 +237,10 @@ impl<'a> ShardedRange<'a> {
     ///
     /// Don't use this function in code that works with physical entities like layer files.
     fn raw_size(range: &Range<Key>) -> u32 {
-        let start = range.start;
-        let end = range.end;
-
-        if end.field1 != start.field1
-            || end.field2 != start.field2
-            || end.field3 != start.field3
-            || end.field4 != start.field4
-        {
-            return u32::MAX;
-        }
-
-        // The check above ensures that keys only differ in low fields (i.e. are nearby)
-        let diff = nearby_key_delta(&start, &end);
-        if diff > u32::MAX as u64 {
-            u32::MAX
+        if is_contiguous_range(range) {
+            contiguous_range_len(range)
         } else {
-            diff as u32
+            u32::MAX
         }
     }
 }
@@ -947,6 +957,35 @@ mod tests {
         assert_eq!(range.page_count(), 1);
     }
 
+    /// Test the helper that we use to identify ranges which go outside the data blocks of a single relation
+    #[test]
+    fn contiguous_range_check() {
+        assert!(!is_contiguous_range(
+            &(Key::from_hex("000000067f00000001000004df00fffffffe").unwrap()
+                ..Key::from_hex("000000067f00000001000004df0100000003").unwrap())
+        ),);
+
+        // The ranges goes all the way up to the 0xffffffff, including it: this is
+        // not considered a rel block range because 0xffffffff stores logical sizes,
+        // not blocks.
+        assert!(!is_contiguous_range(
+            &(Key::from_hex("000000067f00000001000004df00fffffffe").unwrap()
+                ..Key::from_hex("000000067f00000001000004df0100000000").unwrap())
+        ),);
+
+        // Keys within the normal data region of a relation
+        assert!(is_contiguous_range(
+            &(Key::from_hex("000000067f00000001000004df0000000000").unwrap()
+                ..Key::from_hex("000000067f00000001000004df0000000080").unwrap())
+        ),);
+
+        // The logical size key of one forkno, then some blocks in the next
+        assert!(is_contiguous_range(
+            &(Key::from_hex("000000067f00000001000004df00ffffffff").unwrap()
+                ..Key::from_hex("000000067f00000001000004df0100000080").unwrap())
+        ),);
+    }
+
     #[test]
     fn shard_identity_keyspaces_forkno_gap() {
         let shard_identity = ShardIdentity::new(
@@ -964,10 +1003,10 @@ mod tests {
             &shard_identity,
         );
 
-        // Range spanning the end of one forkno and the start of the next, but not intersecting this shard's stripes
-        // This is technically an under-count, as the logical size key would be stored on this shard, but that's okay
-        // because page_count is allowed to under-count: it just mustn't over-count.
-        assert_eq!(range.page_count(), 0);
+        // Range spanning the end of one forkno and the start of the next: we do not attempt to
+        // calculate a valid size, because we have no way to know if they keys between start
+        // and end are actually in use.
+        assert_eq!(range.page_count(), u32::MAX);
     }
 
     #[test]
