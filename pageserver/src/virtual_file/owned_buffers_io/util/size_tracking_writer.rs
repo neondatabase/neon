@@ -24,6 +24,7 @@ impl<W> Writer<W> {
 
     /// Returns the wrapped `VirtualFile` object as well as the number
     /// of bytes that were written to it through this object.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn into_inner(self) -> (u64, W) {
         (self.bytes_amount, self.dst)
     }
