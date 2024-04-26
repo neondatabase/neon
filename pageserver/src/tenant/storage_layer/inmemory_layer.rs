@@ -621,11 +621,6 @@ impl InMemoryLayer {
 
         let end_lsn = *self.end_lsn.get().unwrap();
 
-        // Sort the keys because delta layer writer expects them sorted.
-        //
-        // NOTE: this sort can take up significant time if the layer has millions of
-        //       keys. To speed up all the comparisons we convert the key to i128 and
-        //       keep the value as a reference.
         let mut keys: Vec<_> = if let Some(key_range) = key_range {
             inner
                 .index
@@ -636,10 +631,10 @@ impl InMemoryLayer {
         } else {
             inner.index.iter().map(|(k, m)| (k.to_i128(), m)).collect()
         };
+
         if keys.is_empty() {
             return Ok(None);
         }
-        keys.sort_unstable_by_key(|k| k.0);
 
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
