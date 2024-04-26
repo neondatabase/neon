@@ -7,7 +7,6 @@ use std::collections::HashSet;
 use std::future::Future;
 
 use anyhow::{anyhow, Context};
-use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::TenantShardId;
 use tokio::fs::{self, File, OpenOptions};
