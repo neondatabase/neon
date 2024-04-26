@@ -186,7 +186,7 @@ impl<'a> ShardedRange<'a> {
 
         if self.shard_identity.count < ShardCount::new(2) {
             // Optimization: don't bother stepping through stripes if the tenant isn't sharded.
-            return Self::raw_size(&self.range);
+            return distance_to_range_end as u32;
         }
 
         let stripe_index = cursor.field6 / self.shard_identity.stripe_size.0;
@@ -1018,6 +1018,10 @@ mod tests {
         // Invariant: we always get at least one fragment
         assert!(!fragments.is_empty());
 
+        // Invariant: the first/last fragment start/end should equal the input start/end
+        assert_eq!(fragments.first().unwrap().1.start, range_start);
+        assert_eq!(fragments.last().unwrap().1.end, range_end);
+
         if page_count > 0 {
             // Invariant: every fragment must contain at least one shard-local page, if the
             // total range contains at least one shard-local page
@@ -1154,6 +1158,48 @@ mod tests {
         assert_eq!(
             do_fragment(input_start, input_end, &shard_identity, 0x8000),
             (u32::MAX, vec![(u32::MAX, input_start..input_end),])
+        );
+    }
+
+    #[test]
+    fn sharded_range_fragment_tiny_nblocks() {
+        let shard_identity = ShardIdentity::unsharded();
+
+        // A range that spans relations: expect fragmentation to give up and return a u32::MAX size
+        let input_start = Key::from_hex("000000067F00000001000004E10000000000").unwrap();
+        let input_end = Key::from_hex("000000067F00000001000004E10000000038").unwrap();
+        assert_eq!(
+            do_fragment(input_start, input_end, &shard_identity, 16),
+            (
+                0x38,
+                vec![
+                    (16, input_start..input_start.add(16)),
+                    (16, input_start.add(16)..input_start.add(32)),
+                    (16, input_start.add(32)..input_start.add(48)),
+                    (8, input_start.add(48)..input_end),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn sharded_range_fragment_fuzz() {
+        let shard_identity = ShardIdentity::unsharded();
+
+        // A range that spans relations: expect fragmentation to give up and return a u32::MAX size
+        let input_start = Key::from_hex("000000067F00000001000004E10000000000").unwrap();
+        let input_end = Key::from_hex("000000067F00000001000004E10000000038").unwrap();
+        assert_eq!(
+            do_fragment(input_start, input_end, &shard_identity, 16),
+            (
+                0x38,
+                vec![
+                    (16, input_start..input_start.add(16)),
+                    (16, input_start.add(16)..input_start.add(32)),
+                    (16, input_start.add(32)..input_start.add(48)),
+                    (8, input_start.add(48)..input_end),
+                ]
+            )
         );
     }
 }
