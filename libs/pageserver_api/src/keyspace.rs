@@ -550,6 +550,8 @@ pub fn singleton_range(key: Key) -> Range<Key> {
 
 #[cfg(test)]
 mod tests {
+    use rand::{RngCore, SeedableRng};
+
     use crate::{
         models::ShardParameters,
         shard::{ShardCount, ShardNumber},
@@ -1035,6 +1037,21 @@ mod tests {
             assert_eq!(fragments, vec![(0, range_start..range_end)]);
         }
 
+        // Invariant: fragments must be ordered and non-overlapping
+        let mut last: Option<Range<Key>> = None;
+        for frag in &fragments {
+            if let Some(last) = last {
+                assert!(frag.1.start >= last.end);
+                assert!(frag.1.start > last.start);
+            }
+            last = Some(frag.1.clone())
+        }
+
+        // Invariant: fragments respect target_nblocks
+        for frag in &fragments {
+            assert!(frag.0 == u32::MAX || frag.0 <= target_nblocks);
+        }
+
         (page_count, fragments)
     }
 
@@ -1184,22 +1201,55 @@ mod tests {
 
     #[test]
     fn sharded_range_fragment_fuzz() {
-        let shard_identity = ShardIdentity::unsharded();
+        // Use a fixed seed: we don't want to explicitly pick values, but we do want
+        // the test to be reproducible.
+        let mut prng = rand::rngs::StdRng::seed_from_u64(0xdeadbeef);
 
-        // A range that spans relations: expect fragmentation to give up and return a u32::MAX size
-        let input_start = Key::from_hex("000000067F00000001000004E10000000000").unwrap();
-        let input_end = Key::from_hex("000000067F00000001000004E10000000038").unwrap();
-        assert_eq!(
-            do_fragment(input_start, input_end, &shard_identity, 16),
-            (
-                0x38,
-                vec![
-                    (16, input_start..input_start.add(16)),
-                    (16, input_start.add(16)..input_start.add(32)),
-                    (16, input_start.add(32)..input_start.add(48)),
-                    (8, input_start.add(48)..input_end),
-                ]
-            )
-        );
+        for _i in 0..100 {
+            let shard_identity = if prng.next_u32() % 2 == 0 {
+                ShardIdentity::unsharded()
+            } else {
+                let shard_count = prng.next_u32() % 127 + 1;
+                ShardIdentity::new(
+                    ShardNumber((prng.next_u32() % shard_count) as u8),
+                    ShardCount::new(shard_count as u8),
+                    ShardParameters::DEFAULT_STRIPE_SIZE,
+                )
+                .unwrap()
+            };
+
+            let target_nblocks = prng.next_u32() % 65536 + 1;
+
+            let start_offset = prng.next_u32() % 16384;
+
+            // Try ranges up to 4GiB in size
+            let range_size = prng.next_u32() % 8192;
+
+            // A range that spans relations: expect fragmentation to give up and return a u32::MAX size
+            let input_start = Key::from_hex("000000067F00000001000004E10000000000")
+                .unwrap()
+                .add(start_offset);
+            let input_end = input_start.add(range_size);
+
+            // This test's main success conditions are the invariants baked into do_fragment
+            let (_total_size, fragments) =
+                do_fragment(input_start, input_end, &shard_identity, target_nblocks);
+
+            // Pick a random key within the range and check it appears in the output
+            let example_key = input_start.add(prng.next_u32() % range_size);
+
+            // Panic on unwrap if it isn't found
+            let example_key_frag = fragments
+                .iter()
+                .find(|f| f.1.contains(&example_key))
+                .unwrap();
+
+            // Check that the fragment containing our random key has a nonzero size if
+            // that key is shard-local
+            let example_key_local = !shard_identity.is_key_disposable(&example_key);
+            if example_key_local {
+                assert!(example_key_frag.0 > 0);
+            }
+        }
     }
 }
