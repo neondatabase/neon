@@ -3705,7 +3705,7 @@ class S3Scrubber:
             log.warning(f"Scrub environment: {env}")
             log.warning(f"Output at: {output_path}")
 
-            raise RuntimeError("Remote storage scrub failed")
+            raise RuntimeError(f"Scrubber failed while running {args}")
 
         assert stdout is not None
         return stdout
@@ -3719,6 +3719,13 @@ class S3Scrubber:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
             log.error(stdout)
             raise
+
+    def tenant_snapshot(self, tenant_id: TenantId, output_path: Path):
+        stdout = self.scrubber_cli(
+            ["tenant-snapshot", "--tenant-id", str(tenant_id), "--output-path", str(output_path)],
+            timeout=30,
+        )
+        log.info(f"tenant-snapshot output: {stdout}")
 
 
 def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) -> Path:
