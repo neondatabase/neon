@@ -156,7 +156,11 @@ class TenantShardId:
             raise ValueError(f"Invalid TenantShardId '{input}'")
 
     def __str__(self):
-        return f"{self.tenant_id}-{self.shard_number:02x}{self.shard_count:02x}"
+        if self.shard_count > 0:
+            return f"{self.tenant_id}-{self.shard_number:02x}{self.shard_count:02x}"
+        else:
+            # Unsharded case: equivalent of Rust TenantShardId::unsharded(tenant_id)
+            return str(self.tenant_id)
 
     def __repr__(self):
         return self.__str__()

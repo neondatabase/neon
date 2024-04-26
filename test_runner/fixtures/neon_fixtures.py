@@ -2298,20 +2298,22 @@ class NeonPageserver(PgProtocol):
         # The entries in the list are regular experessions.
         self.allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
-    def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
+    def timeline_dir(
+        self, tenant_shard_id: TenantShardId, timeline_id: Optional[TimelineId] = None
+    ) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
         if timeline_id is None:
-            return self.tenant_dir(tenant_id) / "timelines"
-        return self.tenant_dir(tenant_id) / "timelines" / str(timeline_id)
+            return self.tenant_dir(tenant_shard_id) / "timelines"
+        return self.tenant_dir(tenant_shard_id) / "timelines" / str(timeline_id)
 
     def tenant_dir(
         self,
-        tenant_id: Optional[TenantId] = None,
+        tenant_shard_id: Optional[TenantShardId] = None,
     ) -> Path:
         """Get a tenant directory's path based on the repo directory of the test environment"""
-        if tenant_id is None:
+        if tenant_shard_id is None:
             return self.workdir / "tenants"
-        return self.workdir / "tenants" / str(tenant_id)
+        return self.workdir / "tenants" / str(tenant_shard_id)
 
     def start(
         self,
@@ -2498,8 +2500,8 @@ class NeonPageserver(PgProtocol):
         client = self.http_client()
         return client.tenant_location_conf(tenant_id, config, **kwargs)
 
-    def read_tenant_location_conf(self, tenant_id: TenantId) -> dict[str, Any]:
-        path = self.tenant_dir(tenant_id) / "config-v1"
+    def read_tenant_location_conf(self, tenant_shard_id: TenantShardId) -> dict[str, Any]:
+        path = self.tenant_dir(tenant_shard_id) / "config-v1"
         log.info(f"Reading location conf from {path}")
         bytes = open(path, "r").read()
         try:
