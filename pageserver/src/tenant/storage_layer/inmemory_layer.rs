@@ -621,7 +621,7 @@ impl InMemoryLayer {
 
         let end_lsn = *self.end_lsn.get().unwrap();
 
-        let mut keys: Vec<_> = if let Some(key_range) = key_range {
+        let keys: Vec<_> = if let Some(key_range) = key_range {
             inner
                 .index
                 .iter()

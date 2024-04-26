@@ -4095,10 +4095,9 @@ impl Timeline {
                     }
                 }
             } else if let ImageLayerCreationMode::Try = mode {
-                if !check_for_image_layers
-                    || (check_for_image_layers
-                        && !self.time_for_new_image_layer(partition, lsn).await)
-                {
+                // check_for_image_layers = false -> skip
+                // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
+                if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
                     start = img_range.end;
                     continue;
                 }
