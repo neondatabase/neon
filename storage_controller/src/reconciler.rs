@@ -767,7 +767,10 @@ impl Reconciler {
                 // It is up to the caller whether they want to drop out on this error, but they don't have to:
                 // in general we should avoid letting unavailability of the cloud control plane stop us from
                 // making progress.
-                tracing::warn!("Failed to notify compute of attached pageserver {node}: {e}");
+                if !matches!(e, NotifyError::ShuttingDown) {
+                    tracing::warn!("Failed to notify compute of attached pageserver {node}: {e}");
+                }
+
                 // Set this flag so that in our ReconcileResult we will set the flag on the shard that it
                 // needs to retry at some point.
                 self.compute_notify_failure = true;

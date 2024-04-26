@@ -438,6 +438,8 @@ impl InMemoryLayer {
             }
         }
 
+        reconstruct_state.on_lsn_advanced(&keyspace, self.start_lsn);
+
         Ok(())
     }
 }

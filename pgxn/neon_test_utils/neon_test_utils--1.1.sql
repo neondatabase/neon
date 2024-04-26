@@ -31,12 +31,12 @@ AS 'MODULE_PATHNAME', 'clear_buffer_cache'
 LANGUAGE C STRICT
 PARALLEL UNSAFE;
 
-CREATE FUNCTION get_raw_page_at_lsn(relname text, forkname text, blocknum int8, lsn pg_lsn)
+CREATE FUNCTION get_raw_page_at_lsn(relname text, forkname text, blocknum int8, request_lsn pg_lsn, not_modified_since pg_lsn)
 RETURNS bytea
 AS 'MODULE_PATHNAME', 'get_raw_page_at_lsn'
 LANGUAGE C PARALLEL UNSAFE;
 
-CREATE FUNCTION get_raw_page_at_lsn(tbspc oid, db oid, relfilenode oid, forknum int8, blocknum int8, lsn pg_lsn)
+CREATE FUNCTION get_raw_page_at_lsn(tbspc oid, db oid, relfilenode oid, forknum int8, blocknum int8, request_lsn pg_lsn, not_modified_since pg_lsn)
 RETURNS bytea
 AS 'MODULE_PATHNAME', 'get_raw_page_at_lsn_ex'
 LANGUAGE C PARALLEL UNSAFE;
