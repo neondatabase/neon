@@ -30,14 +30,14 @@ pub const KEY_SIZE: usize = 18;
 pub const METADATA_KEY_SIZE: usize = 16;
 
 /// The key prefix start range for the metadata keys. All keys with the first byte >= 0x40 is a metadata key.
-pub const METADATA_KEY_BEGIN_PREFIX: u8 = 0x40;
+pub const METADATA_KEY_BEGIN_PREFIX: u8 = 0x60;
 pub const METADATA_KEY_END_PREFIX: u8 = 0x7F;
 
 /// The (reserved) key prefix of relation sizes.
-pub const RELATION_SIZE_PREFIX: u8 = 0x41;
+pub const RELATION_SIZE_PREFIX: u8 = 0x61;
 
 /// The key prefix of AUX file keys.
-pub const AUX_KEY_PREFIX: u8 = 0x42;
+pub const AUX_KEY_PREFIX: u8 = 0x62;
 
 /// Check if the key falls in the range of metadata keys.
 pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
