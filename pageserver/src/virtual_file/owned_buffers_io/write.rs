@@ -56,6 +56,7 @@ where
         self.buf()
     }
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn flush_and_into_inner(mut self) -> std::io::Result<W> {
         self.flush().await?;
         let Self { buf, writer } = self;
@@ -70,6 +71,7 @@ where
             .expect("must not use after we returned an error")
     }
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn write_buffered<S: IoBuf>(&mut self, chunk: Slice<S>) -> std::io::Result<(usize, S)>
     where
         S: IoBuf + Send,
