@@ -27,7 +27,7 @@ use crate::{
     },
 };
 
-const TAIL_SZ: usize = PAGE_SZ;
+const TAIL_SZ: usize = 64 * 1024;
 
 /// See module-level comment.
 pub struct RW<W: OwnedAsyncWriter> {
