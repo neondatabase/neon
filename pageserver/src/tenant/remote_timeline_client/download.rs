@@ -183,6 +183,7 @@ async fn download_object<'a>(
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
             use crate::virtual_file::owned_buffers_io::{self, util::size_tracking_writer};
+            use bytes::BytesMut;
             async {
                 let destination_file = VirtualFile::create(dst_path)
                     .await

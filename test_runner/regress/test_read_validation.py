@@ -17,7 +17,14 @@ def test_read_validation(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_read_validation", "empty")
 
-    endpoint = env.endpoints.create_start("test_read_validation")
+    endpoint = env.endpoints.create_start(
+        "test_read_validation",
+        # Use protocol version 2, because the code that constructs the V1 messages
+        # assumes that a primary always wants to read the latest version of a page,
+        # and therefore doesn't work with the test functions below to read an older
+        # page version.
+        config_lines=["neon.protocol_version=2"],
+    )
 
     with closing(endpoint.connect()) as con:
         with con.cursor() as c:
@@ -64,7 +71,7 @@ def test_read_validation(neon_simple_env: NeonEnv):
             log.info("Cache is clear, reading stale page version")
 
             c.execute(
-                f"select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', 0, '{first[0]}'))"
+                f"select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', 0, '{first[0]}', NULL))"
             )
             direct_first = c.fetchone()
             assert first == direct_first, "Failed fetch page at historic lsn"
@@ -77,7 +84,7 @@ def test_read_validation(neon_simple_env: NeonEnv):
             log.info("Cache is clear, reading latest page version without cache")
 
             c.execute(
-                "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', 0, NULL))"
+                "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', 0, NULL, NULL))"
             )
             direct_latest = c.fetchone()
             assert second == direct_latest, "Failed fetch page at latest lsn"
@@ -92,7 +99,7 @@ def test_read_validation(neon_simple_env: NeonEnv):
             )
 
             c.execute(
-                f"select lsn, lower, upper from page_header(get_raw_page_at_lsn({reln[0]}, {reln[1]}, {reln[2]}, 0, 0, '{first[0]}'))"
+                f"select lsn, lower, upper from page_header(get_raw_page_at_lsn({reln[0]}, {reln[1]}, {reln[2]}, 0, 0, '{first[0]}', NULL))"
             )
             direct_first = c.fetchone()
             assert first == direct_first, "Failed fetch page at historic lsn using oid"
@@ -102,7 +109,7 @@ def test_read_validation(neon_simple_env: NeonEnv):
             )
 
             c.execute(
-                f"select lsn, lower, upper from page_header(get_raw_page_at_lsn({reln[0]}, {reln[1]}, {reln[2]}, 0, 0, NULL))"
+                f"select lsn, lower, upper from page_header(get_raw_page_at_lsn({reln[0]}, {reln[1]}, {reln[2]}, 0, 0, NULL, NULL))"
             )
             direct_latest = c.fetchone()
             assert second == direct_latest, "Failed fetch page at latest lsn"
@@ -114,7 +121,7 @@ def test_read_validation(neon_simple_env: NeonEnv):
             )
 
             c.execute(
-                f"select lsn, lower, upper from page_header(get_raw_page_at_lsn({reln[0]}, {reln[1]}, {reln[2]}, 0, 0, '{first[0]}'))"
+                f"select lsn, lower, upper from page_header(get_raw_page_at_lsn({reln[0]}, {reln[1]}, {reln[2]}, 0, 0, '{first[0]}', NULL))"
             )
             direct_first = c.fetchone()
             assert first == direct_first, "Failed fetch page at historic lsn using oid"
@@ -133,7 +140,14 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
 
     env.pageserver.allowed_errors.append(".*invalid LSN\\(0\\) in request.*")
 
-    endpoint = env.endpoints.create_start("test_read_validation_neg")
+    endpoint = env.endpoints.create_start(
+        "test_read_validation_neg",
+        # Use protocol version 2, because the code that constructs the V1 messages
+        # assumes that a primary always wants to read the latest version of a page,
+        # and therefore doesn't work with the test functions below to read an older
+        # page version.
+        config_lines=["neon.protocol_version=2"],
+    )
 
     with closing(endpoint.connect()) as con:
         with con.cursor() as c:
@@ -143,7 +157,7 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
             log.info("read a page of a missing relation")
             try:
                 c.execute(
-                    "select lsn, lower, upper from page_header(get_raw_page_at_lsn('Unknown', 'main', 0, '0/0'))"
+                    "select lsn, lower, upper from page_header(get_raw_page_at_lsn('Unknown', 'main', 0, '0/0', NULL))"
                 )
                 raise AssertionError("query should have failed")
             except UndefinedTable as e:
@@ -155,7 +169,7 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
             log.info("read a page at lsn 0")
             try:
                 c.execute(
-                    "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', 0, '0/0'))"
+                    "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', 0, '0/0', NULL))"
                 )
                 raise AssertionError("query should have failed")
             except IoError as e:
@@ -164,22 +178,22 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
             log.info("Pass NULL as an input")
             expected = (None, None, None)
             c.execute(
-                "select lsn, lower, upper from page_header(get_raw_page_at_lsn(NULL, 'main', 0, '0/0'))"
+                "select lsn, lower, upper from page_header(get_raw_page_at_lsn(NULL, 'main', 0, '0/0', NULL))"
             )
             assert c.fetchone() == expected, "Expected null output"
 
             c.execute(
-                "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', NULL, 0, '0/0'))"
+                "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', NULL, 0, '0/0', NULL))"
             )
             assert c.fetchone() == expected, "Expected null output"
 
             c.execute(
-                "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', NULL, '0/0'))"
+                "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', NULL, '0/0', NULL))"
             )
             assert c.fetchone() == expected, "Expected null output"
 
             # This check is currently failing, reading beyond EOF is returning a 0-page
             log.info("Read beyond EOF")
             c.execute(
-                "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', 1, NULL))"
+                "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', 1, NULL, NULL))"
             )
