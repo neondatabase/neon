@@ -409,15 +409,28 @@ async fn main() -> anyhow::Result<()> {
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
-            if let Some(redis_notifications_client) = redis_notifications_client {
-                let cache = api.caches.project_info.clone();
-                maintenance_tasks.spawn(notifications::task_main(
-                    redis_notifications_client,
-                    cache.clone(),
-                    cancel_map.clone(),
-                    args.region.clone(),
-                ));
-                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+            match (redis_notifications_client, regional_redis_client.clone()) {
+                (None, None) => {}
+                (client1, client2) => {
+                    let cache = api.caches.project_info.clone();
+                    if let Some(client) = client1 {
+                        maintenance_tasks.spawn(notifications::task_main(
+                            client,
+                            cache.clone(),
+                            cancel_map.clone(),
+                            args.region.clone(),
+                        ));
+                    }
+                    if let Some(client) = client2 {
+                        maintenance_tasks.spawn(notifications::task_main(
+                            client,
+                            cache.clone(),
+                            cancel_map.clone(),
+                            args.region.clone(),
+                        ));
+                    }
+                    maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+                }
             }
             if let Some(regional_redis_client) = regional_redis_client {
                 let cache = api.caches.endpoints_cache.clone();

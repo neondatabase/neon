@@ -129,6 +129,7 @@ pub struct PageServerConf {
 
     pub(crate) virtual_file_io_engine: Option<String>,
     pub(crate) get_vectored_impl: Option<String>,
+    pub(crate) get_impl: Option<String>,
 }
 
 impl Default for PageServerConf {
@@ -141,6 +142,7 @@ impl Default for PageServerConf {
             http_auth_type: AuthType::Trust,
             virtual_file_io_engine: None,
             get_vectored_impl: None,
+            get_impl: None,
         }
     }
 }

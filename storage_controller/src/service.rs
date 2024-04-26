@@ -824,8 +824,7 @@ impl Service {
 
                 // Ordering: populate last_error before advancing error_seq,
                 // so that waiters will see the correct error after waiting.
-                *(tenant.last_error.lock().unwrap()) = format!("{e}");
-                tenant.error_waiter.advance(result.sequence);
+                tenant.set_last_error(result.sequence, e);
 
                 for (node_id, o) in result.observed.locations {
                     tenant.observed.locations.insert(node_id, o);
@@ -2805,7 +2804,14 @@ impl Service {
                 tenant_shard_id: shard.tenant_shard_id,
                 node_attached: *shard.intent.get_attached(),
                 node_secondary: shard.intent.get_secondary().to_vec(),
-                last_error: shard.last_error.lock().unwrap().clone(),
+                last_error: shard
+                    .last_error
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|e| format!("{e}"))
+                    .unwrap_or("".to_string())
+                    .clone(),
                 is_reconciling: shard.reconciler.is_some(),
                 is_pending_compute_notification: shard.pending_compute_notification,
                 is_splitting: matches!(shard.splitting, SplitState::Splitting),
@@ -4031,7 +4037,7 @@ impl Service {
                 // TODO: in the background, we should balance work back onto this pageserver
             }
             AvailabilityTransition::Unchanged => {
-                tracing::info!("Node {} no change during config", node_id);
+                tracing::debug!("Node {} no change during config", node_id);
             }
         }
 
@@ -4351,7 +4357,26 @@ impl Service {
         };
 
         let waiter_count = waiters.len();
-        self.await_waiters(waiters, RECONCILE_TIMEOUT).await?;
+        match self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
+            Ok(()) => {}
+            Err(ReconcileWaitError::Failed(_, reconcile_error))
+                if matches!(*reconcile_error, ReconcileError::Cancel) =>
+            {
+                // Ignore reconciler cancel errors: this reconciler might have shut down
+                // because some other change superceded it.  We will return a nonzero number,
+                // so the caller knows they might have to call again to quiesce the system.
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
+        tracing::info!(
+            "{} reconciles in reconcile_all, {} waiters",
+            reconciles_spawned,
+            waiter_count
+        );
+
         Ok(waiter_count)
     }
 
