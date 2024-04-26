@@ -1244,7 +1244,7 @@ mod tests {
         // the test to be reproducible.
         let mut prng = rand::rngs::StdRng::seed_from_u64(0xdeadbeef);
 
-        for _i in 0..100 {
+        for _i in 0..1000 {
             let shard_identity = if prng.next_u32() % 2 == 0 {
                 ShardIdentity::unsharded()
             } else {
@@ -1261,8 +1261,8 @@ mod tests {
 
             let start_offset = prng.next_u32() % 16384;
 
-            // Try ranges up to 4GiB in size
-            let range_size = prng.next_u32() % 8192;
+            // Try ranges up to 4GiB in size, that are always at least 1
+            let range_size = prng.next_u32() % 8192 + 1;
 
             // A range that spans relations: expect fragmentation to give up and return a u32::MAX size
             let input_start = Key::from_hex("000000067F00000001000004E10000000000")
