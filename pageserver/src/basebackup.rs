@@ -10,7 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{anyhow, ensure, Context};
+use anyhow::{anyhow, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
 use pageserver_api::key::{key_to_slru_block, rel_block_to_key, Key};
@@ -415,17 +415,21 @@ where
     }
 
     /// Add contents of relfilenode `src`, naming it as `dst`.
-    async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> anyhow::Result<()> {
+    async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> Result<(), BasebackupError> {
         let nblocks = self
             .timeline
             .get_rel_size(src, Version::Lsn(self.lsn), self.ctx)
-            .await?;
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?;
 
         // If the relation is empty, create an empty file
         if nblocks == 0 {
             let file_name = dst.to_segfile_name(0);
             let header = new_tar_header(&file_name, 0)?;
-            self.ar.append(&header, &mut io::empty()).await?;
+            self.ar
+                .append(&header, &mut io::empty())
+                .await
+                .map_err(BasebackupError::Client)?;
             return Ok(());
         }
 
@@ -440,13 +444,17 @@ where
                 let img = self
                     .timeline
                     .get_rel_page_at_lsn(src, blknum, Version::Lsn(self.lsn), self.ctx)
-                    .await?;
+                    .await
+                    .map_err(|e| BasebackupError::Server(e.into()))?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
             let file_name = dst.to_segfile_name(seg as u32);
             let header = new_tar_header(&file_name, segment_data.len() as u64)?;
-            self.ar.append(&header, segment_data.as_slice()).await?;
+            self.ar
+                .append(&header, segment_data.as_slice())
+                .await
+                .map_err(BasebackupError::Client)?;
 
             seg += 1;
             startblk = endblk;
@@ -466,20 +474,22 @@ where
         spcnode: u32,
         dbnode: u32,
         has_relmap_file: bool,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), BasebackupError> {
         let relmap_img = if has_relmap_file {
             let img = self
                 .timeline
                 .get_relmap_file(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
-                .await?;
+                .await
+                .map_err(|e| BasebackupError::Server(e.into()))?;
 
-            ensure!(
-                img.len()
-                    == dispatch_pgversion!(
-                        self.timeline.pg_version,
-                        pgv::bindings::SIZEOF_RELMAPFILE
-                    )
-            );
+            if img.len()
+                != dispatch_pgversion!(self.timeline.pg_version, pgv::bindings::SIZEOF_RELMAPFILE)
+            {
+                return Err(BasebackupError::Server(anyhow!(
+                    "img.len() != SIZE_OF_RELMAPFILE, img.len()={}",
+                    img.len(),
+                )));
+            }
 
             Some(img)
         } else {
@@ -492,14 +502,20 @@ where
                 ver => format!("{ver}\x0A"),
             };
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
-            self.ar.append(&header, pg_version_str.as_bytes()).await?;
+            self.ar
+                .append(&header, pg_version_str.as_bytes())
+                .await
+                .map_err(BasebackupError::Client)?;
 
             info!("timeline.pg_version {}", self.timeline.pg_version);
 
             if let Some(img) = relmap_img {
                 // filenode map for global tablespace
                 let header = new_tar_header("global/pg_filenode.map", img.len() as u64)?;
-                self.ar.append(&header, &img[..]).await?;
+                self.ar
+                    .append(&header, &img[..])
+                    .await
+                    .map_err(BasebackupError::Client)?;
             } else {
                 warn!("global/pg_filenode.map is missing");
             }
@@ -518,18 +534,26 @@ where
                 && self
                     .timeline
                     .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
-                    .await?
+                    .await
+                    .map_err(|e| BasebackupError::Server(e.into()))?
                     .is_empty()
             {
                 return Ok(());
             }
             // User defined tablespaces are not supported
-            ensure!(spcnode == DEFAULTTABLESPACE_OID);
+            if spcnode != DEFAULTTABLESPACE_OID {
+                return Err(BasebackupError::Server(anyhow!(
+                    "spcnode != DEFAULTTABLESPACE_OID, spcnode={spcnode}"
+                )));
+            }
 
             // Append dir path for each database
             let path = format!("base/{}", dbnode);
             let header = new_tar_header_dir(&path)?;
-            self.ar.append(&header, &mut io::empty()).await?;
+            self.ar
+                .append(&header, &mut io::empty())
+                .await
+                .map_err(BasebackupError::Client)?;
 
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
@@ -539,11 +563,17 @@ where
                     ver => format!("{ver}\x0A"),
                 };
                 let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
-                self.ar.append(&header, pg_version_str.as_bytes()).await?;
+                self.ar
+                    .append(&header, pg_version_str.as_bytes())
+                    .await
+                    .map_err(BasebackupError::Client)?;
 
                 let relmap_path = format!("base/{}/pg_filenode.map", dbnode);
                 let header = new_tar_header(&relmap_path, img.len() as u64)?;
-                self.ar.append(&header, &img[..]).await?;
+                self.ar
+                    .append(&header, &img[..])
+                    .await
+                    .map_err(BasebackupError::Client)?;
             }
         };
         Ok(())
@@ -552,11 +582,12 @@ where
     //
     // Extract twophase state files
     //
-    async fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
+    async fn add_twophase_file(&mut self, xid: TransactionId) -> Result<(), BasebackupError> {
         let img = self
             .timeline
             .get_twophase_file(xid, self.lsn, self.ctx)
-            .await?;
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -564,7 +595,10 @@ where
         buf.put_u32_le(crc);
         let path = format!("pg_twophase/{:>08X}", xid);
         let header = new_tar_header(&path, buf.len() as u64)?;
-        self.ar.append(&header, &buf[..]).await?;
+        self.ar
+            .append(&header, &buf[..])
+            .await
+            .map_err(BasebackupError::Client)?;
 
         Ok(())
     }
@@ -573,24 +607,28 @@ where
     // Add generated pg_control file and bootstrap WAL segment.
     // Also send zenith.signal file with extra bootstrap data.
     //
-    async fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
+    async fn add_pgcontrol_file(&mut self) -> Result<(), BasebackupError> {
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
             if self.lsn == self.timeline.get_ancestor_lsn() {
-                write!(zenith_signal, "PREV LSN: none")?;
+                write!(zenith_signal, "PREV LSN: none")
+                    .map_err(|e| BasebackupError::Server(e.into()))?;
             } else {
-                write!(zenith_signal, "PREV LSN: invalid")?;
+                write!(zenith_signal, "PREV LSN: invalid")
+                    .map_err(|e| BasebackupError::Server(e.into()))?;
             }
         } else {
-            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
+            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)
+                .map_err(|e| BasebackupError::Server(e.into()))?;
         }
         self.ar
             .append(
                 &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
                 zenith_signal.as_bytes(),
             )
-            .await?;
+            .await
+            .map_err(BasebackupError::Client)?;
 
         let checkpoint_bytes = self
             .timeline
@@ -612,7 +650,10 @@ where
 
         //send pg_control
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
-        self.ar.append(&header, &pg_control_bytes[..]).await?;
+        self.ar
+            .append(&header, &pg_control_bytes[..])
+            .await
+            .map_err(BasebackupError::Client)?;
 
         //send wal segment
         let segno = self.lsn.segment_number(WAL_SEGMENT_SIZE);
@@ -627,8 +668,16 @@ where
             self.lsn,
         )
         .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
-        ensure!(wal_seg.len() == WAL_SEGMENT_SIZE);
-        self.ar.append(&header, &wal_seg[..]).await?;
+        if wal_seg.len() != WAL_SEGMENT_SIZE {
+            return Err(BasebackupError::Server(anyhow!(
+                "wal_seg.len() != WAL_SEGMENT_SIZE, wal_seg.len()={}",
+                wal_seg.len()
+            )));
+        }
+        self.ar
+            .append(&header, &wal_seg[..])
+            .await
+            .map_err(BasebackupError::Client)?;
         Ok(())
     }
 }
