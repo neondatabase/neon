@@ -100,12 +100,10 @@ where
 
     // Consolidate the derived and the provided prev_lsn values
     let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
-        if backup_prev != Lsn(0) {
-            if backup_prev != provided_prev_lsn {
-                return Err(BasebackupError::Server(anyhow!(
-                    "backup_prev {backup_prev} != provided_prev_lsn {provided_prev_lsn}"
-                )));
-            }
+        if backup_prev != Lsn(0) && backup_prev != provided_prev_lsn {
+            return Err(BasebackupError::Server(anyhow!(
+                "backup_prev {backup_prev} != provided_prev_lsn {provided_prev_lsn}"
+            )));
         }
         provided_prev_lsn
     } else {
@@ -225,7 +223,7 @@ where
         self.ar
             .append(&header, self.buf.as_slice())
             .await
-            .map_err(|e| BasebackupError::Client(e.into()))?;
+            .map_err(BasebackupError::Client)?;
 
         self.total_blocks += nblocks;
         debug!("Added to basebackup slru {} relsize {}", segname, nblocks);
@@ -404,17 +402,14 @@ where
         }
 
         fail_point!("basebackup-before-control-file", |_| {
-            return Err(BasebackupError::Server(anyhow!(
+            Err(BasebackupError::Server(anyhow!(
                 "failpoint basebackup-before-control-file"
-            )));
+            )))
         });
 
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file().await?;
-        self.ar
-            .finish()
-            .await
-            .map_err(|e| BasebackupError::Client(e.into()))?;
+        self.ar.finish().await.map_err(BasebackupError::Client)?;
         debug!("all tarred up!");
         Ok(())
     }

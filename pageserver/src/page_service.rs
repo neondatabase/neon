@@ -1270,7 +1270,7 @@ impl PageServerHandler {
 
         // switch client to COPYOUT
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)
-            .map_err(|e| QueryError::Disconnected(e))?;
+            .map_err(QueryError::Disconnected)?;
         self.flush_cancellable(pgb, &timeline.cancel).await?;
 
         // Send a tarball of the latest layer on the timeline. Compress if not
@@ -1329,7 +1329,7 @@ impl PageServerHandler {
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)
-            .map_err(|e| QueryError::Disconnected(e))?;
+            .map_err(QueryError::Disconnected)?;
         self.flush_cancellable(pgb, &timeline.cancel).await?;
 
         let basebackup_after = started
