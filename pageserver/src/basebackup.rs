@@ -10,7 +10,7 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{anyhow, bail, ensure, Context};
+use anyhow::{anyhow, ensure, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
 use pageserver_api::key::{key_to_slru_block, rel_block_to_key, Key};
@@ -38,6 +38,14 @@ use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
+#[derive(Debug, thiserror::Error)]
+pub enum BasebackupError {
+    #[error("pageserver error {0:#}")]
+    Server(#[from] anyhow::Error),
+    #[error("client error {0:#}")]
+    Client(#[source] io::Error),
+}
+
 /// Create basebackup with non-rel data in it.
 /// Only include relational data if 'full_backup' is true.
 ///
@@ -53,7 +61,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     prev_lsn: Option<Lsn>,
     full_backup: bool,
     ctx: &'a RequestContext,
-) -> anyhow::Result<()>
+) -> Result<(), BasebackupError>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
@@ -93,7 +101,11 @@ where
     // Consolidate the derived and the provided prev_lsn values
     let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
         if backup_prev != Lsn(0) {
-            ensure!(backup_prev == provided_prev_lsn);
+            if backup_prev != provided_prev_lsn {
+                return Err(BasebackupError::Server(anyhow!(
+                    "backup_prev {backup_prev} != provided_prev_lsn {provided_prev_lsn}"
+                )));
+            }
         }
         provided_prev_lsn
     } else {
@@ -159,15 +171,26 @@ where
         }
     }
 
-    async fn add_block(&mut self, key: &Key, block: Bytes) -> anyhow::Result<()> {
+    async fn add_block(&mut self, key: &Key, block: Bytes) -> Result<(), BasebackupError> {
         let (kind, segno, _) = key_to_slru_block(*key)?;
 
         match kind {
             SlruKind::Clog => {
-                ensure!(block.len() == BLCKSZ as usize || block.len() == BLCKSZ as usize + 8);
+                if !(block.len() == BLCKSZ as usize || block.len() == BLCKSZ as usize + 8) {
+                    return Err(BasebackupError::Server(anyhow!(
+                        "invalid SlruKind::Clog record: block.len()={}",
+                        block.len()
+                    )));
+                }
             }
             SlruKind::MultiXactMembers | SlruKind::MultiXactOffsets => {
-                ensure!(block.len() == BLCKSZ as usize);
+                if block.len() != BLCKSZ as usize {
+                    return Err(BasebackupError::Server(anyhow!(
+                        "invalid {:?} record: block.len()={}",
+                        kind,
+                        block.len()
+                    )));
+                }
             }
         }
 
@@ -194,12 +217,15 @@ where
         Ok(())
     }
 
-    async fn flush(&mut self) -> anyhow::Result<()> {
+    async fn flush(&mut self) -> Result<(), BasebackupError> {
         let nblocks = self.buf.len() / BLCKSZ as usize;
         let (kind, segno) = self.current_segment.take().unwrap();
         let segname = format!("{}/{:>04X}", kind.to_str(), segno);
         let header = new_tar_header(&segname, self.buf.len() as u64)?;
-        self.ar.append(&header, self.buf.as_slice()).await?;
+        self.ar
+            .append(&header, self.buf.as_slice())
+            .await
+            .map_err(|e| BasebackupError::Client(e.into()))?;
 
         self.total_blocks += nblocks;
         debug!("Added to basebackup slru {} relsize {}", segname, nblocks);
@@ -209,7 +235,7 @@ where
         Ok(())
     }
 
-    async fn finish(mut self) -> anyhow::Result<()> {
+    async fn finish(mut self) -> Result<(), BasebackupError> {
         let res = if self.current_segment.is_none() || self.buf.is_empty() {
             Ok(())
         } else {
@@ -226,7 +252,7 @@ impl<'a, W> Basebackup<'a, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
-    async fn send_tarball(mut self) -> anyhow::Result<()> {
+    async fn send_tarball(mut self) -> Result<(), BasebackupError> {
         // TODO include checksum
 
         let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
@@ -262,16 +288,22 @@ where
             let slru_partitions = self
                 .timeline
                 .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
-                .await?
+                .await
+                .map_err(|e| BasebackupError::Server(e.into()))?
                 .partition(Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64);
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
 
             for part in slru_partitions.parts {
-                let blocks = self.timeline.get_vectored(part, self.lsn, self.ctx).await?;
+                let blocks = self
+                    .timeline
+                    .get_vectored(part, self.lsn, self.ctx)
+                    .await
+                    .map_err(|e| BasebackupError::Server(e.into()))?;
 
                 for (key, block) in blocks {
-                    slru_builder.add_block(&key, block?).await?;
+                    let block = block.map_err(|e| BasebackupError::Server(e.into()))?;
+                    slru_builder.add_block(&key, block).await?;
                 }
             }
             slru_builder.finish().await?;
@@ -279,8 +311,11 @@ where
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
         // Create tablespace directories
-        for ((spcnode, dbnode), has_relmap_file) in
-            self.timeline.list_dbdirs(self.lsn, self.ctx).await?
+        for ((spcnode, dbnode), has_relmap_file) in self
+            .timeline
+            .list_dbdirs(self.lsn, self.ctx)
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?
         {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
@@ -289,7 +324,8 @@ where
             let rels = self
                 .timeline
                 .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
-                .await?;
+                .await
+                .map_err(|e| BasebackupError::Server(e.into()))?;
             for &rel in rels.iter() {
                 // Send init fork as main fork to provide well formed empty
                 // contents of UNLOGGED relations. Postgres copies it in
@@ -325,7 +361,12 @@ where
                 }
             }
 
-            for (path, content) in self.timeline.list_aux_files(self.lsn, self.ctx).await? {
+            for (path, content) in self
+                .timeline
+                .list_aux_files(self.lsn, self.ctx)
+                .await
+                .map_err(|e| BasebackupError::Server(e.into()))?
+            {
                 if path.starts_with("pg_replslot") {
                     let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
                     let restart_lsn = Lsn(u64::from_le_bytes(
@@ -356,18 +397,24 @@ where
         for xid in self
             .timeline
             .list_twophase_files(self.lsn, self.ctx)
-            .await?
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?
         {
             self.add_twophase_file(xid).await?;
         }
 
         fail_point!("basebackup-before-control-file", |_| {
-            bail!("failpoint basebackup-before-control-file")
+            return Err(BasebackupError::Server(anyhow!(
+                "failpoint basebackup-before-control-file"
+            )));
         });
 
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file().await?;
-        self.ar.finish().await?;
+        self.ar
+            .finish()
+            .await
+            .map_err(|e| BasebackupError::Client(e.into()))?;
         debug!("all tarred up!");
         Ok(())
     }
