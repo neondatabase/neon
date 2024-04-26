@@ -13,7 +13,7 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
-use pageserver_api::key::{key_to_slru_block, Key};
+use pageserver_api::key::{key_to_slru_block, rel_block_to_key, Key};
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
@@ -297,7 +297,20 @@ where
                 if rel.forknum == INIT_FORKNUM {
                     // I doubt we need _init fork itself, but having it at least
                     // serves as a marker relation is unlogged.
-                    self.add_rel(rel, rel).await?;
+                    if let Err(_e) = self.add_rel(rel, rel).await {
+                        if self
+                            .timeline
+                            .get_shard_identity()
+                            .is_key_buggy_forknum(&rel_block_to_key(rel, 0x0))
+                        {
+                            // Workaround https://github.com/neondatabase/neon/issues/7451 -- if we have an unlogged relation
+                            // whose INIT_FORKNUM is not correctly on shard zero, then omit it in the basebackup.  This allows
+                            // postgres to start up.  The relation won't work, but it will be possible to DROP TABLE on it and
+                            // recreate.
+                            tracing::warn!("Omitting relation {rel} for issue #7451: drop and recreate this unlogged relation");
+                            continue;
+                        }
+                    };
                     self.add_rel(rel, rel.with_forknum(MAIN_FORKNUM)).await?;
                     continue;
                 }
@@ -363,7 +376,7 @@ where
     async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> anyhow::Result<()> {
         let nblocks = self
             .timeline
-            .get_rel_size(src, Version::Lsn(self.lsn), false, self.ctx)
+            .get_rel_size(src, Version::Lsn(self.lsn), self.ctx)
             .await?;
 
         // If the relation is empty, create an empty file
@@ -384,7 +397,7 @@ where
             for blknum in startblk..endblk {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(src, blknum, Version::Lsn(self.lsn), false, self.ctx)
+                    .get_rel_page_at_lsn(src, blknum, Version::Lsn(self.lsn), self.ctx)
                     .await?;
                 segment_data.extend_from_slice(&img[..]);
             }

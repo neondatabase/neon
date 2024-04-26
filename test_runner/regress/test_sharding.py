@@ -1201,3 +1201,45 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
         max_lsn = max(Lsn(info["last_record_lsn"]) for info in infos)
         diff = max_lsn - min_lsn
         assert diff < 2 * 1024 * 1024, f"LSN diff={diff}, expected diff < 2MB due to backpressure"
+
+
+def test_sharding_unlogged_relation(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that an unlogged relation is handled properly on a sharded tenant
+
+    Reproducer for https://github.com/neondatabase/neon/issues/7451
+    """
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    neon_env_builder.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_tenant(tenant_id, timeline_id, shard_count=8)
+
+    # We will create many tables to ensure it's overwhelmingly likely that at least one
+    # of them doesn't land on shard 0
+    table_names = [f"my_unlogged_{i}" for i in range(0, 16)]
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as ep:
+        for table_name in table_names:
+            ep.safe_psql(f"CREATE UNLOGGED TABLE {table_name} (id integer, value varchar(64));")
+            ep.safe_psql(f"INSERT INTO {table_name} VALUES (1, 'foo')")
+            result = ep.safe_psql(f"SELECT * from {table_name};")
+            assert result == [(1, "foo")]
+            ep.safe_psql(f"CREATE INDEX ON {table_name} USING btree (value);")
+
+        wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as ep:
+        for table_name in table_names:
+            # Check that table works: we can select and insert
+            result = ep.safe_psql(f"SELECT * from {table_name};")
+            assert result == []
+            ep.safe_psql(f"INSERT INTO {table_name} VALUES (2, 'bar');")
+            result = ep.safe_psql(f"SELECT * from {table_name};")
+            assert result == [(2, "bar")]
+
+        # Ensure that post-endpoint-restart modifications are ingested happily by pageserver
+        wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)

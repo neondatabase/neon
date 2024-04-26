@@ -182,6 +182,7 @@ async fn download_object<'a>(
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
             use crate::virtual_file::owned_buffers_io::{self, util::size_tracking_writer};
+            use bytes::BytesMut;
             async {
                 let destination_file = VirtualFile::create(dst_path)
                     .await
@@ -194,10 +195,10 @@ async fn download_object<'a>(
                 // There's chunks_vectored() on the stream.
                 let (bytes_amount, destination_file) = async {
                     let size_tracking = size_tracking_writer::Writer::new(destination_file);
-                    let mut buffered = owned_buffers_io::write::BufferedWriter::<
-                        { super::BUFFER_SIZE },
-                        _,
-                    >::new(size_tracking);
+                    let mut buffered = owned_buffers_io::write::BufferedWriter::<BytesMut, _>::new(
+                        size_tracking,
+                        BytesMut::with_capacity(super::BUFFER_SIZE),
+                    );
                     while let Some(res) =
                         futures::StreamExt::next(&mut download.download_stream).await
                     {
@@ -258,7 +259,7 @@ pub async fn list_remote_timelines(
     tenant_shard_id: TenantShardId,
     cancel: CancellationToken,
 ) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
-    let remote_path = remote_timelines_path(&tenant_shard_id);
+    let remote_path = remote_timelines_path(&tenant_shard_id).add_trailing_slash();
 
     fail::fail_point!("storage-sync-list-remote-timelines", |_| {
         anyhow::bail!("storage-sync-list-remote-timelines");
@@ -417,11 +418,16 @@ pub(super) async fn download_index_part(
     let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
 
     let indices = download_retry(
-        || async { storage.list_files(Some(&index_prefix), None, cancel).await },
+        || async {
+            storage
+                .list(Some(&index_prefix), ListingMode::NoDelimiter, None, cancel)
+                .await
+        },
         "list index_part files",
         cancel,
     )
-    .await?;
+    .await?
+    .keys;
 
     // General case logic for which index to use: the latest index whose generation
     // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md

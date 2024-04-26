@@ -2,6 +2,7 @@ pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
+use std::time::Instant;
 
 use self::split_state::SplitState;
 use camino::Utf8Path;
@@ -141,6 +142,31 @@ impl Persistence {
         Self {
             connection_pool,
             json_path,
+        }
+    }
+
+    /// A helper for use during startup, where we would like to tolerate concurrent restarts of the
+    /// database and the storage controller, therefore the database might not be available right away
+    pub async fn await_connection(
+        database_url: &str,
+        timeout: Duration,
+    ) -> Result<(), diesel::ConnectionError> {
+        let started_at = Instant::now();
+        loop {
+            match PgConnection::establish(database_url) {
+                Ok(_) => {
+                    tracing::info!("Connected to database.");
+                    return Ok(());
+                }
+                Err(e) => {
+                    if started_at.elapsed() > timeout {
+                        return Err(e);
+                    } else {
+                        tracing::info!("Database not yet available, waiting... ({e})");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
         }
     }
 
