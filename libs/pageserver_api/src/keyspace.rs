@@ -78,7 +78,7 @@ impl<'a> ShardedRange<'a> {
 
         let mut cursor = self.range.start;
         while cursor < self.range.end {
-            let advance_by = self.advance_to_next_boundary(cursor);
+            let advance_by = self.distance_to_next_boundary(cursor);
             let is_fragment_disposable = self.shard_identity.is_key_disposable(&cursor);
 
             // If the previous fragment is undersized, then we seek to consume enough
@@ -159,7 +159,7 @@ impl<'a> ShardedRange<'a> {
         let mut cursor = self.range.start;
         while cursor < self.range.end {
             // Count up to the next stripe_size boundary or end of range
-            let advance_by = self.advance_to_next_boundary(cursor);
+            let advance_by = self.distance_to_next_boundary(cursor);
 
             // If this blocks in this stripe belong to us, add them to our count
             if !self.shard_identity.is_key_disposable(&cursor) {
@@ -181,7 +181,7 @@ impl<'a> ShardedRange<'a> {
 
     /// Advance the cursor to the next potential fragment boundary: this is either
     /// a stripe boundary, or the end of the range.
-    fn advance_to_next_boundary(&self, cursor: Key) -> u32 {
+    fn distance_to_next_boundary(&self, cursor: Key) -> u32 {
         let distance_to_range_end = nearby_key_delta(&cursor, &self.range.end);
 
         if self.shard_identity.count < ShardCount::new(2) {
@@ -253,12 +253,12 @@ impl KeySpace {
             let range = ShardedRange::new(range.clone(), shard_identity);
 
             // Chunk up the range into parts that each contain up to target_size local blocks
-            for (range_size, range) in range.fragment(target_nblocks) {
+            for (frag_on_shard_size, frag_range) in range.fragment(target_nblocks) {
                 // If appending the next contiguous range in the keyspace to the current
                 // partition would cause it to be too large, and our current partition
                 // covers at least one block that is physically present in this shard,
                 // then start a new partition
-                if current_part_size + range_size as usize > target_nblocks as usize
+                if current_part_size + frag_on_shard_size as usize > target_nblocks as usize
                     && current_part_size > 0
                 {
                     parts.push(KeySpace {
@@ -267,8 +267,8 @@ impl KeySpace {
                     current_part = Vec::new();
                     current_part_size = 0;
                 }
-                current_part.push(range.start..range.end);
-                current_part_size += range_size as usize;
+                current_part.push(frag_range.start..frag_range.end);
+                current_part_size += frag_on_shard_size as usize;
             }
         }
 
