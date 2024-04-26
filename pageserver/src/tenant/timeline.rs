@@ -3906,24 +3906,6 @@ impl Timeline {
 
     // Is it time to create a new image layer for the given partition?
     async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
-        let last = self.last_image_layer_creation_check_at.load();
-        if lsn != Lsn(0) {
-            let distance = lsn
-                .checked_sub(last)
-                .expect("Attempt to compact with LSN going backwards");
-
-            let min_distance = self.get_image_layer_creation_check_threshold() as u64
-                * self.get_checkpoint_distance();
-
-            // Skip the expensive delta layer counting below if we've not ingested
-            // sufficient WAL since the last check.
-            if distance.0 < min_distance {
-                return false;
-            }
-        }
-
-        self.last_image_layer_creation_check_at.store(lsn);
-
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read().await;
@@ -3995,9 +3977,37 @@ impl Timeline {
         // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
         let mut start = Key::MIN;
 
+        let check_for_image_layers = {
+            let last_checks_at = self.last_image_layer_creation_check_at.load();
+            let distance = lsn
+                .checked_sub(last_checks_at)
+                .expect("Attempt to compact with LSN going backwards");
+            let min_distance = self.get_image_layer_creation_check_threshold() as u64
+                * self.get_checkpoint_distance();
+
+            // Skip the expensive delta layer counting if this timeline has not ingested sufficient
+            // WAL since the last check.
+            distance.0 >= min_distance
+        };
+
+        if check_for_image_layers {
+            self.last_image_layer_creation_check_at.store(lsn);
+        }
+
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
-            if !force && !self.time_for_new_image_layer(partition, lsn).await {
+
+            let do_it = if force {
+                true
+            } else if check_for_image_layers {
+                // [`Self::time_for_new_image_layer`] is CPU expensive,
+                // so skip if we've not collected enough WAL since the last time
+                self.time_for_new_image_layer(partition, lsn).await
+            } else {
+                false
+            };
+
+            if !do_it {
                 start = img_range.end;
                 continue;
             }
