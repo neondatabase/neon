@@ -34,6 +34,7 @@ use tokio::io::AsyncReadExt;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use utils::fs_ext;
 use utils::id::{TenantId, TimelineId};
 
 const MAX_RETRIES: usize = 20;
@@ -423,7 +424,9 @@ async fn download_object_to_file(
 ) -> anyhow::Result<()> {
     let tmp_path = Utf8PathBuf::from(format!("{local_path}.tmp"));
     for _ in 0..MAX_RETRIES {
-        tokio::fs::remove_file(&tmp_path).await.ok();
+        tokio::fs::remove_file(&tmp_path)
+            .await
+            .or_else(fs_ext::ignore_not_found)?;
 
         let mut file = tokio::fs::File::create(&tmp_path)
             .await

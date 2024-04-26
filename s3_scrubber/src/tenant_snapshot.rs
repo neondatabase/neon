@@ -88,13 +88,8 @@ impl SnapshotDownloader {
                 .prefix(&remote_layer_path)
                 .send()
                 .await?;
-            let Some(versions) = versions.versions else {
+            let Some(version) = versions.versions.as_ref().and_then(|v| v.first()) else {
                 return Err(anyhow::anyhow!("No versions found for {remote_layer_path}"));
-            };
-            let Some(version) = versions.first() else {
-                return Err(anyhow::anyhow!(
-                    "Empty versions found for {remote_layer_path}"
-                ));
             };
             download_object_to_file(
                 &self.s3_client,
