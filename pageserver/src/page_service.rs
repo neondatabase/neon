@@ -1409,10 +1409,11 @@ where
         Ok(())
     }
 }
+
+type IO<'s> = std::pin::Pin<&'s mut tokio_io_timeout::TimeoutReader<tokio::net::TcpStream>>;
+
 #[async_trait::async_trait]
-impl<IO> postgres_backend::Handler<IO> for PageServerHandler
-where
-    IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+impl<'s> postgres_backend::Handler<IO<'s>> for PageServerHandler
 {
     #[instrument(skip_all, fields(tenant_id, timeline_id))]
     async fn process_query(
