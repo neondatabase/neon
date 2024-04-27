@@ -192,7 +192,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::HandlerSync<IO
     }
 }
 
-#[async_trait::async_trait]
 impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
     for SafekeeperPostgresHandler
 {

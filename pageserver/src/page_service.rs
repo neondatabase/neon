@@ -1412,13 +1412,12 @@ where
 
 type IO<'s> = std::pin::Pin<&'s mut tokio_io_timeout::TimeoutReader<tokio::net::TcpStream>>;
 
-#[async_trait::async_trait]
 impl<'s> postgres_backend::Handler<IO<'s>> for PageServerHandler
 {
     #[instrument(skip_all, fields(tenant_id, timeline_id))]
     async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend<IO>,
+        pgb: &mut PostgresBackend<IO<'s>>,
         query_string: &str,
     ) -> Result<(), QueryError> {
         self.process_query_(pgb, &query_string).await
