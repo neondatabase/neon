@@ -1416,6 +1416,16 @@ where
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
     ) -> Result<(), QueryError> {
+        self.process_query_(pgb, &query_string).await
+    }
+}
+
+impl PageServerHandler {
+    async fn process_query_<IO: AsyncRead + AsyncWrite + Send + Sync + Unpin>(
+        &mut self,
+        pgb: &mut PostgresBackend<IO>,
+        query_string: &str,
+    ) -> Result<(), QueryError> {
         fail::fail_point!("simulated-bad-compute-connection", |_| {
             info!("Hit failpoint for bad connection");
             Err(QueryError::SimulatedConnectionError)
