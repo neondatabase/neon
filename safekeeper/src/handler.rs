@@ -2,10 +2,13 @@
 //! protocol commands.
 
 use anyhow::Context;
+use std::net::TcpStream;
 use std::str::{self, FromStr};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_io_timeout::TimeoutReader;
 use tracing::{debug, info, info_span, Instrument};
+use utils::measured_stream::MeasuredStream;
 
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
@@ -192,12 +195,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::HandlerSync<IO
     }
 }
 
-impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
-    for SafekeeperPostgresHandler
-{
+type IO<'s, R: FnMut(usize), W> =
+    MeasuredStream<std::pin::Pin<&'s mut TimeoutReader<TcpStream>>, R, W>;
+
+impl<'s, R: FnMut(usize), W> postgres_backend::Handler<IO<'s, R, W>> for SafekeeperPostgresHandler {
     async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend<IO>,
+        pgb: &mut PostgresBackend<IO<'s, R, W>>,
         query_string: &str,
     ) -> Result<(), QueryError> {
         self.process_query_(pgb, &query_string).await
