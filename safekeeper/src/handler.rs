@@ -197,6 +197,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
     ) -> Result<(), QueryError> {
+        self.process_query_(pgb, &query_string).await
+    }
+}
+impl SafekeeperPostgresHandler {
+    async fn process_query_<IO: AsyncRead + AsyncWrite + Send + Unpin>(
+        &mut self,
+        pgb: &mut PostgresBackend<IO>,
+        query_string: &str,
+    ) -> Result<(), QueryError> {
         if query_string
             .to_ascii_lowercase()
             .starts_with("set datestyle to ")
