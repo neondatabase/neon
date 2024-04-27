@@ -95,8 +95,7 @@ fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
     }
 }
 
-#[async_trait::async_trait]
-impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
+impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::HandlerSync<IO>
     for SafekeeperPostgresHandler
 {
     // tenant_id and timeline_id are passed in connection string params
@@ -191,7 +190,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         self.claims = Some(data.claims);
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
+    for SafekeeperPostgresHandler
+{
     async fn process_query(
         &mut self,
         pgb: &mut PostgresBackend<IO>,

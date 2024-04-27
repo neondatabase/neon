@@ -1368,8 +1368,7 @@ impl PageServerHandler {
     }
 }
 
-#[async_trait::async_trait]
-impl<IO> postgres_backend::Handler<IO> for PageServerHandler
+impl<IO> postgres_backend::HandlerSync<IO> for PageServerHandler
 where
     IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
 {
@@ -1409,7 +1408,12 @@ where
     ) -> Result<(), QueryError> {
         Ok(())
     }
-
+}
+#[async_trait::async_trait]
+impl<IO> postgres_backend::Handler<IO> for PageServerHandler
+where
+    IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+{
     #[instrument(skip_all, fields(tenant_id, timeline_id))]
     async fn process_query(
         &mut self,

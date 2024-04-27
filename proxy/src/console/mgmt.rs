@@ -89,6 +89,8 @@ impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
     }
 }
 
+impl postgres_backend::HandlerSync<tokio::net::TcpStream> for MgmtHandler {}
+
 fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), QueryError> {
     let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 

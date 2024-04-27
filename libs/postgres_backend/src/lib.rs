@@ -79,7 +79,7 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
 }
 
 #[async_trait::async_trait]
-pub trait Handler<IO> {
+pub trait Handler<IO>: HandlerSync<IO> {
     /// Handle single query.
     /// postgres_backend will issue ReadyForQuery after calling this (this
     /// might be not what we want after CopyData streaming, but currently we don't
@@ -89,7 +89,8 @@ pub trait Handler<IO> {
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
     ) -> Result<(), QueryError>;
-
+}
+pub trait HandlerSync<IO> {
     /// Called on startup packet receival, allows to process params.
     ///
     /// If Ok(false) is returned postgres_backend will skip auth -- that is needed for new users
