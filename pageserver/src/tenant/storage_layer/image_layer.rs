@@ -471,7 +471,7 @@ impl ImageLayerInner {
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         let reads = self
-            .plan_reads(keyspace, ctx)
+            .plan_reads(keyspace, |_| true, ctx)
             .await
             .map_err(GetVectoredError::Other)?;
 
@@ -481,11 +481,15 @@ impl ImageLayerInner {
         Ok(())
     }
 
-    async fn plan_reads(
+    async fn plan_reads<F>(
         &self,
         keyspace: KeySpace,
+        filter: F,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<VectoredRead>> {
+    ) -> anyhow::Result<Vec<VectoredRead>>
+    where
+        F: Fn(&Key) -> bool,
+    {
         let mut planner = VectoredReadPlanner::new(
             self.max_vectored_read_bytes
                 .expect("Layer is loaded with max vectored bytes config")
@@ -501,9 +505,9 @@ impl ImageLayerInner {
             .page_content_kind(PageContentKind::ImageLayerBtreeNode)
             .build();
 
-        for range in keyspace.ranges.iter() {
-            let mut range_end_handled = false;
+        let mut last_key: Option<Key> = None;
 
+        for range in keyspace.ranges.iter() {
             let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
             range.start.write_to_byte_slice(&mut search_key);
 
@@ -516,22 +520,88 @@ impl ImageLayerInner {
                 let key = Key::from_slice(&raw_key[..KEY_SIZE]);
                 assert!(key >= range.start);
 
+                let drop = !filter(&key);
+
+                // Maybe terminate the range if we are at the end of a contiguous run of keys
+                // that pass the condition
+                if let Some(last_key_v) = last_key {
+                    if drop {
+                        last_key = None;
+                        planner.handle_range_end(offset);
+                        continue;
+                    } else if key != last_key_v.next() {
+                        planner.handle_range_end(offset);
+                    }
+                } else if drop {
+                    continue;
+                }
+
                 if key >= range.end {
                     planner.handle_range_end(offset);
-                    range_end_handled = true;
+                    last_key = None;
                     break;
                 } else {
                     planner.handle(key, self.lsn, offset, BlobFlag::None);
+                    last_key = Some(key);
                 }
             }
 
-            if !range_end_handled {
+            if last_key.is_some() {
+                // We had started a contiguous range in the planner, finish it.  Because we reached here
+                // rather than hitting the `key >= range.end` condition above, we must have reached the
+                // end of the layer, so that's what we use as the offset end of the range.
                 let payload_end = self.index_start_blk as u64 * PAGE_SZ as u64;
                 planner.handle_range_end(payload_end);
             }
         }
 
         Ok(planner.finish())
+    }
+
+    /// Given a key range and filter function, generate a read plan and execute it, then for
+    /// each value we read write it onwards into the writer.
+    pub(super) async fn do_reads_and_write<F>(
+        &self,
+        range: Range<Key>,
+        filter: F,
+        writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<usize>
+    where
+        F: Fn(&Key) -> bool,
+    {
+        let plan = self
+            .plan_reads(
+                KeySpace {
+                    ranges: vec![range],
+                },
+                filter,
+                ctx,
+            )
+            .await?;
+
+        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        let mut key_count = 0;
+        for read in plan.into_iter() {
+            let buf_size = read.size();
+
+            let buf = BytesMut::with_capacity(buf_size);
+            let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
+
+            let frozen_buf = blobs_buf.buf.freeze();
+
+            for meta in blobs_buf.blobs.iter() {
+                let img_buf = frozen_buf.slice(meta.start..meta.end);
+
+                key_count += 1;
+                writer
+                    .put_image(meta.meta.key, img_buf, ctx)
+                    .await
+                    .context(format!("Storing key {}", meta.meta.key))?;
+            }
+        }
+
+        Ok(key_count)
     }
 
     async fn do_reads_and_update_state(
