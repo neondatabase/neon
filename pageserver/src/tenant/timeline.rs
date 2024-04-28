@@ -4372,6 +4372,31 @@ impl Timeline {
         Ok(())
     }
 
+    async fn rewrite_layers(
+        self: &Arc<Self>,
+        replace_layers: Vec<(Layer, ResidentLayer)>,
+        drop_layers: Vec<Layer>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.layers.write().await;
+
+        guard.rewrite_layers(&replace_layers, &drop_layers, &self.metrics);
+
+        let upload_layers: Vec<_> = replace_layers.into_iter().map(|r| r.1).collect();
+
+        if let Some(remote_client) = self.remote_client.as_ref() {
+            remote_client.schedule_compaction_update(&drop_layers, &upload_layers)?;
+        }
+
+        // Safety: we are now dropping the ResidentLayer handles that prevented eviction of the old version
+        // of layers we rewrote.
+        // FIXME: we must not race with anyone setting wanted_deleted on this layer!  e.g. GC or eviction.  They would
+        // end up deleting the _new_ local layer before it gets uploaded.
+
+        drop_wlock(guard);
+
+        Ok(())
+    }
+
     /// Schedules the uploads of the given image layers
     fn upload_new_image_layers(
         self: &Arc<Self>,

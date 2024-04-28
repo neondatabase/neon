@@ -15,12 +15,14 @@ use anyhow::{anyhow, Context};
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
-use pageserver_api::shard::{ShardIdentity, TenantShardId};
+use pageserver_api::keyspace::ShardedRange;
+use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
 use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
+use crate::tenant::remote_timeline_client::index::IndexLayerMetadata;
 use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
 use crate::tenant::timeline::{drop_rlock, is_rel_fsm_block_key, is_rel_vm_block_key, Hole};
 use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter};
@@ -93,7 +95,7 @@ impl Timeline {
         // Define partitioning schema if needed
 
         // FIXME: the match should only cover repartitioning, not the next steps
-        match self
+        let partition_count = match self
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
@@ -146,6 +148,7 @@ impl Timeline {
                 assert!(sparse_layers.is_empty());
 
                 self.upload_new_image_layers(dense_layers)?;
+                dense_partitioning.parts.len()
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -157,8 +160,147 @@ impl Timeline {
                 if !self.cancel.is_cancelled() {
                     tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
+                1
             }
         };
+
+        if self.shard_identity.count >= ShardCount::new(2) {
+            // Limit the number of layer rewrites to the number of partitions: this means its
+            // runtime should be comparable to a full round of image layer creations, rather than
+            // being potentially much longer.
+            let rewrite_max = partition_count;
+
+            self.compact_shard_ancestors(rewrite_max, ctx).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Check for layers that are elegible to be rewritten:
+    /// - Shard splitting: After a shard split, ancestor layers beyond pitr_interval, so that
+    ///   we don't indefinitely retain keys in this shard that aren't needed.
+    /// - For future use: layers beyond pitr_interval that are in formats we would
+    ///   rather not maintain compatibility with indefinitely.
+    ///
+    /// Note: this phase may read and write many gigabytes of data: use rewrite_max to bound
+    /// how much work it will try to do in each compaction pass.
+    async fn compact_shard_ancestors(
+        self: &Arc<Self>,
+        rewrite_max: usize,
+        _ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut drop_layers = Vec::new();
+        let layers_to_rewrite: Vec<Layer> = Vec::new();
+
+        let layers = self.layers.read().await;
+        for layer_desc in layers.layer_map().iter_historic_layers() {
+            let layer = layers.get_from_desc(&layer_desc);
+            if layer.metadata().shard.shard_count == self.shard_identity.count {
+                // This layer does not belong to a historic ancestor, no need to re-image it.
+                continue;
+            }
+
+            // This layer was created on an ancestor shard: check if it contains any data for this shard.
+            let sharded_range = ShardedRange::new(layer_desc.get_key_range(), &self.shard_identity);
+            let layer_local_page_count = sharded_range.page_count();
+            let layer_raw_page_count = ShardedRange::raw_size(&layer_desc.get_key_range());
+            if layer_local_page_count == 0 {
+                // This ancestral layer only covers keys that belong to other shards.
+                // We do very verbose logging here, including the full metadata: if we had some critical bug that caused
+                // us to incorrectly drop layers, this would simplify manually reinstating those layers.
+                info!(layer=%layer,
+                    "dropping layer after shard split, contains no keys for this shard.  Old metadata: {}",
+                    serde_json::to_string(&IndexLayerMetadata::from(layer.metadata())).unwrap()
+                );
+
+                if cfg!(debug_assertions) {
+                    // Expensive, exhaustive check of keys in this layer: this guards against ShardedRange's calculations being
+                    // wrong.  If ShardedRange claims the local page count is zero, then no keys in this layer
+                    // should be !is_key_disposable()
+                    let range = layer_desc.get_key_range();
+                    let mut key = range.start;
+                    while key < range.end {
+                        debug_assert!(self.shard_identity.is_key_disposable(&key));
+                        key = key.next();
+                    }
+                }
+
+                drop_layers.push(layer);
+                continue;
+            } else if layer_local_page_count != u32::MAX
+                && layer_local_page_count == layer_raw_page_count
+            {
+                debug!(layer=%layer,
+                    "layer is entirely shard local ({} keys), no need to filter it",
+                    layer_local_page_count
+                );
+                continue;
+            }
+
+            // Don't bother re-writing a layer unless it will at least halve its size
+            if layer_local_page_count != u32::MAX
+                && layer_local_page_count > layer_raw_page_count / 2
+            {
+                debug!(layer=%layer,
+                    "layer is already mostly local ({}/{}), not rewriting",
+                    layer_local_page_count,
+                    layer_raw_page_count
+                );
+            }
+
+            // Don't bother re-writing a layer if it is within the PITR window: it will age-out eventually
+            // without incurring the I/O cost of a rewrite.
+            if layer_desc.get_lsn_range().end >= self.gc_info.read().unwrap().pitr_cutoff {
+                debug!(layer=%layer, "Skipping rewrite of layer still in PITR window ({} >= {})",
+                    layer_desc.get_lsn_range().end, self.gc_info.read().unwrap().pitr_cutoff);
+                continue;
+            }
+
+            if layer_desc.is_delta() {
+                // We do not yet implement rewrite of delta layers
+                debug!(layer=%layer, "Skipping rewrite of delta layer");
+                continue;
+            }
+
+            // Only rewrite layers if they would have different remote paths: either they belong to this
+            // shard but an old generation, or they belonged to another shard.  This also implicitly
+            // guarantees that the layer is persistent in remote storage (as only remote persistent
+            // layers are carried across shard splits, any local-only layer would be in the current generation)
+            if layer.metadata().generation == self.generation
+                && layer.metadata().shard.shard_count == self.shard_identity.count
+            {
+                debug!(layer=%layer, "Skipping rewrite, is not from old generation");
+                continue;
+            }
+
+            if layers_to_rewrite.len() >= rewrite_max {
+                tracing::info!(layer=%layer, "Will rewrite layer on a future compaction, already rewrote {}",
+                    layers_to_rewrite.len()
+                );
+                continue;
+            }
+
+            // Fall through: all our conditions for doing a rewrite passed.
+            // TODO: implement rewriting
+            tracing::debug!(layer=%layer, "Would rewrite layer");
+        }
+
+        // Drop the layers read lock: we will acquire it for write in [`Self::rewrite_layers`]
+        drop(layers);
+
+        // TODO: collect layers to rewrite
+        let replace_layers = Vec::new();
+
+        // Update the LayerMap so that readers will use the new layers, and enqueue it for writing to remote storage
+        self.rewrite_layers(replace_layers, drop_layers).await?;
+
+        if let Some(remote_client) = self.remote_client.as_ref() {
+            // We wait for all uploads to complete before finishing this compaction stage.  This is not
+            // necessary for correctness, but it simplifies testing, and avoids proceeding with another
+            // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
+            // load.
+            remote_client.wait_completion().await?;
+        }
 
         Ok(())
     }
