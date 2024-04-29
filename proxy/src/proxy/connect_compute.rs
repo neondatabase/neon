@@ -194,6 +194,10 @@ where
         let wait_duration = retry_after(num_retries, connect_to_compute_retry_config);
         num_retries += 1;
 
+        let pause = ctx
+            .latency_timer
+            .pause(crate::metrics::Waiting::RetryTimeout);
         time::sleep(wait_duration).await;
+        drop(pause);
     }
 }
