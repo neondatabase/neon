@@ -30,7 +30,10 @@ use crate::{
 
 use super::{
     heatmap::HeatMapLayer,
-    scheduler::{self, Completion, JobGenerator, SchedulingResult, TenantBackgroundJobs},
+    scheduler::{
+        self, period_jitter, period_warmup, Completion, JobGenerator, SchedulingResult,
+        TenantBackgroundJobs,
+    },
     SecondaryTenant,
 };
 
@@ -44,7 +47,6 @@ use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
-use rand::Rng;
 use remote_storage::{DownloadError, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
@@ -270,7 +272,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         // Update freshened_at even if there was an error: we don't want errored tenants to implicitly
         // take priority to run again.
         let mut detail = secondary_state.detail.lock().unwrap();
-        detail.next_download = Some(Instant::now() + DOWNLOAD_FRESHEN_INTERVAL);
+        detail.next_download = Some(Instant::now() + period_jitter(DOWNLOAD_FRESHEN_INTERVAL, 5));
     }
 
     async fn schedule(&mut self) -> SchedulingResult<PendingDownload> {
@@ -301,11 +303,9 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                     }
 
                     if detail.next_download.is_none() {
-                        // Initialize with a jitter: this spreads initial downloads on startup
-                        // or mass-attach across our freshen interval.
-                        let jittered_period =
-                            rand::thread_rng().gen_range(Duration::ZERO..DOWNLOAD_FRESHEN_INTERVAL);
-                        detail.next_download = Some(now.checked_add(jittered_period).expect(
+                        // Initialize randomly in the range from 0 to our interval: this uniformly spreads the start times.  Subsequent
+                        // rounds will use a smaller jitter to avoid accidentally synchronizing later.
+                        detail.next_download = Some(now.checked_add(period_warmup(DOWNLOAD_FRESHEN_INTERVAL)).expect(
                         "Using our constant, which is known to be small compared with clock range",
                     ));
                     }
