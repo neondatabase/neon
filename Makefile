@@ -25,14 +25,17 @@ ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
 	PG_CONFIGURE_OPTS += --with-libseccomp
 else ifeq ($(UNAME_S),Darwin)
-	# macOS with brew-installed openssl requires explicit paths
-	# It can be configured with OPENSSL_PREFIX variable
-	OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
-	PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
-	PG_CONFIGURE_OPTS += PKG_CONFIG_PATH=$(shell brew --prefix icu4c)/lib/pkgconfig
-	# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure
-	# brew formulae are keg-only and not symlinked into HOMEBREW_PREFIX, force their usage
-	EXTRA_PATH_OVERRIDES += $(shell brew --prefix bison)/bin/:$(shell brew --prefix flex)/bin/:
+	BREW_INSTALLED := $(shell command -v brew >/dev/null 2>&1 && echo yes || echo no)
+  ifeq ($(BREW_INSTALLED),yes)
+		# macOS with brew-installed openssl requires explicit paths
+		# It can be configured with OPENSSL_PREFIX variable
+		OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
+		PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
+		PG_CONFIGURE_OPTS += PKG_CONFIG_PATH=$(shell brew --prefix icu4c)/lib/pkgconfig
+		# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure
+		# brew formulae are keg-only and not symlinked into HOMEBREW_PREFIX, force their usage
+		EXTRA_PATH_OVERRIDES += $(shell brew --prefix bison)/bin/:$(shell brew --prefix flex)/bin/:
+	endif
 endif
 
 # Use -C option so that when PostgreSQL "make install" installs the
