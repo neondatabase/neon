@@ -15,7 +15,13 @@ pub struct KeySpace {
 }
 
 impl KeySpace {
-    ///
+    /// Create a key space with a single range.
+    pub fn single(key_range: Range<Key>) -> Self {
+        Self {
+            ranges: vec![key_range],
+        }
+    }
+
     /// Partition a key space into roughly chunks of roughly 'target_size' bytes
     /// in each partition.
     ///
@@ -62,6 +68,10 @@ impl KeySpace {
         }
 
         KeyPartitioning { parts }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total_size() == 0
     }
 
     /// Merge another keyspace into the current one.
@@ -177,6 +187,11 @@ impl KeySpace {
     ///
     pub fn overlaps(&self, range: &Range<Key>) -> bool {
         self.overlaps_at(range).is_some()
+    }
+
+    /// Check if the keyspace contains a key
+    pub fn contains(&self, key: &Key) -> bool {
+        self.overlaps(&(*key..key.next()))
     }
 }
 

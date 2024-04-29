@@ -438,6 +438,8 @@ impl InMemoryLayer {
             }
         }
 
+        reconstruct_state.on_lsn_advanced(&keyspace, self.start_lsn);
+
         Ok(())
     }
 }
@@ -480,7 +482,7 @@ impl InMemoryLayer {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
         let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id).await?;
-        let key = InMemoryLayerFileId(file.id());
+        let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {
             file_id: key,

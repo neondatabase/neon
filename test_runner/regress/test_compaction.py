@@ -14,8 +14,6 @@ AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Compact small layers
     "compaction_target_size": 1024**2,
     "image_creation_threshold": 2,
-    # INC-186: remove when merging the fix
-    "image_layer_creation_check_threshold": 0,
 }
 
 

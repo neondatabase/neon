@@ -18,6 +18,7 @@ from fixtures.remote_storage import s3_storage
 def test_pg_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
+    build_type: str,
     pg_bin,
     capsys,
     base_dir: Path,
@@ -30,6 +31,11 @@ def test_pg_regress(
     """
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
+
+    if build_type == "debug":
+        # Disable vectored read path cross validation since it makes the test time out.
+        neon_env_builder.pageserver_config_override = "validate_vectored_get=false"
+
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)

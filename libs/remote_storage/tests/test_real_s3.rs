@@ -380,6 +380,7 @@ fn create_s3_client(
             endpoint: None,
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
+            upload_storage_class: None,
         }),
         timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
     };
