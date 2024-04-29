@@ -225,7 +225,7 @@ impl KeyPartitioning {
     /// Convert a key partitioning to a sparse partition.
     pub fn into_sparse(self) -> SparseKeyPartitioning {
         SparseKeyPartitioning {
-            parts: self.parts.into_iter().map(|x| SparseKeySpace(x)).collect(),
+            parts: self.parts.into_iter().map(SparseKeySpace).collect(),
         }
     }
 }
