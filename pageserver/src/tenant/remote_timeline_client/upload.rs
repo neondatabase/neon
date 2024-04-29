@@ -138,7 +138,6 @@ pub(super) async fn copy_timeline_layer(
     let source_path = remote_path(conf, source_path, source_metadata.generation)?;
     let target_path = remote_path(conf, target_path, target_metadata.generation)?;
 
-    // TODO: this should have a retry loop ... or not? we are looped externally.
     storage
         .copy_object(&source_path, &target_path, cancel)
         .await

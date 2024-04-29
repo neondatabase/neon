@@ -697,66 +697,34 @@ impl RemoteTimelineClient {
         Self::wait_completion0(receiver).await
     }
 
-    /// Schedules a remote copy of the given Layer file from another timeline of the same tenant.
-    /// The file will be copied under the timeline in the remote storage, and added to the
-    /// `index_part.json` files uploaded on the next metadata upload.
+    /// Schedules uploading a new version of `index_part.json` with the given layers added and
+    /// waits for it to complete.
     ///
-    /// There will be no checking if the copys have already happened. If such is needed, the
-    /// existence of a copy needs to be done before calling this method.
-    ///
-    /// A `index_part.json` upload will not be scheduled, it can be scheduled by
-    /// [`Self::schedule_index_upload_for_file_changes`].
-    pub(crate) fn schedule_layer_adoption(
+    /// This is used with `Timeline::detach_ancestor` functionality.
+    pub(crate) async fn schedule_adding_existing_layers_to_index_upload_and_wait(
         self: &Arc<Self>,
-        adopted: Layer,
-        target: Layer,
+        layers: &[Layer],
     ) -> anyhow::Result<()> {
-        // non-technical rule, we don't have any such support planned
-        anyhow::ensure!(
-            adopted.layer_desc().tenant_shard_id == target.layer_desc().tenant_shard_id,
-            "cross-tenant copying is not supported"
-        );
-        // currently there is no known reason to do copy within
-        anyhow::ensure!(
-            adopted.layer_desc().timeline_id != target.layer_desc().timeline_id,
-            "copying within a timeline is not supported"
-        );
+        let barrier = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
 
-        let mut guard = self.upload_queue.lock().unwrap();
-        let upload_queue = guard.initialized_mut()?;
+            for layer in layers {
+                upload_queue
+                    .latest_files
+                    .insert(layer.layer_desc().filename(), layer.metadata());
+            }
 
-        self.schedule_layer_adoption0(upload_queue, adopted, target);
-        self.launch_queued_tasks(upload_queue);
-        Ok(())
+            let barrier = self.schedule_barrier0(upload_queue);
+            self.launch_queued_tasks(upload_queue);
+            barrier
+        };
+
+        Self::wait_completion0(barrier).await
     }
 
-    pub(crate) fn schedule_layer_adoption0(
-        self: &Arc<Self>,
-        upload_queue: &mut UploadQueueInitialized,
-        adopted: Layer,
-        owned: Layer,
-    ) {
-        let metadata = owned.metadata();
-
-        upload_queue
-            .latest_files
-            .insert(owned.layer_desc().filename(), metadata.clone());
-        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-
-        info!(
-            gen=?metadata.generation,
-            shard=?metadata.shard,
-            "scheduled layer file copy {adopted}",
-        );
-
-        let op = UploadOp::AdoptLayer { adopted, owned };
-        self.metric_begin(&op);
-        upload_queue.queued_operations.push_back(op);
-    }
-
-    ///
-    /// Launch an upload operation in the background.
-    ///
+    /// Launch an upload operation in the background; the file is added to be included in next
+    /// `index_part.json` upload.
     pub(crate) fn schedule_layer_file_upload(
         self: &Arc<Self>,
         layer: ResidentLayer,
@@ -1202,6 +1170,72 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Uploads the given layer **without** adding it to be part of a future `index_part.json` upload.
+    ///
+    /// This is not normally needed.
+    pub(crate) async fn upload_layer_file(
+        self: &Arc<Self>,
+        uploaded: &ResidentLayer,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        backoff::retry(
+            || async {
+                let m = uploaded.metadata();
+                upload::upload_timeline_layer(
+                    self.conf,
+                    &self.storage_impl,
+                    uploaded.local_path(),
+                    &uploaded.metadata(),
+                    m.generation,
+                    cancel,
+                )
+                .await
+            },
+            TimeoutOrCancel::caused_by_cancel,
+            FAILED_UPLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "upload a layer without adding it to latest files",
+            cancel,
+        )
+        .await
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
+        .and_then(|x| x)
+        .context("upload a layer without adding it to latest files")
+    }
+
+    /// Copies the `adopted` remote existing layer to the remote path of `adopted_as`. The layer is
+    /// not added to be part of a future `index_part.json` upload.
+    pub(crate) async fn copy_timeline_layer(
+        self: &Arc<Self>,
+        adopted: &Layer,
+        adopted_as: &Layer,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        backoff::retry(
+            || async {
+                upload::copy_timeline_layer(
+                    self.conf,
+                    &self.storage_impl,
+                    adopted.local_path(),
+                    &adopted.metadata(),
+                    adopted_as.local_path(),
+                    &adopted_as.metadata(),
+                    cancel,
+                )
+                .await
+            },
+            TimeoutOrCancel::caused_by_cancel,
+            FAILED_UPLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "copy timeline layer",
+            cancel,
+        )
+        .await
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
+        .and_then(|x| x)
+        .context("remote copy timeline layer")
+    }
+
     async fn flush_deletion_queue(&self) -> Result<(), DeletionQueueError> {
         match tokio::time::timeout(
             DELETION_QUEUE_FLUSH_TIMEOUT,
@@ -1373,7 +1407,7 @@ impl RemoteTimelineClient {
         while let Some(next_op) = upload_queue.queued_operations.front() {
             // Can we run this task now?
             let can_run_now = match next_op {
-                UploadOp::UploadLayer(..) | UploadOp::AdoptLayer { .. } => {
+                UploadOp::UploadLayer(..) => {
                     // Can always be scheduled.
                     true
                 }
@@ -1419,7 +1453,6 @@ impl RemoteTimelineClient {
                 UploadOp::UploadLayer(_, _) => {
                     upload_queue.num_inprogress_layer_uploads += 1;
                 }
-                UploadOp::AdoptLayer { .. } => upload_queue.num_inprogress_layer_copies += 1,
                 UploadOp::UploadMetadata(_, _) => {
                     upload_queue.num_inprogress_metadata_uploads += 1;
                 }
@@ -1513,28 +1546,6 @@ impl RemoteTimelineClient {
                     .measure_remote_op(
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
-                        Arc::clone(&self.metrics),
-                    )
-                    .await
-                }
-                UploadOp::AdoptLayer {
-                    ref adopted,
-                    ref owned,
-                } => {
-                    let source = adopted.local_path();
-                    let target = owned.local_path();
-                    upload::copy_timeline_layer(
-                        self.conf,
-                        &self.storage_impl,
-                        source,
-                        &adopted.metadata(),
-                        target,
-                        &owned.metadata(),
-                        &self.cancel,
-                    )
-                    .measure_remote_op(
-                        RemoteOpFileKind::Layer,
-                        RemoteOpKind::Copy,
                         Arc::clone(&self.metrics),
                     )
                     .await
@@ -1668,10 +1679,6 @@ impl RemoteTimelineClient {
                     upload_queue.num_inprogress_layer_uploads -= 1;
                     None
                 }
-                UploadOp::AdoptLayer { .. } => {
-                    upload_queue.num_inprogress_layer_copies -= 1;
-                    None
-                }
                 UploadOp::UploadMetadata(_, lsn) => {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
                     // XXX monotonicity check?
@@ -1729,13 +1736,6 @@ impl RemoteTimelineClient {
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Upload,
                 RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size()),
-            ),
-            UploadOp::AdoptLayer { .. } => (
-                RemoteOpFileKind::Layer,
-                RemoteOpKind::Copy,
-                DontTrackSize {
-                    reason: "remote is doing the copying, not us",
-                },
             ),
             UploadOp::UploadMetadata(_, _) => (
                 RemoteOpFileKind::Index,
@@ -1821,7 +1821,6 @@ impl RemoteTimelineClient {
                             .visible_remote_consistent_lsn
                             .clone(),
                         num_inprogress_layer_uploads: 0,
-                        num_inprogress_layer_copies: 0,
                         num_inprogress_metadata_uploads: 0,
                         num_inprogress_deletions: 0,
                         inprogress_tasks: HashMap::default(),
@@ -1974,7 +1973,7 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
 /// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
 ///
 /// Errors if the path provided does not start from pageserver's workdir.
-pub fn remote_path(
+pub(crate) fn remote_path(
     conf: &PageServerConf,
     local_path: &Utf8Path,
     generation: Generation,

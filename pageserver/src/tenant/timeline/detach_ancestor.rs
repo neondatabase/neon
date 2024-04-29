@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use utils::lsn::Lsn;
+use tokio_util::sync::CancellationToken;
+use utils::{generation::Generation, lsn::Lsn};
 
 use super::{layer_manager::LayerManager, DetachFromAncestorError, Timeline};
 use crate::{
@@ -86,12 +87,38 @@ pub(super) fn retain_layers_to_copy_lsn_prefix(
             is_delta: true,
         };
 
-        // keep if we haven't already rewritten this
+        // retain if we haven't already rewritten this
         target_layermap.get(&key).is_none()
     });
 }
 
-pub(super) async fn copy_lsn_prefix(
+pub(super) async fn upload_rewritten_layer(
+    end_lsn: Lsn,
+    layer: &Layer,
+    target: &Arc<Timeline>,
+    cancel: &CancellationToken,
+    ctx: &RequestContext,
+) -> Result<Option<Layer>, DetachFromAncestorError> {
+    use DetachFromAncestorError::UploadRewritten;
+    let copied = copy_lsn_prefix(end_lsn, layer, target, ctx).await?;
+
+    let Some(copied) = copied else {
+        return Ok(None);
+    };
+
+    // FIXME: better shuttingdown error
+    target
+        .remote_client
+        .as_ref()
+        .unwrap()
+        .upload_layer_file(&copied, cancel)
+        .await
+        .map_err(UploadRewritten)?;
+
+    Ok(Some(copied.into()))
+}
+
+async fn copy_lsn_prefix(
     end_lsn: Lsn,
     layer: &Layer,
     target_timeline: &Arc<Timeline>,
@@ -146,24 +173,33 @@ pub(super) async fn copy_lsn_prefix(
     }
 }
 
-pub(super) fn schedule_remote_copy(
+/// Creates a new Layer instance for the adopted layer, and ensures it is found from the remote
+/// storage on successful return without the adopted layer being added to `index_part.json`.
+pub(super) async fn remote_copy(
     rtc: &Arc<RemoteTimelineClient>,
     adopted: &Layer,
     adoptee: &Arc<Timeline>,
+    generation: Generation,
+    cancel: &CancellationToken,
 ) -> Result<Layer, DetachFromAncestorError> {
-    use DetachFromAncestorError::ShuttingDown;
+    use DetachFromAncestorError::CopyFailed;
 
     // depending if Layer::keep_resident we could hardlink
+
+    let mut metadata = adopted.metadata();
+    debug_assert!(metadata.generation <= generation);
+    metadata.generation = generation;
 
     let owned = crate::tenant::storage_layer::Layer::for_evicted(
         adoptee.conf,
         adoptee,
         adopted.layer_desc().filename(),
-        // generation is per tenant, we don't have any values to change here
-        adopted.metadata(),
+        metadata,
     );
-    rtc.schedule_layer_adoption(adopted.clone(), owned.clone())
-        .map_err(|_| ShuttingDown)?;
 
-    Ok(owned)
+    // FIXME: better shuttingdown error
+    rtc.copy_timeline_layer(adopted, &owned, cancel)
+        .await
+        .map(move |()| owned)
+        .map_err(CopyFailed)
 }

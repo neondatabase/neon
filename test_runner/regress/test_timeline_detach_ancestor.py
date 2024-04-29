@@ -1,6 +1,8 @@
 import enum
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
+from queue import Queue, Empty
+from threading import Barrier
 
 import pytest
 from fixtures.neon_fixtures import (
@@ -10,7 +12,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
 from fixtures.pageserver.utils import wait_timeline_detail_404
 from fixtures.types import Lsn, TimelineId
-from fixtures.utils import wait_until
+from fixtures.log_helper import log
 
 
 def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
@@ -329,6 +331,7 @@ def test_detached_receives_flushes_while_being_detached(
         "new main", "main", tenant_id=env.initial_tenant, ancestor_start_lsn=branchpoint
     )
 
+    log.info("starting the new main endpoint")
     ep = env.endpoints.create_start("new main", tenant_id=env.initial_tenant)
     assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
 
@@ -336,46 +339,54 @@ def test_detached_receives_flushes_while_being_detached(
         rows += insert_rows(256, ep)
         wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
         client.timeline_checkpoint(env.initial_tenant, timeline_id)
+        log.info("completed {write_to_branch_first=}")
 
-    failpoint_name = "timeline-ancestor-detach-before-restart-pausable"
-    client.configure_failpoints((failpoint_name, "pause"))
+
+    def small_txs(ep, queue: Queue[str], barrier):
+        extra_rows = 0
+
+        with ep.connect() as conn:
+            while True:
+                try:
+                    queue.get_nowait()
+                    break
+                except Empty:
+                    pass
+
+                if barrier is not None:
+                    barrier.wait()
+                    barrier = None
+
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO foo(i, aux) VALUES (1, 'more info!! this is a long string' || 1);")
+                extra_rows += 1
+        return extra_rows
 
     with ThreadPoolExecutor(max_workers=1) as exec:
-        completion = exec.submit(client.detach_ancestor, env.initial_tenant, timeline_id)
+        queue = Queue()
+        barrier = Barrier(2)
 
-        wait_until(
-            10,
-            0.5,
-            lambda: env.pageserver.assert_log_contains(f".*at failpoint.*{failpoint_name}"),
-        )
+        completion = exec.submit(small_txs, ep, queue, barrier)
+        barrier.wait()
 
-        historic_before = len(
-            client.layer_map_info(env.initial_tenant, timeline_id).historic_layers
-        )
-
-        # just a quick write to make sure we have something to flush
-        rows += insert_rows(256, ep)
-        wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
-        client.timeline_checkpoint(env.initial_tenant, timeline_id)
-
-        historic_after = len(client.layer_map_info(env.initial_tenant, timeline_id).historic_layers)
-        assert historic_before < historic_after, "actually flushed something"
-
-        client.configure_failpoints((failpoint_name, "off"))
-
-        reparented = completion.result()
+        reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
         assert len(reparented) == 0
 
-    if restart_after:
-        # ep is kept alive on purpose
-        env.pageserver.stop()
-        env.pageserver.start()
+        if restart_after:
+            # ep and row production is kept alive on purpose
+            env.pageserver.stop()
+            env.pageserver.start()
 
-    env.pageserver.quiesce_tenants()
+        env.pageserver.quiesce_tenants()
+
+        queue.put("done")
+        extra_rows = completion.result()
+        assert extra_rows > 0, "some rows should had been written"
+        rows += extra_rows
 
     assert client.timeline_detail(env.initial_tenant, timeline_id)["ancestor_timeline_id"] is None
 
-    # before restart this might all come from shared buffers
+    # force reading all rows, causing shared buffers misses
     assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
     assert ep.safe_psql("SELECT SUM(LENGTH(aux)) FROM foo")[0][0] != 0
     ep.stop()
@@ -383,126 +394,6 @@ def test_detached_receives_flushes_while_being_detached(
     # finally restart the endpoint and make sure we still have the same answer
     with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
-
-
-# @pytest.mark.parametrize("failmode", ["return", "exit"])
-def test_retried_ancestor_detach(neon_env_builder: NeonEnvBuilder):
-    """
-    Fail or restart the pageserver, and retry detaching the ancestor.
-    """
-    write_to_branch_first = True
-
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "gc_period": "0s",
-            "pitr_interval": "0s",
-            "compaction_period": "0s",
-            "checkpoint_distance": f"{128 * 1024}",
-            "compaction_target_size": f"{96 * 1024}",
-            "image_layer_creation_check_threshold": "0",
-            "compaction_threshold": "3",
-        },
-    )
-
-    def insert_rows(n: int, ep, i_from: int = 0) -> int:
-        start = i_from
-        end = i_from + n - 1
-        ep.safe_psql(
-            f"INSERT INTO foo SELECT i::bigint, 'more info!! this is a long string' || i FROM generate_series({start}, {end}) g(i);"
-        )
-        return n
-
-    rows = 0
-    batch = 128
-    assert (batch // 2) > 0
-
-    client = env.pageserver.http_client()
-    waited_lsns = []
-
-    # try to create interesting enough
-    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
-        ep.safe_psql("CREATE TABLE foo (i BIGINT, aux TEXT NOT NULL);")
-
-        # batch size is 10, so hopefully we have more; this creates about 300 layers on pg16 in single iteration
-        for _ in range(4):
-            rows += insert_rows(batch, ep, rows)
-
-            # this attempts to write rows, delete half of them, update the remaining half, then vacuum
-            ep.safe_psql(f"DELETE FROM foo WHERE i >= {rows - batch} AND i < {rows - (batch // 2)}")
-            rows -= batch // 2
-            ep.safe_psql(
-                f"UPDATE foo SET i = i - {batch // 2} WHERE i >= {rows} AND i < {rows + (batch // 2)}"
-            )
-            ep.safe_psql("VACUUM FULL")
-
-            lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
-            waited_lsns.append(lsn)
-            client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
-
-        assert (
-            len(client.layer_map_info(env.initial_tenant, env.initial_timeline).historic_layers)
-            > 200
-        )
-        assert len(waited_lsns) == 4
-
-        reparented_old = env.neon_cli.create_branch(
-            "reparented_old",
-            "main",
-            tenant_id=env.initial_tenant,
-            ancestor_start_lsn=waited_lsns[0],
-        )
-
-        reparented_newer = env.neon_cli.create_branch(
-            "reparented_newer",
-            "main",
-            tenant_id=env.initial_tenant,
-            ancestor_start_lsn=waited_lsns[2],
-        )
-
-        detached_timeline = env.neon_cli.create_branch(
-            "detached", "main", tenant_id=env.initial_tenant, ancestor_start_lsn=waited_lsns[3]
-        )
-
-    if write_to_branch_first:
-        with env.endpoints.create_start("detached", tenant_id=env.initial_tenant) as ep:
-            rows += insert_rows(batch // 2, ep, rows)
-            wait_for_last_flush_lsn(env, ep, env.initial_tenant, detached_timeline)
-            client.timeline_checkpoint(env.initial_tenant, detached_timeline)
-
-    # FIXME: a compaction during detach is ok, because we will always get a consistent view of the layers, but we might need to compact again...?
-
-    failpoints = [
-        ("timeline-ancestor-after-one-rewritten", "return"),
-        ("timeline-ancestor-after-rewrite-batch", "return"),
-        ("timeline-ancestor-after-rewrite-fsync", "return"),
-        ("timeline-ancestor-after-copy-batch", "return"),
-        ("timeline-ancestor-reparent", "return"),
-        ("timeline-ancestor-detach-before-detach", "return"),
-        ("timeline-ancestor-detach-before-restart", "return"),
-    ]
-
-    client.configure_failpoints(failpoints)
-
-    for index, (name, _) in enumerate(failpoints):
-        if name == "timeline-ancestor-reparent":
-            matcher = "some reparentings failed, please retry"
-        else:
-            matcher = f"failpoint: {failpoints[index][0]}"
-
-        with pytest.raises(PageserverApiException, match=matcher):
-            client.detach_ancestor(env.initial_tenant, detached_timeline, batch_size=10)
-
-        client.configure_failpoints((failpoints[index][0], "off"))
-
-    reparented = client.detach_ancestor(env.initial_tenant, detached_timeline)
-    assert reparented == set([reparented_old, reparented_newer])
-
-    env.pageserver.allowed_errors.append(
-        ".* request\\{method=POST path=/v1/tenant/[0-9a-f]+/timeline/[0-9a-f]+/detach_ancestor request_id=[-0-9a-f]+\\}: Error processing HTTP request: InternalServerError\\(failpoint:.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".* request\\{method=POST path=/v1/tenant/[0-9a-f]+/timeline/[0-9a-f]+/detach_ancestor request_id=[-0-9a-f]+\\}: Error processing HTTP request: InternalServerError\\(some reparentings failed, please retry"
-    )
 
 
 # TODO:

@@ -1,5 +1,5 @@
 use super::storage_layer::LayerFileName;
-use super::storage_layer::{Layer, ResidentLayer};
+use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
@@ -69,7 +69,6 @@ pub(crate) struct UploadQueueInitialized {
 
     // Breakdown of different kinds of tasks currently in-progress
     pub(crate) num_inprogress_layer_uploads: usize,
-    pub(crate) num_inprogress_layer_copies: usize,
     pub(crate) num_inprogress_metadata_uploads: usize,
     pub(crate) num_inprogress_deletions: usize,
 
@@ -177,7 +176,6 @@ impl UploadQueue {
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
-            num_inprogress_layer_copies: 0,
             num_inprogress_metadata_uploads: 0,
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
@@ -227,7 +225,6 @@ impl UploadQueue {
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
-            num_inprogress_layer_copies: 0,
             num_inprogress_metadata_uploads: 0,
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
@@ -295,9 +292,6 @@ pub(crate) enum UploadOp {
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
 
-    /// Copy layer from another timeline
-    AdoptLayer { adopted: Layer, owned: Layer },
-
     /// Delete layer files
     Delete(Delete),
 
@@ -323,16 +317,6 @@ impl std::fmt::Display for UploadOp {
             }
             UploadOp::UploadMetadata(_, lsn) => {
                 write!(f, "UploadMetadata(lsn: {})", lsn)
-            }
-            UploadOp::AdoptLayer { adopted, owned } => {
-                let m = owned.metadata();
-                write!(
-                    f,
-                    "AdoptLayer({adopted}, size={:?}, gen={:?}=>{:?})",
-                    m.file_size(),
-                    adopted.metadata().generation,
-                    m.generation,
-                )
             }
             UploadOp::Delete(delete) => {
                 write!(f, "Delete({} layers)", delete.layers.len())

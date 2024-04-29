@@ -56,6 +56,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::delete::DeleteTenantError;
 use super::secondary::SecondaryTenant;
+use super::timeline::PreparedTimelineDetach;
 use super::TenantSharedResources;
 
 /// For a tenant that appears in TenantsMap, it may either be
@@ -1996,6 +1997,101 @@ impl TenantManager {
                 TenantSlot::InProgress(_) => None,
             })
             .collect())
+    }
+
+    /// Completes an earlier prepared timeline detach ancestor.
+    pub(crate) async fn complete_detaching_timeline_ancestor(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        prepared: PreparedTimelineDetach,
+        ctx: &RequestContext,
+    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+        struct RevertOnDropSlot(Option<SlotGuard>);
+
+        impl Drop for RevertOnDropSlot {
+            fn drop(&mut self) {
+                if let Some(taken) = self.0.take() {
+                    taken.revert();
+                }
+            }
+        }
+
+        impl RevertOnDropSlot {
+            fn into_inner(mut self) -> SlotGuard {
+                self.0.take().unwrap()
+            }
+        }
+
+        impl std::ops::Deref for RevertOnDropSlot {
+            type Target = SlotGuard;
+
+            fn deref(&self) -> &Self::Target {
+                self.0.as_ref().unwrap()
+            }
+        }
+
+        let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        let slot_guard = RevertOnDropSlot(Some(slot_guard));
+
+        let tenant = {
+            let Some(old_slot) = slot_guard.get_old_value() else {
+                anyhow::bail!(
+                    "Tenant not found when trying to complete detaching timeline ancestor"
+                );
+            };
+
+            let Some(tenant) = old_slot.get_attached() else {
+                anyhow::bail!("Tenant is not in attached state");
+            };
+
+            if !tenant.is_active() {
+                anyhow::bail!("Tenant is not active");
+            }
+
+            tenant.clone()
+        };
+
+        let timeline = tenant.get_timeline(timeline_id, true)?;
+
+        let reparented = timeline
+            .complete_detaching_timeline_ancestor(&tenant, prepared, ctx)
+            .await?;
+
+        let mut slot_guard = slot_guard.into_inner();
+
+        let (_guard, progress) = utils::completion::channel();
+        match tenant.shutdown(progress, ShutdownMode::Hard).await {
+            Ok(()) => {
+                slot_guard.drop_old_value()?;
+            }
+            Err(_barrier) => {
+                slot_guard.revert();
+                // this really should not happen, at all, unless it was already going?
+                anyhow::bail!("Cannot restart Tenant, already shutting down");
+            }
+        }
+
+        let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+
+        let shard_identity = config.shard;
+        let tenant = tenant_spawn(
+            self.conf,
+            tenant_shard_id,
+            &tenant_path,
+            self.resources.clone(),
+            AttachedTenantConf::try_from(config)?,
+            shard_identity,
+            None,
+            self.tenants,
+            SpawnMode::Eager,
+            ctx,
+        )?;
+
+        slot_guard.upsert(TenantSlot::Attached(tenant))?;
+
+        Ok(reparented)
     }
 }
 

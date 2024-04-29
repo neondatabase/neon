@@ -322,6 +322,9 @@ pub struct Tenant {
     /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
     pub(crate) timeline_get_throttle:
         Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
+
+    /// An ongoing timeline detach must be checked during attempts to GC or compact a timeline.
+    ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -2529,6 +2532,7 @@ impl Tenant {
                 &crate::metrics::tenant_throttling::TIMELINE_GET,
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
+            ongoing_timeline_detach: std::sync::Mutex::default(),
         }
     }
 

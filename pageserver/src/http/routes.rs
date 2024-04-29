@@ -1836,50 +1836,57 @@ async fn timeline_detach_ancestor_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
 
-    let mut options = AncestorDetachOptions::default();
+    let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
 
-    let batch_size = parse_query_param::<_, std::num::NonZeroUsize>(&request, "batch_size")?;
+    async move {
+        let mut options = AncestorDetachOptions::default();
 
-    if let Some(batch_size) = batch_size {
-        options.batch_size = batch_size;
-    }
+        let batch_size = parse_query_param::<_, std::num::NonZeroUsize>(&request, "batch_size")?;
 
-    let state = get_state(&request);
-
-    let tenant = state
-        .tenant_manager
-        .get_attached_tenant_shard(tenant_shard_id)?;
-
-    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
-
-    let ctx = RequestContext::new(TaskKind::DetachAncestor, DownloadBehavior::Download);
-
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(|e| ApiError::NotFound(e.into()))?;
-
-    match timeline.detach_from_ancestor(&tenant, options, &ctx).await {
-        Ok(detach_result) => {
-            drop(timeline);
-            drop(tenant);
-
-            let res = state
-                .tenant_manager
-                .reset_tenant(tenant_shard_id, false, &ctx)
-                .await;
-
-            match res {
-                Ok(()) => {
-                    // TODO: it would be best to wait until completed
-                    json_response(StatusCode::OK, detach_result)
-                }
-                Err(e) => Err(ApiError::InternalServerError(
-                    e.context("tenant restart after timeline detach"),
-                )),
-            }
+        if let Some(batch_size) = batch_size {
+            options.batch_size = batch_size;
         }
-        Err(e) => Err(ApiError::InternalServerError(e.into())),
+
+        let state = get_state(&request);
+
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+        let ctx = RequestContext::new(TaskKind::DetachAncestor, DownloadBehavior::Download);
+        let ctx = &ctx;
+
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(|e| ApiError::NotFound(e.into()))?;
+
+        let prepared = timeline
+            .prepare_to_detach_from_ancestor(&tenant, options, ctx)
+            .await
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+        let res = state
+            .tenant_manager
+            .complete_detaching_timeline_ancestor(tenant_shard_id, timeline_id, prepared, ctx)
+            .await;
+
+        match res {
+            Ok(reparented_timelines) => {
+                let resp = pageserver_api::models::detach_ancestor::AncestorDetached {
+                    reparented_timelines,
+                };
+
+                json_response(StatusCode::OK, resp)
+            }
+            Err(e) => Err(ApiError::InternalServerError(
+                e.context("timeline detach completion"),
+            )),
+        }
     }
+    .instrument(span)
+    .await
 }
 
 async fn deletion_queue_flush(
