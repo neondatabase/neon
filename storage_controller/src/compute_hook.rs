@@ -460,7 +460,12 @@ impl ComputeHook {
                 return Ok(());
             }
             MaybeSendResult::AwaitLock(send_lock) => {
-                let send_locked = send_lock.lock_owned().await;
+                let send_locked = tokio::select! {
+                    guard = send_lock.lock_owned() => {guard},
+                    _ = cancel.cancelled() => {
+                        return Err(NotifyError::ShuttingDown)
+                    }
+                };
 
                 // Lock order: maybe_send is called within the `[Self::state]` lock, and takes the send lock, but here
                 // we have acquired the send lock and take `[Self::state]` lock.  This is safe because maybe_send only uses
