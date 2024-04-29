@@ -279,6 +279,7 @@ async fn handle_client(
 
     // doesn't yet matter as pg-sni-router doesn't report analytics logs
     ctx.set_success();
+    ctx.log_connect();
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
