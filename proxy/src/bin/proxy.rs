@@ -200,6 +200,12 @@ struct ProxyCliArgs {
     /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
     #[clap(long, default_value = "4194304")]
     metric_backup_collection_chunk_size: usize,
+    /// Whether to retry the connection to the compute node
+    #[clap(long, default_value = config::RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)]
+    connect_to_compute_retry: String,
+    /// Whether to retry the wake_compute request
+    #[clap(long, default_value = config::RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)]
+    wake_compute_retry: String,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -397,27 +403,43 @@ async fn main() -> anyhow::Result<()> {
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
         client_tasks.spawn(usage_metrics::task_backup(
             &metrics_config.backup_metric_collection_config,
-            cancellation_token,
+            cancellation_token.clone(),
         ));
     }
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
-            if let Some(redis_notifications_client) = redis_notifications_client {
-                let cache = api.caches.project_info.clone();
-                maintenance_tasks.spawn(notifications::task_main(
-                    redis_notifications_client,
-                    cache.clone(),
-                    cancel_map.clone(),
-                    args.region.clone(),
-                ));
-                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+            match (redis_notifications_client, regional_redis_client.clone()) {
+                (None, None) => {}
+                (client1, client2) => {
+                    let cache = api.caches.project_info.clone();
+                    if let Some(client) = client1 {
+                        maintenance_tasks.spawn(notifications::task_main(
+                            client,
+                            cache.clone(),
+                            cancel_map.clone(),
+                            args.region.clone(),
+                        ));
+                    }
+                    if let Some(client) = client2 {
+                        maintenance_tasks.spawn(notifications::task_main(
+                            client,
+                            cache.clone(),
+                            cancel_map.clone(),
+                            args.region.clone(),
+                        ));
+                    }
+                    maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+                }
             }
             if let Some(regional_redis_client) = regional_redis_client {
                 let cache = api.caches.endpoints_cache.clone();
                 let con = regional_redis_client;
                 let span = tracing::info_span!("endpoints_cache");
-                maintenance_tasks.spawn(async move { cache.do_read(con).await }.instrument(span));
+                maintenance_tasks.spawn(
+                    async move { cache.do_read(con, cancellation_token.clone()).await }
+                        .instrument(span),
+                );
             }
         }
     }
@@ -584,6 +606,10 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
         aws_region: args.aws_region.clone(),
+        wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
+        connect_to_compute_retry_config: config::RetryConfig::parse(
+            &args.connect_to_compute_retry,
+        )?,
     }));
 
     Ok(config)

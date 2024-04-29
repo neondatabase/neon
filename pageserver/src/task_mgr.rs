@@ -361,6 +361,8 @@ pub enum TaskKind {
 
     DebugTool,
 
+    EphemeralFilePreWarmPageCache,
+
     #[cfg(test)]
     UnitTest,
 }
