@@ -1938,6 +1938,49 @@ class Pagectl(AbstractNeonCli):
         return IndexPartDump.from_json(parsed)
 
 
+class Logging:
+    def __init__(self, logfile: Path) -> None:
+        self.logfile = logfile
+
+    def assert_log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Tuple[str, LogCursor]:
+        """Convenient for use inside wait_until()"""
+
+        res = self.log_contains(pattern, offset=offset)
+        assert res is not None
+        return res
+
+    def log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Optional[Tuple[str, LogCursor]]:
+        """Check that the storage controller log contains a line that matches the given regex"""
+        logfile = self.logfile
+        if not logfile.exists():
+            log.warning(f"Skipping log check: {logfile} does not exist")
+            return None
+
+        contains_re = re.compile(pattern)
+
+        # XXX: Our rust logging machinery buffers the messages, so if you
+        # call this function immediately after it's been logged, there is
+        # no guarantee it is already present in the log file. This hasn't
+        # been a problem in practice, our python tests are not fast enough
+        # to hit that race condition.
+        skip_until_line_no = 0 if offset is None else offset._line_no
+        cur_line_no = 0
+        with logfile.open("r") as f:
+            for line in f:
+                if cur_line_no < skip_until_line_no:
+                    cur_line_no += 1
+                    continue
+                if contains_re.search(line):
+                    # found it!
+                    cur_line_no += 1
+                    return (line, LogCursor(cur_line_no))
+        return None
+
+
 class StorageControllerApiException(Exception):
     def __init__(self, message, status_code: int):
         super().__init__(message)
@@ -1945,12 +1988,13 @@ class StorageControllerApiException(Exception):
         self.status_code = status_code
 
 
-class NeonStorageController(MetricsGetter):
+class NeonStorageController(MetricsGetter, Logging):
     def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
         self.running = False
         self.auth_enabled = auth_enabled
         self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
+        self.logfile = self.workdir / "storage_controller.log"
 
     def start(self):
         assert not self.running
@@ -2251,44 +2295,6 @@ class NeonStorageController(MetricsGetter):
     def workdir(self) -> Path:
         return self.env.repo_dir
 
-    def assert_log_contains(
-        self, pattern: str, offset: None | LogCursor = None
-    ) -> Tuple[str, LogCursor]:
-        """Convenient for use inside wait_until()"""
-
-        res = self.log_contains(pattern, offset=offset)
-        assert res is not None
-        return res
-
-    def log_contains(
-        self, pattern: str, offset: None | LogCursor = None
-    ) -> Optional[Tuple[str, LogCursor]]:
-        """Check that the storage controller log contains a line that matches the given regex"""
-        logfile = self.workdir / "storage_controller.log"
-        if not logfile.exists():
-            log.warning(f"Skipping log check: {logfile} does not exist")
-            return None
-
-        contains_re = re.compile(pattern)
-
-        # XXX: Our rust logging machinery buffers the messages, so if you
-        # call this function immediately after it's been logged, there is
-        # no guarantee it is already present in the log file. This hasn't
-        # been a problem in practice, our python tests are not fast enough
-        # to hit that race condition.
-        skip_until_line_no = 0 if offset is None else offset._line_no
-        cur_line_no = 0
-        with logfile.open("r") as f:
-            for line in f:
-                if cur_line_no < skip_until_line_no:
-                    cur_line_no += 1
-                    continue
-                if contains_re.search(line):
-                    # found it!
-                    cur_line_no += 1
-                    return (line, LogCursor(cur_line_no))
-        return None
-
     def __enter__(self) -> "NeonStorageController":
         return self
 
@@ -2306,7 +2312,7 @@ class LogCursor:
     _line_no: int
 
 
-class NeonPageserver(PgProtocol):
+class NeonPageserver(PgProtocol, Logging):
     """
     An object representing a running pageserver.
     """
@@ -2323,6 +2329,7 @@ class NeonPageserver(PgProtocol):
         self.service_port = port
         self.config_override = config_override
         self.version = env.get_binary_version("pageserver")
+        self.logfile = self.workdir / "pageserver.log"
 
         # After a test finishes, we will scrape the log to see if there are any
         # unexpected error messages. If your test expects an error, add it to
@@ -2458,44 +2465,6 @@ class NeonPageserver(PgProtocol):
         ]:
             value = self.http_client().get_metric_value(metric)
             assert value == 0, f"Nonzero {metric} == {value}"
-
-    def assert_log_contains(
-        self, pattern: str, offset: None | LogCursor = None
-    ) -> Tuple[str, LogCursor]:
-        """Convenient for use inside wait_until()"""
-
-        res = self.log_contains(pattern, offset=offset)
-        assert res is not None
-        return res
-
-    def log_contains(
-        self, pattern: str, offset: None | LogCursor = None
-    ) -> Optional[Tuple[str, LogCursor]]:
-        """Check that the pageserver log contains a line that matches the given regex"""
-        logfile = self.workdir / "pageserver.log"
-        if not logfile.exists():
-            log.warning(f"Skipping log check: {logfile} does not exist")
-            return None
-
-        contains_re = re.compile(pattern)
-
-        # XXX: Our rust logging machinery buffers the messages, so if you
-        # call this function immediately after it's been logged, there is
-        # no guarantee it is already present in the log file. This hasn't
-        # been a problem in practice, our python tests are not fast enough
-        # to hit that race condition.
-        skip_until_line_no = 0 if offset is None else offset._line_no
-        cur_line_no = 0
-        with logfile.open("r") as f:
-            for line in f:
-                if cur_line_no < skip_until_line_no:
-                    cur_line_no += 1
-                    continue
-                if contains_re.search(line):
-                    # found it!
-                    cur_line_no += 1
-                    return (line, LogCursor(cur_line_no))
-        return None
 
     def tenant_attach(
         self,
