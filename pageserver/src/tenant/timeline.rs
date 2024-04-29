@@ -4443,8 +4443,7 @@ impl Timeline {
 
         tracing::info!(filtered=%filtered_layers, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
 
-        // TODO: copying and lsn prefix copying could be done at the same time for shared
-        // index_part.json updates, with a single fsync after
+        // TODO: copying and lsn prefix copying could be done at the same time with a single fsync after
 
         let mut new_layers: Vec<Layer> =
             Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len());
