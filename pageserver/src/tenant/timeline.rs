@@ -4451,26 +4451,42 @@ impl Timeline {
         {
             tracing::debug!(to_rewrite = %straddling_branchpoint.len(), "copying prefix of delta layers");
 
+            let mut tasks = tokio::task::JoinSet::new();
+
             let mut wrote_any = false;
 
-            for layer in straddling_branchpoint.into_iter() {
-                let copied = detach_ancestor::upload_rewritten_layer(
-                    end_lsn,
-                    &layer,
-                    self,
-                    &self.cancel,
-                    ctx,
-                )
-                .await?;
+            for layers in straddling_branchpoint.chunks(options.rewrite_batch_size.get()) {
+                for layer in layers {
+                    let layer = layer.clone();
+                    let timeline = self.clone();
+                    let ctx =
+                        ctx.detached_child(TaskKind::DetachAncestor, DownloadBehavior::Download);
 
-                let Some(copied) = copied else {
-                    continue;
-                };
+                    tasks.spawn(async move {
+                        let copied = detach_ancestor::upload_rewritten_layer(
+                            end_lsn,
+                            &layer,
+                            &timeline,
+                            &timeline.cancel,
+                            &ctx,
+                        )
+                        .await?;
+                        Ok(copied)
+                    });
+                }
 
-                wrote_any = true;
-
-                tracing::info!(layer=%copied, "rewrote and uploaded");
-                new_layers.push(copied);
+                while let Some(res) = tasks.join_next().await {
+                    match res {
+                        Ok(Ok(Some(copied))) => {
+                            wrote_any = true;
+                            tracing::info!(layer=%copied, "rewrote and uploaded");
+                            new_layers.push(copied);
+                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(e)) => return Err(e),
+                        Err(je) => return Err(Unexpected(je.into())),
+                    }
+                }
             }
 
             // FIXME: the fsync should be mandatory, after both rewrites and copies in the case of
@@ -4491,17 +4507,41 @@ impl Timeline {
         }
 
         // because we hold the layers, they will not be removed from remote storage.
-        let chunks = rest_of_historic.chunks(options.batch_size.get());
+        let chunks = rest_of_historic.chunks(options.copy_batch_size.get());
+
+        let mut tasks = tokio::task::JoinSet::new();
 
         for layers in chunks {
             for adopted in layers {
-                // this layer will not exist until the copy completes
-                // FIXME: serial copies makes no sense, we should be able to do batches of 10 or 20
-                let owned =
-                    detach_ancestor::remote_copy(rtc, adopted, self, self.generation, &self.cancel)
+                let adopted = adopted.clone();
+                let timeline = self.clone();
+
+                tasks.spawn(
+                    async move {
+                        let owned = detach_ancestor::remote_copy(
+                            &adopted,
+                            &timeline,
+                            timeline.generation,
+                            &timeline.cancel,
+                        )
                         .await?;
-                tracing::info!(layer=%owned, "remote copied");
-                new_layers.push(owned);
+                        tracing::info!(layer=%owned, "remote copied");
+                        Ok(owned)
+                    }
+                    .in_current_span(),
+                );
+            }
+
+            while let Some(res) = tasks.join_next().await {
+                match res {
+                    Ok(Ok(owned)) => {
+                        new_layers.push(owned);
+                    }
+                    Ok(Err(failed)) => {
+                        return Err(failed);
+                    }
+                    Err(je) => return Err(Unexpected(je.into())),
+                }
             }
         }
 
@@ -4665,6 +4705,9 @@ pub(crate) enum DetachFromAncestorError {
 
     #[error("remote copying layer failed")]
     CopyFailed(#[source] anyhow::Error),
+
+    #[error("unexpected error")]
+    Unexpected(#[source] anyhow::Error),
 }
 
 pub(crate) struct PreparedTimelineDetach {
@@ -4674,13 +4717,15 @@ pub(crate) struct PreparedTimelineDetach {
 
 #[derive(Debug)]
 pub(crate) struct AncestorDetachOptions {
-    pub(crate) batch_size: std::num::NonZeroUsize,
+    pub(crate) rewrite_batch_size: std::num::NonZeroUsize,
+    pub(crate) copy_batch_size: std::num::NonZeroUsize,
 }
 
 impl Default for AncestorDetachOptions {
     fn default() -> Self {
         Self {
-            batch_size: std::num::NonZeroUsize::new(10).unwrap(),
+            rewrite_batch_size: std::num::NonZeroUsize::new(2).unwrap(),
+            copy_batch_size: std::num::NonZeroUsize::new(10).unwrap(),
         }
     }
 }

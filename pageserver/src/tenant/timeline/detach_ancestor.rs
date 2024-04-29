@@ -130,7 +130,6 @@ async fn copy_lsn_prefix(
 /// Creates a new Layer instance for the adopted layer, and ensures it is found from the remote
 /// storage on successful return without the adopted layer being added to `index_part.json`.
 pub(super) async fn remote_copy(
-    rtc: &Arc<RemoteTimelineClient>,
     adopted: &Layer,
     adoptee: &Arc<Timeline>,
     generation: Generation,
@@ -152,7 +151,11 @@ pub(super) async fn remote_copy(
     );
 
     // FIXME: better shuttingdown error
-    rtc.copy_timeline_layer(adopted, &owned, cancel)
+    adoptee
+        .remote_client
+        .as_ref()
+        .unwrap()
+        .copy_timeline_layer(adopted, &owned, cancel)
         .await
         .map(move |()| owned)
         .map_err(CopyFailed)
