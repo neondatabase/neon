@@ -1950,9 +1950,9 @@ class Pagectl(AbstractNeonCli):
         return IndexPartDump.from_json(parsed)
 
 
-class AssertLogging:
+class LogUtils:
     """
-    A class that server to quickly assert statement from a logfile defined in class inheriting.
+    A mixin class which provides utilities for inspecting the logs of a service.
     """
 
     def __init__(self, logfile: Path) -> None:
@@ -2004,7 +2004,7 @@ class StorageControllerApiException(Exception):
         self.status_code = status_code
 
 
-class NeonStorageController(MetricsGetter, AssertLogging):
+class NeonStorageController(MetricsGetter, LogUtils):
     def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
         self.running = False
@@ -2335,7 +2335,7 @@ class LogCursor:
     _line_no: int
 
 
-class NeonPageserver(PgProtocol, AssertLogging):
+class NeonPageserver(PgProtocol, LogUtils):
     """
     An object representing a running pageserver.
     """
