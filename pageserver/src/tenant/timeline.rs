@@ -1149,6 +1149,11 @@ impl Timeline {
                 panic!(concat!("Sequential get failed with {}, but vectored get did not",
                                " - keyspace={:?} lsn={}"),
                        seq_err, keyspace, lsn) },
+            (Ok(_), Err(GetVectoredError::GetReadyAncestorError(GetReadyAncestorError::AncestorLsnTimeout(_)))) => {
+                // Sequential get runs after vectored get, so it is possible for the later 
+                // to time out while waiting for its ancestor's Lsn to become ready and for the
+                // former to succeed (it essentially has a doubled wait time).
+            },
             (Ok(_), Err(vec_err)) => {
                 panic!(concat!("Vectored get failed with {}, but sequential get did not",
                                " - keyspace={:?} lsn={}"),
