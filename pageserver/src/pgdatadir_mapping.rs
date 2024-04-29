@@ -23,6 +23,7 @@ use pageserver_api::key::{
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
+use pageserver_api::keyspace::SparseKeySpace;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -736,7 +737,7 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<(KeySpace, KeySpace), CollectKeySpaceError> {
+    ) -> Result<(KeySpace, SparseKeySpace), CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -811,7 +812,8 @@ impl Timeline {
 
         Ok((
             result.to_keyspace(),
-            /* AUX sparse key space */ KeySpace::single(Key::metadata_aux_key_range()),
+            /* AUX sparse key space */
+            SparseKeySpace(KeySpace::single(Key::metadata_aux_key_range())),
         ))
     }
 

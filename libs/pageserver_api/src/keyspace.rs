@@ -14,6 +14,10 @@ pub struct KeySpace {
     pub ranges: Vec<Range<Key>>,
 }
 
+/// A wrapper type for sparse keyspaces.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SparseKeySpace(pub KeySpace);
+
 impl KeySpace {
     /// Create a key space with a single range.
     pub fn single(key_range: Range<Key>) -> Self {
@@ -207,9 +211,32 @@ pub struct KeyPartitioning {
     pub parts: Vec<KeySpace>,
 }
 
+/// Represents a partitioning of the sparse key space.
+#[derive(Clone, Debug, Default)]
+pub struct SparseKeyPartitioning {
+    pub parts: Vec<SparseKeySpace>,
+}
+
 impl KeyPartitioning {
     pub fn new() -> Self {
         KeyPartitioning { parts: Vec::new() }
+    }
+
+    /// Convert a key partitioning to a sparse partition.
+    pub fn into_sparse(self) -> SparseKeyPartitioning {
+        SparseKeyPartitioning {
+            parts: self.parts.into_iter().map(|x| SparseKeySpace(x)).collect(),
+        }
+    }
+}
+
+impl SparseKeyPartitioning {
+    /// Note: use this function with caution. Attempt to handle a sparse keyspace in the same way as a dense keyspace will
+    /// cause long/dead loops.
+    pub fn into_dense(self) -> KeyPartitioning {
+        KeyPartitioning {
+            parts: self.parts.into_iter().map(|x| x.0).collect(),
+        }
     }
 }
 

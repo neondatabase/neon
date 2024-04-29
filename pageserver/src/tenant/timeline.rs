@@ -17,7 +17,7 @@ use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{AUX_FILES_KEY, NON_INHERITED_RANGE},
-    keyspace::KeySpaceAccum,
+    keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
         EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
@@ -336,7 +336,7 @@ pub struct Timeline {
     pub initdb_lsn: Lsn,
 
     /// When did we last calculate the partitioning?
-    partitioning: tokio::sync::Mutex<((KeyPartitioning, KeyPartitioning), Lsn)>,
+    partitioning: tokio::sync::Mutex<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -2124,7 +2124,7 @@ impl Timeline {
                     LogicalSize::empty_initial()
                 },
                 partitioning: tokio::sync::Mutex::new((
-                    (KeyPartitioning::new(), KeyPartitioning::new()),
+                    (KeyPartitioning::new(), KeyPartitioning::new().into_sparse()),
                     Lsn(0),
                 )),
                 repartition_threshold: 0,
@@ -3727,14 +3727,14 @@ impl Timeline {
                 );
                 let metadata_keyspace = &metadata_partition.parts[0];
                 assert_eq!(
-                    metadata_keyspace.ranges.len(),
+                    metadata_keyspace.0.ranges.len(),
                     1,
                     "aux file keyspace should be a single range"
                 );
                 self.create_delta_layer(
                     &frozen_layer,
                     ctx,
-                    Some(metadata_keyspace.ranges[0].clone()),
+                    Some(metadata_keyspace.0.ranges[0].clone()),
                 )
                 .await?
             } else {
@@ -3950,7 +3950,7 @@ impl Timeline {
         partition_size: u64,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<((KeyPartitioning, KeyPartitioning), Lsn)> {
+    ) -> anyhow::Result<((KeyPartitioning, SparseKeyPartitioning), Lsn)> {
         let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
@@ -3980,7 +3980,7 @@ impl Timeline {
 
         let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
         let dense_partitioning = dense_ks.partition(partition_size);
-        let sparse_partitioning = KeyPartitioning {
+        let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
         }; // no partitioning for metadata keys for now
         *partitioning_guard = ((dense_partitioning, sparse_partitioning), lsn);

@@ -132,7 +132,7 @@ impl Timeline {
                 // For now, nothing will be produced...
                 let sparse_layers = self
                     .create_image_layers(
-                        &sparse_partitioning,
+                        &sparse_partitioning.clone().into_dense(),
                         lsn,
                         if flags.contains(CompactFlags::ForceImageLayerCreation) {
                             ImageLayerCreationMode::Force
