@@ -40,6 +40,8 @@
             curl
           ];
 
+          env.DISABLE_HOMEBREW = "1";
+
           scripts = {
             neonmake = {
               description = "Build Neon";

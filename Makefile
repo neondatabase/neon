@@ -25,8 +25,7 @@ ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
 	PG_CONFIGURE_OPTS += --with-libseccomp
 else ifeq ($(UNAME_S),Darwin)
-	BREW_INSTALLED := $(shell command -v brew >/dev/null 2>&1 && echo yes || echo no)
-  ifeq ($(BREW_INSTALLED),yes)
+	ifndef DISABLE_HOMEBREW
 		# macOS with brew-installed openssl requires explicit paths
 		# It can be configured with OPENSSL_PREFIX variable
 		OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
