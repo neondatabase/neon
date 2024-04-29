@@ -97,9 +97,7 @@ pub(super) async fn connection_manager_loop_step(
 
     // TODO: create a separate config option for discovery request interval
     let discovery_request_interval = connection_manager_state.conf.lagging_wal_timeout;
-    let mut last_discovery_ts = Utc::now().naive_utc() - discovery_request_interval;
-    let discovery_request_interval = chrono::Duration::from_std(discovery_request_interval)
-        .expect("invalid discovery_request_interval duration");
+    let mut last_discovery_ts: Option<std::time::Instant> = None;
 
     // Subscribe to the broker updates. Stream shares underlying TCP connection
     // with other streams on this client (other connection managers). When
@@ -122,6 +120,7 @@ pub(super) async fn connection_manager_loop_step(
         //  - receive updates from broker
         //      - this might change the current desired connection
         //  - timeline state changes to something that does not allow walreceiver to run concurrently
+        //  - if there's no connection and no candidates, try to send a discovery request
 
         // NB: make sure each of the select expressions are cancellation-safe
         // (no need for arms to be cancellation-safe).
@@ -244,14 +243,14 @@ pub(super) async fn connection_manager_loop_step(
                 }
 
                 // All preconditions met, preparing to send a discovery request.
-                let now = Utc::now().naive_utc();
+                let now = std::time::Instant::now();
                 let next_discovery_ts = last_discovery_ts
-                    .checked_add_signed(discovery_request_interval)
-                    .unwrap_or(now);
+                    .map(|ts| ts + discovery_request_interval)
+                    .unwrap_or_else(|| now);
 
                 if next_discovery_ts > now {
                     // Prevent sending discovery requests too frequently.
-                    tokio::time::sleep((next_discovery_ts - now).to_std().unwrap_or_default()).await;
+                    tokio::time::sleep(next_discovery_ts - now).await;
                 }
 
                 let tenant_timeline_id = Some(ProtoTenantTimelineId {
@@ -266,8 +265,16 @@ pub(super) async fn connection_manager_loop_step(
                     safekeeper_discovery_response: None,
                     };
 
-                last_discovery_ts = Utc::now().naive_utc();
+                last_discovery_ts = Some(std::time::Instant::now());
                 debug!("No active connection and no candidates, sending discovery request to the broker");
+
+                // Cancellation safety: we want to send a message to the broker, but publish_one()
+                // function can get cancelled by the other select! arm. This is absolutely fine, because
+                // we just want to receive broker updates and discovery is not important if we already
+                // receive updates.
+                //
+                // It is possible that `last_discovery_ts` will be updated, but the message will not be sent.
+                // This is totally fine because of the reason above.
 
                 // This is a fire-and-forget request, we don't care about the response
                 let _ = broker_client.publish_one(msg).await;
@@ -703,7 +710,6 @@ impl ConnectionManagerState {
             }
         };
 
-        // TODO: make a separate metric for discovery requests
         WALRECEIVER_BROKER_UPDATES.inc();
 
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
