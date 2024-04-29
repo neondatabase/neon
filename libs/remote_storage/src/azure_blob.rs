@@ -15,7 +15,6 @@ use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
 use azure_core::RetryOptions;
 use azure_identity::DefaultAzureCredential;
-use azure_identity::TokenCredentialOptions;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
