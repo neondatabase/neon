@@ -15,6 +15,7 @@ use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
 use azure_core::RetryOptions;
 use azure_identity::DefaultAzureCredential;
+use azure_identity::TokenCredentialOptions;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
@@ -56,7 +57,7 @@ impl AzureBlobStorage {
         let credentials = if let Ok(access_key) = env::var("AZURE_STORAGE_ACCESS_KEY") {
             StorageCredentials::access_key(account.clone(), access_key)
         } else {
-            let token_credential = DefaultAzureCredential::default();
+            let token_credential = DefaultAzureCredential::create(TokenCredentialOptions::default())?;
             StorageCredentials::token_credential(Arc::new(token_credential))
         };
 
