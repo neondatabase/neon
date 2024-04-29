@@ -51,6 +51,9 @@ pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "gc")]
     Gc,
 
+    #[strum(serialize = "update gc info")]
+    UpdateGcInfo,
+
     #[strum(serialize = "create tenant")]
     CreateTenant,
 }
@@ -1910,6 +1913,22 @@ impl StorageTimeMetricsTimer {
         self.metrics.timeline_count.inc();
         self.metrics.global_histogram.observe(duration);
     }
+
+    /// Turns this timer into a timer, which will always record -- usually this means recording
+    /// regardless an early `?` path was taken in a function.
+    pub(crate) fn record_on_drop(self) -> AlwaysRecordingStorageTimeMetricsTimer {
+        AlwaysRecordingStorageTimeMetricsTimer(Some(self))
+    }
+}
+
+pub(crate) struct AlwaysRecordingStorageTimeMetricsTimer(Option<StorageTimeMetricsTimer>);
+
+impl Drop for AlwaysRecordingStorageTimeMetricsTimer {
+    fn drop(&mut self) {
+        if let Some(inner) = self.0.take() {
+            inner.stop_and_record();
+        }
+    }
 }
 
 /// Timing facilities for an globally histogrammed metric, which is supported by per tenant and
@@ -1970,6 +1989,7 @@ pub(crate) struct TimelineMetrics {
     pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
+    pub update_gc_info_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -2030,6 +2050,12 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
+        let update_gc_info_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::UpdateGcInfo,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -2072,6 +2098,7 @@ impl TimelineMetrics {
             logical_size_histo,
             imitate_logical_size_histo,
             garbage_collect_histo,
+            update_gc_info_histo,
             load_layer_map_histo,
             last_record_gauge,
             resident_physical_size_gauge,

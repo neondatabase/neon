@@ -4345,6 +4345,12 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let _timer = self
+            .metrics
+            .update_gc_info_histo
+            .start_timer()
+            .record_on_drop();
+
         // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
         //
         // Some unit tests depend on garbage-collection working even when
