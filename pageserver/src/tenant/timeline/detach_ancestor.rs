@@ -6,10 +6,7 @@ use utils::{generation::Generation, lsn::Lsn};
 use super::{layer_manager::LayerManager, DetachFromAncestorError, Timeline};
 use crate::{
     context::RequestContext,
-    tenant::{
-        remote_timeline_client::RemoteTimelineClient,
-        storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer},
-    },
+    tenant::storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer},
 };
 
 pub(super) fn partition_work(
