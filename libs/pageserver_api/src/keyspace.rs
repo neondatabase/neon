@@ -1179,6 +1179,39 @@ mod tests {
         );
     }
 
+    /// Test our calculations work correctly when we start a range from the logical size key of
+    /// a previous relation.
+    #[test]
+    fn sharded_range_fragment_starting_from_logical_size() {
+        let input_start = Key::from_hex("000000067f00000001000000ae00ffffffff").unwrap();
+        let input_end = Key::from_hex("000000067f00000001000000ae0100008000").unwrap();
+
+        // Shard 0 owns the first stripe in the relation, and the preceding logical size is shard local too
+        let shard_identity = ShardIdentity::new(
+            ShardNumber(0),
+            ShardCount::new(4),
+            ShardParameters::DEFAULT_STRIPE_SIZE,
+        )
+        .unwrap();
+        assert_eq!(
+            do_fragment(input_start, input_end, &shard_identity, 0x10000),
+            (0x8001, vec![(0x8001, input_start..input_end)])
+        );
+
+        // Shard 1 does not own the first stripe in the relation, but it does own the logical size (all shards
+        // store all logical sizes)
+        let shard_identity = ShardIdentity::new(
+            ShardNumber(1),
+            ShardCount::new(4),
+            ShardParameters::DEFAULT_STRIPE_SIZE,
+        )
+        .unwrap();
+        assert_eq!(
+            do_fragment(input_start, input_end, &shard_identity, 0x10000),
+            (0x1, vec![(0x1, input_start..input_end)])
+        );
+    }
+
     /// Test that ShardedRange behaves properly when used on un-sharded data
     #[test]
     fn sharded_range_fragment_unsharded() {
