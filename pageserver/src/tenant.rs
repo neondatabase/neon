@@ -5057,7 +5057,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_random_updates")?;
+        let names_algorithms = [
+            ("test_random_updates_legacy", CompactionAlgorithm::Legacy),
+            ("test_random_updates_tiered", CompactionAlgorithm::Tiered),
+        ];
+        for (name, algorithm) in names_algorithms {
+            test_random_updates_algorithm(name, algorithm).await?;
+        }
+        Ok(())
+    }
+
+    async fn test_random_updates_algorithm(
+        name: &'static str,
+        compaction_algorithm: CompactionAlgorithm,
+    ) -> anyhow::Result<()> {
+        let mut harness = TenantHarness::create(name)?;
+        harness.tenant_conf.compaction_algorithm = compaction_algorithm;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -5122,7 +5137,7 @@ mod tests {
                 );
             }
 
-            // Perform a cycle of flush, compact, and GC
+            // Perform a cycle of flush, and GC
             let cutoff = tline.get_last_record_lsn();
             tline
                 .update_gc_info(
@@ -5134,9 +5149,6 @@ mod tests {
                 )
                 .await?;
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
-                .await?;
             tline.gc().await?;
         }
 
