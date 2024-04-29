@@ -1841,11 +1841,18 @@ async fn timeline_detach_ancestor_handler(
     async move {
         let mut options = AncestorDetachOptions::default();
 
-        let batch_size = parse_query_param::<_, std::num::NonZeroUsize>(&request, "batch_size")?;
+        let rewrite_concurrency =
+            parse_query_param::<_, std::num::NonZeroUsize>(&request, "rewrite_concurrency")?;
+        let copy_concurrency =
+            parse_query_param::<_, std::num::NonZeroUsize>(&request, "copy_concurrency")?;
 
-        if let Some(batch_size) = batch_size {
-            options.batch_size = batch_size;
-        }
+        [
+            (&mut options.rewrite_concurrency, rewrite_concurrency),
+            (&mut options.copy_concurrency, copy_concurrency),
+        ]
+        .into_iter()
+        .filter_map(|(target, val)| val.map(|val| (target, val)))
+        .for_each(|(target, val)| *target = val);
 
         let state = get_state(&request);
 

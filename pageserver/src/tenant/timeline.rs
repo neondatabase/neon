@@ -4357,9 +4357,9 @@ impl Timeline {
     ) -> Result<PreparedTimelineDetach, DetachFromAncestorError> {
         use DetachFromAncestorError::*;
 
-        let Some(rtc) = self.remote_client.as_ref() else {
+        if self.remote_client.as_ref().is_none() {
             unimplemented!("no new code for running without remote storage");
-        };
+        }
 
         let Some((ancestor, ancestor_lsn)) = self
             .ancestor_timeline
@@ -4440,11 +4440,9 @@ impl Timeline {
 
         // TODO: layers are already sorted by something: use that to determine how much of remote
         // copies are already done.
-
         tracing::info!(filtered=%filtered_layers, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
 
         // TODO: copying and lsn prefix copying could be done at the same time with a single fsync after
-
         let mut new_layers: Vec<Layer> =
             Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len());
 
@@ -4455,37 +4453,39 @@ impl Timeline {
 
             let mut wrote_any = false;
 
-            for layers in straddling_branchpoint.chunks(options.rewrite_batch_size.get()) {
-                for layer in layers {
-                    let layer = layer.clone();
-                    let timeline = self.clone();
-                    let ctx =
-                        ctx.detached_child(TaskKind::DetachAncestor, DownloadBehavior::Download);
+            let limiter = Arc::new(tokio::sync::Semaphore::new(
+                options.rewrite_concurrency.get(),
+            ));
 
-                    tasks.spawn(async move {
-                        let copied = detach_ancestor::upload_rewritten_layer(
-                            end_lsn,
-                            &layer,
-                            &timeline,
-                            &timeline.cancel,
-                            &ctx,
-                        )
-                        .await?;
-                        Ok(copied)
-                    });
-                }
+            for layer in straddling_branchpoint {
+                let limiter = limiter.clone();
+                let timeline = self.clone();
+                let ctx = ctx.detached_child(TaskKind::DetachAncestor, DownloadBehavior::Download);
 
-                while let Some(res) = tasks.join_next().await {
-                    match res {
-                        Ok(Ok(Some(copied))) => {
-                            wrote_any = true;
-                            tracing::info!(layer=%copied, "rewrote and uploaded");
-                            new_layers.push(copied);
-                        }
-                        Ok(Ok(None)) => {}
-                        Ok(Err(e)) => return Err(e),
-                        Err(je) => return Err(Unexpected(je.into())),
+                tasks.spawn(async move {
+                    let _permit = limiter.acquire().await;
+                    let copied = detach_ancestor::upload_rewritten_layer(
+                        end_lsn,
+                        &layer,
+                        &timeline,
+                        &timeline.cancel,
+                        &ctx,
+                    )
+                    .await?;
+                    Ok(copied)
+                });
+            }
+
+            while let Some(res) = tasks.join_next().await {
+                match res {
+                    Ok(Ok(Some(copied))) => {
+                        wrote_any = true;
+                        tracing::info!(layer=%copied, "rewrote and uploaded");
+                        new_layers.push(copied);
                     }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(e)) => return Err(e),
+                    Err(je) => return Err(Unexpected(je.into())),
                 }
             }
 
@@ -4507,41 +4507,39 @@ impl Timeline {
         }
 
         // because we hold the layers, they will not be removed from remote storage.
-        let chunks = rest_of_historic.chunks(options.copy_batch_size.get());
-
         let mut tasks = tokio::task::JoinSet::new();
+        let limiter = Arc::new(tokio::sync::Semaphore::new(options.copy_concurrency.get()));
 
-        for layers in chunks {
-            for adopted in layers {
-                let adopted = adopted.clone();
-                let timeline = self.clone();
+        for adopted in rest_of_historic {
+            let limiter = limiter.clone();
+            let timeline = self.clone();
 
-                tasks.spawn(
-                    async move {
-                        let owned = detach_ancestor::remote_copy(
-                            &adopted,
-                            &timeline,
-                            timeline.generation,
-                            &timeline.cancel,
-                        )
-                        .await?;
-                        tracing::info!(layer=%owned, "remote copied");
-                        Ok(owned)
-                    }
-                    .in_current_span(),
-                );
-            }
-
-            while let Some(res) = tasks.join_next().await {
-                match res {
-                    Ok(Ok(owned)) => {
-                        new_layers.push(owned);
-                    }
-                    Ok(Err(failed)) => {
-                        return Err(failed);
-                    }
-                    Err(je) => return Err(Unexpected(je.into())),
+            tasks.spawn(
+                async move {
+                    let _permit = limiter.acquire().await;
+                    let owned = detach_ancestor::remote_copy(
+                        &adopted,
+                        &timeline,
+                        timeline.generation,
+                        &timeline.cancel,
+                    )
+                    .await?;
+                    tracing::info!(layer=%owned, "remote copied");
+                    Ok(owned)
                 }
+                .in_current_span(),
+            );
+        }
+
+        while let Some(res) = tasks.join_next().await {
+            match res {
+                Ok(Ok(owned)) => {
+                    new_layers.push(owned);
+                }
+                Ok(Err(failed)) => {
+                    return Err(failed);
+                }
+                Err(je) => return Err(Unexpected(je.into())),
             }
         }
 
@@ -4717,15 +4715,15 @@ pub(crate) struct PreparedTimelineDetach {
 
 #[derive(Debug)]
 pub(crate) struct AncestorDetachOptions {
-    pub(crate) rewrite_batch_size: std::num::NonZeroUsize,
-    pub(crate) copy_batch_size: std::num::NonZeroUsize,
+    pub(crate) rewrite_concurrency: std::num::NonZeroUsize,
+    pub(crate) copy_concurrency: std::num::NonZeroUsize,
 }
 
 impl Default for AncestorDetachOptions {
     fn default() -> Self {
         Self {
-            rewrite_batch_size: std::num::NonZeroUsize::new(2).unwrap(),
-            copy_batch_size: std::num::NonZeroUsize::new(10).unwrap(),
+            rewrite_concurrency: std::num::NonZeroUsize::new(2).unwrap(),
+            copy_concurrency: std::num::NonZeroUsize::new(10).unwrap(),
         }
     }
 }
