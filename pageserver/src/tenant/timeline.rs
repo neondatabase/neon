@@ -4674,8 +4674,6 @@ pub(crate) struct PreparedTimelineDetach {
 
 #[derive(Debug)]
 pub(crate) struct AncestorDetachOptions {
-    /// How often should remote `index_part.json` be updated for copied or deltas which had their
-    /// Lsn prefix truncated.
     pub(crate) batch_size: std::num::NonZeroUsize,
 }
 
