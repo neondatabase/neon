@@ -2299,7 +2299,9 @@ class NeonPageserver(PgProtocol):
         self.allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
     def timeline_dir(
-        self, tenant_shard_id: TenantShardId, timeline_id: Optional[TimelineId] = None
+        self,
+        tenant_shard_id: Union[TenantId, TenantShardId],
+        timeline_id: Optional[TimelineId] = None,
     ) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
         if timeline_id is None:
@@ -2308,7 +2310,7 @@ class NeonPageserver(PgProtocol):
 
     def tenant_dir(
         self,
-        tenant_shard_id: Optional[TenantShardId] = None,
+        tenant_shard_id: Optional[Union[TenantId, TenantShardId]] = None,
     ) -> Path:
         """Get a tenant directory's path based on the repo directory of the test environment"""
         if tenant_shard_id is None:
@@ -2500,7 +2502,9 @@ class NeonPageserver(PgProtocol):
         client = self.http_client()
         return client.tenant_location_conf(tenant_id, config, **kwargs)
 
-    def read_tenant_location_conf(self, tenant_shard_id: TenantShardId) -> dict[str, Any]:
+    def read_tenant_location_conf(
+        self, tenant_shard_id: Union[TenantId, TenantShardId]
+    ) -> dict[str, Any]:
         path = self.tenant_dir(tenant_shard_id) / "config-v1"
         log.info(f"Reading location conf from {path}")
         bytes = open(path, "r").read()
