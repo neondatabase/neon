@@ -4412,11 +4412,12 @@ impl Timeline {
 
             // we do not need to wait for uploads to complete, because we only want to see the file
             // on disk.
+            tracing::info!("froze and flush the ancestor");
         }
 
         let end_lsn = ancestor_lsn + 1;
 
-        let (filtered_layers, mut straddling_branchpoint, mut rest_of_historic) = {
+        let (filtered_layers, straddling_branchpoint, rest_of_historic) = {
             // we do not need to start from our layers, because they can only be layers that come
             // *after* our
             let layers = tokio::select! {
@@ -4437,27 +4438,8 @@ impl Timeline {
             (later_by_lsn, straddling, rest)
         };
 
-        {
-            let layers = tokio::select! {
-                guard = self.layers.read() => guard,
-                _ = self.cancel.cancelled() => return Err(ShuttingDown),
-            };
-
-            let before = straddling_branchpoint.len();
-            detach_ancestor::retain_layers_to_copy_lsn_prefix(
-                end_lsn,
-                ancestor_lsn,
-                &mut straddling_branchpoint,
-                &layers,
-            );
-            assert_eq!(before, straddling_branchpoint.len());
-
-            let before = rest_of_historic.len();
-            detach_ancestor::retain_missing_layers(&mut rest_of_historic, &layers);
-            assert_eq!(before, rest_of_historic.len());
-
-            // FIXME: sort values to query remote up to which point have we gotten before
-        }
+        // TODO: layers are already sorted by something: use that to determine how much of remote
+        // copies are already done.
 
         tracing::info!(filtered=%filtered_layers, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
 
@@ -4488,6 +4470,7 @@ impl Timeline {
 
                 wrote_any = true;
 
+                tracing::info!(layer=%copied, "rewrote and uploaded");
                 new_layers.push(copied);
             }
 
@@ -4518,6 +4501,7 @@ impl Timeline {
                 let owned =
                     detach_ancestor::remote_copy(rtc, adopted, self, self.generation, &self.cancel)
                         .await?;
+                tracing::info!(layer=%owned, "remote copied");
                 new_layers.push(owned);
             }
         }
