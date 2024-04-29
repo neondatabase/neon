@@ -4251,7 +4251,9 @@ impl Service {
     /// Check all tenants for pending reconciliation work, and reconcile those in need.
     /// Additionally, reschedule tenants that require it.
     ///
-    /// Returns how many reconciliation tasks were started
+    /// Returns how many reconciliation tasks were started, or `1` if no reconciles were
+    /// spawned but some _would_ have been spawned if `reconciler_concurrency` units where
+    /// available.  A return value of 0 indicates that everything is fully reconciled already.
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, _scheduler) = locked.parts_mut();
