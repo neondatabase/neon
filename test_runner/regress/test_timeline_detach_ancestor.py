@@ -148,11 +148,11 @@ def test_ancestor_detach_branched_from(
     with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
 
-    old_main = client.layer_map_info(env.initial_tenant, env.initial_timeline)
-    old_main = set(map(layer_name, old_main.historic_layers))
+    old_main_info = client.layer_map_info(env.initial_tenant, env.initial_timeline)
+    old_main = set(map(layer_name, old_main_info.historic_layers))
 
-    new_main = client.layer_map_info(env.initial_tenant, timeline_id)
-    new_main = set(map(layer_name, new_main.historic_layers))
+    new_main_info = client.layer_map_info(env.initial_tenant, timeline_id)
+    new_main = set(map(layer_name, new_main_info.historic_layers))
 
     new_main_copied_or_truncated = new_main - branch_layers
     new_main_truncated = new_main_copied_or_truncated - old_main
@@ -352,7 +352,7 @@ def test_detached_receives_flushes_while_being_detached(
         return extra_rows
 
     with ThreadPoolExecutor(max_workers=1) as exec:
-        queue = Queue()
+        queue: Queue[str] = Queue()
         barrier = Barrier(2)
 
         completion = exec.submit(small_txs, ep, queue, barrier)
@@ -383,6 +383,8 @@ def test_detached_receives_flushes_while_being_detached(
     # finally restart the endpoint and make sure we still have the same answer
     with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
+
+    env.pageserver.allowed_errors.append("initial size calculation failed: downloading failed, possibly for shutdown")
 
 
 # TODO:
