@@ -1575,6 +1575,11 @@ class NeonCli(AbstractNeonCli):
         res.check_returncode()
         return tenant_id, timeline_id
 
+    def import_tenant(self, tenant_id: TenantId):
+        args = ["tenant", "import", "--tenant-id", str(tenant_id)]
+        res = self.raw_cli(args)
+        res.check_returncode()
+
     def set_default(self, tenant_id: TenantId):
         """
         Update default tenant for future operations that require tenant_id.
@@ -2204,6 +2209,13 @@ class NeonStorageController(MetricsGetter):
             "PUT",
             f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/policy",
             json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def tenant_import(self, tenant_id: TenantId):
+        self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/import",
             headers=self.headers(TokenScope.ADMIN),
         )
 

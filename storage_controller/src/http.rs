@@ -522,6 +522,18 @@ async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiErr
     json_response(StatusCode::OK, state.service.tenant_drop(tenant_id).await?)
 }
 
+async fn handle_tenant_import(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state.service.tenant_import(tenant_id).await?,
+    )
+}
+
 async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -758,6 +770,13 @@ pub fn make_router(
         })
         .post("/debug/v1/node/:node_id/drop", |r| {
             named_request_span(r, handle_node_drop, RequestName("debug_v1_node_drop"))
+        })
+        .post("/debug/v1/tenant/:tenant_id/import", |r| {
+            named_request_span(
+                r,
+                handle_tenant_import,
+                RequestName("debug_v1_tenant_import"),
+            )
         })
         .get("/debug/v1/tenant", |r| {
             named_request_span(r, handle_tenants_dump, RequestName("debug_v1_tenant"))
