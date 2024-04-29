@@ -49,6 +49,8 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
+int         neon_protocol_version = 1;
+
 static int	n_reconnect_attempts = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
@@ -379,7 +381,17 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		pfree(msg);
 		return false;
 	}
-	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
+	switch (neon_protocol_version)
+	{
+		case 2:
+			query = psprintf("pagestream_v2 %s %s", neon_tenant, neon_timeline);
+			break;
+		case 1:
+			query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
+			break;
+		default:
+			elog(ERROR, "unexpected neon_protocol_version %d", neon_protocol_version);
+	}
 	ret = PQsendQuery(conn, query);
 	pfree(query);
 	if (ret != 1)
@@ -440,7 +452,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		return false;
 	}
 
-	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s'", connstr);
+	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
 	page_servers[shard_no].conn = conn;
 	page_servers[shard_no].wes = wes;
 
@@ -844,6 +856,16 @@ pg_init_libpagestore(void)
 							PGC_USERSET,
 							0,	/* no flags required */
 							NULL, (GucIntAssignHook) &readahead_buffer_resize, NULL);
+	DefineCustomIntVariable("neon.protocol_version",
+							"Version of compute<->page server protocol",
+							NULL,
+							&neon_protocol_version,
+							1, /* default to old protocol for now */
+							1, /* min */
+							2, /* max */
+							PGC_SU_BACKEND,
+							0,	/* no flags required */
+							NULL, NULL, NULL);
 
 	relsize_hash_init();
 

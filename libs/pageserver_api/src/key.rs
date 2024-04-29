@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
+use bytes::BufMut;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
@@ -21,15 +22,107 @@ pub struct Key {
     pub field6: u32,
 }
 
+/// The storage key size.
 pub const KEY_SIZE: usize = 18;
 
+/// The metadata key size. 2B fewer than the storage key size because field2 is not fully utilized.
+/// See [`Key::to_i128`] for more information on the encoding.
+pub const METADATA_KEY_SIZE: usize = 16;
+
+/// The key prefix start range for the metadata keys. All keys with the first byte >= 0x40 is a metadata key.
+pub const METADATA_KEY_BEGIN_PREFIX: u8 = 0x60;
+pub const METADATA_KEY_END_PREFIX: u8 = 0x7F;
+
+/// The (reserved) key prefix of relation sizes.
+pub const RELATION_SIZE_PREFIX: u8 = 0x61;
+
+/// The key prefix of AUX file keys.
+pub const AUX_KEY_PREFIX: u8 = 0x62;
+
+/// Check if the key falls in the range of metadata keys.
+pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
+    key[0] >= METADATA_KEY_BEGIN_PREFIX && key[0] < METADATA_KEY_END_PREFIX
+}
+
 impl Key {
+    /// Check if the key falls in the range of metadata keys.
+    pub const fn is_metadata_key(&self) -> bool {
+        self.field1 >= METADATA_KEY_BEGIN_PREFIX && self.field1 < METADATA_KEY_END_PREFIX
+    }
+
+    /// Encode a metadata key to a storage key.
+    pub fn from_metadata_key_fixed_size(key: &[u8; METADATA_KEY_SIZE]) -> Self {
+        assert!(is_metadata_key_slice(key), "key not in metadata key range");
+        Key {
+            field1: key[0],
+            field2: u16::from_be_bytes(key[1..3].try_into().unwrap()) as u32,
+            field3: u32::from_be_bytes(key[3..7].try_into().unwrap()),
+            field4: u32::from_be_bytes(key[7..11].try_into().unwrap()),
+            field5: key[11],
+            field6: u32::from_be_bytes(key[12..16].try_into().unwrap()),
+        }
+    }
+
+    /// Encode a metadata key to a storage key.
+    pub fn from_metadata_key(key: &[u8]) -> Self {
+        Self::from_metadata_key_fixed_size(key.try_into().expect("expect 16 byte metadata key"))
+    }
+
+    /// Extract a metadata key to a writer. The result should always be 16 bytes.
+    pub fn extract_metadata_key_to_writer(&self, mut writer: impl BufMut) {
+        writer.put_u8(self.field1);
+        assert!(self.field2 <= 0xFFFF);
+        writer.put_u16(self.field2 as u16);
+        writer.put_u32(self.field3);
+        writer.put_u32(self.field4);
+        writer.put_u8(self.field5);
+        writer.put_u32(self.field6);
+    }
+
+    /// Get the range of metadata keys.
+    pub fn metadata_key_range() -> Range<Self> {
+        Key {
+            field1: METADATA_KEY_BEGIN_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: METADATA_KEY_END_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
+    /// Get the range of aux keys.
+    pub fn metadata_aux_key_range() -> Range<Self> {
+        Key {
+            field1: AUX_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: AUX_KEY_PREFIX + 1,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
     /// 'field2' is used to store tablespaceid for relations and small enum numbers for other relish.
     /// As long as Neon does not support tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
         assert!(self.field2 < 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
-        (((self.field1 & 0xf) as i128) << 120)
+        (((self.field1 & 0x7F) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
             | ((self.field3 as i128) << 72)
             | ((self.field4 as i128) << 40)
@@ -39,7 +132,7 @@ impl Key {
 
     pub const fn from_i128(x: i128) -> Self {
         Key {
-            field1: ((x >> 120) & 0xf) as u8,
+            field1: ((x >> 120) & 0x7F) as u8,
             field2: ((x >> 104) & 0xFFFF) as u32,
             field3: (x >> 72) as u32,
             field4: (x >> 40) as u32,
@@ -48,11 +141,11 @@ impl Key {
         }
     }
 
-    pub fn next(&self) -> Key {
+    pub const fn next(&self) -> Key {
         self.add(1)
     }
 
-    pub fn add(&self, x: u32) -> Key {
+    pub const fn add(&self, x: u32) -> Key {
         let mut key = *self;
 
         let r = key.field6.overflowing_add(x);
@@ -81,6 +174,8 @@ impl Key {
         key
     }
 
+    /// Convert a 18B slice to a key. This function should not be used for metadata keys because field2 is handled differently.
+    /// Use [`Key::from_metadata_key`] instead.
     pub fn from_slice(b: &[u8]) -> Self {
         Key {
             field1: b[0],
@@ -92,6 +187,8 @@ impl Key {
         }
     }
 
+    /// Convert a key to a 18B slice. This function should not be used for metadata keys because field2 is handled differently.
+    /// Use [`Key::extract_metadata_key_to_writer`] instead.
     pub fn write_to_byte_slice(&self, buf: &mut [u8]) {
         buf[0] = self.field1;
         BE::write_u32(&mut buf[1..5], self.field2);
@@ -475,12 +572,14 @@ pub const AUX_FILES_KEY: Key = Key {
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
 
+pub const NON_INHERITED_RANGE: Range<Key> = AUX_FILES_KEY..AUX_FILES_KEY.next();
+
 // AUX_FILES currently stores only data for logical replication (slots etc), and
 // we don't preserve these on a branch because safekeepers can't follow timeline
 // switch (and generally it likely should be optional), so ignore these.
 #[inline(always)]
 pub fn is_inherited_key(key: Key) -> bool {
-    key != AUX_FILES_KEY
+    !NON_INHERITED_RANGE.contains(&key)
 }
 
 #[inline(always)]
@@ -556,10 +655,13 @@ impl std::str::FromStr for Key {
 mod tests {
     use std::str::FromStr;
 
+    use crate::key::is_metadata_key_slice;
     use crate::key::Key;
 
     use rand::Rng;
     use rand::SeedableRng;
+
+    use super::AUX_KEY_PREFIX;
 
     #[test]
     fn display_fromstr_bijection() {
@@ -575,5 +677,17 @@ mod tests {
         };
 
         assert_eq!(key, Key::from_str(&format!("{key}")).unwrap());
+    }
+
+    #[test]
+    fn test_metadata_keys() {
+        let mut metadata_key = vec![AUX_KEY_PREFIX];
+        metadata_key.extend_from_slice(&[0xFF; 15]);
+        let encoded_key = Key::from_metadata_key(&metadata_key);
+        let mut output_key = Vec::new();
+        encoded_key.extract_metadata_key_to_writer(&mut output_key);
+        assert_eq!(metadata_key, output_key);
+        assert!(encoded_key.is_metadata_key());
+        assert!(is_metadata_key_slice(&metadata_key));
     }
 }

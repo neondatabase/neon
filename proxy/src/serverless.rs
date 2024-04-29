@@ -33,9 +33,8 @@ use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::Metrics;
-use crate::protocol2::WithClientIp;
+use crate::protocol2::read_proxy_protocol;
 use crate::proxy::run_until_cancelled;
-use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
 
@@ -53,7 +52,6 @@ pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_handler: Arc<CancellationHandlerMain>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
@@ -117,7 +115,6 @@ pub async fn task_main(
                 backend.clone(),
                 connections.clone(),
                 cancellation_handler.clone(),
-                endpoint_rate_limiter.clone(),
                 cancellation_token.clone(),
                 server.clone(),
                 tls_acceptor.clone(),
@@ -147,7 +144,6 @@ async fn connection_handler(
     backend: Arc<PoolingBackend>,
     connections: TaskTracker,
     cancellation_handler: Arc<CancellationHandlerMain>,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
     server: Builder<TokioExecutor>,
     tls_acceptor: TlsAcceptor,
@@ -162,9 +158,8 @@ async fn connection_handler(
         .guard(crate::metrics::Protocol::Http);
 
     // handle PROXY protocol
-    let mut conn = WithClientIp::new(conn);
-    let peer = match conn.wait_for_addr().await {
-        Ok(peer) => peer,
+    let (conn, peer) = match read_proxy_protocol(conn).await {
+        Ok(c) => c,
         Err(e) => {
             tracing::error!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
             return;
@@ -172,6 +167,10 @@ async fn connection_handler(
     };
 
     let peer_addr = peer.unwrap_or(peer_addr).ip();
+    let has_private_peer_addr = match peer_addr {
+        IpAddr::V4(ip) => ip.is_private(),
+        _ => false,
+    };
     info!(?session_id, %peer_addr, "accepted new TCP connection");
 
     // try upgrade to TLS, but with a timeout.
@@ -182,13 +181,17 @@ async fn connection_handler(
         }
         // The handshake failed
         Ok(Err(e)) => {
-            Metrics::get().proxy.tls_handshake_failures.inc();
+            if !has_private_peer_addr {
+                Metrics::get().proxy.tls_handshake_failures.inc();
+            }
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
             return;
         }
         // The handshake timed out
         Err(e) => {
-            Metrics::get().proxy.tls_handshake_failures.inc();
+            if !has_private_peer_addr {
+                Metrics::get().proxy.tls_handshake_failures.inc();
+            }
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
             return;
         }
@@ -223,7 +226,6 @@ async fn connection_handler(
                     cancellation_handler.clone(),
                     session_id,
                     peer_addr,
-                    endpoint_rate_limiter.clone(),
                     http_request_token,
                 )
                 .in_current_span()
@@ -262,7 +264,6 @@ async fn request_handler(
     cancellation_handler: Arc<CancellationHandlerMain>,
     session_id: uuid::Uuid,
     peer_addr: IpAddr,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
@@ -290,15 +291,9 @@ async fn request_handler(
 
         ws_connections.spawn(
             async move {
-                if let Err(e) = websocket::serve_websocket(
-                    config,
-                    ctx,
-                    websocket,
-                    cancellation_handler,
-                    host,
-                    endpoint_rate_limiter,
-                )
-                .await
+                if let Err(e) =
+                    websocket::serve_websocket(config, ctx, websocket, cancellation_handler, host)
+                        .await
                 {
                     error!("error in websocket connection: {e:#}");
                 }

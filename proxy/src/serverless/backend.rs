@@ -6,7 +6,7 @@ use tracing::{field::display, info};
 use crate::{
     auth::{backend::ComputeCredentials, check_peer_addr_is_in_list, AuthError},
     compute,
-    config::ProxyConfig,
+    config::{AuthenticationConfig, ProxyConfig},
     console::{
         errors::{GetAuthInfoError, WakeComputeError},
         CachedNodeInfo,
@@ -27,6 +27,7 @@ impl PoolingBackend {
     pub async fn authenticate(
         &self,
         ctx: &mut RequestMonitoring,
+        config: &AuthenticationConfig,
         conn_info: &ConnInfo,
     ) -> Result<ComputeCredentials, AuthError> {
         let user_info = conn_info.user_info.clone();
@@ -43,6 +44,7 @@ impl PoolingBackend {
         let secret = match cached_secret.value.clone() {
             Some(secret) => self.config.authentication_config.check_rate_limit(
                 ctx,
+                config,
                 secret,
                 &user_info.endpoint,
                 true,
@@ -106,6 +108,8 @@ impl PoolingBackend {
             },
             &backend,
             false, // do not allow self signed compute for http flow
+            self.config.wake_compute_retry_config,
+            self.config.connect_to_compute_retry_config,
         )
         .await
     }
@@ -175,7 +179,9 @@ impl ConnectMechanism for TokioMechanism {
             .dbname(&self.conn_info.dbname)
             .connect_timeout(timeout);
 
+        let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
         let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+        drop(pause);
 
         tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
         Ok(poll_client(

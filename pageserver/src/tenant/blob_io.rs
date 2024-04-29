@@ -121,7 +121,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         self.offset
     }
 
-    const CAPACITY: usize = if BUFFERED { PAGE_SZ } else { 0 };
+    const CAPACITY: usize = if BUFFERED { 64 * 1024 } else { 0 };
 
     /// Writes the given buffer directly to the underlying `VirtualFile`.
     /// You need to make sure that the internal buffer is empty, otherwise

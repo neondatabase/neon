@@ -507,6 +507,11 @@ class NeonEnvBuilder:
             self.pageserver_get_vectored_impl = "vectored"
             log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
 
+        self.pageserver_get_impl: Optional[str] = None
+        if os.getenv("PAGESERVER_GET_IMPL", "") == "vectored":
+            self.pageserver_get_impl = "vectored"
+            log.debug('Overriding pageserver get_impl config to "vectored"')
+
         assert test_name.startswith(
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
@@ -1078,6 +1083,8 @@ class NeonEnv:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_get_vectored_impl is not None:
                 ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
+            if config.pageserver_get_impl is not None:
+                ps_cfg["get_impl"] = config.pageserver_get_impl
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1567,6 +1574,11 @@ class NeonCli(AbstractNeonCli):
         res = self.raw_cli(args)
         res.check_returncode()
         return tenant_id, timeline_id
+
+    def import_tenant(self, tenant_id: TenantId):
+        args = ["tenant", "import", "--tenant-id", str(tenant_id)]
+        res = self.raw_cli(args)
+        res.check_returncode()
 
     def set_default(self, tenant_id: TenantId):
         """
@@ -2244,6 +2256,13 @@ class NeonStorageController(MetricsGetter, Logging):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def tenant_import(self, tenant_id: TenantId):
+        self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/import",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def reconcile_all(self):
         r = self.request(
             "POST",
@@ -2340,20 +2359,24 @@ class NeonPageserver(PgProtocol, Logging):
         # The entries in the list are regular experessions.
         self.allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
-    def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
+    def timeline_dir(
+        self,
+        tenant_shard_id: Union[TenantId, TenantShardId],
+        timeline_id: Optional[TimelineId] = None,
+    ) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
         if timeline_id is None:
-            return self.tenant_dir(tenant_id) / "timelines"
-        return self.tenant_dir(tenant_id) / "timelines" / str(timeline_id)
+            return self.tenant_dir(tenant_shard_id) / "timelines"
+        return self.tenant_dir(tenant_shard_id) / "timelines" / str(timeline_id)
 
     def tenant_dir(
         self,
-        tenant_id: Optional[TenantId] = None,
+        tenant_shard_id: Optional[Union[TenantId, TenantShardId]] = None,
     ) -> Path:
         """Get a tenant directory's path based on the repo directory of the test environment"""
-        if tenant_id is None:
+        if tenant_shard_id is None:
             return self.workdir / "tenants"
-        return self.workdir / "tenants" / str(tenant_id)
+        return self.workdir / "tenants" / str(tenant_shard_id)
 
     def start(
         self,
@@ -2500,8 +2523,10 @@ class NeonPageserver(PgProtocol, Logging):
         client = self.http_client()
         return client.tenant_location_conf(tenant_id, config, **kwargs)
 
-    def read_tenant_location_conf(self, tenant_id: TenantId) -> dict[str, Any]:
-        path = self.tenant_dir(tenant_id) / "config-v1"
+    def read_tenant_location_conf(
+        self, tenant_shard_id: Union[TenantId, TenantShardId]
+    ) -> dict[str, Any]:
+        path = self.tenant_dir(tenant_shard_id) / "config-v1"
         log.info(f"Reading location conf from {path}")
         bytes = open(path, "r").read()
         try:
@@ -3705,7 +3730,7 @@ class S3Scrubber:
             log.warning(f"Scrub environment: {env}")
             log.warning(f"Output at: {output_path}")
 
-            raise RuntimeError("Remote storage scrub failed")
+            raise RuntimeError(f"Scrubber failed while running {args}")
 
         assert stdout is not None
         return stdout
@@ -3719,6 +3744,13 @@ class S3Scrubber:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
             log.error(stdout)
             raise
+
+    def tenant_snapshot(self, tenant_id: TenantId, output_path: Path):
+        stdout = self.scrubber_cli(
+            ["tenant-snapshot", "--tenant-id", str(tenant_id), "--output-path", str(output_path)],
+            timeout=30,
+        )
+        log.info(f"tenant-snapshot output: {stdout}")
 
 
 def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) -> Path:

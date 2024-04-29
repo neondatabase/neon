@@ -41,7 +41,7 @@ where
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) async fn copy_bidirectional_client_compute<Client, Compute>(
+pub async fn copy_bidirectional_client_compute<Client, Compute>(
     client: &mut Client,
     compute: &mut Compute,
 ) -> Result<(u64, u64), std::io::Error>

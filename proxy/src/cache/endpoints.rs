@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use dashmap::DashSet;
@@ -13,6 +14,8 @@ use redis::{
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 use crate::{
     config::EndpointCacheConfig,
@@ -69,17 +72,14 @@ impl EndpointsCache {
         if !self.ready.load(Ordering::Acquire) {
             return true;
         }
-        // If cache is disabled, just collect the metrics and return.
-        if self.config.disable_cache {
-            ctx.set_rejected(self.should_reject(endpoint));
-            return true;
-        }
-        // If the limiter allows, we don't need to check the cache.
-        if self.limiter.lock().await.check() {
-            return true;
-        }
         let rejected = self.should_reject(endpoint);
         ctx.set_rejected(rejected);
+        info!(?rejected, "check endpoint is valid, disabled cache");
+        // If cache is disabled, just collect the metrics and return or
+        // If the limiter allows, we don't need to check the cache.
+        if self.config.disable_cache || self.limiter.lock().await.check() {
+            return true;
+        }
         !rejected
     }
     fn should_reject(&self, endpoint: &EndpointId) -> bool {
@@ -113,16 +113,22 @@ impl EndpointsCache {
     pub async fn do_read(
         &self,
         mut con: ConnectionWithCredentialsProvider,
+        cancellation_token: CancellationToken,
     ) -> anyhow::Result<Infallible> {
         let mut last_id = "0-0".to_string();
         loop {
-            self.ready.store(false, Ordering::Release);
             if let Err(e) = con.connect().await {
                 tracing::error!("error connecting to redis: {:?}", e);
-                continue;
+                self.ready.store(false, Ordering::Release);
             }
             if let Err(e) = self.read_from_stream(&mut con, &mut last_id).await {
                 tracing::error!("error reading from redis: {:?}", e);
+                self.ready.store(false, Ordering::Release);
+            }
+            if cancellation_token.is_cancelled() {
+                info!("cancellation token is cancelled, exiting");
+                tokio::time::sleep(Duration::from_secs(60 * 60 * 24 * 7)).await;
+                // 1 week.
             }
             tokio::time::sleep(self.config.retry_interval).await;
         }
@@ -171,6 +177,9 @@ impl EndpointsCache {
 
             if res.keys.is_empty() {
                 if return_when_finish {
+                    if total != 0 {
+                        break;
+                    }
                     anyhow::bail!(
                         "Redis stream {} is empty, cannot be used to filter endpoints",
                         self.config.stream_name

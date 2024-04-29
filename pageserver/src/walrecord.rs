@@ -55,6 +55,7 @@ impl NeonWalRecord {
     /// Does replaying this WAL record initialize the page from scratch, or does
     /// it need to be applied over the previous image of the page?
     pub fn will_init(&self) -> bool {
+        // If you change this function, you'll also need to change ValueBytes::will_init
         match self {
             NeonWalRecord::Postgres { will_init, rec: _ } => *will_init,
 

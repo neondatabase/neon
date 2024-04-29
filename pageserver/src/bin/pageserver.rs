@@ -121,8 +121,10 @@ fn main() -> anyhow::Result<()> {
         &[("node_id", &conf.id.to_string())],
     );
 
-    // after setting up logging, log the effective IO engine choice
+    // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
+    info!(?conf.get_impl, "starting with get page implementation");
+    info!(?conf.get_vectored_impl, "starting with vectored get page implementation");
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
@@ -285,6 +287,7 @@ fn start_pageserver(
     ))
     .unwrap();
     pageserver::preinitialize_metrics();
+    pageserver::metrics::wal_redo::set_process_kind_metric(conf.walredo_process_kind);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes

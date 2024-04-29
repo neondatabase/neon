@@ -84,6 +84,20 @@ impl std::ops::Add for AffinityScore {
     }
 }
 
+/// Hint for whether this is a sincere attempt to schedule, or a speculative
+/// check for where we _would_ schedule (done during optimization)
+#[derive(Debug)]
+pub(crate) enum ScheduleMode {
+    Normal,
+    Speculative,
+}
+
+impl Default for ScheduleMode {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
 // For carrying state between multiple calls to [`TenantShard::schedule`], e.g. when calling
 // it for many shards in the same tenant.
 #[derive(Debug, Default)]
@@ -93,6 +107,8 @@ pub(crate) struct ScheduleContext {
 
     /// Specifically how many _attached_ locations are on each node
     pub(crate) attached_nodes: HashMap<NodeId, usize>,
+
+    pub(crate) mode: ScheduleMode,
 }
 
 impl ScheduleContext {
@@ -329,27 +345,34 @@ impl Scheduler {
         scores.sort_by_key(|i| (i.1, i.2, i.0));
 
         if scores.is_empty() {
-            // After applying constraints, no pageservers were left.  We log some detail about
-            // the state of nodes to help understand why this happened.  This is not logged as an error because
-            // it is legitimately possible for enough nodes to be Offline to prevent scheduling a shard.
-            tracing::info!("Scheduling failure, while excluding {hard_exclude:?}, node states:");
-            for (node_id, node) in &self.nodes {
+            // After applying constraints, no pageservers were left.
+            if !matches!(context.mode, ScheduleMode::Speculative) {
+                // If this was not a speculative attempt, log details to understand why we couldn't
+                // schedule: this may help an engineer understand if some nodes are marked offline
+                // in a way that's preventing progress.
                 tracing::info!(
-                    "Node {node_id}: may_schedule={} shards={}",
-                    node.may_schedule != MaySchedule::No,
-                    node.shard_count
+                    "Scheduling failure, while excluding {hard_exclude:?}, node states:"
                 );
+                for (node_id, node) in &self.nodes {
+                    tracing::info!(
+                        "Node {node_id}: may_schedule={} shards={}",
+                        node.may_schedule != MaySchedule::No,
+                        node.shard_count
+                    );
+                }
             }
-
             return Err(ScheduleError::ImpossibleConstraint);
         }
 
         // Lowest score wins
         let node_id = scores.first().unwrap().0;
-        tracing::info!(
+
+        if !matches!(context.mode, ScheduleMode::Speculative) {
+            tracing::info!(
             "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?})",
             scores.iter().map(|i| i.0 .0).collect::<Vec<_>>()
         );
+        }
 
         // Note that we do not update shard count here to reflect the scheduling: that
         // is IntentState's job when the scheduled location is used.

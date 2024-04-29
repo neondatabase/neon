@@ -5,6 +5,7 @@ pub mod cloud_admin_api;
 pub mod garbage;
 pub mod metadata_stream;
 pub mod scan_metadata;
+pub mod tenant_snapshot;
 
 use std::env;
 use std::fmt::Display;
@@ -23,17 +24,18 @@ use aws_sdk_s3::config::{AsyncSleep, Region, SharedAsyncSleep};
 use aws_sdk_s3::{Client, Config};
 use aws_smithy_async::rt::sleep::TokioSleep;
 
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
 use pageserver_api::shard::TenantShardId;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::io::IsTerminal;
 use tokio::io::AsyncReadExt;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use utils::id::TimelineId;
+use utils::fs_ext;
+use utils::id::{TenantId, TimelineId};
 
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
@@ -147,6 +149,23 @@ impl RootTarget {
         self.tenants_root().with_sub_segment(&tenant_id.to_string())
     }
 
+    pub(crate) fn tenant_shards_prefix(&self, tenant_id: &TenantId) -> S3Target {
+        // Only pageserver remote storage contains tenant-shards
+        assert!(matches!(self, Self::Pageserver(_)));
+        let Self::Pageserver(root) = self else {
+            panic!();
+        };
+
+        S3Target {
+            bucket_name: root.bucket_name.clone(),
+            prefix_in_bucket: format!(
+                "{}/{TENANTS_SEGMENT_NAME}/{tenant_id}",
+                root.prefix_in_bucket
+            ),
+            delimiter: root.delimiter.clone(),
+        }
+    }
+
     pub fn timelines_root(&self, tenant_id: &TenantShardId) -> S3Target {
         match self {
             Self::Pageserver(_) => self.tenant_root(tenant_id).with_sub_segment("timelines"),
@@ -240,7 +259,6 @@ pub fn init_logging(file_name: &str) -> WorkerGuard {
         .with_ansi(false)
         .with_writer(file_writer);
     let stderr_logs = fmt::Layer::new()
-        .with_ansi(std::io::stderr().is_terminal())
         .with_target(false)
         .with_writer(std::io::stderr);
     tracing_subscriber::registry()
@@ -392,6 +410,53 @@ async fn download_object_with_retries(
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
+    }
+
+    anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")
+}
+
+async fn download_object_to_file(
+    s3_client: &Client,
+    bucket_name: &str,
+    key: &str,
+    version_id: Option<&str>,
+    local_path: &Utf8Path,
+) -> anyhow::Result<()> {
+    let tmp_path = Utf8PathBuf::from(format!("{local_path}.tmp"));
+    for _ in 0..MAX_RETRIES {
+        tokio::fs::remove_file(&tmp_path)
+            .await
+            .or_else(fs_ext::ignore_not_found)?;
+
+        let mut file = tokio::fs::File::create(&tmp_path)
+            .await
+            .context("Opening output file")?;
+
+        let request = s3_client.get_object().bucket(bucket_name).key(key);
+
+        let request = match version_id {
+            Some(version_id) => request.version_id(version_id),
+            None => request,
+        };
+
+        let response_stream = match request.send().await {
+            Ok(response) => response,
+            Err(e) => {
+                error!(
+                    "Failed to download object for key {key} version {}: {e:#}",
+                    version_id.unwrap_or("")
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        let mut read_stream = response_stream.body.into_async_read();
+
+        tokio::io::copy(&mut read_stream, &mut file).await?;
+
+        tokio::fs::rename(&tmp_path, local_path).await?;
+        return Ok(());
     }
 
     anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")

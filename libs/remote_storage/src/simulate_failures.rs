@@ -107,27 +107,6 @@ impl UnreliableWrapper {
 type VoidStorage = crate::LocalFs;
 
 impl RemoteStorage for UnreliableWrapper {
-    async fn list_prefixes(
-        &self,
-        prefix: Option<&RemotePath>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
-            .map_err(DownloadError::Other)?;
-        self.inner.list_prefixes(prefix, cancel).await
-    }
-
-    async fn list_files(
-        &self,
-        folder: Option<&RemotePath>,
-        max_keys: Option<NonZeroU32>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        self.attempt(RemoteOp::ListPrefixes(folder.cloned()))
-            .map_err(DownloadError::Other)?;
-        self.inner.list_files(folder, max_keys, cancel).await
-    }
-
     async fn list(
         &self,
         prefix: Option<&RemotePath>,

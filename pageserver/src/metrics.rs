@@ -51,6 +51,9 @@ pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "gc")]
     Gc,
 
+    #[strum(serialize = "update gc info")]
+    UpdateGcInfo,
+
     #[strum(serialize = "create tenant")]
     CreateTenant,
 }
@@ -86,41 +89,58 @@ pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static READ_NUM_FS_LAYERS: Lazy<Histogram> = Lazy::new(|| {
+pub(crate) static READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
-        "pageserver_read_num_fs_layers",
-        "Number of persistent layers accessed for processing a read request, including those in the cache",
-        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 50.0, 100.0],
+        "pageserver_layers_visited_per_read_global",
+        "Number of layers visited to reconstruct one key",
+        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_layers_visited_per_vectored_read_global",
+        "Average number of layers visited to reconstruct one key",
+        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
     )
     .expect("failed to define a metric")
 });
 
 // Metrics collected on operations on the storage repository.
+#[derive(
+    Clone, Copy, enum_map::Enum, strum_macros::EnumString, strum_macros::Display, IntoStaticStr,
+)]
+pub(crate) enum GetKind {
+    Singular,
+    Vectored,
+}
 
 pub(crate) struct ReconstructTimeMetrics {
-    ok: Histogram,
-    err: Histogram,
+    singular: Histogram,
+    vectored: Histogram,
 }
 
 pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value (reconstruct a page from deltas)",
-        &["result"],
+        &["get_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric");
+
     ReconstructTimeMetrics {
-        ok: inner.get_metric_with_label_values(&["ok"]).unwrap(),
-        err: inner.get_metric_with_label_values(&["err"]).unwrap(),
+        singular: inner.with_label_values(&[GetKind::Singular.into()]),
+        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
     }
 });
 
 impl ReconstructTimeMetrics {
-    pub(crate) fn for_result<T, E>(&self, result: &Result<T, E>) -> &Histogram {
-        match result {
-            Ok(_) => &self.ok,
-            Err(_) => &self.err,
+    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
+        match get_kind {
+            GetKind::Singular => &self.singular,
+            GetKind::Vectored => &self.vectored,
         }
     }
 }
@@ -133,13 +153,33 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::n
     .expect("failed to define a metric")
 });
 
-pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+pub(crate) struct ReconstructDataTimeMetrics {
+    singular: Histogram,
+    vectored: Histogram,
+}
+
+impl ReconstructDataTimeMetrics {
+    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
+        match get_kind {
+            GetKind::Singular => &self.singular,
+            GetKind::Vectored => &self.vectored,
+        }
+    }
+}
+
+pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<ReconstructDataTimeMetrics> = Lazy::new(|| {
+    let inner = register_histogram_vec!(
         "pageserver_getpage_get_reconstruct_data_seconds",
         "Time spent in get_reconstruct_value_data",
+        &["get_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
-    .expect("failed to define a metric")
+    .expect("failed to define a metric");
+
+    ReconstructDataTimeMetrics {
+        singular: inner.with_label_values(&[GetKind::Singular.into()]),
+        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
+    }
 });
 
 pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
@@ -1482,35 +1522,6 @@ pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
 }
 });
 
-pub(crate) struct WalIngestMetrics {
-    pub(crate) bytes_received: IntCounter,
-    pub(crate) records_received: IntCounter,
-    pub(crate) records_committed: IntCounter,
-    pub(crate) records_filtered: IntCounter,
-}
-
-pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
-    bytes_received: register_int_counter!(
-        "pageserver_wal_ingest_bytes_received",
-        "Bytes of WAL ingested from safekeepers",
-    )
-    .unwrap(),
-    records_received: register_int_counter!(
-        "pageserver_wal_ingest_records_received",
-        "Number of WAL records received from safekeepers"
-    )
-    .expect("failed to define a metric"),
-    records_committed: register_int_counter!(
-        "pageserver_wal_ingest_records_committed",
-        "Number of WAL records which resulted in writes to pageserver storage"
-    )
-    .expect("failed to define a metric"),
-    records_filtered: register_int_counter!(
-        "pageserver_wal_ingest_records_filtered",
-        "Number of WAL records filtered out due to sharding"
-    )
-    .expect("failed to define a metric"),
-});
 pub(crate) struct SecondaryModeMetrics {
     pub(crate) upload_heatmap: IntCounter,
     pub(crate) upload_heatmap_errors: IntCounter,
@@ -1518,7 +1529,8 @@ pub(crate) struct SecondaryModeMetrics {
     pub(crate) download_heatmap: IntCounter,
     pub(crate) download_layer: IntCounter,
 }
-pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
+    SecondaryModeMetrics {
     upload_heatmap: register_int_counter!(
         "pageserver_secondary_upload_heatmap",
         "Number of heatmaps written to remote storage by attached tenants"
@@ -1536,7 +1548,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
     .expect("failed to define a metric"),
     download_heatmap: register_int_counter!(
         "pageserver_secondary_download_heatmap",
-        "Number of downloads of heatmaps by secondary mode locations"
+        "Number of downloads of heatmaps by secondary mode locations, including when it hasn't changed"
     )
     .expect("failed to define a metric"),
     download_layer: register_int_counter!(
@@ -1544,6 +1556,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
         "Number of downloads of layers by secondary mode locations"
     )
     .expect("failed to define a metric"),
+}
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1710,6 +1723,43 @@ macro_rules! redo_bytes_histogram_count_buckets {
     };
 }
 
+pub(crate) struct WalIngestMetrics {
+    pub(crate) bytes_received: IntCounter,
+    pub(crate) records_received: IntCounter,
+    pub(crate) records_committed: IntCounter,
+    pub(crate) records_filtered: IntCounter,
+    pub(crate) time_spent_on_ingest: Histogram,
+}
+
+pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
+    bytes_received: register_int_counter!(
+        "pageserver_wal_ingest_bytes_received",
+        "Bytes of WAL ingested from safekeepers",
+    )
+    .unwrap(),
+    records_received: register_int_counter!(
+        "pageserver_wal_ingest_records_received",
+        "Number of WAL records received from safekeepers"
+    )
+    .expect("failed to define a metric"),
+    records_committed: register_int_counter!(
+        "pageserver_wal_ingest_records_committed",
+        "Number of WAL records which resulted in writes to pageserver storage"
+    )
+    .expect("failed to define a metric"),
+    records_filtered: register_int_counter!(
+        "pageserver_wal_ingest_records_filtered",
+        "Number of WAL records filtered out due to sharding"
+    )
+    .expect("failed to define a metric"),
+    time_spent_on_ingest: register_histogram!(
+        "pageserver_wal_ingest_put_value_seconds",
+        "Actual time spent on ingesting a record",
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric"),
+});
+
 pub(crate) static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_seconds",
@@ -1819,6 +1869,29 @@ impl Default for WalRedoProcessCounters {
 pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
     Lazy::new(WalRedoProcessCounters::default);
 
+#[cfg(not(test))]
+pub mod wal_redo {
+    use super::*;
+
+    static PROCESS_KIND: Lazy<std::sync::Mutex<UIntGaugeVec>> = Lazy::new(|| {
+        std::sync::Mutex::new(
+            register_uint_gauge_vec!(
+                "pageserver_wal_redo_process_kind",
+                "The configured process kind for walredo",
+                &["kind"],
+            )
+            .unwrap(),
+        )
+    });
+
+    pub fn set_process_kind_metric(kind: crate::walredo::ProcessKind) {
+        // use guard to avoid races around the next two steps
+        let guard = PROCESS_KIND.lock().unwrap();
+        guard.reset();
+        guard.with_label_values(&[&format!("{kind}")]).set(1);
+    }
+}
+
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
@@ -1839,6 +1912,22 @@ impl StorageTimeMetricsTimer {
         self.metrics.timeline_sum.inc_by(duration);
         self.metrics.timeline_count.inc();
         self.metrics.global_histogram.observe(duration);
+    }
+
+    /// Turns this timer into a timer, which will always record -- usually this means recording
+    /// regardless an early `?` path was taken in a function.
+    pub(crate) fn record_on_drop(self) -> AlwaysRecordingStorageTimeMetricsTimer {
+        AlwaysRecordingStorageTimeMetricsTimer(Some(self))
+    }
+}
+
+pub(crate) struct AlwaysRecordingStorageTimeMetricsTimer(Option<StorageTimeMetricsTimer>);
+
+impl Drop for AlwaysRecordingStorageTimeMetricsTimer {
+    fn drop(&mut self) {
+        if let Some(inner) = self.0.take() {
+            inner.stop_and_record();
+        }
     }
 }
 
@@ -1900,6 +1989,7 @@ pub(crate) struct TimelineMetrics {
     pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
+    pub update_gc_info_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -1960,6 +2050,12 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
+        let update_gc_info_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::UpdateGcInfo,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -2002,6 +2098,7 @@ impl TimelineMetrics {
             logical_size_histo,
             imitate_logical_size_histo,
             garbage_collect_histo,
+            update_gc_info_histo,
             load_layer_map_histo,
             last_record_gauge,
             resident_physical_size_gauge,
@@ -2746,7 +2843,8 @@ pub fn preinitialize_metrics() {
 
     // histograms
     [
-        &READ_NUM_FS_LAYERS,
+        &READ_NUM_LAYERS_VISITED,
+        &VEC_READ_NUM_LAYERS_VISITED,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
