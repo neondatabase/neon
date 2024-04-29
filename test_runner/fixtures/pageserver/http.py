@@ -828,7 +828,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         params = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
-        res = self.post(
+        res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
             params=params,
         )

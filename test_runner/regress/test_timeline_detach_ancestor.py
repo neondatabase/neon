@@ -1,18 +1,18 @@
 import enum
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
-from queue import Queue, Empty
+from queue import Empty, Queue
 from threading import Barrier
+from typing import List
 
 import pytest
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
+from fixtures.pageserver.http import HistoricLayerInfo
 from fixtures.pageserver.utils import wait_timeline_detail_404
 from fixtures.types import Lsn, TimelineId
-from fixtures.log_helper import log
 
 
 def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
@@ -59,11 +59,7 @@ def test_ancestor_detach_branched_from(
     # TODO: parametrize; currently unimplemented over at pageserver
     write_to_branch_first = True
 
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "gc_period": "0s",
-        }
-    )
+    env = neon_env_builder.init_start()
 
     client = env.pageserver.http_client()
 
@@ -203,11 +199,7 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
     # TODO: support not yet implemented for these
     write_to_branch_first = True
 
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "gc_period": "0s",
-        }
-    )
+    env = neon_env_builder.init_start()
 
     env.pageserver.allowed_errors.append(
         ".*initial size calculation failed: downloading failed, possibly for shutdown"
@@ -304,11 +296,7 @@ def test_detached_receives_flushes_while_being_detached(
     """
     write_to_branch_first = True
 
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "gc_period": "0s",
-        },
-    )
+    env = neon_env_builder.init_start()
 
     client = env.pageserver.http_client()
 
@@ -341,7 +329,6 @@ def test_detached_receives_flushes_while_being_detached(
         client.timeline_checkpoint(env.initial_tenant, timeline_id)
         log.info("completed {write_to_branch_first=}")
 
-
     def small_txs(ep, queue: Queue[str], barrier):
         extra_rows = 0
 
@@ -358,7 +345,9 @@ def test_detached_receives_flushes_while_being_detached(
                     barrier = None
 
                 cursor = conn.cursor()
-                cursor.execute("INSERT INTO foo(i, aux) VALUES (1, 'more info!! this is a long string' || 1);")
+                cursor.execute(
+                    "INSERT INTO foo(i, aux) VALUES (1, 'more info!! this is a long string' || 1);"
+                )
                 extra_rows += 1
         return extra_rows
 
