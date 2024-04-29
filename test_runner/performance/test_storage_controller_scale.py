@@ -141,16 +141,22 @@ def test_storage_controller_many_tenants(
         for f in futs:
             f.result()
 
-    check_memory()
+    # Consistency check is safe here: all the previous operations waited for reconcile before completing
     env.storage_controller.consistency_check()
+    check_memory()
 
+    # This loop waits for reconcile_all to indicate no pending work, and then calls it once more to time
+    # how long the call takes when idle: this iterates over shards while doing no I/O and should be reliably fast: if
+    # it isn't, that's a sign that we have made some algorithmic mistake (e.g. O(N**2) scheduling)
+    #
+    # We do not require that the system is quiescent already here, although at present in this point in the test
+    # that may be the case.
     while True:
         t1 = time.time()
         reconcilers = env.storage_controller.reconcile_all()
         if reconcilers == 0:
             # Time how long a no-op background reconcile takes: this measures how long it takes to
-            # loop over all the shards looking for work to do.  This does no I/O and should be reliably fast: if
-            # it isn't, that's a sign that we have made some algorithmic mistake (e.g. O(N**2) scheduling)
+            # loop over all the shards looking for work to do.
             runtime = time.time() - t1
             log.info(f"No-op call to reconcile_all took {runtime}s")
             assert runtime < 1
@@ -166,16 +172,20 @@ def test_storage_controller_many_tenants(
     readiness_period = env.storage_controller.wait_until_ready()
     assert readiness_period < 5
 
-    check_memory()
+    # Consistency check is safe here: the storage controller's restart should not have caused any reconcilers
+    # to run, as it was in a stable state before restart.  If it did, that's a bug.
     env.storage_controller.consistency_check()
+    check_memory()
 
     # Restart pageservers: this exercises the /re-attach API
     for pageserver in env.pageservers:
         pageserver.stop()
         pageserver.start()
 
-    check_memory()
+    # Consistency check is safe here: restarting pageservers should not have caused any Reconcilers to spawn,
+    # as they were not offline long enough to trigger any scheduling changes.
     env.storage_controller.consistency_check()
+    check_memory()
 
     # Stop the storage controller before tearing down fixtures, because it otherwise might log
     # errors trying to call our `ComputeReconfigure`.
