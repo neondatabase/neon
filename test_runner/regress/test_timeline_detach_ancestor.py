@@ -384,7 +384,9 @@ def test_detached_receives_flushes_while_being_detached(
     with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
 
-    env.pageserver.allowed_errors.append("initial size calculation failed: downloading failed, possibly for shutdown")
+    env.pageserver.allowed_errors.append(
+        "initial size calculation failed: downloading failed, possibly for shutdown"
+    )
 
 
 # TODO:
