@@ -3609,6 +3609,13 @@ impl Service {
                     }
                 }
 
+                // Ensure shard still complies with its policy (e.g. number of secondaries)
+                if let Err(e) = shard.schedule(scheduler, &mut ScheduleContext::default()) {
+                    // This might happen if we are migrating and there are not enough nodes for
+                    // secondaries, for example
+                    tracing::warn!("Scheduling error during migration: {e}");
+                }
+
                 tracing::info!("Migrating: new intent {:?}", shard.intent);
                 shard.sequence = shard.sequence.next();
             }
