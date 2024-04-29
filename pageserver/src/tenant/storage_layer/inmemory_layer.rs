@@ -401,7 +401,7 @@ impl InMemoryLayer {
             }
         }
 
-        let keyspace_size = keyspace.total_size();
+        let keyspace_size = keyspace.total_raw_size();
 
         let mut completed_keys = HashSet::new();
         while completed_keys.len() < keyspace_size && !planned_block_reads.is_empty() {

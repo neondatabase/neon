@@ -263,7 +263,10 @@ where
                 .timeline
                 .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
                 .await?
-                .partition(Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64);
+                .partition(
+                    self.timeline.get_shard_identity(),
+                    Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+                );
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
 
