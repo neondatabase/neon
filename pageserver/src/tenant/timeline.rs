@@ -955,7 +955,7 @@ impl Timeline {
             return Err(GetVectoredError::InvalidLsn(lsn));
         }
 
-        let key_count = keyspace.total_size().try_into().unwrap();
+        let key_count = keyspace.total_raw_size().try_into().unwrap();
         if key_count > Timeline::MAX_GET_VECTORED_KEYS {
             return Err(GetVectoredError::Oversized(key_count));
         }
@@ -1095,7 +1095,7 @@ impl Timeline {
         mut reconstruct_state: ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let get_kind = if keyspace.total_size() == 1 {
+        let get_kind = if keyspace.total_raw_size() == 1 {
             GetKind::Singular
         } else {
             GetKind::Vectored
@@ -3228,7 +3228,7 @@ impl Timeline {
                 }
             }
 
-            if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
+            if keyspace.total_raw_size() == 0 || timeline.ancestor_timeline.is_none() {
                 break;
             }
 
@@ -3241,7 +3241,7 @@ impl Timeline {
             timeline = &*timeline_owned;
         }
 
-        if keyspace.total_size() != 0 {
+        if keyspace.total_raw_size() != 0 {
             return Err(GetVectoredError::MissingKey(keyspace.start().unwrap()));
         }
 
@@ -3979,7 +3979,7 @@ impl Timeline {
         }
 
         let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
-        let dense_partitioning = dense_ks.partition(partition_size);
+        let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
         let sparse_partitioning = SparseKeyPartitioning {
             parts: vec![sparse_ks],
         }; // no partitioning for metadata keys for now
@@ -4141,7 +4141,7 @@ impl Timeline {
                     key = key.next();
 
                     // Maybe flush `key_rest_accum`
-                    if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
+                    if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
                         || last_key_in_range
                     {
                         let results = self

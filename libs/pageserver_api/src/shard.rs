@@ -451,7 +451,7 @@ impl ShardIdentity {
     /// An identity with number=0 count=0 is a "none" identity, which represents legacy
     /// tenants.  Modern single-shard tenants should not use this: they should
     /// have number=0 count=1.
-    pub fn unsharded() -> Self {
+    pub const fn unsharded() -> Self {
         Self {
             number: ShardNumber(0),
             count: ShardCount(0),
