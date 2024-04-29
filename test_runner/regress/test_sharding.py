@@ -177,6 +177,67 @@ def test_sharding_split_unsharded(
     env.storage_controller.consistency_check()
 
 
+def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that after a split, we clean up parent layer data in the child shards via compaction.
+    """
+    TENANT_CONF = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": f"{128 * 1024}",
+        "compaction_threshold": "1",
+        "compaction_target_size": f"{128 * 1024}",
+        # no PITR horizon, we specify the horizon when we request on-demand GC
+        "pitr_interval": "3600s",
+        # disable background compaction and GC. We invoke it manually when we want it to happen.
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        # create image layers eagerly, so that GC can remove some layers
+        "image_creation_threshold": "1",
+        "image_layer_creation_check_threshold": "0",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Check that we created with an unsharded TenantShardId: this is the default,
+    # but check it in case we change the default in future
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 0)) is not None
+
+    workload = Workload(env, tenant_id, timeline_id, branch_name="main")
+    workload.init()
+    workload.write_rows(256)
+    workload.validate()
+    workload.stop()
+
+    # Split one shard into two
+    shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=2)
+
+    # Check we got the shard IDs we expected
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 2)) is not None
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 1, 2)) is not None
+
+    workload.validate()
+    workload.stop()
+
+    env.storage_controller.consistency_check()
+
+    # Cleanup part 1: while layers are still in PITR window, we should only drop layers that are fully redundant
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+
+        # Invoke compaction: this should drop any layers that don't overlap with the shard's key stripes
+        detail_before = ps.http_client().timeline_detail(shard, timeline_id)
+        ps.http_client().timeline_compact(shard, timeline_id)
+        detail_after = ps.http_client().timeline_detail(shard, timeline_id)
+
+        # Physical size should shrink because some layers have been dropped
+        assert detail_after["current_physical_size"] < detail_before["current_physical_size"]
+
+    # Compaction shouldn't make anything unreadable
+    workload.validate()
+
+
 def test_sharding_split_smoke(
     neon_env_builder: NeonEnvBuilder,
 ):
