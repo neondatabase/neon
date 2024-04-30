@@ -1319,6 +1319,7 @@ dependencies = [
  "git-version",
  "hex",
  "humantime",
+ "humantime-serde",
  "hyper 0.14.26",
  "nix 0.27.1",
  "once_cell",
