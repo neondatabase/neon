@@ -130,6 +130,7 @@ pub struct PageServerConf {
     pub(crate) virtual_file_io_engine: Option<String>,
     pub(crate) get_vectored_impl: Option<String>,
     pub(crate) get_impl: Option<String>,
+    pub(crate) validate_vectored_get: Option<bool>,
 }
 
 impl Default for PageServerConf {
@@ -143,6 +144,7 @@ impl Default for PageServerConf {
             virtual_file_io_engine: None,
             get_vectored_impl: None,
             get_impl: None,
+            validate_vectored_get: None,
         }
     }
 }
