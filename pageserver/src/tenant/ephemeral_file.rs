@@ -164,7 +164,7 @@ impl EphemeralFile {
                         let (mutable_tail, res) = self
                             .ephemeral_file
                             .file
-                            .write_all_at(mutable_tail, self.blknum as u64 * PAGE_SZ as u64)
+                            .write_all_at(mutable_tail, self.blknum as u64 * PAGE_SZ as u64, ctx)
                             .await;
                         // TODO: If we panic before we can put the mutable_tail back, subsequent calls will fail.
                         // I.e., the IO isn't retryable if we panic.

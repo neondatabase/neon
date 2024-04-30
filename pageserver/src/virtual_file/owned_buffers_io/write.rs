@@ -1,12 +1,15 @@
 use bytes::BytesMut;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
+use crate::context::RequestContext;
+
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 pub trait OwnedAsyncWriter {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
+        ctx: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)>;
 }
 
@@ -46,20 +49,25 @@ where
         }
     }
 
-    pub async fn flush_and_into_inner(mut self) -> std::io::Result<W> {
-        self.flush().await?;
+    pub async fn flush_and_into_inner(mut self, ctx: &RequestContext) -> std::io::Result<W> {
+        self.flush(ctx).await?;
+
         let Self { buf, writer } = self;
         assert!(buf.is_some());
         Ok(writer)
     }
 
-    pub async fn write_buffered<B: IoBuf>(&mut self, chunk: Slice<B>) -> std::io::Result<()>
+    pub async fn write_buffered<B: IoBuf>(
+        &mut self,
+        chunk: Slice<B>,
+        ctx: &RequestContext,
+    ) -> std::io::Result<()>
     where
         B: IoBuf + Send,
     {
         // avoid memcpy for the middle of the chunk
         if chunk.len() >= BUFFER_SIZE {
-            self.flush().await?;
+            self.flush(ctx).await?;
             // do a big write, bypassing `buf`
             assert_eq!(
                 self.buf
@@ -69,7 +77,7 @@ where
                 0
             );
             let chunk_len = chunk.len();
-            let (nwritten, chunk) = self.writer.write_all(chunk).await?;
+            let (nwritten, chunk) = self.writer.write_all(chunk, ctx).await?;
             assert_eq!(nwritten, chunk_len);
             drop(chunk);
             return Ok(());
@@ -86,21 +94,21 @@ where
             chunk = &chunk[n..];
             if buf.len() >= BUFFER_SIZE {
                 assert_eq!(buf.len(), BUFFER_SIZE);
-                self.flush().await?;
+                self.flush(ctx).await?;
             }
         }
         assert!(chunk.is_empty(), "by now we should have drained the chunk");
         Ok(())
     }
 
-    async fn flush(&mut self) -> std::io::Result<()> {
+    async fn flush(&mut self, ctx: &RequestContext) -> std::io::Result<()> {
         let buf = self.buf.take().expect("must not use after an error");
         if buf.is_empty() {
             self.buf = Some(buf);
             return std::io::Result::Ok(());
         }
         let buf_len = buf.len();
-        let (nwritten, mut buf) = self.writer.write_all(buf).await?;
+        let (nwritten, mut buf) = self.writer.write_all(buf, ctx).await?;
         assert_eq!(nwritten, buf_len);
         buf.clear();
         self.buf = Some(buf);
@@ -112,6 +120,7 @@ impl OwnedAsyncWriter for Vec<u8> {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
+        _: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
@@ -126,6 +135,8 @@ impl OwnedAsyncWriter for Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::{DownloadBehavior, RequestContext};
+    use crate::task_mgr::TaskKind;
 
     #[derive(Default)]
     struct RecorderWriter {
@@ -135,6 +146,7 @@ mod tests {
         async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
             &mut self,
             buf: B,
+            _: &RequestContext,
         ) -> std::io::Result<(usize, B::Buf)> {
             let nbytes = buf.bytes_init();
             if nbytes == 0 {
@@ -147,10 +159,14 @@ mod tests {
         }
     }
 
+    fn test_ctx() -> RequestContext {
+        RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
+    }
+
     macro_rules! write {
         ($writer:ident, $data:literal) => {{
             $writer
-                .write_buffered(::bytes::Bytes::from_static($data).slice_full())
+                .write_buffered(::bytes::Bytes::from_static($data).slice_full(), &test_ctx())
                 .await?;
         }};
     }
@@ -164,7 +180,7 @@ mod tests {
         write!(writer, b"c");
         write!(writer, b"d");
         write!(writer, b"e");
-        let recorder = writer.flush_and_into_inner().await?;
+        let recorder = writer.flush_and_into_inner(&test_ctx()).await?;
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"ab"), Vec::from(b"cd"), Vec::from(b"e")]
@@ -180,7 +196,7 @@ mod tests {
         write!(writer, b"de");
         write!(writer, b"");
         write!(writer, b"fghijk");
-        let recorder = writer.flush_and_into_inner().await?;
+        let recorder = writer.flush_and_into_inner(&test_ctx()).await?;
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"abc"), Vec::from(b"de"), Vec::from(b"fghijk")]
@@ -196,7 +212,7 @@ mod tests {
         write!(writer, b"bc");
         write!(writer, b"d");
         write!(writer, b"e");
-        let recorder = writer.flush_and_into_inner().await?;
+        let recorder = writer.flush_and_into_inner(&test_ctx()).await?;
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"a"), Vec::from(b"bc"), Vec::from(b"de")]

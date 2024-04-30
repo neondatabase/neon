@@ -1,4 +1,7 @@
-use crate::virtual_file::{owned_buffers_io::write::OwnedAsyncWriter, VirtualFile};
+use crate::{
+    context::RequestContext,
+    virtual_file::{owned_buffers_io::write::OwnedAsyncWriter, VirtualFile},
+};
 use tokio_epoll_uring::{BoundedBuf, IoBuf};
 
 pub struct Writer {
@@ -25,8 +28,9 @@ impl OwnedAsyncWriter for Writer {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
+        ctx: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
-        let (buf, res) = self.dst.write_all(buf).await;
+        let (buf, res) = self.dst.write_all(buf, ctx).await;
         let nwritten = res?;
         self.bytes_amount += u64::try_from(nwritten).unwrap();
         Ok((nwritten, buf))
