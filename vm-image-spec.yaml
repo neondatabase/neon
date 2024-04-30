@@ -273,7 +273,7 @@ merge: |
   RUN set -e \
       && apt update \
       && apt install --no-install-recommends -y \
-             sudo
+             sudo \
       && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
   COPY compute_ctl-resize-swap /etc/sudoers.d/compute_ctl-resize-swap
 
