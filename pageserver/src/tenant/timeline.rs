@@ -1076,7 +1076,7 @@ impl Timeline {
         // We should generalize this into Keyspace::contains in the future.
         for range in &keyspace.ranges {
             if range.start.field1 < METADATA_KEY_BEGIN_PREFIX
-                || range.end.field1 >= METADATA_KEY_END_PREFIX
+                || range.end.field1 > METADATA_KEY_END_PREFIX
             {
                 return Err(GetVectoredError::Other(anyhow::anyhow!(
                     "only metadata keyspace can be scanned"
