@@ -152,4 +152,21 @@ mod tests {
             encode_aux_file_key("other_file_not_supported").to_string()
         );
     }
+
+    #[test]
+    fn test_value_encoding() {
+        let files = vec![
+            ("pg_logical/1.file", "1111".as_bytes()),
+            ("pg_logical/2.file", "2222".as_bytes()),
+        ];
+        assert_eq!(
+            files,
+            decode_file_value(&encode_file_value(&files).unwrap()).unwrap()
+        );
+        let files = vec![];
+        assert_eq!(
+            files,
+            decode_file_value(&encode_file_value(&files).unwrap()).unwrap()
+        );
+    }
 }
