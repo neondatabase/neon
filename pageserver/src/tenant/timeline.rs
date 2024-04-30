@@ -2942,7 +2942,7 @@ trait TraversalLayerExt {
 
 impl TraversalLayerExt for Layer {
     fn traversal_id(&self) -> TraversalId {
-        Arc::clone(self.local_path_str())
+        Arc::clone(self.debug_str())
     }
 }
 
