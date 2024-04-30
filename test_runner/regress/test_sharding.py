@@ -221,7 +221,7 @@ def test_sharding_split_smoke(
     )
     env.storage_controller.allowed_errors.extend(
         [
-            "*.Lock on ShardSplit was held for.*",
+            ".*Lock on ShardSplit was held for.*",
         ]
     )
 
@@ -936,7 +936,7 @@ def test_sharding_split_failures(
             # While parent shard's client is stopped during split, flush loop updating LSNs will emit this warning
             ".*Failed to schedule metadata upload after updating disk_consistent_lsn.*",
             # Ignore warning when locks are being held for long time
-            ".*Lock on ShardSplit was held.*",
+            ".*Lock on ShardSplit was held for.*",
             ".*Operation ShardSplit on key.*",
         ]
     )
