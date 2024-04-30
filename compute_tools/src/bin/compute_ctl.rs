@@ -309,7 +309,8 @@ fn main() -> Result<()> {
         const RESIZE_SWAP_BIN: &str = "/neonvm/bin/resize-swap";
         // use a closure to make error handling easier.
         let result = (|| -> anyhow::Result<()> {
-            let child_result = std::process::Command::new(RESIZE_SWAP_BIN)
+            let child_result = std::process::Command::new("/usr/bin/sudo")
+                .arg(RESIZE_SWAP_BIN)
                 .arg("--once")
                 .arg(size_bytes.to_string())
                 .spawn();

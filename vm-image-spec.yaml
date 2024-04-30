@@ -20,6 +20,11 @@ commands:
 shutdownHook: |
   su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
 files:
+  - filename: compute_ctl-resize-swap
+    content: |
+      # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap,
+      # without requiring entering a password (NOPASSWD), regardless of hostname (ALL)
+      postgres ALL = NOPASSWD: /neonvm/bin/resize-swap
   - filename: pgbouncer.ini
     content: |
       [databases]
@@ -262,6 +267,15 @@ merge: |
          echo '*    - nofile 1048576' >>/etc/security/limits.conf \
       && echo 'root - nofile 1048576' >>/etc/security/limits.conf \
          )
+
+  # Allow postgres user (compute_ctl) to run swap resizer.
+  # Need to install sudo in order to allow this.
+  RUN set -e \
+      && apt update \
+      && apt install --no-install-recommends -y \
+             sudo
+      && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+  COPY compute_ctl-resize-swap /etc/sudoers.d/compute_ctl-resize-swap
 
   COPY cgconfig.conf /etc/cgconfig.conf
   COPY pgbouncer.ini /etc/pgbouncer.ini
