@@ -45,10 +45,10 @@ anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
 atomic-take = "1.1.0"
-azure_core = "0.19"
-azure_identity = "0.19"
-azure_storage = "0.19"
-azure_storage_blobs = "0.19"
+azure_core = "0.20"
+azure_identity = "0.20"
+azure_storage = "0.20"
+azure_storage_blobs = "0.20"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
@@ -143,7 +143,7 @@ rustls-split = "0.3"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
 sd-notify = "0.4.1"
-sentry = { version = "0.31", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
+sentry = { version = "0.32", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
