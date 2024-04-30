@@ -678,7 +678,7 @@ impl From<GetVectoredError> for PageReconstructError {
             GetVectoredError::Cancelled => PageReconstructError::Cancelled,
             GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(anyhow!("Invalid LSN")),
             err @ GetVectoredError::Oversized(_) => PageReconstructError::Other(err.into()),
-            err @ GetVectoredError::MissingKey(_) => PageReconstructError::Other(err.into()),
+            GetVectoredError::MissingKey(err) => PageReconstructError::MissingKey(err),
             GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
             GetVectoredError::Other(err) => PageReconstructError::Other(err),
         }
