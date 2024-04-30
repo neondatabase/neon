@@ -277,15 +277,16 @@ pub struct ComputeConnectionLatencyGroup {
     protocol: Protocol,
     cold_start_info: ColdStartInfo,
     outcome: ConnectOutcome,
-    excluded: LatencyExclusions,
+    component: LatencyComponents,
 }
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]
-pub enum LatencyExclusions {
+pub enum LatencyComponents {
     Client,
-    ClientAndCplane,
-    ClientCplaneCompute,
-    ClientCplaneComputeRetry,
+    Cplane,
+    Compute,
+    ComputeRetry,
+    Proxy,
 }
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]
@@ -445,46 +446,52 @@ impl Drop for LatencyTimer {
 
         let metric = &Metrics::get().proxy.compute_connection_latency_seconds;
 
-        // Excluding client communication from the accumulated time.
+        // client only latency
         metric.observe(
             ComputeConnectionLatencyGroup {
                 protocol: self.protocol,
                 cold_start_info: self.cold_start_info,
                 outcome: self.outcome,
-                excluded: LatencyExclusions::Client,
+                component: LatencyComponents::Client,
             },
-            duration
-                .saturating_sub(self.accumulated.client)
-                .as_secs_f64(),
+            self.accumulated.client.as_secs_f64(),
         );
 
-        // Exclude client and cplane communication from the accumulated time.
-        let accumulated_total = self.accumulated.client + self.accumulated.cplane;
+        // cplane only latency
         metric.observe(
             ComputeConnectionLatencyGroup {
                 protocol: self.protocol,
                 cold_start_info: self.cold_start_info,
                 outcome: self.outcome,
-                excluded: LatencyExclusions::ClientAndCplane,
+                component: LatencyComponents::Cplane,
             },
-            duration.saturating_sub(accumulated_total).as_secs_f64(),
+            self.accumulated.cplane.as_secs_f64(),
         );
 
-        // Exclude client cplane, compue communication from the accumulated time.
-        let accumulated_total =
-            self.accumulated.client + self.accumulated.cplane + self.accumulated.compute;
+        // compute connect only latency
         metric.observe(
             ComputeConnectionLatencyGroup {
                 protocol: self.protocol,
                 cold_start_info: self.cold_start_info,
                 outcome: self.outcome,
-                excluded: LatencyExclusions::ClientCplaneCompute,
+                component: LatencyComponents::Compute,
             },
-            duration.saturating_sub(accumulated_total).as_secs_f64(),
+            self.accumulated.compute.as_secs_f64(),
         );
 
-        // Exclude client cplane, compue, retry communication from the accumulated time.
-        let accumulated_total = self.accumulated.client
+        // compute failure retry latency
+        metric.observe(
+            ComputeConnectionLatencyGroup {
+                protocol: self.protocol,
+                cold_start_info: self.cold_start_info,
+                outcome: self.outcome,
+                component: LatencyComponents::ComputeRetry,
+            },
+            self.accumulated.retry.as_secs_f64(),
+        );
+
+        // proxy only latency, removing client+cplane+compute+retry from the total
+        let accumulated = self.accumulated.client
             + self.accumulated.cplane
             + self.accumulated.compute
             + self.accumulated.retry;
@@ -493,9 +500,9 @@ impl Drop for LatencyTimer {
                 protocol: self.protocol,
                 cold_start_info: self.cold_start_info,
                 outcome: self.outcome,
-                excluded: LatencyExclusions::ClientCplaneComputeRetry,
+                component: LatencyComponents::Proxy,
             },
-            duration.saturating_sub(accumulated_total).as_secs_f64(),
+            duration.saturating_sub(accumulated).as_secs_f64(),
         );
     }
 }

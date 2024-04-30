@@ -79,15 +79,19 @@ pub(super) async fn authenticate(
 
     // Give user a URL to spawn a new database.
     info!(parent: &span, "sending the auth URL to the user");
+    let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
     client
         .write_message_noflush(&Be::AuthenticationOk)?
         .write_message_noflush(&Be::CLIENT_ENCODING)?
         .write_message(&Be::NoticeResponse(&greeting))
         .await?;
+    drop(pause);
 
     // Wait for web console response (see `mgmt`).
     info!(parent: &span, "waiting for console's reply...");
+    let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
     let db_info = waiter.await.map_err(LinkAuthError::from)?;
+    drop(pause);
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
