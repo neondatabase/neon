@@ -499,6 +499,7 @@ class NeonEnvBuilder:
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
         self.control_plane_compute_hook_api: Optional[str] = None
+        self.storage_controller_config: Optional[dict[Any, Any]] = None
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
@@ -1021,6 +1022,7 @@ class NeonEnv:
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
         self.pageserver_config_override = config.pageserver_config_override
+        self.storage_controller_config = config.storage_controller_config
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -1065,6 +1067,9 @@ class NeonEnv:
 
         if self.control_plane_compute_hook_api is not None:
             cfg["control_plane_compute_hook_api"] = self.control_plane_compute_hook_api
+
+        if self.storage_controller_config is not None:
+            cfg["storage_controller"] = self.storage_controller_config
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
