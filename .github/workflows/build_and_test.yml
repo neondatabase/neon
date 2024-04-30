@@ -478,6 +478,7 @@ jobs:
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           PAGESERVER_GET_VECTORED_IMPL: vectored
           PAGESERVER_GET_IMPL: vectored
+          PAGESERVER_VALIDATE_VEC_GET: true
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
@@ -557,6 +558,9 @@ jobs:
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          PAGESERVER_GET_VECTORED_IMPL: vectored
+          PAGESERVER_GET_IMPL: vectored
+          PAGESERVER_VALIDATE_VEC_GET: false
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 

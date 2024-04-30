@@ -10,6 +10,9 @@ pub trait ShouldRetry {
             err => err.could_retry(),
         }
     }
+    fn should_retry_database_address(&self) -> bool {
+        true
+    }
 }
 
 impl ShouldRetry for io::Error {
@@ -33,6 +36,21 @@ impl ShouldRetry for tokio_postgres::error::DbError {
                 | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
         )
     }
+    fn should_retry_database_address(&self) -> bool {
+        use tokio_postgres::error::SqlState;
+        // Here are errors that happens after the user successfully authenticated to the database.
+        // TODO: there are pgbouncer errors that should be retried, but they are not listed here.
+        !matches!(
+            self.code(),
+            &SqlState::TOO_MANY_CONNECTIONS
+                | &SqlState::OUT_OF_MEMORY
+                | &SqlState::SYNTAX_ERROR
+                | &SqlState::T_R_SERIALIZATION_FAILURE
+                | &SqlState::INVALID_CATALOG_NAME
+                | &SqlState::INVALID_SCHEMA_NAME
+                | &SqlState::INVALID_PARAMETER_VALUE
+        )
+    }
 }
 
 impl ShouldRetry for tokio_postgres::Error {
@@ -45,6 +63,15 @@ impl ShouldRetry for tokio_postgres::Error {
             false
         }
     }
+    fn should_retry_database_address(&self) -> bool {
+        if let Some(io_err) = self.source().and_then(|x| x.downcast_ref()) {
+            io::Error::should_retry_database_address(io_err)
+        } else if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
+            tokio_postgres::error::DbError::should_retry_database_address(db_err)
+        } else {
+            true
+        }
+    }
 }
 
 impl ShouldRetry for compute::ConnectionError {
@@ -53,6 +80,13 @@ impl ShouldRetry for compute::ConnectionError {
             compute::ConnectionError::Postgres(err) => err.could_retry(),
             compute::ConnectionError::CouldNotConnect(err) => err.could_retry(),
             _ => false,
+        }
+    }
+    fn should_retry_database_address(&self) -> bool {
+        match self {
+            compute::ConnectionError::Postgres(err) => err.should_retry_database_address(),
+            compute::ConnectionError::CouldNotConnect(err) => err.should_retry_database_address(),
+            _ => true,
         }
     }
 }

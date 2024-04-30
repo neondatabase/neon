@@ -17,7 +17,7 @@ use anyhow::{anyhow, ensure, Result};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tracing::*;
@@ -78,10 +78,10 @@ impl std::fmt::Debug for InMemoryLayer {
 }
 
 pub struct InMemoryLayerInner {
-    /// All versions of all pages in the layer are kept here.  Indexed
+    /// All versions of all pages in the layer are kept here. Indexed
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
-    index: HashMap<Key, VecMap<Lsn, u64>>,
+    index: BTreeMap<Key, VecMap<Lsn, u64>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
@@ -384,29 +384,24 @@ impl InMemoryLayer {
         let mut planned_block_reads = BinaryHeap::new();
 
         for range in keyspace.ranges.iter() {
-            let mut key = range.start;
-            while key < range.end {
-                if let Some(vec_map) = inner.index.get(&key) {
-                    let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
-                        Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
-                        None => self.start_lsn..end_lsn,
-                    };
+            for (key, vec_map) in inner.index.range(range.start..range.end) {
+                let lsn_range = match reconstruct_state.get_cached_lsn(key) {
+                    Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
+                    None => self.start_lsn..end_lsn,
+                };
 
-                    let slice = vec_map.slice_range(lsn_range);
-                    for (entry_lsn, pos) in slice.iter().rev() {
-                        planned_block_reads.push(BlockRead {
-                            key,
-                            lsn: *entry_lsn,
-                            block_offset: *pos,
-                        });
-                    }
+                let slice = vec_map.slice_range(lsn_range);
+                for (entry_lsn, pos) in slice.iter().rev() {
+                    planned_block_reads.push(BlockRead {
+                        key: *key,
+                        lsn: *entry_lsn,
+                        block_offset: *pos,
+                    });
                 }
-
-                key = key.next();
             }
         }
 
-        let keyspace_size = keyspace.total_size();
+        let keyspace_size = keyspace.total_raw_size();
 
         let mut completed_keys = HashSet::new();
         while completed_keys.len() < keyspace_size && !planned_block_reads.is_empty() {
@@ -499,7 +494,7 @@ impl InMemoryLayer {
             end_lsn: OnceLock::new(),
             opened_at: Instant::now(),
             inner: RwLock::new(InMemoryLayerInner {
-                index: HashMap::new(),
+                index: BTreeMap::new(),
                 file,
                 resource_units: GlobalResourceUnits::new(),
             }),
@@ -636,26 +631,17 @@ impl InMemoryLayer {
 
         let cursor = inner.file.block_cursor();
 
-        // Sort the keys because delta layer writer expects them sorted.
-        //
-        // NOTE: this sort can take up significant time if the layer has millions of
-        //       keys. To speed up all the comparisons we convert the key to i128 and
-        //       keep the value as a reference.
-        let mut keys: Vec<_> = inner.index.iter().map(|(k, m)| (k.to_i128(), m)).collect();
-        keys.sort_unstable_by_key(|k| k.0);
-
         let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
             .build();
-        for (key, vec_map) in keys.iter() {
-            let key = Key::from_i128(*key);
+        for (key, vec_map) in inner.index.iter() {
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
                 let will_init = Value::des(&buf)?.will_init();
                 let res;
                 (buf, res) = delta_layer_writer
-                    .put_value_bytes(key, *lsn, buf, will_init)
+                    .put_value_bytes(*key, *lsn, buf, will_init)
                     .await;
                 res?;
             }

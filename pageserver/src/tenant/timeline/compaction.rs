@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context};
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
 use utils::id::TimelineId;
@@ -830,6 +830,10 @@ impl CompactionJobExecutor for TimelineAdaptor {
     type ImageLayer = ResidentImageLayer;
 
     type RequestContext = crate::context::RequestContext;
+
+    fn get_shard_identity(&self) -> &ShardIdentity {
+        self.timeline.get_shard_identity()
+    }
 
     async fn get_layers(
         &mut self,

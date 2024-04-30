@@ -252,8 +252,11 @@ class S3Storage:
 
         log.info(f"deleted {cnt} objects from remote storage")
 
+    def tenants_path(self) -> str:
+        return f"{self.prefix_in_bucket}/tenants"
+
     def tenant_path(self, tenant_id: TenantId) -> str:
-        return f"{self.prefix_in_bucket}/tenants/{tenant_id}"
+        return f"{self.tenants_path()}/{tenant_id}"
 
     def heatmap_key(self, tenant_id: TenantId) -> str:
         return f"{self.tenant_path(tenant_id)}/{TENANT_HEATMAP_FILE_NAME}"
@@ -261,6 +264,9 @@ class S3Storage:
     def heatmap_content(self, tenant_id: TenantId):
         r = self.client.get_object(Bucket=self.bucket_name, Key=self.heatmap_key(tenant_id))
         return json.loads(r["Body"].read().decode("utf-8"))
+
+    def mock_remote_tenant_path(self, tenant_id: TenantId):
+        assert self.real is False
 
 
 RemoteStorage = Union[LocalFsStorage, S3Storage]

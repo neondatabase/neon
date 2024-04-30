@@ -25,6 +25,7 @@ async-stream.workspace = true
 tokio-stream.workspace = true
 futures-util.workspace = true
 itertools.workspace = true
+camino.workspace = true
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }
