@@ -66,6 +66,10 @@ const AUX_FILE_ENCODING_VERSION: u8 = 0x01;
 
 pub fn decode_file_value(val: &[u8]) -> anyhow::Result<Vec<(&str, &[u8])>> {
     let mut ptr = val;
+    if ptr.is_empty() {
+        // empty value = no files
+        return Ok(Vec::new());
+    }
     assert_eq!(
         ptr.get_u8(),
         AUX_FILE_ENCODING_VERSION,
@@ -87,6 +91,10 @@ pub fn decode_file_value(val: &[u8]) -> anyhow::Result<Vec<(&str, &[u8])>> {
 }
 
 pub fn encode_file_value(files: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
+    if files.is_empty() {
+        // no files = empty value
+        return Ok(Vec::new());
+    }
     let mut encoded = vec![];
     encoded.put_u8(AUX_FILE_ENCODING_VERSION);
     for (path, content) in files {
