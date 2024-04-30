@@ -229,6 +229,7 @@ pub(super) async fn connection_manager_loop_step(
             } => debug!("Waking up for the next retry after waiting for {time_until_next_retry:?}"),
 
             Some(()) = async {
+                // Reminder: this match arm needs to be cancellation-safe.
                 // Calculating time needed to wait until sending the next discovery request.
                 // Current implementation is conservative and sends discovery requests only when there are no candidates.
 
