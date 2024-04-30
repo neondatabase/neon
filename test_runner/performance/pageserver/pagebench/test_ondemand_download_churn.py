@@ -83,8 +83,7 @@ def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     client = env.pageserver.http_client()
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as ep:
-        if os.getenv("CI", "false") == "true":
-            pg_bin.run_capture(["pgbench", "-i", "-s200", ep.connstr()])
+        pg_bin.run_capture(["pgbench", "-i", "-s200", ep.connstr()])
         wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
         client.timeline_checkpoint(tenant_id, timeline_id)
         client.timeline_compact(tenant_id, timeline_id)
