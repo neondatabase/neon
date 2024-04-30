@@ -17,13 +17,13 @@ use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{AUX_FILES_KEY, NON_INHERITED_RANGE},
-    keyspace::KeySpaceAccum,
+    keyspace::{KeySpaceAccum, ShardedRange},
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
         EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
     },
     reltag::BlockNumber,
-    shard::{ShardIdentity, ShardNumber, TenantShardId},
+    shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId},
 };
 use rand::Rng;
 use serde_with::serde_as;
@@ -4517,6 +4517,28 @@ impl Timeline {
         let layers = guard.layer_map();
         'outer: for l in layers.iter_historic_layers() {
             result.layers_total += 1;
+
+            // 0. Is this layer a relic from a shard split?
+            //    (Do this check first because irrespective of later logic regarding LSNs, this
+            //    layer should be dropped.)
+            if self.shard_identity.count >= ShardCount::new(2) {
+                // We are a sharded tenant
+                let layer = guard.get_from_desc(&l);
+                if layer.metadata().shard != self.tenant_shard_id.to_index() {
+                    // This is an ancestral layer
+                    let sharded_range = ShardedRange::new(l.get_key_range(), &self.shard_identity);
+                    if sharded_range.page_count() == 0 {
+                        // This ancestral layer only covers keys that belong to other shards
+                        info!(
+                            "garbate collecting layer {} ({:?}) after shard split",
+                            l.filename(),
+                            l.get_key_range()
+                        );
+                        layers_to_remove.push(l);
+                        continue;
+                    }
+                }
+            }
 
             // 1. Is it newer than GC horizon cutoff point?
             if l.get_lsn_range().end > horizon_cutoff {
