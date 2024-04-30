@@ -240,7 +240,11 @@ pub(super) async fn connection_manager_loop_step(
 
                 // Waiting for an active wait_lsn request.
                 while wait_lsn_status.borrow().is_none() {
-                    wait_lsn_status.changed().await.ok();
+                    if let Err(_) = wait_lsn_status.changed().await {
+                        // wait_lsn_status channel was closed, exiting
+                        warn!("wait_lsn_status channel was closed in connection_manager_loop_step");
+                        return None;
+                    }
                 }
 
                 // All preconditions met, preparing to send a discovery request.
@@ -688,9 +692,13 @@ impl ConnectionManagerState {
         let mut is_discovery = false;
         let timeline_update = match typed_msg.r#type() {
             MessageType::SafekeeperTimelineInfo => {
-                let info = typed_msg
-                    .safekeeper_timeline_info
-                    .expect("proto type mismatch from broker message");
+                let info = match typed_msg.safekeeper_timeline_info {
+                    Some(info) => info,
+                    None => {
+                        warn!("bad proto message from broker: no safekeeper_timeline_info");
+                        return;
+                    }
+                };
                 SafekeeperDiscoveryResponse {
                     safekeeper_id: info.safekeeper_id,
                     tenant_timeline_id: info.tenant_timeline_id,
@@ -701,9 +709,13 @@ impl ConnectionManagerState {
             }
             MessageType::SafekeeperDiscoveryResponse => {
                 is_discovery = true;
-                typed_msg
-                    .safekeeper_discovery_response
-                    .expect("proto type mismatch from broker message")
+                match typed_msg.safekeeper_discovery_response {
+                    Some(response) => response,
+                    None => {
+                        warn!("bad proto message from broker: no safekeeper_discovery_response");
+                        return;
+                    }
+                }
             }
             _ => {
                 // unexpected message
