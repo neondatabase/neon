@@ -499,6 +499,7 @@ class NeonEnvBuilder:
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
         self.control_plane_compute_hook_api: Optional[str] = None
+        self.storage_controller_config: Optional[dict[Any, Any]] = None
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
@@ -1021,6 +1022,7 @@ class NeonEnv:
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
         self.pageserver_config_override = config.pageserver_config_override
+        self.storage_controller_config = config.storage_controller_config
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -1065,6 +1067,9 @@ class NeonEnv:
 
         if self.control_plane_compute_hook_api is not None:
             cfg["control_plane_compute_hook_api"] = self.control_plane_compute_hook_api
+
+        if self.storage_controller_config is not None:
+            cfg["storage_controller"] = self.storage_controller_config
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -1134,12 +1139,9 @@ class NeonEnv:
         # bounce through retries on startup
         self.storage_controller.start()
 
-        def storage_controller_ready():
-            assert self.storage_controller.ready() is True
-
         # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
-        wait_until(30, 1, storage_controller_ready)
+        self.storage_controller.wait_until_ready()
 
         # Start up broker, pageserver and all safekeepers
         futs = []
@@ -2043,6 +2045,15 @@ class NeonStorageController(MetricsGetter):
         else:
             raise RuntimeError(f"Unexpected status {status} from readiness endpoint")
 
+    def wait_until_ready(self):
+        t1 = time.time()
+
+        def storage_controller_ready():
+            assert self.ready() is True
+
+        wait_until(30, 1, storage_controller_ready)
+        return time.time() - t1
+
     def attach_hook_issue(
         self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
     ) -> int:
@@ -2130,7 +2141,7 @@ class NeonStorageController(MetricsGetter):
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[Dict[Any, Any]] = None,
-        placement_policy: Optional[str] = None,
+        placement_policy: Optional[Union[Dict[Any, Any] | str]] = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters
@@ -2240,10 +2251,21 @@ class NeonStorageController(MetricsGetter):
     def reconcile_until_idle(self, timeout_secs=30):
         start_at = time.time()
         n = 1
+        delay_sec = 0.5
+        delay_max = 5
         while n > 0:
             n = self.reconcile_all()
-            if time.time() - start_at > timeout_secs:
+            if n == 0:
+                break
+            elif time.time() - start_at > timeout_secs:
                 raise RuntimeError("Timeout in reconcile_until_idle")
+            else:
+                # Don't call again right away: if we're waiting for many reconciles that
+                # are blocked on the concurrency limit, it slows things down to call
+                # reconcile_all frequently.
+                time.sleep(delay_sec)
+                delay_sec *= 2
+                delay_sec = min(delay_sec, delay_max)
 
     def consistency_check(self):
         """

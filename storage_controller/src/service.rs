@@ -90,7 +90,11 @@ const INITIAL_GENERATION: Generation = Generation::new(0);
 /// up on unresponsive pageservers and proceed.
 pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
+/// How long a node may be unresponsive to heartbeats before we declare it offline.
+/// This must be long enough to cover node restarts as well as normal operations: in future
+/// it should be separated into distinct timeouts for startup vs. normal operation
+/// (`<https://github.com/neondatabase/neon/issues/7552>`)
+pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);
 
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 
@@ -4251,7 +4255,9 @@ impl Service {
     /// Check all tenants for pending reconciliation work, and reconcile those in need.
     /// Additionally, reschedule tenants that require it.
     ///
-    /// Returns how many reconciliation tasks were started
+    /// Returns how many reconciliation tasks were started, or `1` if no reconciles were
+    /// spawned but some _would_ have been spawned if `reconciler_concurrency` units where
+    /// available.  A return value of 0 indicates that everything is fully reconciled already.
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, _scheduler) = locked.parts_mut();
@@ -4266,7 +4272,11 @@ impl Service {
             }
 
             // Skip checking if this shard is already enqueued for reconciliation
-            if shard.delayed_reconcile {
+            if shard.delayed_reconcile && self.reconciler_concurrency.available_permits() == 0 {
+                // If there is something delayed, then return a nonzero count so that
+                // callers like reconcile_all_now do not incorrectly get the impression
+                // that the system is in a quiescent state.
+                reconciles_spawned = std::cmp::max(1, reconciles_spawned);
                 continue;
             }
 
@@ -4451,7 +4461,7 @@ impl Service {
             waiter_count
         );
 
-        Ok(waiter_count)
+        Ok(std::cmp::max(waiter_count, reconciles_spawned))
     }
 
     pub async fn shutdown(&self) {
