@@ -1227,7 +1227,7 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
- "tracing-opentelemetry 0.20.0",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-utils",
  "url",
@@ -2584,22 +2584,6 @@ dependencies = [
  "native-tls",
  "tokio",
  "tokio-native-tls",
-]
-
-[[package]]
-name = "hyper-tls"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper 1.2.0",
- "hyper-util",
- "native-tls",
- "tokio",
- "tokio-native-tls",
- "tower-service",
 ]
 
 [[package]]
@@ -4441,7 +4425,7 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "tracing",
- "tracing-opentelemetry 0.20.0",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-utils",
  "url",
@@ -4755,7 +4739,7 @@ dependencies = [
  "http 0.2.9",
  "http-body 0.4.5",
  "hyper 0.14.26",
- "hyper-tls 0.5.0",
+ "hyper-tls",
  "ipnet",
  "js-sys",
  "log",
@@ -4795,13 +4779,11 @@ dependencies = [
  "http-body-util",
  "hyper 1.2.0",
  "hyper-rustls 0.26.0",
- "hyper-tls 0.6.0",
  "hyper-util",
  "ipnet",
  "js-sys",
  "log",
  "mime",
- "native-tls",
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
@@ -4813,7 +4795,6 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
- "tokio-native-tls",
  "tokio-rustls 0.25.0",
  "tokio-util",
  "tower-service",
@@ -4878,7 +4859,7 @@ dependencies = [
  "reqwest 0.12.4",
  "reqwest-middleware",
  "tracing",
- "tracing-opentelemetry 0.21.0",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
@@ -6592,20 +6573,6 @@ dependencies = [
 
 [[package]]
 name = "tracing-opentelemetry"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc09e402904a5261e42cf27aea09ccb7d5318c6717a9eec3d8e2e65c56b18f19"
-dependencies = [
- "once_cell",
- "opentelemetry",
- "tracing",
- "tracing-core",
- "tracing-log",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tracing-opentelemetry"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75327c6b667828ddc28f5e3f169036cb793c3f588d83bf0f262a7f062ffed3c8"
@@ -6662,7 +6629,7 @@ dependencies = [
  "reqwest 0.12.4",
  "tokio",
  "tracing",
- "tracing-opentelemetry 0.20.0",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "workspace_hack",
 ]
@@ -7526,6 +7493,7 @@ dependencies = [
  "regex",
  "regex-automata 0.4.3",
  "regex-syntax 0.8.2",
+ "reqwest 0.11.19",
  "reqwest 0.12.4",
  "rustls 0.21.11",
  "scopeguard",

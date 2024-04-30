@@ -6,6 +6,7 @@ use std::env;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -13,7 +14,7 @@ use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
 use azure_core::RetryOptions;
-use azure_identity::create_default_credential;
+use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
@@ -55,7 +56,8 @@ impl AzureBlobStorage {
         let credentials = if let Ok(access_key) = env::var("AZURE_STORAGE_ACCESS_KEY") {
             StorageCredentials::access_key(account.clone(), access_key)
         } else {
-            StorageCredentials::token_credential(create_default_credential()?)
+            let token_credential = DefaultAzureCredential::default();
+            StorageCredentials::token_credential(Arc::new(token_credential))
         };
 
         // we have an outer retry
