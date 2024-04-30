@@ -68,13 +68,13 @@ def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
-            "gc_period": "0s",  # disable periodic gc
-            "checkpoint_timeout": "10years",
-            "compaction_period": "0s",  # disable periodic compaction
-            "checkpoint_distance": 10485760,
-            "image_creation_threshold": 1000,
-            "compaction_threshold": 1,
-            "pitr_interval": "1000d",
+            "pitr_interval": "1000d", # let's not make it get in the way
+            "gc_period": "0s",  # disable periodic gc to avoid noise
+            "checkpoint_timeout": "10years", # rely solely on checkpoint_distance
+            "checkpoint_distance": 10 * (1024**2), # 10M instead of 256M to create more smaller layers
+            "image_creation_threshold": 1000, # deterministically create just delta layers
+            "compaction_threshold": 1, # L0s just get converted into L1 using this setting
+            "compaction_period": "0s",  # disable periodic L0=>L1 compaction, let checkpoint trigger it (more deterministc)
         }
     )
 
