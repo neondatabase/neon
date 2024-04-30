@@ -240,7 +240,7 @@ pub(super) async fn connection_manager_loop_step(
 
                 // Waiting for an active wait_lsn request.
                 while wait_lsn_status.borrow().is_none() {
-                    if let Err(_) = wait_lsn_status.changed().await {
+                    if wait_lsn_status.changed().await.is_err() {
                         // wait_lsn_status channel was closed, exiting
                         warn!("wait_lsn_status channel was closed in connection_manager_loop_step");
                         return None;
