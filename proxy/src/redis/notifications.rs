@@ -247,7 +247,7 @@ where
         ));
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await; // 6h.
-            cancellation_token;
+            cancellation_token.cancel();
         });
     }
 }
