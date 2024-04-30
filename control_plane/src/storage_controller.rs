@@ -3,7 +3,6 @@ use crate::{
     local_env::{LocalEnv, NeonStorageControllerConf},
 };
 use camino::{Utf8Path, Utf8PathBuf};
-use hyper::Method;
 use pageserver_api::{
     controller_api::{
         NodeConfigureRequest, NodeRegisterRequest, TenantCreateResponse, TenantLocateResponse,
@@ -17,6 +16,7 @@ use pageserver_api::{
 };
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
+use reqwest::Method;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{fs, str::FromStr};
 use tokio::process::Command;
@@ -379,7 +379,7 @@ impl StorageController {
     /// Simple HTTP request wrapper for calling into storage controller
     async fn dispatch<RQ, RS>(
         &self,
-        method: hyper::Method,
+        method: reqwest::Method,
         path: String,
         body: Option<RQ>,
     ) -> anyhow::Result<RS>

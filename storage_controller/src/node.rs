@@ -1,6 +1,6 @@
 use std::{str::FromStr, time::Duration};
 
-use hyper::StatusCode;
+use reqwest::StatusCode;
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy,

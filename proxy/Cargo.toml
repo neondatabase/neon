@@ -59,8 +59,8 @@ prometheus.workspace = true
 rand.workspace = true
 regex.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
-reqwest = { workspace = true, features = ["json"] }
-reqwest-middleware.workspace = true
+reqwest.workspace = true
+reqwest-middleware = { workspace = true, features = ["json"] }
 reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
 routerify.workspace = true
@@ -84,6 +84,7 @@ tokio-postgres.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
+tower-service.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true

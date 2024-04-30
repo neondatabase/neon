@@ -1,7 +1,7 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::service;
-use hyper::StatusCode;
+use reqwest::StatusCode;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };

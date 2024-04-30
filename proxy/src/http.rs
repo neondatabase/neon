@@ -4,7 +4,7 @@
 
 pub mod health_server;
 
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use futures::FutureExt;
 pub use reqwest::{Request, Response, StatusCode};
@@ -103,12 +103,12 @@ impl Endpoint {
     }
 }
 
-/// https://docs.rs/reqwest/0.11.18/src/reqwest/dns/gai.rs.html
-use hyper::{
-    client::connect::dns::{GaiResolver as HyperGaiResolver, Name},
-    service::Service,
+use hyper_util::client::legacy::connect::dns::{
+    GaiResolver as HyperGaiResolver, Name as HyperName,
 };
-use reqwest::dns::{Addrs, Resolve, Resolving};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+/// https://docs.rs/reqwest/0.11.18/src/reqwest/dns/gai.rs.html
+use tower_service::Service;
 #[derive(Debug)]
 pub struct GaiResolver(HyperGaiResolver);
 
@@ -121,11 +121,12 @@ impl Default for GaiResolver {
 impl Resolve for GaiResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let this = &mut self.0.clone();
+        let hyper_name = HyperName::from_str(name.as_str()).expect("name should be valid");
         let start = Instant::now();
         Box::pin(
-            Service::<Name>::call(this, name.clone()).map(move |result| {
+            Service::<HyperName>::call(this, hyper_name).map(move |result| {
                 let resolve_duration = start.elapsed();
-                trace!(duration = ?resolve_duration, addr = %name, "resolve host complete");
+                trace!(duration = ?resolve_duration, addr = %name.as_str(), "resolve host complete");
                 result
                     .map(|addrs| -> Addrs { Box::new(addrs) })
                     .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })

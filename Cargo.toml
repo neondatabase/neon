@@ -130,10 +130,10 @@ prost = "0.11"
 rand = "0.8"
 redis = { version = "0.25.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.4.7", features = ["opentelemetry_0_20"] }
-reqwest-middleware = "0.2.0"
-reqwest-retry = "0.2.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_20"] }
+reqwest-middleware = "0.3.0"
+reqwest-retry = "0.5"
 routerify = "3"
 rpds = "0.13"
 rustc-hash = "1.1.0"
@@ -177,6 +177,7 @@ tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.7"
 toml_edit = "0.19"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
+tower-service = "0.3.2"
 tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.20.0"
