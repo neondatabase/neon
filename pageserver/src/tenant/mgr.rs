@@ -590,7 +590,9 @@ pub async fn init_tenant_mgr(
     );
     TENANT.startup_scheduled.inc_by(tenant_configs.len() as u64);
 
-    // Construct `Tenant` objects and start them running
+    let mut spawn_tenant_configs = Vec::new();
+
+    // Update the location configs according to the re-attach response and persist them to disk
     for (tenant_shard_id, location_conf) in tenant_configs {
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
 
@@ -617,7 +619,6 @@ pub async fn init_tenant_mgr(
         const DEFAULT_SECONDARY_CONF: SecondaryLocationConfig =
             SecondaryLocationConfig { warm: true };
 
-        // Update the location config according to the re-attach response
         if let Some(tenant_modes) = &tenant_modes {
             // We have a generation map: treat it as the authority for whether
             // this tenant is really attached.
@@ -681,6 +682,12 @@ pub async fn init_tenant_mgr(
         // if it wasn't already, and apply the generation number.
         Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
 
+        spawn_tenant_configs.push((tenant_shard_id, location_conf));
+    }
+
+    // For those shards that have live configurations, construct `Tenant` or `SecondaryTenant` objects and start them running
+    for (tenant_shard_id, location_conf) in spawn_tenant_configs {
+        let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
         let shard_identity = location_conf.shard;
         let slot = match location_conf.mode {
             LocationMode::Attached(attached_conf) => {
