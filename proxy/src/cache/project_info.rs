@@ -5,9 +5,11 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
+use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
@@ -21,11 +23,12 @@ use crate::{
 
 use super::{Cache, Cached};
 
+#[async_trait]
 pub trait ProjectInfoCache {
     fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt);
     fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
-    fn enable_ttl(&self);
-    fn disable_ttl(&self);
+    async fn decrement_active_listeners(&self);
+    async fn increment_active_listeners(&self);
 }
 
 struct Entry<T> {
@@ -116,8 +119,10 @@ pub struct ProjectInfoCacheImpl {
 
     start_time: Instant,
     ttl_disabled_since_us: AtomicU64,
+    active_listeners_lock: Mutex<usize>,
 }
 
+#[async_trait]
 impl ProjectInfoCache for ProjectInfoCacheImpl {
     fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt) {
         info!("invalidating allowed ips for project `{}`", project_id);
@@ -148,15 +153,28 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             }
         }
     }
-    fn enable_ttl(&self) {
-        self.ttl_disabled_since_us
-            .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+    async fn decrement_active_listeners(&self) {
+        let mut listeners_guard = self.active_listeners_lock.lock().await;
+        if *listeners_guard == 0 {
+            tracing::error!("active_listeners count is already 0, something is broken");
+            return;
+        }
+        *listeners_guard -= 1;
+        if *listeners_guard == 0 {
+            let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
+            self.ttl_disabled_since_us
+                .store(new_ttl, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
-    fn disable_ttl(&self) {
-        let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
-        self.ttl_disabled_since_us
-            .store(new_ttl, std::sync::atomic::Ordering::Relaxed);
+    async fn increment_active_listeners(&self) {
+        let mut listeners_guard = self.active_listeners_lock.lock().await;
+        *listeners_guard += 1;
+        if *listeners_guard == 1 {
+            let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
+            self.ttl_disabled_since_us
+                .store(new_ttl, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -168,6 +186,7 @@ impl ProjectInfoCacheImpl {
             config,
             ttl_disabled_since_us: AtomicU64::new(u64::MAX),
             start_time: Instant::now(),
+            active_listeners_lock: Mutex::new(0),
         }
     }
 
@@ -432,7 +451,7 @@ mod tests {
             ttl: Duration::from_secs(1),
             gc_interval: Duration::from_secs(600),
         }));
-        cache.clone().disable_ttl();
+        cache.clone().increment_active_listeners().await;
         tokio::time::advance(Duration::from_secs(2)).await;
 
         let project_id: ProjectId = "project".into();
@@ -489,7 +508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_disable_ttl_invalidate_added_before() {
+    async fn test_increment_active_listeners_invalidate_added_before() {
         tokio::time::pause();
         let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
             size: 2,
@@ -514,7 +533,7 @@ mod tests {
             (&user1).into(),
             secret1.clone(),
         );
-        cache.clone().disable_ttl();
+        cache.clone().increment_active_listeners().await;
         tokio::time::advance(Duration::from_millis(100)).await;
         cache.insert_role_secret(
             (&project_id).into(),
