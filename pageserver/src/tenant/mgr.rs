@@ -2,6 +2,7 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
+use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::LocationConfigMode;
@@ -590,9 +591,11 @@ pub async fn init_tenant_mgr(
     );
     TENANT.startup_scheduled.inc_by(tenant_configs.len() as u64);
 
-    let mut spawn_tenant_configs = Vec::new();
+    // Accumulate futures for writing tenant configs, so that we can execute in parallel
+    let mut config_write_futs = Vec::new();
 
     // Update the location configs according to the re-attach response and persist them to disk
+    tracing::info!("Updating {} location configs", tenant_configs.len());
     for (tenant_shard_id, location_conf) in tenant_configs {
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
 
@@ -680,13 +683,31 @@ pub async fn init_tenant_mgr(
 
         // Presence of a generation number implies attachment: attach the tenant
         // if it wasn't already, and apply the generation number.
-        Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
-
-        spawn_tenant_configs.push((tenant_shard_id, location_conf));
+        config_write_futs.push(async move {
+            let r = Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await;
+            (tenant_shard_id, location_conf, r)
+        });
     }
 
+    // Execute config writes with concurrency, to avoid bottlenecking on local FS write latency
+    tracing::info!(
+        "Writing {} location config files...",
+        config_write_futs.len()
+    );
+    let config_write_results = futures::stream::iter(config_write_futs)
+        .buffer_unordered(16)
+        .collect::<Vec<_>>()
+        .await;
+
+    tracing::info!(
+        "Spawning {} tenant shard locations...",
+        config_write_results.len()
+    );
     // For those shards that have live configurations, construct `Tenant` or `SecondaryTenant` objects and start them running
-    for (tenant_shard_id, location_conf) in spawn_tenant_configs {
+    for (tenant_shard_id, location_conf, config_write_result) in config_write_results {
+        // Errors writing configs are fatal
+        config_write_result?;
+
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
         let shard_identity = location_conf.shard;
         let slot = match location_conf.mode {
