@@ -30,7 +30,7 @@ The storage controller uses a postgres database to persist a subset of its state
 persist the _relationships_ between them: the attachment state of a tenant's shards to nodes is kept in memory and
 rebuilt on startup.
 
-The file `[persistence.rs](http://persistence.rs)` contains all the code for accessing the database, and has a large doc comment that goes into more detail about exactly what we persist and why.
+The file `persistence.rs` contains all the code for accessing the database, and has a large doc comment that goes into more detail about exactly what we persist and why.
 
 The `diesel` crate is used for defining models & migrations.
 

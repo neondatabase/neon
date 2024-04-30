@@ -17,7 +17,7 @@ use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{AUX_FILES_KEY, NON_INHERITED_RANGE},
-    keyspace::KeySpaceAccum,
+    keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
         EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
@@ -55,7 +55,6 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -66,6 +65,7 @@ use crate::{
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     pgdatadir_mapping::CollectKeySpaceError,
 };
+use crate::{deletion_queue::DeletionQueueClient, metrics::GetKind};
 use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
@@ -86,7 +86,7 @@ use crate::{
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::metrics::{
-    GetKind, TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
+    TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
@@ -135,6 +135,25 @@ pub(super) enum FlushLoopState {
         initdb_optimization_count: usize,
     },
     Exited,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ImageLayerCreationMode {
+    /// Try to create image layers based on `time_for_new_image_layer`. Used in compaction code path.
+    Try,
+    /// Force creating the image layers if possible. For now, no image layers will be created
+    /// for metadata keys. Used in compaction code path with force flag enabled.
+    Force,
+    /// Initial ingestion of the data, and no data should be dropped in this function. This
+    /// means that no metadata keys should be included in the partitions. Used in flush frozen layer
+    /// code path.
+    Initial,
+}
+
+impl std::fmt::Display for ImageLayerCreationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 /// Wrapper for key range to provide reverse ordering by range length for BinaryHeap
@@ -317,7 +336,7 @@ pub struct Timeline {
     pub initdb_lsn: Lsn,
 
     /// When did we last calculate the partitioning?
-    partitioning: tokio::sync::Mutex<(KeyPartitioning, Lsn)>,
+    partitioning: tokio::sync::Mutex<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -936,7 +955,7 @@ impl Timeline {
             return Err(GetVectoredError::InvalidLsn(lsn));
         }
 
-        let key_count = keyspace.total_size().try_into().unwrap();
+        let key_count = keyspace.total_raw_size().try_into().unwrap();
         if key_count > Timeline::MAX_GET_VECTORED_KEYS {
             return Err(GetVectoredError::Oversized(key_count));
         }
@@ -1076,7 +1095,7 @@ impl Timeline {
         mut reconstruct_state: ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let get_kind = if keyspace.total_size() == 1 {
+        let get_kind = if keyspace.total_raw_size() == 1 {
             GetKind::Singular
         } else {
             GetKind::Vectored
@@ -1149,6 +1168,11 @@ impl Timeline {
                 panic!(concat!("Sequential get failed with {}, but vectored get did not",
                                " - keyspace={:?} lsn={}"),
                        seq_err, keyspace, lsn) },
+            (Ok(_), Err(GetVectoredError::GetReadyAncestorError(GetReadyAncestorError::AncestorLsnTimeout(_)))) => {
+                // Sequential get runs after vectored get, so it is possible for the later 
+                // to time out while waiting for its ancestor's Lsn to become ready and for the
+                // former to succeed (it essentially has a doubled wait time).
+            },
             (Ok(_), Err(vec_err)) => {
                 panic!(concat!("Vectored get failed with {}, but sequential get did not",
                                " - keyspace={:?} lsn={}"),
@@ -1871,6 +1895,15 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
+    #[allow(dead_code)]
+    pub(crate) fn get_switch_to_aux_file_v2(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .switch_to_aux_file_v2
+            .unwrap_or(self.conf.default_tenant_conf.switch_to_aux_file_v2)
+    }
+
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2090,7 +2123,10 @@ impl Timeline {
                     // initial logical size is 0.
                     LogicalSize::empty_initial()
                 },
-                partitioning: tokio::sync::Mutex::new((KeyPartitioning::new(), Lsn(0))),
+                partitioning: tokio::sync::Mutex::new((
+                    (KeyPartitioning::new(), KeyPartitioning::new().into_sparse()),
+                    Lsn(0),
+                )),
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
 
@@ -3092,7 +3128,6 @@ impl Timeline {
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                 let layer = guard.get_from_desc(&layer);
                 drop(guard);
-
                 // Get all the data needed to reconstruct the page version from this layer.
                 // But if we have an older cached page image, no need to go past that.
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
@@ -3193,7 +3228,7 @@ impl Timeline {
                 }
             }
 
-            if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
+            if keyspace.total_raw_size() == 0 || timeline.ancestor_timeline.is_none() {
                 break;
             }
 
@@ -3206,14 +3241,14 @@ impl Timeline {
             timeline = &*timeline_owned;
         }
 
-        if keyspace.total_size() != 0 {
+        if keyspace.total_raw_size() != 0 {
             return Err(GetVectoredError::MissingKey(keyspace.start().unwrap()));
         }
 
         Ok(())
     }
 
-    /// Collect the reconstruct data for a ketspace from the specified timeline.
+    /// Collect the reconstruct data for a keyspace from the specified timeline.
     ///
     /// Maintain a fringe [`LayerFringe`] which tracks all the layers that intersect
     /// the current keyspace. The current keyspace of the search at any given timeline
@@ -3642,65 +3677,102 @@ impl Timeline {
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
-        let (layers_to_upload, delta_layer_to_add) =
-            if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
-                #[cfg(test)]
-                match &mut *self.flush_loop_state.lock().unwrap() {
-                    FlushLoopState::NotStarted | FlushLoopState::Exited => {
-                        panic!("flush loop not running")
-                    }
-                    FlushLoopState::Running {
-                        initdb_optimization_count,
-                        ..
-                    } => {
+
+        // Whether to directly create image layers for this flush, or flush them as delta layers
+        let create_image_layer =
+            lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1);
+
+        #[cfg(test)]
+        {
+            match &mut *self.flush_loop_state.lock().unwrap() {
+                FlushLoopState::NotStarted | FlushLoopState::Exited => {
+                    panic!("flush loop not running")
+                }
+                FlushLoopState::Running {
+                    expect_initdb_optimization,
+                    initdb_optimization_count,
+                    ..
+                } => {
+                    if create_image_layer {
                         *initdb_optimization_count += 1;
-                    }
-                }
-                // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
-                // require downloading anything during initial import.
-                let (partitioning, _lsn) = self
-                    .repartition(
-                        self.initdb_lsn,
-                        self.get_compaction_target_size(),
-                        EnumSet::empty(),
-                        ctx,
-                    )
-                    .await?;
-
-                if self.cancel.is_cancelled() {
-                    return Err(FlushLayerError::Cancelled);
-                }
-
-                // For image layers, we add them immediately into the layer map.
-                (
-                    self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
-                        .await?,
-                    None,
-                )
-            } else {
-                #[cfg(test)]
-                match &mut *self.flush_loop_state.lock().unwrap() {
-                    FlushLoopState::NotStarted | FlushLoopState::Exited => {
-                        panic!("flush loop not running")
-                    }
-                    FlushLoopState::Running {
-                        expect_initdb_optimization,
-                        ..
-                    } => {
+                    } else {
                         assert!(!*expect_initdb_optimization, "expected initdb optimization");
                     }
                 }
-                // Normal case, write out a L0 delta layer file.
-                // `create_delta_layer` will not modify the layer map.
-                // We will remove frozen layer and add delta layer in one atomic operation later.
-                let layer = self.create_delta_layer(&frozen_layer, ctx).await?;
-                (
-                    // FIXME: even though we have a single image and single delta layer assumption
-                    // we push them to vec
-                    vec![layer.clone()],
-                    Some(layer),
+            }
+        }
+
+        let (layers_to_upload, delta_layer_to_add) = if create_image_layer {
+            // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
+            // require downloading anything during initial import.
+            let ((rel_partition, metadata_partition), _lsn) = self
+                .repartition(
+                    self.initdb_lsn,
+                    self.get_compaction_target_size(),
+                    EnumSet::empty(),
+                    ctx,
                 )
+                .await?;
+
+            if self.cancel.is_cancelled() {
+                return Err(FlushLayerError::Cancelled);
+            }
+
+            // For metadata, always create delta layers.
+            let delta_layer = if !metadata_partition.parts.is_empty() {
+                assert_eq!(
+                    metadata_partition.parts.len(),
+                    1,
+                    "currently sparse keyspace should only contain a single aux file keyspace"
+                );
+                let metadata_keyspace = &metadata_partition.parts[0];
+                assert_eq!(
+                    metadata_keyspace.0.ranges.len(),
+                    1,
+                    "aux file keyspace should be a single range"
+                );
+                self.create_delta_layer(
+                    &frozen_layer,
+                    ctx,
+                    Some(metadata_keyspace.0.ranges[0].clone()),
+                )
+                .await?
+            } else {
+                None
             };
+
+            // For image layers, we add them immediately into the layer map.
+            let mut layers_to_upload = Vec::new();
+            layers_to_upload.extend(
+                self.create_image_layers(
+                    &rel_partition,
+                    self.initdb_lsn,
+                    ImageLayerCreationMode::Initial,
+                    ctx,
+                )
+                .await?,
+            );
+
+            if let Some(delta_layer) = delta_layer {
+                layers_to_upload.push(delta_layer.clone());
+                (layers_to_upload, Some(delta_layer))
+            } else {
+                (layers_to_upload, None)
+            }
+        } else {
+            // Normal case, write out a L0 delta layer file.
+            // `create_delta_layer` will not modify the layer map.
+            // We will remove frozen layer and add delta layer in one atomic operation later.
+            let Some(layer) = self.create_delta_layer(&frozen_layer, ctx, None).await? else {
+                panic!("delta layer cannot be empty if no filter is applied");
+            };
+            (
+                // FIXME: even though we have a single image and single delta layer assumption
+                // we push them to vec
+                vec![layer.clone()],
+                Some(layer),
+            )
+        };
 
         pausable_failpoint!("flush-layer-cancel-after-writing-layer-out-pausable");
 
@@ -3821,12 +3893,18 @@ impl Timeline {
         self: &Arc<Self>,
         frozen_layer: &Arc<InMemoryLayer>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<ResidentLayer> {
+        key_range: Option<Range<Key>>,
+    ) -> anyhow::Result<Option<ResidentLayer>> {
         let self_clone = Arc::clone(self);
         let frozen_layer = Arc::clone(frozen_layer);
         let ctx = ctx.attached_child();
         let work = async move {
-            let new_delta = frozen_layer.write_to_disk(&self_clone, &ctx).await?;
+            let Some(new_delta) = frozen_layer
+                .write_to_disk(&self_clone, &ctx, key_range)
+                .await?
+            else {
+                return Ok(None);
+            };
             // The write_to_disk() above calls writer.finish() which already did the fsync of the inodes.
             // We just need to fsync the directory in which these inodes are linked,
             // which we know to be the timeline directory.
@@ -3845,7 +3923,7 @@ impl Timeline {
                 .sync_all()
                 .await
                 .fatal_err("VirtualFile::sync_all timeline dir");
-            anyhow::Ok(new_delta)
+            anyhow::Ok(Some(new_delta))
         };
         // Before tokio-epoll-uring, we ran write_to_disk & the sync_all inside spawn_blocking.
         // Preserve that behavior to maintain the same behavior for `virtual_file_io_engine=std-fs`.
@@ -3872,19 +3950,20 @@ impl Timeline {
         partition_size: u64,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
+    ) -> anyhow::Result<((KeyPartitioning, SparseKeyPartitioning), Lsn)> {
         let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
             anyhow::bail!("repartition() called concurrently, this should not happen");
         };
-        if lsn < partitioning_guard.1 {
+        let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
+        if lsn < *partition_lsn {
             anyhow::bail!("repartition() called with LSN going backwards, this should not happen");
         }
 
-        let distance = lsn.0 - partitioning_guard.1 .0;
-        if partitioning_guard.1 != Lsn(0)
+        let distance = lsn.0 - partition_lsn.0;
+        if *partition_lsn != Lsn(0)
             && distance <= self.repartition_threshold
             && !flags.contains(CompactFlags::ForceRepartition)
         {
@@ -3893,37 +3972,24 @@ impl Timeline {
                 threshold = self.repartition_threshold,
                 "no repartitioning needed"
             );
-            return Ok((partitioning_guard.0.clone(), partitioning_guard.1));
+            return Ok((
+                (dense_partition.clone(), sparse_partition.clone()),
+                *partition_lsn,
+            ));
         }
 
-        let keyspace = self.collect_keyspace(lsn, ctx).await?;
-        let partitioning = keyspace.partition(partition_size);
-
-        *partitioning_guard = (partitioning, lsn);
+        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
+        let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
+        let sparse_partitioning = SparseKeyPartitioning {
+            parts: vec![sparse_ks],
+        }; // no partitioning for metadata keys for now
+        *partitioning_guard = ((dense_partitioning, sparse_partitioning), lsn);
 
         Ok((partitioning_guard.0.clone(), partitioning_guard.1))
     }
 
     // Is it time to create a new image layer for the given partition?
     async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
-        let last = self.last_image_layer_creation_check_at.load();
-        if lsn != Lsn(0) {
-            let distance = lsn
-                .checked_sub(last)
-                .expect("Attempt to compact with LSN going backwards");
-
-            let min_distance = self.get_image_layer_creation_check_threshold() as u64
-                * self.get_checkpoint_distance();
-
-            // Skip the expensive delta layer counting below if we've not ingested
-            // sufficient WAL since the last check.
-            if distance.0 < min_distance {
-                return false;
-            }
-        }
-
-        self.last_image_layer_creation_check_at.store(lsn);
-
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read().await;
@@ -3973,12 +4039,12 @@ impl Timeline {
         false
     }
 
-    #[tracing::instrument(skip_all, fields(%lsn, %force))]
+    #[tracing::instrument(skip_all, fields(%lsn, %mode))]
     async fn create_image_layers(
         self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,
         lsn: Lsn,
-        force: bool,
+        mode: ImageLayerCreationMode,
         ctx: &RequestContext,
     ) -> Result<Vec<ResidentLayer>, CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
@@ -3995,11 +4061,46 @@ impl Timeline {
         // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
         let mut start = Key::MIN;
 
+        let check_for_image_layers = {
+            let last_checks_at = self.last_image_layer_creation_check_at.load();
+            let distance = lsn
+                .checked_sub(last_checks_at)
+                .expect("Attempt to compact with LSN going backwards");
+            let min_distance = self.get_image_layer_creation_check_threshold() as u64
+                * self.get_checkpoint_distance();
+
+            // Skip the expensive delta layer counting if this timeline has not ingested sufficient
+            // WAL since the last check.
+            distance.0 >= min_distance
+        };
+
+        if check_for_image_layers {
+            self.last_image_layer_creation_check_at.store(lsn);
+        }
+
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
-            if !force && !self.time_for_new_image_layer(partition, lsn).await {
-                start = img_range.end;
-                continue;
+
+            if partition.overlaps(&Key::metadata_key_range()) {
+                // TODO(chi): The next patch will correctly create image layers for metadata keys, and it would be a
+                // rather big change. Keep this patch small for now.
+                match mode {
+                    ImageLayerCreationMode::Force | ImageLayerCreationMode::Try => {
+                        // skip image layer creation anyways for metadata keys.
+                        start = img_range.end;
+                        continue;
+                    }
+                    ImageLayerCreationMode::Initial => {
+                        return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
+                    }
+                }
+            } else if let ImageLayerCreationMode::Try = mode {
+                // check_for_image_layers = false -> skip
+                // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
+                if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
+                    start = img_range.end;
+                    continue;
+                }
             }
 
             let mut image_layer_writer = ImageLayerWriter::new(
@@ -4040,7 +4141,7 @@ impl Timeline {
                     key = key.next();
 
                     // Maybe flush `key_rest_accum`
-                    if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
+                    if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
                         || last_key_in_range
                     {
                         let results = self
@@ -4326,6 +4427,12 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let _timer = self
+            .metrics
+            .update_gc_info_histo
+            .start_timer()
+            .record_on_drop();
+
         // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
         //
         // Some unit tests depend on garbage-collection working even when
