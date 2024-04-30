@@ -39,7 +39,7 @@ pub mod defaults {
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
     pub const DEFAULT_COMPACTION_ALGORITHM: super::CompactionAlgorithm =
-        super::CompactionAlgorithm::Legacy;
+        super::CompactionAlgorithm::Tiered;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
