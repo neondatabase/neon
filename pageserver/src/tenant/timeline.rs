@@ -464,6 +464,7 @@ pub(crate) enum PageReconstructError {
 
 #[derive(Debug)]
 pub struct MissingKeyError {
+    vectored_get: bool,
     stuck_at_lsn: bool,
     key: Key,
     shard: ShardNumber,
@@ -493,6 +494,10 @@ impl std::fmt::Display for MissingKeyError {
                 "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}",
                 self.key, self.shard, self.cont_lsn, self.request_lsn
             )?;
+        }
+
+        if self.vectored_get {
+            write!(f, " during vectored get")?;
         }
 
         if !self.traversal_path.is_empty() {
@@ -568,8 +573,8 @@ pub(crate) enum GetVectoredError {
     #[error("Requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
 
-    #[error("Requested key {0} not found")]
-    MissingKey(Key),
+    #[error("Requested key not found: {0}")]
+    MissingKey(MissingKeyError),
 
     #[error(transparent)]
     GetReadyAncestorError(GetReadyAncestorError),
@@ -1050,15 +1055,17 @@ impl Timeline {
                         return Err(GetVectoredError::Cancelled)
                     }
                     // we only capture stuck_at_lsn=false now until we figure out https://github.com/neondatabase/neon/issues/7380
-                    Err(MissingKey(MissingKeyError {
-                        stuck_at_lsn: false,
-                        ..
-                    })) if !NON_INHERITED_RANGE.contains(&key) => {
+                    Err(MissingKey(
+                        err @ MissingKeyError {
+                            stuck_at_lsn: false,
+                            ..
+                        },
+                    )) if !NON_INHERITED_RANGE.contains(&key) => {
                         // The vectored read path handles non inherited keys specially.
                         // If such a a key cannot be reconstructed from the current timeline,
                         // the vectored read path returns a key level error as opposed to a top
                         // level error.
-                        return Err(GetVectoredError::MissingKey(key));
+                        return Err(GetVectoredError::MissingKey(err));
                     }
                     Err(Other(err))
                         if err
@@ -1154,7 +1161,7 @@ impl Timeline {
             match (lhs, rhs) {
                 (Oversized(l), Oversized(r)) => l == r,
                 (InvalidLsn(l), InvalidLsn(r)) => l == r,
-                (MissingKey(l), MissingKey(r)) => l == r,
+                (MissingKey(l), MissingKey(r)) => l.key == r.key,
                 (GetReadyAncestorError(_), GetReadyAncestorError(_)) => true,
                 (Other(_), Other(_)) => true,
                 _ => false,
@@ -3024,6 +3031,7 @@ impl Timeline {
                             // Didn't make any progress in last iteration. Error out to avoid
                             // getting stuck in the loop.
                             return Err(PageReconstructError::MissingKey(MissingKeyError {
+                                vectored_get: false,
                                 stuck_at_lsn: true,
                                 key,
                                 shard: self.shard_identity.get_shard_number(&key),
@@ -3039,6 +3047,7 @@ impl Timeline {
                 }
                 ValueReconstructResult::Missing => {
                     return Err(PageReconstructError::MissingKey(MissingKeyError {
+                        vectored_get: false,
                         stuck_at_lsn: false,
                         key,
                         shard: self.shard_identity.get_shard_number(&key),
@@ -3215,6 +3224,7 @@ impl Timeline {
                         reconstruct_state.on_key_error(
                             key,
                             PageReconstructError::MissingKey(MissingKeyError {
+                                vectored_get: true,
                                 stuck_at_lsn: false,
                                 key,
                                 shard: self.shard_identity.get_shard_number(&key),
@@ -3248,7 +3258,19 @@ impl Timeline {
         }
 
         if keyspace.total_raw_size() != 0 {
-            return Err(GetVectoredError::MissingKey(keyspace.start().unwrap()));
+            return Err(GetVectoredError::MissingKey(MissingKeyError {
+                vectored_get: true,
+                stuck_at_lsn: false,
+                key: keyspace.start().unwrap(), /* better if we can store the full keyspace */
+                shard: self
+                    .shard_identity
+                    .get_shard_number(&keyspace.start().unwrap()),
+                cont_lsn,
+                request_lsn,
+                ancestor_lsn: Some(timeline.ancestor_lsn),
+                traversal_path: vec![],
+                backtrace: None,
+            }));
         }
 
         Ok(())
