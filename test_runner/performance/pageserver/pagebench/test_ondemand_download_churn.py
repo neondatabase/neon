@@ -8,6 +8,7 @@ from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.remote_storage import s3_storage
+from fixtures.pageserver.utils import wait_for_upload_queue_empty
 
 
 @pytest.mark.parametrize("duration", [30])
@@ -66,15 +67,17 @@ def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     remote_storage_kind = s3_storage()
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
+    # We configure tenant conf such that SQL query below produces a lot of layers.
+    # We don't care what's in the layers really, we just care that layers are created.
+    bytes_per_layer = 10 * (1024**2)
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             "pitr_interval": "1000d", # let's not make it get in the way
             "gc_period": "0s",  # disable periodic gc to avoid noise
+            "compaction_period": "0s",  # disable L0=>L1 compaction
             "checkpoint_timeout": "10years", # rely solely on checkpoint_distance
-            "checkpoint_distance": 10 * (1024**2), # 10M instead of 256M to create more smaller layers
-            "image_creation_threshold": 1000, # deterministically create just delta layers
-            "compaction_threshold": 1, # L0s just get converted into L1 using this setting
-            "compaction_period": "0s",  # disable periodic L0=>L1 compaction, let checkpoint trigger it (more deterministc)
+            "checkpoint_distance": bytes_per_layer, # 10M instead of 256M to create more smaller layers
+            "image_creation_threshold": 100000, # don't create image layers ever
         }
     )
 
@@ -83,10 +86,15 @@ def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     client = env.pageserver.http_client()
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as ep:
-        pg_bin.run_capture(["pgbench", "-i", "-s200", ep.connstr()])
+        ep.safe_psql("CREATE TABLE data (random_text text)")
+        bytes_per_row = 512 # make big enough so WAL record size doesn't dominate
+        desired_layers = 300
+        desired_bytes = bytes_per_layer * desired_layers
+        nrows = desired_bytes / bytes_per_row
+        ep.safe_psql(f"INSERT INTO data SELECT lpad(i::text, {bytes_per_row}, '0') FROM generate_series(1, {int(nrows)})  as i", options="-c statement_timeout=0")
         wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
-        client.timeline_checkpoint(tenant_id, timeline_id)
-        client.timeline_compact(tenant_id, timeline_id)
+    # TODO: this is a bit imprecise, there could be frozen layers being written out that we don't observe here
+    wait_for_upload_queue_empty(client, tenant_id, timeline_id)
 
     return env
 
