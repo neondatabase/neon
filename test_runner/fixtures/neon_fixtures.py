@@ -1970,7 +1970,7 @@ class LogUtils:
     def log_contains(
         self, pattern: str, offset: None | LogCursor = None
     ) -> Optional[Tuple[str, LogCursor]]:
-        """Check that the storage controller log contains a line that matches the given regex"""
+        """Check that the log contains a line that matches the given regex"""
         logfile = self.logfile
         if not logfile.exists():
             log.warning(f"Skipping log check: {logfile} does not exist")
@@ -1990,10 +1990,12 @@ class LogUtils:
                 if cur_line_no < skip_until_line_no:
                     cur_line_no += 1
                     continue
-                if contains_re.search(line):
+                elif contains_re.search(line):
                     # found it!
                     cur_line_no += 1
                     return (line, LogCursor(cur_line_no))
+                else:
+                    cur_line_no += 1
         return None
 
 
@@ -2353,7 +2355,6 @@ class NeonPageserver(PgProtocol, LogUtils):
         self.config_override = config_override
         self.version = env.get_binary_version("pageserver")
         self.logfile = self.workdir / "pageserver.log"
-
         # After a test finishes, we will scrape the log to see if there are any
         # unexpected error messages. If your test expects an error, add it to
         # 'allowed_errors' in the test with something like:
