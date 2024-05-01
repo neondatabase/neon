@@ -5194,6 +5194,7 @@ dependencies = [
  "rand 0.8.5",
  "remote_storage",
  "reqwest 0.12.4",
+ "safekeeper",
  "serde",
  "serde_json",
  "serde_with",

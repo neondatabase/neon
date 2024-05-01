@@ -7,6 +7,7 @@ pub mod metadata_stream;
 pub mod scan_pageserver_metadata;
 pub mod scan_safekeeper_metadata;
 pub mod tenant_snapshot;
+pub mod validate_safekeeper_timeline;
 
 use std::env;
 use std::fmt::Display;
@@ -36,7 +37,7 @@ use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use utils::fs_ext;
-use utils::id::{TenantId, TimelineId};
+use utils::id::{TenantId, TimelineId, TenantTimelineId};
 
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
@@ -184,6 +185,12 @@ impl RootTarget {
             .with_sub_segment(&id.timeline_id.to_string())
     }
 
+    pub fn safekeeper_timeline_root(&self, id: &TenantTimelineId) -> S3Target {
+        self.tenants_root()
+            .with_sub_segment(&id.tenant_id.to_string())
+            .with_sub_segment(&id.timeline_id.to_string())
+    }
+
     pub fn bucket_name(&self) -> &str {
         match self {
             Self::Pageserver(root) => &root.bucket_name,
@@ -251,6 +258,25 @@ impl ConsoleConfig {
 
         let token = env::var(CLOUD_ADMIN_API_TOKEN_ENV_VAR)
             .context("'CLOUD_ADMIN_API_TOKEN' environment variable fetch")?;
+
+        Ok(Self { base_url, token })
+    }
+}
+
+pub struct SafekeeperApiConfig {
+    pub token: String,
+    pub base_url: Url,
+}
+
+impl SafekeeperApiConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let base_url: Url = env::var("SAFEKEEPER_API_URL")
+            .context("'SAFEKEEPER_API_URL' param retrieval")?
+            .parse()
+            .context("'SAFEKEEPER_API_URL' param parsing")?;
+
+        let token = env::var("SAFEKEEPER_API_TOKEN")
+            .context("'SAFEKEEPER_API_TOKEN' environment variable fetch")?;
 
         Ok(Self { base_url, token })
     }

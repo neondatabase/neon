@@ -4,6 +4,7 @@ use pageserver_api::shard::TenantShardId;
 use s3_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use s3_scrubber::scan_pageserver_metadata::scan_metadata;
 use s3_scrubber::tenant_snapshot::SnapshotDownloader;
+use s3_scrubber::validate_safekeeper_timeline::validate_timelines;
 use s3_scrubber::{
     init_logging, scan_safekeeper_metadata::scan_safekeeper_metadata, BucketConfig, ConsoleConfig,
     NodeKind, TraversingDepth,
@@ -54,6 +55,15 @@ enum Command {
         #[arg(long, default_value = None)]
         dump_db_table: Option<String>,
     },
+    #[command(verbatim_doc_comment)]
+    ValidateTimelines {
+        // points to db with debug dump
+        dump_db_connstr: String,
+        // table in the db with debug dump
+        dump_db_table: String,
+        // validation script will be written to this file
+        script_file: String,
+    },
     TenantSnapshot {
         #[arg(long = "tenant-id")]
         tenant_id: TenantId,
@@ -75,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         Command::FindGarbage { .. } => "find-garbage",
         Command::PurgeGarbage { .. } => "purge-garbage",
         Command::TenantSnapshot { .. } => "tenant-snapshot",
+        Command::ValidateTimelines { .. } => "validate-timelines",
     };
     let _guard = init_logging(&format!(
         "{}_{}_{}_{}.log",
@@ -177,6 +188,19 @@ async fn main() -> anyhow::Result<()> {
             let downloader =
                 SnapshotDownloader::new(bucket_config, tenant_id, output_path, concurrency)?;
             downloader.download().await
+        }
+        Command::ValidateTimelines {
+            dump_db_connstr,
+            dump_db_table,
+            script_file,
+        } => {
+            validate_timelines(
+                bucket_config.clone(),
+                dump_db_connstr,
+                dump_db_table,
+                script_file,
+            )
+            .await
         }
     }
 }
