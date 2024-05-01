@@ -4,7 +4,6 @@ use bytes::BufMut;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
-use std::ops::RangeInclusive;
 use std::{fmt, ops::Range};
 
 use crate::reltag::{BlockNumber, RelTag, SlruKind};
@@ -30,24 +29,25 @@ pub const KEY_SIZE: usize = 18;
 /// See [`Key::to_i128`] for more information on the encoding.
 pub const METADATA_KEY_SIZE: usize = 16;
 
-/// The key prefix start range for the metadata keys. All keys with the first byte >= 0x80 is a metadata key.
-pub const METADATA_KEY_BEGIN_PREFIX: u8 = 0x80;
+/// The key prefix start range for the metadata keys. All keys with the first byte >= 0x40 is a metadata key.
+pub const METADATA_KEY_BEGIN_PREFIX: u8 = 0x60;
+pub const METADATA_KEY_END_PREFIX: u8 = 0x7F;
 
 /// The (reserved) key prefix of relation sizes.
-pub const RELATION_SIZE_PREFIX: u8 = 0x81;
+pub const RELATION_SIZE_PREFIX: u8 = 0x61;
 
 /// The key prefix of AUX file keys.
-pub const AUX_KEY_PREFIX: u8 = 0x82;
+pub const AUX_KEY_PREFIX: u8 = 0x62;
 
 /// Check if the key falls in the range of metadata keys.
 pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
-    key[0] >= METADATA_KEY_BEGIN_PREFIX
+    key[0] >= METADATA_KEY_BEGIN_PREFIX && key[0] < METADATA_KEY_END_PREFIX
 }
 
 impl Key {
     /// Check if the key falls in the range of metadata keys.
     pub const fn is_metadata_key(&self) -> bool {
-        self.field1 >= METADATA_KEY_BEGIN_PREFIX
+        self.field1 >= METADATA_KEY_BEGIN_PREFIX && self.field1 < METADATA_KEY_END_PREFIX
     }
 
     /// Encode a metadata key to a storage key.
@@ -80,7 +80,7 @@ impl Key {
     }
 
     /// Get the range of metadata keys.
-    pub fn metadata_key_range() -> RangeInclusive<Self> {
+    pub fn metadata_key_range() -> Range<Self> {
         Key {
             field1: METADATA_KEY_BEGIN_PREFIX,
             field2: 0,
@@ -88,13 +88,32 @@ impl Key {
             field4: 0,
             field5: 0,
             field6: 0,
-        }..=Key {
-            field1: u8::MAX,
-            field2: u16::MAX as u32,
-            field3: u32::MAX,
-            field4: u32::MAX,
-            field5: u8::MAX,
-            field6: u32::MAX,
+        }..Key {
+            field1: METADATA_KEY_END_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
+    /// Get the range of aux keys.
+    pub fn metadata_aux_key_range() -> Range<Self> {
+        Key {
+            field1: AUX_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: AUX_KEY_PREFIX + 1,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
         }
     }
 
@@ -103,7 +122,7 @@ impl Key {
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
         assert!(self.field2 < 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
-        (((self.field1 & 0xf) as i128) << 120)
+        (((self.field1 & 0x7F) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
             | ((self.field3 as i128) << 72)
             | ((self.field4 as i128) << 40)
@@ -113,7 +132,7 @@ impl Key {
 
     pub const fn from_i128(x: i128) -> Self {
         Key {
-            field1: ((x >> 120) & 0xf) as u8,
+            field1: ((x >> 120) & 0x7F) as u8,
             field2: ((x >> 104) & 0xFFFF) as u32,
             field3: (x >> 72) as u32,
             field4: (x >> 40) as u32,

@@ -38,12 +38,18 @@ use crate::{
 };
 
 /// Serialization helper
-fn read_mutex_content<S, T>(v: &std::sync::Mutex<T>, serializer: S) -> Result<S::Ok, S::Error>
+fn read_last_error<S, T>(v: &std::sync::Mutex<Option<T>>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::ser::Serializer,
-    T: Clone + std::fmt::Display,
+    T: std::fmt::Display,
 {
-    serializer.collect_str(&v.lock().unwrap())
+    serializer.collect_str(
+        &v.lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| format!("{e}"))
+            .unwrap_or("".to_string()),
+    )
 }
 
 /// In-memory state for a particular tenant shard.
@@ -111,11 +117,15 @@ pub(crate) struct TenantShard {
     #[serde(skip)]
     pub(crate) error_waiter: std::sync::Arc<SeqWait<Sequence, Sequence>>,
 
-    /// The most recent error from a reconcile on this tenant
+    /// The most recent error from a reconcile on this tenant.  This is a nested Arc
+    /// because:
+    ///  - ReconcileWaiters need to Arc-clone the overall object to read it later
+    ///  - ReconcileWaitError needs to use an `Arc<ReconcileError>` because we can construct
+    ///    many waiters for one shard, and the underlying error types are not Clone.
     /// TODO: generalize to an array of recent events
     /// TOOD: use a ArcSwap instead of mutex for faster reads?
-    #[serde(serialize_with = "read_mutex_content")]
-    pub(crate) last_error: std::sync::Arc<std::sync::Mutex<String>>,
+    #[serde(serialize_with = "read_last_error")]
+    pub(crate) last_error: std::sync::Arc<std::sync::Mutex<Option<Arc<ReconcileError>>>>,
 
     /// If we have a pending compute notification that for some reason we weren't able to send,
     /// set this to true. If this is set, calls to [`Self::get_reconcile_needed`] will return Yes
@@ -293,18 +303,18 @@ pub(crate) struct ReconcilerWaiter {
 
     seq_wait: std::sync::Arc<SeqWait<Sequence, Sequence>>,
     error_seq_wait: std::sync::Arc<SeqWait<Sequence, Sequence>>,
-    error: std::sync::Arc<std::sync::Mutex<String>>,
+    error: std::sync::Arc<std::sync::Mutex<Option<Arc<ReconcileError>>>>,
     seq: Sequence,
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ReconcileWaitError {
+pub(crate) enum ReconcileWaitError {
     #[error("Timeout waiting for shard {0}")]
     Timeout(TenantShardId),
     #[error("shutting down")]
     Shutdown,
     #[error("Reconcile error on shard {0}: {1}")]
-    Failed(TenantShardId, String),
+    Failed(TenantShardId, Arc<ReconcileError>),
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -342,7 +352,8 @@ impl ReconcilerWaiter {
                     SeqWaitError::Timeout => unreachable!()
                 })?;
 
-                return Err(ReconcileWaitError::Failed(self.tenant_shard_id, self.error.lock().unwrap().clone()))
+                return Err(ReconcileWaitError::Failed(self.tenant_shard_id,
+                    self.error.lock().unwrap().clone().expect("If error_seq_wait was advanced error was set").clone()))
             }
         }
 
@@ -873,7 +884,7 @@ impl TenantShard {
             active_nodes_dirty || dirty_observed || self.pending_compute_notification;
 
         if !do_reconcile {
-            tracing::info!("Not dirty, no reconciliation needed.");
+            tracing::debug!("Not dirty, no reconciliation needed.");
             return ReconcileNeeded::No;
         }
 
@@ -941,8 +952,8 @@ impl TenantShard {
 
     /// Create a waiter that will wait for some future Reconciler that hasn't been spawned yet.
     ///
-    /// This is appropriate when you can't spawn a recociler (e.g. due to resource limits), but
-    /// you would like to wait until one gets spawned in the background.
+    /// This is appropriate when you can't spawn a reconciler (e.g. due to resource limits), but
+    /// you would like to wait on the next reconciler that gets spawned in the background.
     pub(crate) fn future_reconcile_waiter(&mut self) -> ReconcilerWaiter {
         self.ensure_sequence_ahead();
 
@@ -1149,6 +1160,13 @@ impl TenantShard {
 
     pub(crate) fn get_scheduling_policy(&self) -> &ShardSchedulingPolicy {
         &self.scheduling_policy
+    }
+
+    pub(crate) fn set_last_error(&mut self, sequence: Sequence, error: ReconcileError) {
+        // Ordering: always set last_error before advancing sequence, so that sequence
+        // waiters are guaranteed to see a Some value when they see an error.
+        *(self.last_error.lock().unwrap()) = Some(Arc::new(error));
+        self.error_waiter.advance(sequence);
     }
 
     pub(crate) fn from_persistent(
