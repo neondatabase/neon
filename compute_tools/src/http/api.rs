@@ -7,6 +7,7 @@ use std::thread;
 
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
+use crate::schema::{get_schema_objects, schema_dump};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
@@ -130,6 +131,28 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     error!("error handling /terminate request: {msg}");
                     render_json_error(&msg, code)
                 }
+            }
+        }
+
+        (&Method::GET, "/schema/objects") => {
+            info!("serving /schema/objects GET request",);
+            match get_schema_objects(compute).await {
+                Ok(res) => Response::new(Body::from(serde_json::to_string(&res).unwrap())),
+                Err(_) => render_json_error(
+                    "schema get_schema_objects",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+            }
+        }
+
+        (&Method::GET, "/schema/dump") => {
+            info!("serving /schema/dump GET request",);
+            match schema_dump(compute).await {
+                Ok(res) => Response::new(Body::from(res)),
+                Err(_) => render_json_error(
+                    "schema get_schema_objects",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
             }
         }
 
@@ -397,3 +420,4 @@ pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> Result<thread:
         .name("http-endpoint".into())
         .spawn(move || serve(port, state))?)
 }
+

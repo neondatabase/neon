@@ -13,6 +13,7 @@ pub mod extension_server;
 pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
+pub mod schema;
 pub mod spec;
 pub mod swap;
 pub mod sync_sk;
