@@ -84,8 +84,11 @@ fn main() -> Result<()> {
     info!("build_tag: {build_tag}");
 
     let matches = cli().get_matches();
-    let pgbin_default = String::from("postgres");
-    let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
+    let pgbin_default = "postgres";
+    let pgbin = matches
+        .get_one::<String>("pgbin")
+        .map(|s| s.as_str())
+        .unwrap_or(pgbin_default);
 
     let ext_remote_storage = matches
         .get_one::<String>("remote-ext-config")
@@ -239,8 +242,6 @@ fn main() -> Result<()> {
     let _http_handle =
         launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
-    let extension_server_port: u16 = http_port;
-
     if !spec_set {
         // No spec provided, hang waiting for it.
         info!("no compute spec provided, waiting");
@@ -318,10 +319,10 @@ fn main() -> Result<()> {
         }
     }
 
+    let extension_server_port: u16 = http_port;
+
     // Start Postgres
     let mut pg = None;
-    let mut exit_code = None;
-
     if !prestartup_failed {
         pg = match compute.start_compute(extension_server_port) {
             Ok(pg) => Some(pg),
@@ -391,6 +392,7 @@ fn main() -> Result<()> {
 
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
+    let mut exit_code = None;
     if let Some((mut pg, logs_handle)) = pg {
         // Startup is finished, exit the startup tracing span
         drop(startup_context_guard);
