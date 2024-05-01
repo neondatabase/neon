@@ -40,9 +40,9 @@ use utils::lsn::Lsn;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BasebackupError {
-    #[error("pageserver error {0:#}")]
+    #[error("basebackup pageserver error {0:#}")]
     Server(#[from] anyhow::Error),
-    #[error("client error {0:#}")]
+    #[error("basebackup client error {0:#}")]
     Client(#[source] io::Error),
 }
 
