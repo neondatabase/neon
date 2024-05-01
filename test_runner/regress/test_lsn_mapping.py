@@ -110,10 +110,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
 # Test pageserver get_timestamp_of_lsn API
 def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
-    if neon_env_builder.pageserver_get_impl == "vectored":
-        key_not_found_error = r".*Requested key.*not found,*"
-    else:
-        key_not_found_error = r".*could not find data for key.*"
+    key_not_found_error = r".*could not find data for key.*"
 
     env = neon_env_builder.init_start()
 
