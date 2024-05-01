@@ -156,17 +156,15 @@ pub async fn serve_websocket(
         Err(e) => {
             // todo: log and push to ctx the error kind
             ctx.set_error_kind(e.get_error_kind());
-            ctx.log();
             Err(e.into())
         }
         Ok(None) => {
             ctx.set_success();
-            ctx.log();
             Ok(())
         }
         Ok(Some(p)) => {
             ctx.set_success();
-            ctx.log();
+            ctx.log_connect();
             p.proxy_pass().await
         }
     }

@@ -1,4 +1,7 @@
-use crate::{background_process, local_env::LocalEnv};
+use crate::{
+    background_process,
+    local_env::{LocalEnv, NeonStorageControllerConf},
+};
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper::Method;
 use pageserver_api::{
@@ -32,14 +35,12 @@ pub struct StorageController {
     public_key: Option<String>,
     postgres_port: u16,
     client: reqwest::Client,
+    config: NeonStorageControllerConf,
 }
 
 const COMMAND: &str = "storage_controller";
 
 const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
-
-// Use a shorter pageserver unavailability interval than the default to speed up tests.
-const NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
@@ -135,6 +136,7 @@ impl StorageController {
             client: reqwest::ClientBuilder::new()
                 .build()
                 .expect("Failed to construct http client"),
+            config: env.storage_controller.clone(),
         }
     }
 
@@ -272,8 +274,6 @@ impl StorageController {
         // Run migrations on every startup, in case something changed.
         let database_url = self.setup_database().await?;
 
-        let max_unavailable: humantime::Duration = NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL.into();
-
         let mut args = vec![
             "-l",
             &self.listen,
@@ -283,7 +283,7 @@ impl StorageController {
             "--database-url",
             &database_url,
             "--max-unavailable-interval",
-            &max_unavailable.to_string(),
+            &humantime::Duration::from(self.config.max_unavailable).to_string(),
         ]
         .into_iter()
         .map(|s| s.to_string())
@@ -470,6 +470,16 @@ impl StorageController {
     ) -> anyhow::Result<TenantCreateResponse> {
         self.dispatch(Method::POST, "v1/tenant".to_string(), Some(req))
             .await
+    }
+
+    #[instrument(skip(self))]
+    pub async fn tenant_import(&self, tenant_id: TenantId) -> anyhow::Result<TenantCreateResponse> {
+        self.dispatch::<(), TenantCreateResponse>(
+            Method::POST,
+            format!("debug/v1/tenant/{tenant_id}/import"),
+            None,
+        )
+        .await
     }
 
     #[instrument(skip(self))]

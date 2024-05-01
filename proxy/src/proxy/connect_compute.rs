@@ -133,10 +133,17 @@ where
 
     error!(error = ?err, "could not connect to compute node");
 
-    let node_info = if !node_info.cached() {
+    let node_info = if !node_info.cached() || !err.should_retry_database_address() {
         // If we just recieved this from cplane and dodn't get it from cache, we shouldn't retry.
         // Do not need to retrieve a new node_info, just return the old one.
         if !err.should_retry(num_retries, connect_to_compute_retry_config) {
+            Metrics::get().proxy.retries_metric.observe(
+                RetriesMetricGroup {
+                    outcome: ConnectOutcome::Failed,
+                    retry_type,
+                },
+                num_retries.into(),
+            );
             return Err(err.into());
         }
         node_info
@@ -194,6 +201,10 @@ where
         let wait_duration = retry_after(num_retries, connect_to_compute_retry_config);
         num_retries += 1;
 
+        let pause = ctx
+            .latency_timer
+            .pause(crate::metrics::Waiting::RetryTimeout);
         time::sleep(wait_duration).await;
+        drop(pause);
     }
 }

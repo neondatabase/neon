@@ -83,6 +83,7 @@ pub struct SafeKeeperConf {
     pub walsenders_keep_horizon: bool,
     pub partial_backup_enabled: bool,
     pub partial_backup_timeout: Duration,
+    pub disable_periodic_broker_push: bool,
 }
 
 impl SafeKeeperConf {
@@ -129,6 +130,7 @@ impl SafeKeeperConf {
             walsenders_keep_horizon: false,
             partial_backup_enabled: false,
             partial_backup_timeout: Duration::from_secs(0),
+            disable_periodic_broker_push: false,
         }
     }
 }

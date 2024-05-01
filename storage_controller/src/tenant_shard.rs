@@ -952,8 +952,8 @@ impl TenantShard {
 
     /// Create a waiter that will wait for some future Reconciler that hasn't been spawned yet.
     ///
-    /// This is appropriate when you can't spawn a recociler (e.g. due to resource limits), but
-    /// you would like to wait until one gets spawned in the background.
+    /// This is appropriate when you can't spawn a reconciler (e.g. due to resource limits), but
+    /// you would like to wait on the next reconciler that gets spawned in the background.
     pub(crate) fn future_reconcile_waiter(&mut self) -> ReconcilerWaiter {
         self.ensure_sequence_ahead();
 
