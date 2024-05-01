@@ -47,7 +47,7 @@ use chrono::Utc;
 use clap::Arg;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
@@ -285,6 +285,9 @@ fn main() -> Result<()> {
     let _monitor_handle = launch_monitor(&compute);
     let _configurator_handle = launch_configurator(&compute);
 
+    let mut prestartup_failed = false;
+    let mut delay_exit = false;
+
     // Resize swap to the desired size if the compute spec says so
     if let (Some(size_bytes), true) = (swap_size_bytes, resize_swap_on_bind) {
         // TODO(cloud#12047/sharnoff): For avoid 'swapoff' hitting during postgres startup, we need
@@ -313,38 +316,47 @@ fn main() -> Result<()> {
                 info!(%size_bytes, %size_gib, "resized swap");
             }
             Err(err) => {
+                let err = err.context("failed to resize swap");
                 error!("{err:#}");
-                // TODO(#7239/sharnoff): What should we do here?
-                // Should we fail compute startup if swap resizing fails?
-                //
-                // It'd be a clearer signal, making it immediately clear if something's wrong, but
-                // swap is also often just nice-to-have, so having startup fail over a nice-to-have
-                // feature makes the system more fragile. Maybe that's ultimately the best though.
+
+                // Mark compute startup as failed; don't try to start postgres, and report this
+                // error to the control plane when it next asks.
+                prestartup_failed = true;
+                let mut state = compute.state.lock().unwrap();
+                state.error = Some(format!("{err:?}"));
+                state.status = ComputeStatus::Failed;
+                compute.state_changed.notify_all();
+                delay_exit = true;
             }
         }
     }
 
     // Start Postgres
-    let mut delay_exit = false;
+    let mut pg = None;
     let mut exit_code = None;
-    let pg = match compute.start_compute(extension_server_port) {
-        Ok(pg) => Some(pg),
-        Err(err) => {
-            error!("could not start the compute node: {:#}", err);
-            let mut state = compute.state.lock().unwrap();
-            state.error = Some(format!("{:?}", err));
-            state.status = ComputeStatus::Failed;
-            // Notify others that Postgres failed to start. In case of configuring the
-            // empty compute, it's likely that API handler is still waiting for compute
-            // state change. With this we will notify it that compute is in Failed state,
-            // so control plane will know about it earlier and record proper error instead
-            // of timeout.
-            compute.state_changed.notify_all();
-            drop(state); // unlock
-            delay_exit = true;
-            None
-        }
-    };
+
+    if !prestartup_failed {
+        pg = match compute.start_compute(extension_server_port) {
+            Ok(pg) => Some(pg),
+            Err(err) => {
+                error!("could not start the compute node: {:#}", err);
+                let mut state = compute.state.lock().unwrap();
+                state.error = Some(format!("{:?}", err));
+                state.status = ComputeStatus::Failed;
+                // Notify others that Postgres failed to start. In case of configuring the
+                // empty compute, it's likely that API handler is still waiting for compute
+                // state change. With this we will notify it that compute is in Failed state,
+                // so control plane will know about it earlier and record proper error instead
+                // of timeout.
+                compute.state_changed.notify_all();
+                drop(state); // unlock
+                delay_exit = true;
+                None
+            }
+        };
+    } else {
+        warn!("skipping postgres startup because pre-startup step failed");
+    }
 
     // Start the vm-monitor if directed to. The vm-monitor only runs on linux
     // because it requires cgroups.
