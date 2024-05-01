@@ -100,6 +100,7 @@ postgres-protocol.workspace = true
 redis.workspace = true
 
 workspace_hack.workspace = true
+pin-list = { version = "0.1.0", features = ["std"] }
 
 [dev-dependencies]
 camino-tempfile.workspace = true
