@@ -307,15 +307,13 @@ fn main() -> Result<()> {
         // postgres is running.
         //
         // NOTE: resize-swap is dumb. If present, --once MUST be the first arg.
-        const RESIZE_SWAP_BIN: &str = "/neonvm/bin/resize-swap";
-        // use a closure to make error handling easier.
         match resize_swap(size_bytes) {
             Ok(()) => {
                 let size_gib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
                 info!(%size_bytes, %size_gib, "resized swap");
             }
             Err(err) => {
-                error!("could not run `{RESIZE_SWAP_BIN} {size_bytes}: {err:#}");
+                error!("{err:#}");
                 // TODO(#7239/sharnoff): What should we do here?
                 // Should we fail compute startup if swap resizing fails?
                 //

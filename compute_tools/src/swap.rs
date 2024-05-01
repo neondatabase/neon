@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context};
 use tracing::warn;
 
-const RESIZE_SWAP_BIN: &str = "/neonvm/bin/resize-swap";
+pub const RESIZE_SWAP_BIN: &str = "/neonvm/bin/resize-swap";
 
 pub fn resize_swap(size_bytes: u64) -> anyhow::Result<()> {
     // run `/neonvm/bin/resize-swap --once {size_bytes}`
@@ -16,20 +16,21 @@ pub fn resize_swap(size_bytes: u64) -> anyhow::Result<()> {
         .arg("--once")
         .arg(size_bytes.to_string())
         .spawn();
-    let mut child = match child_result {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            warn!("ignoring \"not found\" error from resize-swap to avoid swapoff while compute is running");
-            return Ok(()); // returns from the closure
-        }
-        Err(e) => return Err(e).context("spawn() failed"), // returns from the closure
-    };
 
-    child
-        .wait()
-        .context("wait() failed")
+    if matches!(&child_result, Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        warn!("ignoring \"not found\" error from resize-swap to avoid swapoff while compute is running");
+        return Ok(());
+    }
+
+    child_result
+        .context("spawn() failed")
+        .and_then(|mut child| child.wait().context("wait() failed"))
         .and_then(|status| match status.success() {
             true => Ok(()),
             false => Err(anyhow!("process exited with {status}")),
+        })
+        // wrap any prior error with the overall context that we couldn't run the command
+        .with_context(|| {
+            format!("could not run `/usr/bin/sudo {RESIZE_SWAP_BIN} --once {size_bytes}`")
         })
 }
