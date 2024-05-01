@@ -1,6 +1,5 @@
 use std::{str::FromStr, time::Duration};
 
-use reqwest::StatusCode;
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy,
@@ -9,6 +8,7 @@ use pageserver_api::{
     shard::TenantShardId,
 };
 use pageserver_client::mgmt_api;
+use reqwest::StatusCode;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use utils::{backoff, id::NodeId};
