@@ -12,7 +12,6 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
-use anyhow::anyhow;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
 use azure_core::RetryOptions;
@@ -23,6 +22,7 @@ use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use bytes::Bytes;
 use futures::future::Either;
+use futures::lock::Mutex;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -155,7 +155,7 @@ impl AzureBlobStorage {
                 Err(_elapsed) => Err(DownloadError::Timeout),
             });
 
-            let mut response = std::pin::pin!(response);
+            let mut response = Box::pin(response);
 
             let Some(part) = response.next().await else {
                 return Err(DownloadError::Other(anyhow::anyhow!(
@@ -185,17 +185,10 @@ impl AzureBlobStorage {
                     }
                 })
                 .flatten();
-            /*
-            let tail_stream = response
-                .map(|part| part.unwrap().data.map(|r| Ok(r.unwrap())))
-                .flatten()
-            */
-            //let tail_stream = futures::stream::once(async { Err(io::Error::other(anyhow!("foo")))});
             let stream = part
                 .data
                 .map(|r| r.map_err(|e| io::Error::other(e)))
-                .chain(tail_stream);
-
+                .chain(SyncStream::from_pin(Box::pin(tail_stream)));
 
             Ok(Download {
                 download_stream: Box::pin(stream),
@@ -676,5 +669,30 @@ where
             Actual { len, .. } => *len,
             Cloned { len_was, .. } => *len_was,
         }
+    }
+}
+
+/// A Stream wrapper that impls Sync even though the inner doesn't need to.
+struct SyncStream<T: Stream>(Mutex<Pin<Box<T>>>);
+
+impl<T: Stream> SyncStream<T> {
+    fn from_pin(inner: Pin<Box<T>>) -> Self {
+        SyncStream(Mutex::new(inner))
+    }
+}
+impl<T: Stream + Send> Stream for SyncStream<T> {
+    type Item = T::Item;
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let Some(mut lock) = self.0.try_lock() else {
+            return std::task::Poll::Pending;
+        };
+        let lock: Pin<&mut T> = Pin::as_mut(&mut lock);
+        Stream::poll_next(lock, cx)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, None)
     }
 }
