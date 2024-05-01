@@ -50,18 +50,12 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default, serde::Serialize)]
-struct Stats {
-    evictions: AtomicU64,
-    downloads: AtomicU64,
-    timeline_restarts: AtomicU64,
-}
-
 #[derive(serde::Serialize)]
 struct Output {
-    downloads: f64,
-    evictions: f64,
+    downloads: u64,
+    evictions: u64,
     timeline_restarts: u64,
+    runtime: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -108,13 +102,13 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     let token = CancellationToken::new();
     let mut tasks = JoinSet::new();
 
-    let live_stats = Arc::new(LiveStats::default());
-    let stats = Arc::new(Stats::default());
+    let periodic_stats = Arc::new(LiveStats::default());
+    let total_stats = Arc::new(LiveStats::default());
 
     let start = Instant::now();
     tasks.spawn({
-        let live_stats = Arc::clone(&live_stats);
-        let stats = Arc::clone(&stats);
+        let periodic_stats = Arc::clone(&periodic_stats);
+        let total_stats = Arc::clone(&total_stats);
         let cloned_token = token.clone();
         async move {
             let mut last_at = Instant::now();
@@ -131,14 +125,14 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                     evictions,
                     downloads,
                     timeline_restarts,
-                } = &*live_stats;
+                } = &*periodic_stats;
                 let evictions = evictions.swap(0, Ordering::Relaxed);
                 let downloads = downloads.swap(0, Ordering::Relaxed);
                 let timeline_restarts = timeline_restarts.swap(0, Ordering::Relaxed);
 
-                stats.evictions.fetch_add(evictions, Ordering::Relaxed);
-                stats.downloads.fetch_add(downloads, Ordering::Relaxed);
-                stats.timeline_restarts.fetch_add(timeline_restarts, Ordering::Relaxed);
+                total_stats.evictions.fetch_add(evictions, Ordering::Relaxed);
+                total_stats.downloads.fetch_add(downloads, Ordering::Relaxed);
+                total_stats.timeline_restarts.fetch_add(timeline_restarts, Ordering::Relaxed);
 
                 let evictions_per_s = evictions as f64 / delta.as_secs_f64();
                 let downloads_per_s = downloads as f64 / delta.as_secs_f64();
@@ -154,7 +148,7 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                 args,
                 Arc::clone(&mgmt_api_client),
                 tl,
-                Arc::clone(&live_stats),
+                Arc::clone(&periodic_stats),
                 token.clone(),
             ));
         }
@@ -173,9 +167,10 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     let duration: Duration = end - start;
 
     let output = Output {
-        downloads: stats.downloads.load(Ordering::Relaxed) as f64 / duration.as_secs_f64(),
-        evictions: stats.evictions.load(Ordering::Relaxed) as f64 / duration.as_secs_f64(),
-        timeline_restarts: stats.timeline_restarts.load(Ordering::Relaxed),
+        downloads: total_stats.downloads.load(Ordering::Relaxed),
+        evictions: total_stats.evictions.load(Ordering::Relaxed),
+        timeline_restarts: total_stats.timeline_restarts.load(Ordering::Relaxed),
+        runtime: duration,
     };
     let output = serde_json::to_string_pretty(&output).unwrap();
     println!("{output}");
