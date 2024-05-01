@@ -735,15 +735,7 @@ impl LayerInner {
 
         LayerInner {
             conf,
-            debug_str: {
-                format!(
-                    "tenants/{}/timelines/{}/{}",
-                    timeline.tenant_shard_id,
-                    timeline.timeline_id,
-                    desc.filename()
-                )
-                .into()
-            },
+            debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
             path,
             desc,
             timeline: Arc::downgrade(timeline),
