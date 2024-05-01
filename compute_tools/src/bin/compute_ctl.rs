@@ -42,12 +42,12 @@ use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{thread, time::Duration};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
@@ -62,6 +62,7 @@ use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
+use compute_tools::swap::resize_swap;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
@@ -308,30 +309,7 @@ fn main() -> Result<()> {
         // NOTE: resize-swap is dumb. If present, --once MUST be the first arg.
         const RESIZE_SWAP_BIN: &str = "/neonvm/bin/resize-swap";
         // use a closure to make error handling easier.
-        let result = (|| -> anyhow::Result<()> {
-            let child_result = std::process::Command::new("/usr/bin/sudo")
-                .arg(RESIZE_SWAP_BIN)
-                .arg("--once")
-                .arg(size_bytes.to_string())
-                .spawn();
-            let mut child = match child_result {
-                Ok(child) => child,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    warn!("ignoring \"not found\" error from resize-swap to avoid swapoff while compute is running");
-                    return Ok(()); // returns from the closure
-                }
-                Err(e) => return Err(e).context("spawn() failed"), // returns from the closure
-            };
-
-            child
-                .wait()
-                .context("wait() failed")
-                .and_then(|status| match status.success() {
-                    true => Ok(()),
-                    false => Err(anyhow!("process exited with {status}")),
-                })
-        })();
-        match result {
+        match resize_swap(size_bytes) {
             Ok(()) => {
                 let size_gib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
                 info!(%size_bytes, %size_gib, "resized swap");
