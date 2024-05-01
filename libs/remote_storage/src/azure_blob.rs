@@ -22,7 +22,7 @@ use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use bytes::Bytes;
 use futures::future::Either;
-use futures::lock::Mutex;
+use tokio::sync::Mutex;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -686,7 +686,7 @@ impl<T: Stream + Send> Stream for SyncStream<T> {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let Some(mut lock) = self.0.try_lock() else {
+        let Ok(mut lock) = self.0.try_lock() else {
             cx.waker().wake_by_ref();
             return std::task::Poll::Pending;
         };
