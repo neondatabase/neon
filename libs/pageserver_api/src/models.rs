@@ -303,6 +303,7 @@ pub struct TenantConfig {
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
+    pub switch_to_aux_file_v2: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -779,6 +780,17 @@ pub struct SecondaryProgress {
     pub bytes_downloaded: u64,
     /// The number of layer bytes in the most recently seen heatmap
     pub bytes_total: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantScanRemoteStorageShard {
+    pub tenant_shard_id: TenantShardId,
+    pub generation: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct TenantScanRemoteStorageResponse {
+    pub shards: Vec<TenantScanRemoteStorageShard>,
 }
 
 pub mod virtual_file {

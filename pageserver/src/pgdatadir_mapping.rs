@@ -23,6 +23,7 @@ use pageserver_api::key::{
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
+use pageserver_api::keyspace::SparseKeySpace;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -445,11 +446,6 @@ impl Timeline {
         // include physical changes from later commits that will be marked
         // as aborted, and will need to be vacuumed away.
         let commit_lsn = Lsn((low - 1) * 8);
-        // This maxing operation is for the edge case that the search above did
-        // set found_smaller to true but it never increased the lsn. Then, low
-        // is still the old min_lsn the subtraction above could possibly give a value
-        // below the anchestor_lsn.
-        let commit_lsn = commit_lsn.max(min_lsn);
         match (found_smaller, found_larger) {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
@@ -458,6 +454,12 @@ impl Timeline {
             }
             (false, true) => {
                 // Didn't find any commit timestamps smaller than the request
+                Ok(LsnForTimestamp::Past(min_lsn))
+            }
+            (true, _) if commit_lsn < min_lsn => {
+                // the search above did set found_smaller to true but it never increased the lsn.
+                // Then, low is still the old min_lsn, and the subtraction above gave a value
+                // below the min_lsn. We should never do that.
                 Ok(LsnForTimestamp::Past(min_lsn))
             }
             (true, false) => {
@@ -729,11 +731,13 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
+    ///
+    /// The return value is (dense keyspace, sparse keyspace).
     pub(crate) async fn collect_keyspace(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<KeySpace, CollectKeySpaceError> {
+    ) -> Result<(KeySpace, SparseKeySpace), CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -805,7 +809,12 @@ impl Timeline {
         if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
             result.add_key(AUX_FILES_KEY);
         }
-        Ok(result.to_keyspace())
+
+        Ok((
+            result.to_keyspace(),
+            /* AUX sparse key space */
+            SparseKeySpace(KeySpace::single(Key::metadata_aux_key_range())),
+        ))
     }
 
     /// Get cached size of relation if it not updated after specified LSN

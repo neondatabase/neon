@@ -3,6 +3,7 @@ mod draw;
 use draw::{LayerTraceEvent, LayerTraceFile, LayerTraceOp};
 
 use futures::StreamExt;
+use pageserver_api::shard::ShardIdentity;
 use rand::Rng;
 use tracing::info;
 
@@ -71,7 +72,7 @@ impl interface::CompactionKey for Key {
     const MIN: Self = u64::MIN;
     const MAX: Self = u64::MAX;
 
-    fn key_range_size(key_range: &Range<Self>) -> u32 {
+    fn key_range_size(key_range: &Range<Self>, _shard_identity: &ShardIdentity) -> u32 {
         std::cmp::min(key_range.end - key_range.start, u32::MAX as u64) as u32
     }
 
@@ -433,6 +434,11 @@ impl interface::CompactionJobExecutor for MockTimeline {
     type DeltaLayer = Arc<MockDeltaLayer>;
     type ImageLayer = Arc<MockImageLayer>;
     type RequestContext = MockRequestContext;
+
+    fn get_shard_identity(&self) -> &ShardIdentity {
+        static IDENTITY: ShardIdentity = ShardIdentity::unsharded();
+        &IDENTITY
+    }
 
     async fn get_layers(
         &mut self,

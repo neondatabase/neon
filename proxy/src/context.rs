@@ -20,7 +20,8 @@ use self::parquet::RequestData;
 
 pub mod parquet;
 
-static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestData>> = OnceCell::new();
+pub static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestData>> = OnceCell::new();
+pub static LOG_CHAN_DISCONNECT: OnceCell<mpsc::WeakUnboundedSender<RequestData>> = OnceCell::new();
 
 /// Context data for a single request to connect to a database.
 ///
@@ -49,9 +50,12 @@ pub struct RequestMonitoring {
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
     sender: Option<mpsc::UnboundedSender<RequestData>>,
+    // This sender is only used to log the length of session in case of success.
+    disconnect_sender: Option<mpsc::UnboundedSender<RequestData>>,
     pub latency_timer: LatencyTimer,
     // Whether proxy decided that it's not a valid endpoint end rejected it before going to cplane.
     rejected: Option<bool>,
+    disconnect_timestamp: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug)]
@@ -100,7 +104,9 @@ impl RequestMonitoring {
             cold_start_info: ColdStartInfo::Unknown,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
+            disconnect_sender: LOG_CHAN_DISCONNECT.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
+            disconnect_timestamp: None,
         }
     }
 
@@ -190,11 +196,7 @@ impl RequestMonitoring {
         self.success = true;
     }
 
-    pub fn log(self) {}
-}
-
-impl Drop for RequestMonitoring {
-    fn drop(&mut self) {
+    pub fn log_connect(&mut self) {
         let outcome = if self.success {
             ConnectOutcome::Success
         } else {
@@ -224,6 +226,25 @@ impl Drop for RequestMonitoring {
         }
         if let Some(tx) = self.sender.take() {
             let _: Result<(), _> = tx.send(RequestData::from(&*self));
+        }
+    }
+
+    fn log_disconnect(&mut self) {
+        // If we are here, it's guaranteed that the user successfully connected to the endpoint.
+        // Here we log the length of the session.
+        self.disconnect_timestamp = Some(Utc::now());
+        if let Some(tx) = self.disconnect_sender.take() {
+            let _: Result<(), _> = tx.send(RequestData::from(&*self));
+        }
+    }
+}
+
+impl Drop for RequestMonitoring {
+    fn drop(&mut self) {
+        if self.sender.is_some() {
+            self.log_connect();
+        } else {
+            self.log_disconnect();
         }
     }
 }
