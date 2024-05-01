@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
+use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -11,6 +12,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
+use anyhow::anyhow;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
 use azure_core::RetryOptions;
@@ -20,6 +22,7 @@ use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use bytes::Bytes;
+use futures::future::Either;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -154,37 +157,48 @@ impl AzureBlobStorage {
 
             let mut response = std::pin::pin!(response);
 
-            let mut bufs = Vec::new();
-            while let Some(part) = response.next().await {
-                let part = part?;
-                if etag.is_none() {
-                    etag = Some(part.blob.properties.etag);
-                }
-                if last_modified.is_none() {
-                    last_modified = Some(part.blob.properties.last_modified.into());
-                }
-                if let Some(blob_meta) = part.blob.metadata {
-                    metadata.extend(blob_meta.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
-                }
-                let data = part
-                    .data
-                    .collect()
-                    .await
-                    .map_err(|e| DownloadError::Other(e.into()))?;
-                bufs.push(data);
+            let Some(part) = response.next().await else {
+                return Err(DownloadError::Other(anyhow::anyhow!(
+                    "Azure GET response contained no response body"
+                )));
+            };
+            let part = part?;
+            if etag.is_none() {
+                etag = Some(part.blob.properties.etag);
+            }
+            if last_modified.is_none() {
+                last_modified = Some(part.blob.properties.last_modified.into());
+            }
+            if let Some(blob_meta) = part.blob.metadata {
+                metadata.extend(blob_meta.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
             }
 
-            if bufs.is_empty() {
-                return Err(DownloadError::Other(anyhow::anyhow!(
-                    "Azure GET response contained no buffers"
-                )));
-            }
             // unwrap safety: if these were None, bufs would be empty and we would have returned an error already
             let etag = etag.unwrap();
             let last_modified = last_modified.unwrap();
 
+            let tail_stream = response
+                .map(|part| match part {
+                    Ok(part) => Either::Left(part.data.map(|r| r.map_err(|e| io::Error::other(e)))),
+                    Err(e) => {
+                        Either::Right(futures::stream::once(async { Err(io::Error::other(e)) }))
+                    }
+                })
+                .flatten();
+            /*
+            let tail_stream = response
+                .map(|part| part.unwrap().data.map(|r| Ok(r.unwrap())))
+                .flatten()
+            */
+            //let tail_stream = futures::stream::once(async { Err(io::Error::other(anyhow!("foo")))});
+            let stream = part
+                .data
+                .map(|r| r.map_err(|e| io::Error::other(e)))
+                .chain(tail_stream);
+
+
             Ok(Download {
-                download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
+                download_stream: Box::pin(stream),
                 etag,
                 last_modified,
                 metadata: Some(StorageMetadata(metadata)),
