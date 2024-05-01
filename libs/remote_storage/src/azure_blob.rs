@@ -687,6 +687,7 @@ impl<T: Stream + Send> Stream for SyncStream<T> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let Some(mut lock) = self.0.try_lock() else {
+            cx.waker().wake_by_ref();
             return std::task::Poll::Pending;
         };
         let lock: Pin<&mut T> = Pin::as_mut(&mut lock);
