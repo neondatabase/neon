@@ -67,5 +67,5 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
         else:
             execute_retry_on_timeout("SELECT t FROM foo ORDER BY RANDOM() LIMIT 10")
             cur.fetchall()
-            times_executed += 1
+        times_executed += 1
     log.info(f"Workload executed {times_executed} times")
