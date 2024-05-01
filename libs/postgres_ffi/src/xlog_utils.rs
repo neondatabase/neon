@@ -331,7 +331,10 @@ impl CheckPoint {
     /// Returns 'true' if the XID was updated.
     pub fn update_next_xid(&mut self, xid: u32) -> bool {
         // nextXid should be greater than any XID in WAL, so increment provided XID and check for wraparround.
-        let mut new_xid = std::cmp::max(xid.wrapping_add(1), pg_constants::FIRST_NORMAL_TRANSACTION_ID);
+        let mut new_xid = std::cmp::max(
+            xid.wrapping_add(1),
+            pg_constants::FIRST_NORMAL_TRANSACTION_ID,
+        );
         // To reduce number of metadata checkpoints, we forward align XID on XID_CHECKPOINT_INTERVAL.
         // XID_CHECKPOINT_INTERVAL should not be larger than BLCKSZ*CLOG_XACTS_PER_BYTE
         new_xid =
@@ -367,8 +370,16 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
     let seg_off = lsn.segment_offset(WAL_SEGMENT_SIZE);
 
     let first_page_only = seg_off < XLOG_BLCKSZ;
-    let (shdr_rem_len, infoflags) = if first_page_only {
-        (seg_off, pg_constants::XLP_FIRST_IS_CONTRECORD)
+    // If first records starts in the middle of the page, pretend in page header
+    // there is a fake record which ends where first real record starts. This
+    // makes pg_waldump etc happy.
+    let (shdr_rem_len, infoflags) = if first_page_only && seg_off > 0 {
+        assert!(seg_off >= XLOG_SIZE_OF_XLOG_LONG_PHD);
+        // xlp_rem_len doesn't include page header, hence the subtraction.
+        (
+            seg_off - XLOG_SIZE_OF_XLOG_LONG_PHD,
+            pg_constants::XLP_FIRST_IS_CONTRECORD,
+        )
     } else {
         (0, 0)
     };
@@ -397,20 +408,22 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 
     if !first_page_only {
         let block_offset = lsn.page_offset_in_segment(WAL_SEGMENT_SIZE) as usize;
+        // see comments above about XLP_FIRST_IS_CONTRECORD and xlp_rem_len.
+        let (xlp_rem_len, xlp_info) = if page_off > 0 {
+            assert!(page_off >= XLOG_SIZE_OF_XLOG_SHORT_PHD as u64);
+            (
+                (page_off - XLOG_SIZE_OF_XLOG_SHORT_PHD as u64) as u32,
+                pg_constants::XLP_FIRST_IS_CONTRECORD,
+            )
+        } else {
+            (0, 0)
+        };
         let header = XLogPageHeaderData {
             xlp_magic: XLOG_PAGE_MAGIC as u16,
-            xlp_info: if page_off >= pg_constants::SIZE_OF_PAGE_HEADER as u64 {
-                pg_constants::XLP_FIRST_IS_CONTRECORD
-            } else {
-                0
-            },
+            xlp_info,
             xlp_tli: PG_TLI,
             xlp_pageaddr: lsn.page_lsn().0,
-            xlp_rem_len: if page_off >= pg_constants::SIZE_OF_PAGE_HEADER as u64 {
-                page_off as u32
-            } else {
-                0u32
-            },
+            xlp_rem_len,
             ..Default::default() // Put 0 in padding fields.
         };
         let hdr_bytes = header.encode()?;
