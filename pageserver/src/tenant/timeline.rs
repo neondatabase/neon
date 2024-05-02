@@ -4460,12 +4460,9 @@ impl Timeline {
                 }
             };
 
-            let (later_by_lsn, straddling, rest) =
-                detach_ancestor::partition_work(ancestor_lsn, &layers);
-
             // between retries, these can change if compaction or gc ran in between. this will mean
             // we have to redo work.
-            (later_by_lsn, straddling, rest)
+            detach_ancestor::partition_work(ancestor_lsn, &layers)
         };
 
         // TODO: layers are already sorted by something: use that to determine how much of remote
