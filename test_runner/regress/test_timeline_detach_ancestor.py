@@ -309,6 +309,7 @@ def test_detached_receives_flushes_while_being_detached(
         return n
 
     with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql("CREATE EXTENSION neon_test_utils;")
         ep.safe_psql("CREATE TABLE foo (i BIGINT, aux TEXT NOT NULL);")
 
         rows = insert_rows(256, ep)
@@ -375,7 +376,7 @@ def test_detached_receives_flushes_while_being_detached(
 
     assert client.timeline_detail(env.initial_tenant, timeline_id)["ancestor_timeline_id"] is None
 
-    # force reading all rows, causing shared buffers misses
+    assert ep.safe_psql("SELECT clear_buffer_cache();")
     assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
     assert ep.safe_psql("SELECT SUM(LENGTH(aux)) FROM foo")[0][0] != 0
     ep.stop()
