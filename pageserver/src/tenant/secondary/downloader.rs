@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     config::PageServerConf,
+    context::RequestContext,
     disk_usage_eviction_task::{
         finite_f32, DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer,
     },
@@ -74,12 +75,14 @@ pub(super) async fn downloader_task(
     command_queue: tokio::sync::mpsc::Receiver<CommandRequest<DownloadCommand>>,
     background_jobs_can_start: Barrier,
     cancel: CancellationToken,
+    root_ctx: RequestContext,
 ) {
     let concurrency = tenant_manager.get_conf().secondary_download_concurrency;
 
     let generator = SecondaryDownloader {
         tenant_manager,
         remote_storage,
+        root_ctx,
     };
     let mut scheduler = Scheduler::new(generator, concurrency);
 
@@ -92,6 +95,7 @@ pub(super) async fn downloader_task(
 struct SecondaryDownloader {
     tenant_manager: Arc<TenantManager>,
     remote_storage: GenericRemoteStorage,
+    root_ctx: RequestContext,
 }
 
 #[derive(Debug, Clone)]
@@ -367,11 +371,12 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         let remote_storage = self.remote_storage.clone();
         let conf = self.tenant_manager.get_conf();
         let tenant_shard_id = *secondary_state.get_tenant_shard_id();
+        let download_ctx = self.root_ctx.attached_child();
         (RunningDownload { barrier }, Box::pin(async move {
             let _completion = completion;
 
             match TenantDownloader::new(conf, &remote_storage, &secondary_state)
-                .download()
+                .download(&download_ctx)
                 .await
             {
                 Err(UpdateError::NoData) => {
@@ -485,7 +490,7 @@ impl<'a> TenantDownloader<'a> {
         }
     }
 
-    async fn download(&self) -> Result<(), UpdateError> {
+    async fn download(&self, ctx: &RequestContext) -> Result<(), UpdateError> {
         debug_assert_current_span_has_tenant_id();
 
         // For the duration of a download, we must hold the SecondaryTenant::gate, to ensure
@@ -560,7 +565,7 @@ impl<'a> TenantDownloader<'a> {
             }
 
             let timeline_id = timeline.timeline_id;
-            self.download_timeline(timeline)
+            self.download_timeline(timeline, ctx)
                 .instrument(tracing::info_span!(
                     "secondary_download_timeline",
                     tenant_id=%tenant_shard_id.tenant_id,
@@ -742,7 +747,11 @@ impl<'a> TenantDownloader<'a> {
         .and_then(|x| x)
     }
 
-    async fn download_timeline(&self, timeline: HeatMapTimeline) -> Result<(), UpdateError> {
+    async fn download_timeline(
+        &self,
+        timeline: HeatMapTimeline,
+        ctx: &RequestContext,
+    ) -> Result<(), UpdateError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
         let timeline_path = self
@@ -875,6 +884,7 @@ impl<'a> TenantDownloader<'a> {
                 &layer.name,
                 &LayerFileMetadata::from(&layer.metadata),
                 &self.secondary_state.cancel,
+                ctx,
             )
             .await
             {

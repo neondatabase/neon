@@ -4179,7 +4179,7 @@ impl Timeline {
                             };
 
                             // Write all the keys we just read into our new image layer.
-                            image_layer_writer.put_image(img_key, img).await?;
+                            image_layer_writer.put_image(img_key, img, ctx).await?;
                             wrote_keys = true;
                         }
                     }
@@ -4190,7 +4190,7 @@ impl Timeline {
                 // Normal path: we have written some data into the new image layer for this
                 // partition, so flush it to disk.
                 start = img_range.end;
-                let image_layer = image_layer_writer.finish(self).await?;
+                let image_layer = image_layer_writer.finish(self, ctx).await?;
                 image_layers.push(image_layer);
             } else {
                 // Special case: the image layer may be empty if this is a sharded tenant and the

@@ -428,9 +428,15 @@ impl DeltaLayerWriterInner {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
+    async fn put_value(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        val: Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         let (_, res) = self
-            .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init())
+            .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init(), ctx)
             .await;
         res
     }
@@ -441,9 +447,10 @@ impl DeltaLayerWriterInner {
         lsn: Lsn,
         val: Vec<u8>,
         will_init: bool,
+        ctx: &RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
-        let (val, res) = self.blob_writer.write_blob(val).await;
+        let (val, res) = self.blob_writer.write_blob(val, ctx).await;
         let off = match res {
             Ok(off) => off,
             Err(e) => return (val, Err(anyhow::anyhow!(e))),
@@ -463,18 +470,23 @@ impl DeltaLayerWriterInner {
     ///
     /// Finish writing the delta layer.
     ///
-    async fn finish(self, key_end: Key, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
+    async fn finish(
+        self,
+        key_end: Key,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
-        let mut file = self.blob_writer.into_inner().await?;
+        let mut file = self.blob_writer.into_inner(ctx).await?;
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf).await;
+            let (_buf, res) = file.write_all(buf, ctx).await;
             res?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
@@ -494,7 +506,7 @@ impl DeltaLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, ctx).await;
         res?;
 
         let metadata = file
@@ -592,8 +604,18 @@ impl DeltaLayerWriter {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    pub async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_value(key, lsn, val).await
+    pub async fn put_value(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        val: Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .as_mut()
+            .unwrap()
+            .put_value(key, lsn, val, ctx)
+            .await
     }
 
     pub async fn put_value_bytes(
@@ -602,11 +624,12 @@ impl DeltaLayerWriter {
         lsn: Lsn,
         val: Vec<u8>,
         will_init: bool,
+        ctx: &RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         self.inner
             .as_mut()
             .unwrap()
-            .put_value_bytes(key, lsn, val, will_init)
+            .put_value_bytes(key, lsn, val, will_init, ctx)
             .await
     }
 
@@ -621,10 +644,11 @@ impl DeltaLayerWriter {
         mut self,
         key_end: Key,
         timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
         let inner = self.inner.take().unwrap();
         let temp_path = inner.path.clone();
-        let result = inner.finish(key_end, timeline).await;
+        let result = inner.finish(key_end, timeline, ctx).await;
         // The delta layer files can sometimes be really large. Clean them up.
         if result.is_err() {
             tracing::warn!(
@@ -692,7 +716,7 @@ impl DeltaLayer {
         // TODO: could use smallvec here, but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, ctx).await;
         res?;
         Ok(())
     }
@@ -1281,7 +1305,13 @@ impl DeltaLayerInner {
                     per_blob_copy.extend_from_slice(data);
 
                     let (tmp, res) = writer
-                        .put_value_bytes(key, lsn, std::mem::take(&mut per_blob_copy), will_init)
+                        .put_value_bytes(
+                            key,
+                            lsn,
+                            std::mem::take(&mut per_blob_copy),
+                            will_init,
+                            ctx,
+                        )
                         .await;
                     per_blob_copy = tmp;
                     res?;
@@ -1760,12 +1790,14 @@ mod test {
 
         for entry in entries {
             let (_, res) = writer
-                .put_value_bytes(entry.key, entry.lsn, entry.value, false)
+                .put_value_bytes(entry.key, entry.lsn, entry.value, false, &ctx)
                 .await;
             res?;
         }
 
-        let resident = writer.finish(entries_meta.key_range.end, &timeline).await?;
+        let resident = writer
+            .finish(entries_meta.key_range.end, &timeline, &ctx)
+            .await?;
 
         let inner = resident.as_delta(&ctx).await?;
 
@@ -1951,7 +1983,7 @@ mod test {
                 .await
                 .unwrap();
 
-            let copied_layer = writer.finish(Key::MAX, &branch).await.unwrap();
+            let copied_layer = writer.finish(Key::MAX, &branch, ctx).await.unwrap();
 
             copied_layer.as_delta(ctx).await.unwrap();
 
