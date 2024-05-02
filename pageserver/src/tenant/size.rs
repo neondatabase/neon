@@ -118,9 +118,6 @@ pub(super) async fn gather_inputs(
     ctx: &RequestContext,
 ) -> anyhow::Result<ModelInputs> {
     // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
-    //
-    // FIXME: if a single timeline is deleted while refresh gc info is ongoing, we will fail the
-    // whole computation. It does not make sense from the billing perspective.
     tenant
         .refresh_gc_info(cancel, ctx)
         .await
