@@ -218,6 +218,8 @@ pub(super) async fn gather_inputs(
             .map(|lsn| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
 
+        drop(gc_info);
+
         // Add branch points we collected earlier, just in case there were any that were
         // not present in retain_lsns. We will remove any duplicates below later.
         if let Some(this_branchpoints) = branchpoints.get(&timeline_id) {
