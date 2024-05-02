@@ -31,6 +31,11 @@ def pageserver_virtual_file_io_engine() -> Optional[str]:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE")
 
 
+@pytest.fixture(scope="function", autouse=True)
+def pageserver_aux_file_v2() -> Optional[bool]:
+    return None
+
+
 def pytest_generate_tests(metafunc: Metafunc):
     if (bt := os.getenv("BUILD_TYPE")) is None:
         build_types = ["debug", "release"]
