@@ -80,7 +80,7 @@ const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // For operations that might be slow, like migrating a tenant with
 // some data in it.
-const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // If we receive a call using Secondary mode initially, it will omit generation.  We will initialize
 // tenant shards into this generation, and as long as it remains in this generation, we will accept

@@ -4,7 +4,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use std::time::Duration;
 
-const LOCK_TIMEOUT_ALERT_THRESHOLD: Duration = Duration::from_secs(30);
+use crate::service::RECONCILE_TIMEOUT;
+
+const LOCK_TIMEOUT_ALERT_THRESHOLD: Duration = RECONCILE_TIMEOUT;
 
 /// A wrapper around `OwnedRwLockWriteGuard` that when dropped changes the
 /// current holding operation in lock.
