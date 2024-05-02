@@ -51,8 +51,8 @@ pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "gc")]
     Gc,
 
-    #[strum(serialize = "update gc info")]
-    UpdateGcInfo,
+    #[strum(serialize = "find gc cutoffs")]
+    FindGcCutoffs,
 
     #[strum(serialize = "create tenant")]
     CreateTenant,
@@ -1989,7 +1989,7 @@ pub(crate) struct TimelineMetrics {
     pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
-    pub update_gc_info_histo: StorageTimeMetrics,
+    pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -2050,8 +2050,8 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
-        let update_gc_info_histo = StorageTimeMetrics::new(
-            StorageTimeOperation::UpdateGcInfo,
+        let find_gc_cutoffs_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::FindGcCutoffs,
             &tenant_id,
             &shard_id,
             &timeline_id,
@@ -2098,7 +2098,7 @@ impl TimelineMetrics {
             logical_size_histo,
             imitate_logical_size_histo,
             garbage_collect_histo,
-            update_gc_info_histo,
+            find_gc_cutoffs_histo,
             load_layer_map_histo,
             last_record_gauge,
             resident_physical_size_gauge,

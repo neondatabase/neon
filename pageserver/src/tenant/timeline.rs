@@ -4447,7 +4447,7 @@ impl Timeline {
     ) -> anyhow::Result<GcCutoffs> {
         let _timer = self
             .metrics
-            .update_gc_info_histo
+            .find_gc_cutoffs_histo
             .start_timer()
             .record_on_drop();
 
