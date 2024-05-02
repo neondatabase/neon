@@ -4434,6 +4434,8 @@ impl Timeline {
             .start_timer()
             .record_on_drop();
 
+        pausable_failpoint!("Timeline::find_gc_cutoffs-pausable");
+
         // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
         //
         // Some unit tests depend on garbage-collection working even when
