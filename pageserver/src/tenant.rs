@@ -5078,6 +5078,7 @@ mod tests {
             .await?;
 
         const NUM_KEYS: usize = 1000;
+        let cancel = CancellationToken::new();
 
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
@@ -5137,18 +5138,10 @@ mod tests {
             }
 
             // Perform a cycle of flush, and GC
-            let cutoff = tline.get_last_record_lsn();
-            tline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    &ctx,
-                )
-                .await?;
             tline.freeze_and_flush().await?;
-            tline.gc().await?;
+            tenant
+                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .await?;
         }
 
         Ok(())
