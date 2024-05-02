@@ -4649,7 +4649,7 @@ impl Timeline {
                         let res = timeline
                             .remote_client
                             .as_ref()
-                            .expect("sibling has to have remote client because we have one")
+                            .expect("reparented has to have remote client because we have one")
                             .schedule_reparenting_and_wait(&new_parent)
                             .await;
 
