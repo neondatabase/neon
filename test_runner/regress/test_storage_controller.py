@@ -1269,7 +1269,7 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     env.storage_controller.allowed_errors.extend(
         [
-            ".*Lock on*.",
+            ".*Lock on.*",
             ".*Scheduling is disabled by policy.*",
             f".*Operation TimelineCreate on key {tenant_id} has waited.*",
         ]
@@ -1277,7 +1277,7 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
 
     # Apply failpoint
     env.storage_controller.configure_failpoints(
-        ("tenant-update-policy-exclusive-lock", "return(5000)")
+        ("tenant-update-policy-exclusive-lock", "return(31000)")
     )
 
     # This will hold the exclusive for enough time to cause an warning

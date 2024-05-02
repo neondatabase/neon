@@ -219,11 +219,6 @@ def test_sharding_split_smoke(
         placement_policy='{"Attached": 1}',
         conf=non_default_tenant_config,
     )
-    env.storage_controller.allowed_errors.extend(
-        [
-            ".*Lock on ShardSplit was held for.*",
-        ]
-    )
 
     workload = Workload(env, tenant_id, timeline_id, branch_name="main")
     workload.init()
@@ -935,9 +930,6 @@ def test_sharding_split_failures(
             ".*Reconcile error on shard.*: receive body: error sending request for url.*",
             # While parent shard's client is stopped during split, flush loop updating LSNs will emit this warning
             ".*Failed to schedule metadata upload after updating disk_consistent_lsn.*",
-            # Ignore warning when locks are being held for long time
-            ".*Lock on ShardSplit was held for.*",
-            ".*Operation ShardSplit on key.*",
         ]
     )
 
