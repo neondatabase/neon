@@ -1,4 +1,5 @@
 import contextlib
+import enum
 import json
 import os
 import re
@@ -484,3 +485,15 @@ def assert_no_errors(log_file, service, allowed_errors):
         log.info(f"not allowed {service} error: {error.strip()}")
 
     assert not errors, f"Log errors on {service}: {errors[0]}"
+
+
+@enum.unique
+class AuxFileStore(str, enum.Enum):
+    V1 = "v1"
+    V2 = "v2"
+
+    def __repr__(self) -> str:
+        return f"'aux{self.value}'"
+
+    def __str__(self) -> str:
+        return f"'aux{self.value}'"
