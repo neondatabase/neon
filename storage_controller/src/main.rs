@@ -5,7 +5,6 @@ use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
 use std::sync::Arc;
-use std::time::Duration;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
@@ -70,6 +69,10 @@ struct Cli {
     /// Maximum number of reconcilers that may run in parallel
     #[arg(long)]
     reconciler_concurrency: Option<usize>,
+
+    /// How long to wait for the initial database connection to be available.
+    #[arg(long, default_value="5s")]
+    db_connect_timeout: humantime::Duration,
 }
 
 enum StrictMode {
@@ -255,7 +258,7 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations
-    Persistence::await_connection(&secrets.database_url, Duration::from_secs(5)).await?;
+    Persistence::await_connection(&secrets.database_url, args.db_connect_timeout.into()).await?;
 
     migration_run(&secrets.database_url)
         .await
