@@ -22,7 +22,6 @@ use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use bytes::Bytes;
 use futures::future::Either;
-use tokio::sync::Mutex;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -135,8 +134,6 @@ impl AzureBlobStorage {
         let mut etag = None;
         let mut last_modified = None;
         let mut metadata = HashMap::new();
-        // TODO give proper streaming response instead of buffering into RAM
-        // https://github.com/neondatabase/neon/issues/5563
 
         let download = async {
             let response = builder
@@ -673,11 +670,11 @@ where
 }
 
 /// A Stream wrapper that impls Sync even though the inner doesn't need to.
-struct SyncStream<T: Stream>(Mutex<Pin<Box<T>>>);
+struct SyncStream<T: Stream>(std::sync::Mutex<Pin<Box<T>>>);
 
 impl<T: Stream> SyncStream<T> {
     fn from_pin(inner: Pin<Box<T>>) -> Self {
-        SyncStream(Mutex::new(inner))
+        SyncStream(std::sync::Mutex::new(inner))
     }
 }
 impl<T: Stream + Send> Stream for SyncStream<T> {
@@ -686,14 +683,23 @@ impl<T: Stream + Send> Stream for SyncStream<T> {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let Ok(mut lock) = self.0.try_lock() else {
-            cx.waker().wake_by_ref();
-            return std::task::Poll::Pending;
+        let mut lock = match self.0.lock() {
+            Ok(lock) => lock,
+            Err(e) => {
+                tracing::info!("Failed to acquire SyncStream lock: {e}");
+                // TODO maybe return an error here instead?
+                return std::task::Poll::Ready(None);
+            }
         };
         let lock: Pin<&mut T> = Pin::as_mut(&mut lock);
         Stream::poll_next(lock, cx)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, None)
+        // We can't do async here and blocking locks will likely panic
+        if let Ok(lock) = self.0.lock() {
+            lock.size_hint()
+        } else {
+            (0, None)
+        }
     }
 }
