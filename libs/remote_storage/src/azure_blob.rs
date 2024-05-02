@@ -178,7 +178,7 @@ impl AzureBlobStorage {
 
             let tail_stream = response
                 .map(|part| match part {
-                    Ok(part) => Either::Left(part.data.map(|r| r.map_err(|e| io::Error::other(e)))),
+                    Ok(part) => Either::Left(part.data.map(|r| r.map_err(io::Error::other))),
                     Err(e) => {
                         Either::Right(futures::stream::once(async { Err(io::Error::other(e)) }))
                     }
@@ -186,7 +186,7 @@ impl AzureBlobStorage {
                 .flatten();
             let stream = part
                 .data
-                .map(|r| r.map_err(|e| io::Error::other(e)))
+                .map(|r| r.map_err(io::Error::other))
                 .chain(SyncStream::from_pin(Box::pin(tail_stream)));
 
             let download_stream = crate::support::DownloadStream::new(cancel_or_timeout_, stream);
@@ -690,14 +690,7 @@ impl<T: Stream + Send> Stream for SyncStream<T> {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let mut lock = match self.0.lock() {
-            Ok(lock) => lock,
-            Err(e) => {
-                tracing::info!("Failed to acquire SyncStream lock: {e}");
-                // TODO maybe return an error here instead?
-                return std::task::Poll::Ready(None);
-            }
-        };
+        let mut lock = self.0.lock().unwrap();
         let lock: Pin<&mut T> = Pin::as_mut(&mut lock);
         Stream::poll_next(lock, cx)
     }
