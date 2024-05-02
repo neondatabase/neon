@@ -7,6 +7,7 @@ use std::thread;
 
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
+use crate::schema::SchemaDumpError;
 use crate::schema::{get_schema_objects, schema_dump};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
@@ -17,6 +18,7 @@ use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::task;
 use tracing::{error, info, warn};
 use tracing_utils::http::OtelName;
+use utils::http::request::must_get_query_param;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
@@ -139,20 +141,27 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             match get_schema_objects(compute).await {
                 Ok(res) => Response::new(Body::from(serde_json::to_string(&res).unwrap())),
                 Err(_) => render_json_error(
-                    "schema get_schema_objects",
+                    "can't get schema objects",
                     StatusCode::INTERNAL_SERVER_ERROR,
                 ),
             }
         }
 
         (&Method::GET, "/schema/dump") => {
-            info!("serving /schema/dump GET request",);
-            match schema_dump(compute).await {
-                Ok(res) => Response::new(Body::from(res)),
-                Err(_) => render_json_error(
-                    "schema get_schema_objects",
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                ),
+            let db_name = match must_get_query_param(&req, "db_name") {
+                Err(e) => return e.into_response(),
+                Ok(db_name) => db_name,
+            };
+            info!("serving /schema/dump GET request with db_name: {db_name}",);
+            match schema_dump(compute, &db_name).await {
+                Ok(res) => Response::new(Body::wrap_stream(res)),
+                Err(SchemaDumpError::DatabaseDoesNotExist) => {
+                    render_json_error("database does not exist", StatusCode::NOT_FOUND)
+                }
+                Err(e) => {
+                    error!("can't get schema dump: {}", e);
+                    render_json_error("can't get schema dump", StatusCode::INTERNAL_SERVER_ERROR)
+                }
             }
         }
 
@@ -420,4 +429,3 @@ pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> Result<thread:
         .name("http-endpoint".into())
         .spawn(move || serve(port, state))?)
 }
-
