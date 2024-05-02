@@ -240,7 +240,7 @@ where
     loop {
         let cancellation_token = CancellationToken::new();
         interval.tick().await;
-        
+
         tokio::spawn(handle_messages(
             handler.clone(),
             redis.clone(),
