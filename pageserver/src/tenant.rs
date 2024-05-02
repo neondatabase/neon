@@ -4513,18 +4513,20 @@ mod tests {
     }
 
     async fn bulk_insert_compact_gc(
-        timeline: Arc<Timeline>,
+        tenant: &Tenant,
+        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         lsn: Lsn,
         repeat: usize,
         key_count: usize,
     ) -> anyhow::Result<()> {
         let compact = true;
-        bulk_insert_maybe_compact_gc(timeline, ctx, lsn, repeat, key_count, compact).await
+        bulk_insert_maybe_compact_gc(tenant, timeline, ctx, lsn, repeat, key_count, compact).await
     }
 
     async fn bulk_insert_maybe_compact_gc(
-        timeline: Arc<Timeline>,
+        tenant: &Tenant,
+        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         mut lsn: Lsn,
         repeat: usize,
@@ -4536,6 +4538,8 @@ mod tests {
 
         // Enforce that key range is monotonously increasing
         let mut keyspace = KeySpaceAccum::new();
+
+        let cancel = CancellationToken::new();
 
         for _ in 0..repeat {
             for _ in 0..key_count {
@@ -4558,24 +4562,18 @@ mod tests {
                 blknum += 1;
             }
 
-            let cutoff = timeline.get_last_record_lsn();
-
-            timeline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    ctx,
-                )
-                .await?;
             timeline.freeze_and_flush().await?;
             if compact {
-                timeline
-                    .compact(&CancellationToken::new(), EnumSet::empty(), ctx)
-                    .await?;
+                timeline.compact(&cancel, EnumSet::empty(), ctx).await?;
             }
-            timeline.gc().await?;
+
+            // this doesn't really need to use the timeline_id target, but it is closer to what it
+            // originally was.
+            let res = tenant
+                .gc_iteration(Some(timeline.timeline_id), 0, Duration::ZERO, &cancel, ctx)
+                .await?;
+
+            assert_eq!(res.layers_removed, 0, "this never removes anything");
         }
 
         Ok(())
@@ -4594,7 +4592,7 @@ mod tests {
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+        bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         Ok(())
     }
@@ -4625,7 +4623,7 @@ mod tests {
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+        bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         let guard = tline.layers.read().await;
         guard.layer_map().dump(true, &ctx).await?;
@@ -5452,7 +5450,7 @@ mod tests {
 
         let lsn = Lsn(0x10);
         let compact = false;
-        bulk_insert_maybe_compact_gc(tline.clone(), &ctx, lsn, 50, 10000, compact).await?;
+        bulk_insert_maybe_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000, compact).await?;
 
         let test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let read_lsn = Lsn(u64::MAX - 1);
