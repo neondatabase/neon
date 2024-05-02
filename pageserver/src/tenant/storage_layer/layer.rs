@@ -1797,8 +1797,7 @@ impl ResidentLayer {
         }
     }
 
-    /// FIXME: truncate is bad name because we are not truncating anything, but copying the
-    /// filtered parts.
+    /// Returns the amount of keys and values written to the writer.
     pub(crate) async fn copy_delta_prefix(
         &self,
         writer: &mut super::delta_layer::DeltaLayerWriter,
