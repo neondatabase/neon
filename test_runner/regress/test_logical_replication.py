@@ -18,6 +18,15 @@ def random_string(n: int):
     return "".join([choice(ascii_lowercase) for _ in range(n)])
 
 
+@pytest.mark.parametrize("pageserver_aux_file_v2", [False, True])
+def test_aux_file_v2_flag(neon_simple_env: NeonEnv, pageserver_aux_file_v2: bool):
+    env = neon_simple_env
+    with env.pageserver.http_client() as client:
+        tenant_config = client.tenant_config(env.initial_tenant).effective_config
+        assert tenant_config["switch_to_aux_file_v2"] == pageserver_aux_file_v2
+
+
+@pytest.mark.parametrize("pageserver_aux_file_v2", [False, True])
 def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
@@ -159,6 +168,7 @@ COMMIT;
 
 
 # Test that neon.logical_replication_max_snap_files works
+@pytest.mark.parametrize("pageserver_aux_file_v2", [False, True])
 def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
     def slot_removed(ep):
         assert (
@@ -205,6 +215,7 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
 
 # Test compute start at LSN page of which starts with contrecord
 # https://github.com/neondatabase/neon/issues/5749
+@pytest.mark.parametrize("pageserver_aux_file_v2", [False, True])
 def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
@@ -295,6 +306,7 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
 # logical replication bug as such, but without logical replication,
 # records passed ot the WAL redo process are never large enough to hit
 # the bug.
+@pytest.mark.parametrize("pageserver_aux_file_v2", [False, True])
 def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
@@ -366,6 +378,7 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     ws_cur.execute("select pg_create_logical_replication_slot('my_slot', 'pgoutput')")
 
 
+@pytest.mark.parametrize("pageserver_aux_file_v2", [False, True])
 def test_replication_shutdown(neon_simple_env: NeonEnv):
     # Ensure Postgres can exit without stuck when a replication job is active + neon extension installed
     env = neon_simple_env

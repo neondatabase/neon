@@ -41,8 +41,6 @@ use utils::{bin_ser::BeSer, lsn::Lsn};
 
 const MAX_AUX_FILE_DELTAS: usize = 1024;
 
-pub const AUX_FILES_V2: bool = true; // Set it to true to see if e2e test passes. Will change to tenant-level flag + have a test matrix after getting early review feedbacks.
-
 #[derive(Debug)]
 pub enum LsnForTimestamp {
     /// Found commits both before and after the given timestamp
@@ -677,7 +675,7 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        if AUX_FILES_V2 {
+        if self.get_switch_to_aux_file_v2() {
             let kv = self
                 .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
                 .await
@@ -1422,7 +1420,7 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        if AUX_FILES_V2 {
+        if self.tline.get_switch_to_aux_file_v2() {
             let key = aux_file::encode_aux_file_key(path);
             // retrieve the key from the engine
             let old_val = match self.get(key, ctx).await {

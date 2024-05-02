@@ -3354,10 +3354,6 @@ impl Timeline {
                 return Err(GetVectoredError::Cancelled);
             }
 
-            if !cont_lsn.is_valid() {
-                break;
-            }
-
             let keys_done_last_step = reconstruct_state.consume_done_keys();
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);

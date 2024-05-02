@@ -464,6 +464,7 @@ class NeonEnvBuilder:
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
         pageserver_virtual_file_io_engine: Optional[str] = None,
+        pageserver_aux_file_v2: Optional[bool] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -518,6 +519,8 @@ class NeonEnvBuilder:
             self.pageserver_validate_vectored_get = bool(validate)
             log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
 
+        self.pageserver_aux_file_v2 = bool(pageserver_aux_file_v2)
+
         assert test_name.startswith(
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
@@ -563,6 +566,7 @@ class NeonEnvBuilder:
             timeline_id=env.initial_timeline,
             shard_count=initial_tenant_shard_count,
             shard_stripe_size=initial_tenant_shard_stripe_size,
+            aux_file_v2=self.pageserver_aux_file_v2,
         )
         assert env.initial_tenant == initial_tenant
         assert env.initial_timeline == initial_timeline
@@ -1051,6 +1055,7 @@ class NeonEnv:
         )
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
+        self.pageserver_aux_file_v2 = config.pageserver_aux_file_v2
 
         # Create a config file corresponding to the options
         cfg: Dict[str, Any] = {
@@ -1283,6 +1288,7 @@ def _shared_simple_env(
     pg_distrib_dir: Path,
     pg_version: PgVersion,
     pageserver_virtual_file_io_engine: str,
+    pageserver_aux_file_v2: bool,
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1313,6 +1319,7 @@ def _shared_simple_env(
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
+        pageserver_aux_file_v2=pageserver_aux_file_v2,
     ) as builder:
         env = builder.init_start()
 
@@ -1352,6 +1359,7 @@ def neon_env_builder(
     test_overlay_dir: Path,
     top_output_dir: Path,
     pageserver_virtual_file_io_engine: str,
+    pageserver_aux_file_v2: Optional[bool] = None,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1385,6 +1393,7 @@ def neon_env_builder(
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
+        pageserver_aux_file_v2=pageserver_aux_file_v2,
     ) as builder:
         yield builder
 
@@ -1544,6 +1553,7 @@ class NeonCli(AbstractNeonCli):
         shard_stripe_size: Optional[int] = None,
         placement_policy: Optional[str] = None,
         set_default: bool = False,
+        aux_file_v2: Optional[bool] = None,
     ) -> Tuple[TenantId, TimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -1567,6 +1577,10 @@ class NeonCli(AbstractNeonCli):
                     product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
                 )
             )
+
+        if aux_file_v2 is True:
+            args.extend(["-c", "switch_to_aux_file_v2:true"])
+
         if set_default:
             args.append("--set-default")
 
