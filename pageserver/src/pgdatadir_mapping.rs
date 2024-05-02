@@ -1144,7 +1144,7 @@ impl<'a> DatadirModification<'a> {
             .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let mut rel_dir = if let hash_map::Entry::Occupied(mut e) =
-            dbdir.dbdirs.entry(&(rel.spcnode, rel.dbnode))
+            dbdir.dbdirs.entry((rel.spcnode, rel.dbnode))
         {
             // Didn't exist. Update dbdir
             e.insert(false);
