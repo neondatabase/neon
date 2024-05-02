@@ -284,6 +284,23 @@ impl Client {
         Ok((status, progress))
     }
 
+    pub async fn tenant_secondary_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<SecondaryProgress> {
+        let path = reqwest::Url::parse(&format!(
+            "{}/v1/tenant/{}/secondary/status",
+            self.mgmt_api_endpoint, tenant_shard_id
+        ))
+        .expect("Cannot build URL");
+
+        self.request(Method::GET, path, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn location_config(
         &self,
         tenant_shard_id: TenantShardId,
