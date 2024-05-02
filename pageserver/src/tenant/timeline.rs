@@ -409,7 +409,6 @@ pub struct WalReceiverInfo {
     pub last_received_msg_ts: u128,
 }
 
-///
 /// Information about how much history needs to be retained, needed by
 /// Garbage Collection.
 ///
@@ -436,6 +435,16 @@ pub struct GcInfo {
     /// This is calculated by finding a number such that a record is needed for PITR
     /// if only if its LSN is larger than 'pitr_cutoff'.
     pub pitr_cutoff: Lsn,
+}
+
+impl Default for GcInfo {
+    fn default() -> Self {
+        Self {
+            retain_lsns: Default::default(),
+            pitr_cutoff: Lsn(0),
+            horizon_cutoff: Lsn(0),
+        }
+    }
 }
 
 /// An error happened in a get() operation.
@@ -2111,11 +2120,7 @@ impl Timeline {
 
                 write_lock: tokio::sync::Mutex::new(None),
 
-                gc_info: std::sync::RwLock::new(GcInfo {
-                    retain_lsns: Vec::new(),
-                    horizon_cutoff: Lsn(0),
-                    pitr_cutoff: Lsn(0),
-                }),
+                gc_info: std::sync::RwLock::new(GcInfo::default()),
 
                 latest_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
                 initdb_lsn: metadata.initdb_lsn(),
