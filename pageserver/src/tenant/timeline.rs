@@ -4605,8 +4605,6 @@ impl Timeline {
             .expect("must still have a ancestor");
         let ancestor_lsn = self.get_ancestor_lsn();
 
-        let new_parent = self.timeline_id;
-
         // because we are now keeping the slot in progress, it is unlikely that there will be any
         // timeline deletions during this time. if we raced one, then we'll just ignore it.
         tenant
@@ -4642,6 +4640,7 @@ impl Timeline {
             .for_each(|timeline| {
                 // important in this scope: we are holding the Tenant::timelines lock
                 let span = tracing::info_span!("reparent", reparented=%timeline.timeline_id);
+                let new_parent = self.timeline_id;
 
                 tasks.spawn(
                     async move {
