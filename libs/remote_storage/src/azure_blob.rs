@@ -130,6 +130,8 @@ impl AzureBlobStorage {
         let kind = RequestKind::Get;
 
         let _permit = self.permit(kind, cancel).await?;
+        let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
+        let cancel_or_timeout_ = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
 
         let mut etag = None;
         let mut last_modified = None;
@@ -187,8 +189,10 @@ impl AzureBlobStorage {
                 .map(|r| r.map_err(|e| io::Error::other(e)))
                 .chain(SyncStream::from_pin(Box::pin(tail_stream)));
 
+            let download_stream = crate::support::DownloadStream::new(cancel_or_timeout_, stream);
+
             Ok(Download {
-                download_stream: Box::pin(stream),
+                download_stream: Box::pin(download_stream),
                 etag,
                 last_modified,
                 metadata: Some(StorageMetadata(metadata)),
@@ -197,7 +201,10 @@ impl AzureBlobStorage {
 
         tokio::select! {
             bufs = download => bufs,
-            _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+            cancel_or_timeout = cancel_or_timeout => match cancel_or_timeout {
+                TimeoutOrCancel::Timeout => Err(DownloadError::Timeout),
+                TimeoutOrCancel::Cancel => Err(DownloadError::Cancelled),
+            },
         }
     }
 
