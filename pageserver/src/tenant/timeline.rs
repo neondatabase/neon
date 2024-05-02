@@ -1495,6 +1495,12 @@ impl Timeline {
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub(crate) async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+        self.freeze_and_flush0().await
+    }
+
+    // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
+    // polluting the span hierarchy.
+    pub(crate) async fn freeze_and_flush0(&self) -> anyhow::Result<()> {
         let to_lsn = self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
@@ -4405,14 +4411,37 @@ impl Timeline {
         let _gate_entered = self.gate.enter().map_err(|_| ShuttingDown)?;
 
         if ancestor_lsn >= ancestor.get_disk_consistent_lsn() {
-            ancestor
-                .freeze_and_flush()
-                .await
-                .map_err(DetachFromAncestorError::FlushAncestor)?;
+            let span =
+                tracing::info_span!("freeze_and_flush", ancestor_timeline_id=%ancestor.timeline_id);
+            async {
+                let started_at = std::time::Instant::now();
+                let freeze_and_flush = ancestor.freeze_and_flush0();
+                let mut freeze_and_flush = std::pin::pin!(freeze_and_flush);
 
-            // we do not need to wait for uploads to complete, because we only want to see the file
-            // on disk.
-            tracing::info!("froze and flush the ancestor");
+                let res =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), &mut freeze_and_flush)
+                        .await;
+
+                let res = match res {
+                    Ok(res) => res,
+                    Err(_elapsed) => {
+                        tracing::info!("freezing and flushing ancestor is still ongoing");
+                        freeze_and_flush.await
+                    }
+                };
+
+                res.map_err(FlushAncestor)?;
+
+                // we do not need to wait for uploads to complete, because we only want to see the file
+                // on disk.
+                tracing::info!(
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "froze and flushed the ancestor"
+                );
+                Ok(())
+            }
+            .instrument(span)
+            .await?;
         }
 
         let end_lsn = ancestor_lsn + 1;
