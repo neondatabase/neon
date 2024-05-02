@@ -336,6 +336,12 @@ impl Layer {
             .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
+            .map_err(|err| match err {
+                GetVectoredError::Other(err) => GetVectoredError::Other(
+                    err.context(format!("get_values_reconstruct_data for layer {self}")),
+                ),
+                err => err,
+            })
     }
 
     /// Download the layer if evicted.
@@ -393,6 +399,10 @@ impl Layer {
 
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.0.path
+    }
+
+    pub(crate) fn debug_str(&self) -> &Arc<str> {
+        &self.0.debug_str
     }
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
@@ -516,6 +526,9 @@ struct LayerInner {
 
     /// Full path to the file; unclear if this should exist anymore.
     path: Utf8PathBuf,
+
+    /// String representation of the layer, used for traversal id.
+    debug_str: Arc<str>,
 
     desc: PersistentLayerDesc,
 
@@ -722,6 +735,7 @@ impl LayerInner {
 
         LayerInner {
             conf,
+            debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
             path,
             desc,
             timeline: Arc::downgrade(timeline),

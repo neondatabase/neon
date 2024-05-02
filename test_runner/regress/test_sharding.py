@@ -928,6 +928,8 @@ def test_sharding_split_failures(
             ".*Reconcile error: receive body: error sending request for url.*",
             # Node offline cases will fail inside reconciler when detaching secondaries
             ".*Reconcile error on shard.*: receive body: error sending request for url.*",
+            # Node offline cases may eventually cancel reconcilers when the heartbeater realizes nodes are offline
+            ".*Reconcile error.*Cancelled.*",
             # While parent shard's client is stopped during split, flush loop updating LSNs will emit this warning
             ".*Failed to schedule metadata upload after updating disk_consistent_lsn.*",
         ]

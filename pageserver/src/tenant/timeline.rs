@@ -16,14 +16,14 @@ use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
-    key::AUX_FILES_KEY,
-    keyspace::KeySpaceAccum,
+    key::{AUX_FILES_KEY, NON_INHERITED_RANGE},
+    keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
         EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
     },
     reltag::BlockNumber,
-    shard::{ShardIdentity, TenantShardId},
+    shard::{ShardIdentity, ShardNumber, TenantShardId},
 };
 use rand::Rng;
 use serde_with::serde_as;
@@ -55,7 +55,6 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -66,6 +65,7 @@ use crate::{
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     pgdatadir_mapping::CollectKeySpaceError,
 };
+use crate::{deletion_queue::DeletionQueueClient, metrics::GetKind};
 use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
@@ -119,8 +119,8 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
 use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
+use super::{config::TenantConf, storage_layer::VectoredValueReconstructState};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -135,6 +135,25 @@ pub(super) enum FlushLoopState {
         initdb_optimization_count: usize,
     },
     Exited,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ImageLayerCreationMode {
+    /// Try to create image layers based on `time_for_new_image_layer`. Used in compaction code path.
+    Try,
+    /// Force creating the image layers if possible. For now, no image layers will be created
+    /// for metadata keys. Used in compaction code path with force flag enabled.
+    Force,
+    /// Initial ingestion of the data, and no data should be dropped in this function. This
+    /// means that no metadata keys should be included in the partitions. Used in flush frozen layer
+    /// code path.
+    Initial,
+}
+
+impl std::fmt::Display for ImageLayerCreationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 /// Wrapper for key range to provide reverse ordering by range length for BinaryHeap
@@ -180,6 +199,16 @@ pub struct TimelineResources {
 pub(crate) struct AuxFilesState {
     pub(crate) dir: Option<AuxFilesDirectory>,
     pub(crate) n_deltas: usize,
+}
+
+/// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
+/// ingestion considerably, because WAL ingestion needs to check on most records if the record
+/// implicitly extends the relation.  At startup, `complete_as_of` is initialized to the current end
+/// of the timeline (disk_consistent_lsn).  It's used on reads of relation sizes to check if the
+/// value can be used to also update the cache, see [`Timeline::update_cached_rel_size`].
+pub(crate) struct RelSizeCache {
+    pub(crate) complete_as_of: Lsn,
+    pub(crate) map: HashMap<RelTag, (Lsn, BlockNumber)>,
 }
 
 pub struct Timeline {
@@ -307,7 +336,7 @@ pub struct Timeline {
     pub initdb_lsn: Lsn,
 
     /// When did we last calculate the partitioning?
-    partitioning: tokio::sync::Mutex<(KeyPartitioning, Lsn)>,
+    partitioning: tokio::sync::Mutex<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -324,7 +353,7 @@ pub struct Timeline {
     pub walreceiver: Mutex<Option<WalReceiver>>,
 
     /// Relation size cache
-    pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
+    pub(crate) rel_size_cache: RwLock<RelSizeCache>,
 
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
@@ -428,6 +457,51 @@ pub(crate) enum PageReconstructError {
     /// An error happened replaying WAL records
     #[error(transparent)]
     WalRedo(anyhow::Error),
+
+    #[error("{0}")]
+    MissingKey(MissingKeyError),
+}
+
+#[derive(Debug)]
+pub struct MissingKeyError {
+    key: Key,
+    shard: ShardNumber,
+    cont_lsn: Lsn,
+    request_lsn: Lsn,
+    ancestor_lsn: Option<Lsn>,
+    traversal_path: Vec<TraversalPathItem>,
+    backtrace: Option<std::backtrace::Backtrace>,
+}
+
+impl std::fmt::Display for MissingKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "could not find data for key {} (shard {:?}) at LSN {}, request LSN {}",
+            self.key, self.shard, self.cont_lsn, self.request_lsn
+        )?;
+        if let Some(ref ancestor_lsn) = self.ancestor_lsn {
+            write!(f, ", ancestor {}", ancestor_lsn)?;
+        }
+
+        if !self.traversal_path.is_empty() {
+            writeln!(f)?;
+        }
+
+        for (r, c, l) in &self.traversal_path {
+            writeln!(
+                f,
+                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
+                r, c, l,
+            )?;
+        }
+
+        if let Some(ref backtrace) = self.backtrace {
+            write!(f, "\n{}", backtrace)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl PageReconstructError {
@@ -439,6 +513,7 @@ impl PageReconstructError {
             AncestorLsnTimeout(_) => false,
             Cancelled | AncestorStopping(_) => true,
             WalRedo(_) => false,
+            MissingKey { .. } => false,
         }
     }
 }
@@ -482,8 +557,8 @@ pub(crate) enum GetVectoredError {
     #[error("Requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
 
-    #[error("Requested key {0} not found")]
-    MissingKey(Key),
+    #[error("Requested key not found: {0}")]
+    MissingKey(MissingKeyError),
 
     #[error(transparent)]
     GetReadyAncestorError(GetReadyAncestorError),
@@ -586,6 +661,19 @@ impl From<GetVectoredError> for CreateImageLayersError {
     }
 }
 
+impl From<GetVectoredError> for PageReconstructError {
+    fn from(e: GetVectoredError) -> Self {
+        match e {
+            GetVectoredError::Cancelled => PageReconstructError::Cancelled,
+            GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(anyhow!("Invalid LSN")),
+            err @ GetVectoredError::Oversized(_) => PageReconstructError::Other(err.into()),
+            GetVectoredError::MissingKey(err) => PageReconstructError::MissingKey(err),
+            GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
+            GetVectoredError::Other(err) => PageReconstructError::Other(err),
+        }
+    }
+}
+
 impl From<GetReadyAncestorError> for PageReconstructError {
     fn from(e: GetReadyAncestorError) -> Self {
         use GetReadyAncestorError::*;
@@ -612,6 +700,23 @@ impl From<GetReadyAncestorError> for PageReconstructError {
 #[strum(serialize_all = "kebab-case")]
 pub enum GetVectoredImpl {
     Sequential,
+    Vectored,
+}
+
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum GetImpl {
+    Legacy,
     Vectored,
 }
 
@@ -677,16 +782,6 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
-        self.timeline_get_throttle.throttle(ctx, 1).await;
-        self.get_impl(key, lsn, ctx).await
-    }
-    /// Not subject to [`Self::timeline_get_throttle`].
-    async fn get_impl(
-        &self,
-        key: Key,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Result<Bytes, PageReconstructError> {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
@@ -696,13 +791,7 @@ impl Timeline {
         // page_service.
         debug_assert!(!self.shard_identity.is_key_disposable(&key));
 
-        // XXX: structured stats collection for layer eviction here.
-        trace!(
-            "get page request for {}@{} from task kind {:?}",
-            key,
-            lsn,
-            ctx.task_kind()
-        );
+        self.timeline_get_throttle.throttle(ctx, 1).await;
 
         // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
         // The cached image can be returned directly if there is no WAL between the cached image
@@ -725,12 +814,85 @@ impl Timeline {
             None => None,
         };
 
-        let mut reconstruct_state = ValueReconstructState {
-            records: Vec::new(),
-            img: cached_page_img,
-        };
+        match self.conf.get_impl {
+            GetImpl::Legacy => {
+                let reconstruct_state = ValueReconstructState {
+                    records: Vec::new(),
+                    img: cached_page_img,
+                };
 
-        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME.start_timer();
+                self.get_impl(key, lsn, reconstruct_state, ctx).await
+            }
+            GetImpl::Vectored => {
+                let keyspace = KeySpace {
+                    ranges: vec![key..key.next()],
+                };
+
+                // Initialise the reconstruct state for the key with the cache
+                // entry returned above.
+                let mut reconstruct_state = ValuesReconstructState::new();
+                let mut key_state = VectoredValueReconstructState::default();
+                key_state.img = cached_page_img;
+                reconstruct_state.keys.insert(key, Ok(key_state));
+
+                let vectored_res = self
+                    .get_vectored_impl(keyspace.clone(), lsn, reconstruct_state, ctx)
+                    .await;
+
+                if self.conf.validate_vectored_get {
+                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
+                        .await;
+                }
+
+                let key_value = vectored_res?.pop_first();
+                match key_value {
+                    Some((got_key, value)) => {
+                        if got_key != key {
+                            error!(
+                                "Expected {}, but singular vectored get returned {}",
+                                key, got_key
+                            );
+                            Err(PageReconstructError::Other(anyhow!(
+                                "Singular vectored get returned wrong key"
+                            )))
+                        } else {
+                            value
+                        }
+                    }
+                    None => {
+                        error!(
+                            "Expected {}, but singular vectored get returned nothing",
+                            key
+                        );
+                        Err(PageReconstructError::Other(anyhow!(
+                            "Singular vectored get did not return a value for {}",
+                            key
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Not subject to [`Self::timeline_get_throttle`].
+    async fn get_impl(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        mut reconstruct_state: ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        // XXX: structured stats collection for layer eviction here.
+        trace!(
+            "get page request for {}@{} from task kind {:?}",
+            key,
+            lsn,
+            ctx.task_kind()
+        );
+
+        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(GetKind::Singular)
+            .start_timer();
         let path = self
             .get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
@@ -740,7 +902,7 @@ impl Timeline {
         let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
         let elapsed = start.elapsed();
         crate::metrics::RECONSTRUCT_TIME
-            .for_result(&res)
+            .for_get_kind(GetKind::Singular)
             .observe(elapsed.as_secs_f64());
 
         if cfg!(feature = "testing") && res.is_err() {
@@ -753,7 +915,7 @@ impl Timeline {
                 writeln!(
                     msg,
                     "- layer traversal: result {res:?}, cont_lsn {cont_lsn}, layer: {}",
-                    layer(),
+                    layer,
                 )
                 .expect("string grows")
             });
@@ -782,7 +944,7 @@ impl Timeline {
             return Err(GetVectoredError::InvalidLsn(lsn));
         }
 
-        let key_count = keyspace.total_size().try_into().unwrap();
+        let key_count = keyspace.total_raw_size().try_into().unwrap();
         if key_count > Timeline::MAX_GET_VECTORED_KEYS {
             return Err(GetVectoredError::Oversized(key_count));
         }
@@ -819,7 +981,9 @@ impl Timeline {
                 self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
             }
             GetVectoredImpl::Vectored => {
-                let vectored_res = self.get_vectored_impl(keyspace.clone(), lsn, ctx).await;
+                let vectored_res = self
+                    .get_vectored_impl(keyspace.clone(), lsn, ValuesReconstructState::new(), ctx)
+                    .await;
 
                 if self.conf.validate_vectored_get {
                     self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
@@ -865,15 +1029,39 @@ impl Timeline {
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
-                let block = self.get_impl(key, lsn, ctx).await;
+                let block = self
+                    .get_impl(key, lsn, ValueReconstructState::default(), ctx)
+                    .await;
 
                 use PageReconstructError::*;
                 match block {
                     Err(Cancelled | AncestorStopping(_)) => {
                         return Err(GetVectoredError::Cancelled)
                     }
-                    Err(Other(err)) if err.to_string().contains("could not find data for key") => {
-                        return Err(GetVectoredError::MissingKey(key))
+                    // we only capture stuck_at_lsn=false now until we figure out https://github.com/neondatabase/neon/issues/7380
+                    Err(MissingKey(err)) if !NON_INHERITED_RANGE.contains(&key) => {
+                        // The vectored read path handles non inherited keys specially.
+                        // If such a a key cannot be reconstructed from the current timeline,
+                        // the vectored read path returns a key level error as opposed to a top
+                        // level error.
+                        return Err(GetVectoredError::MissingKey(err));
+                    }
+                    Err(Other(err))
+                        if err
+                            .to_string()
+                            .contains("downloading evicted layer file failed") =>
+                    {
+                        return Err(GetVectoredError::Other(err))
+                    }
+                    Err(Other(err))
+                        if err
+                            .chain()
+                            .any(|cause| cause.to_string().contains("layer loading failed")) =>
+                    {
+                        // The intent here is to achieve error parity with the vectored read path.
+                        // When vectored read fails to load a layer it fails the whole read, hence
+                        // we mimic this behaviour here to keep the validation happy.
+                        return Err(GetVectoredError::Other(err));
                     }
                     _ => {
                         values.insert(key, block);
@@ -890,14 +1078,27 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
+        mut reconstruct_state: ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let mut reconstruct_state = ValuesReconstructState::new();
+        let get_kind = if keyspace.total_raw_size() == 1 {
+            GetKind::Singular
+        } else {
+            GetKind::Vectored
+        };
 
+        let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
             .await?;
+        get_data_timer.stop_and_record();
 
+        let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
+            .for_get_kind(get_kind)
+            .start_timer();
         let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
+        let layers_visited = reconstruct_state.get_layers_visited();
         for (key, res) in reconstruct_state.keys {
             match res {
                 Err(err) => {
@@ -911,6 +1112,13 @@ impl Timeline {
                 }
             }
         }
+        reconstruct_timer.stop_and_record();
+
+        // Note that this is an approximation. Tracking the exact number of layers visited
+        // per key requires virtually unbounded memory usage and is inefficient
+        // (i.e. segment tree tracking each range queried from a layer)
+        crate::metrics::VEC_READ_NUM_LAYERS_VISITED
+            .observe(layers_visited as f64 / results.len() as f64);
 
         Ok(results)
     }
@@ -932,7 +1140,7 @@ impl Timeline {
             match (lhs, rhs) {
                 (Oversized(l), Oversized(r)) => l == r,
                 (InvalidLsn(l), InvalidLsn(r)) => l == r,
-                (MissingKey(l), MissingKey(r)) => l == r,
+                (MissingKey(l), MissingKey(r)) => l.key == r.key,
                 (GetReadyAncestorError(_), GetReadyAncestorError(_)) => true,
                 (Other(_), Other(_)) => true,
                 _ => false,
@@ -946,6 +1154,11 @@ impl Timeline {
                 panic!(concat!("Sequential get failed with {}, but vectored get did not",
                                " - keyspace={:?} lsn={}"),
                        seq_err, keyspace, lsn) },
+            (Ok(_), Err(GetVectoredError::GetReadyAncestorError(GetReadyAncestorError::AncestorLsnTimeout(_)))) => {
+                // Sequential get runs after vectored get, so it is possible for the later 
+                // to time out while waiting for its ancestor's Lsn to become ready and for the
+                // former to succeed (it essentially has a doubled wait time).
+            },
             (Ok(_), Err(vec_err)) => {
                 panic!(concat!("Vectored get failed with {}, but sequential get did not",
                                " - keyspace={:?} lsn={}"),
@@ -1024,6 +1237,12 @@ impl Timeline {
     /// Atomically get both last and prev.
     pub(crate) fn get_last_record_rlsn(&self) -> RecordLsn {
         self.last_record_lsn.load()
+    }
+
+    /// Subscribe to callers of wait_lsn(). The value of the channel is None if there are no
+    /// wait_lsn() calls in progress, and Some(Lsn) if there is an active waiter for wait_lsn().
+    pub(crate) fn subscribe_for_wait_lsn_updates(&self) -> watch::Receiver<Option<Lsn>> {
+        self.last_record_lsn.status_receiver()
     }
 
     pub(crate) fn get_disk_consistent_lsn(&self) -> Lsn {
@@ -1668,6 +1887,15 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
+    #[allow(dead_code)]
+    pub(crate) fn get_switch_to_aux_file_v2(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .switch_to_aux_file_v2
+            .unwrap_or(self.conf.default_tenant_conf.switch_to_aux_file_v2)
+    }
+
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -1887,12 +2115,18 @@ impl Timeline {
                     // initial logical size is 0.
                     LogicalSize::empty_initial()
                 },
-                partitioning: tokio::sync::Mutex::new((KeyPartitioning::new(), Lsn(0))),
+                partitioning: tokio::sync::Mutex::new((
+                    (KeyPartitioning::new(), KeyPartitioning::new().into_sparse()),
+                    Lsn(0),
+                )),
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
 
                 last_received_wal: Mutex::new(None),
-                rel_size_cache: RwLock::new(HashMap::new()),
+                rel_size_cache: RwLock::new(RelSizeCache {
+                    complete_as_of: disk_consistent_lsn,
+                    map: HashMap::new(),
+                }),
 
                 download_all_remote_layers_task_info: RwLock::new(None),
 
@@ -2692,7 +2926,7 @@ impl Timeline {
     }
 }
 
-type TraversalId = String;
+type TraversalId = Arc<str>;
 
 trait TraversalLayerExt {
     fn traversal_id(&self) -> TraversalId;
@@ -2700,13 +2934,13 @@ trait TraversalLayerExt {
 
 impl TraversalLayerExt for Layer {
     fn traversal_id(&self) -> TraversalId {
-        self.local_path().to_string()
+        Arc::clone(self.debug_str())
     }
 }
 
 impl TraversalLayerExt for Arc<InMemoryLayer> {
     fn traversal_id(&self) -> TraversalId {
-        format!("timeline {} in-memory {self}", self.get_timeline_id())
+        Arc::clone(self.local_path_str())
     }
 }
 
@@ -2735,7 +2969,7 @@ impl Timeline {
         let mut timeline = self;
 
         let mut read_count = scopeguard::guard(0, |cnt| {
-            crate::metrics::READ_NUM_FS_LAYERS.observe(cnt as f64)
+            crate::metrics::READ_NUM_LAYERS_VISITED.observe(cnt as f64)
         });
 
         // For debugging purposes, collect the path of layers that we traversed
@@ -2775,32 +3009,33 @@ impl Timeline {
                         if prev <= cont_lsn {
                             // Didn't make any progress in last iteration. Error out to avoid
                             // getting stuck in the loop.
-                            return Err(layer_traversal_error(format!(
-                                "could not find layer with more data for key {} at LSN {}, request LSN {}, ancestor {}",
+                            return Err(PageReconstructError::MissingKey(MissingKeyError {
                                 key,
-                                Lsn(cont_lsn.0 - 1),
+                                shard: self.shard_identity.get_shard_number(&key),
+                                cont_lsn: Lsn(cont_lsn.0 - 1),
                                 request_lsn,
-                                timeline.ancestor_lsn
-                            ), traversal_path));
+                                ancestor_lsn: Some(timeline.ancestor_lsn),
+                                traversal_path,
+                                backtrace: None,
+                            }));
                         }
                     }
                     prev_lsn = Some(cont_lsn);
                 }
                 ValueReconstructResult::Missing => {
-                    return Err(layer_traversal_error(
-                        if cfg!(test) {
-                            format!(
-                                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}\n{}",
-                                key, self.shard_identity.get_shard_number(&key), cont_lsn, request_lsn, std::backtrace::Backtrace::force_capture(),
-                            )
-                        } else {
-                            format!(
-                                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}",
-                                key, self.shard_identity.get_shard_number(&key), cont_lsn, request_lsn
-                            )
-                        },
+                    return Err(PageReconstructError::MissingKey(MissingKeyError {
+                        key,
+                        shard: self.shard_identity.get_shard_number(&key),
+                        cont_lsn,
+                        request_lsn,
+                        ancestor_lsn: None,
                         traversal_path,
-                    ));
+                        backtrace: if cfg!(test) {
+                            Some(std::backtrace::Backtrace::force_capture())
+                        } else {
+                            None
+                        },
+                    }));
                 }
             }
 
@@ -2847,12 +3082,8 @@ impl Timeline {
                         Err(e) => return Err(PageReconstructError::from(e)),
                     };
                     cont_lsn = lsn_floor;
-                    // metrics: open_layer does not count as fs access, so we are not updating `read_count`
-                    traversal_path.push((
-                        result,
-                        cont_lsn,
-                        Box::new(move || open_layer.traversal_id()),
-                    ));
+                    *read_count += 1;
+                    traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
                     continue 'outer;
                 }
             }
@@ -2878,12 +3109,8 @@ impl Timeline {
                         Err(e) => return Err(PageReconstructError::from(e)),
                     };
                     cont_lsn = lsn_floor;
-                    // metrics: open_layer does not count as fs access, so we are not updating `read_count`
-                    traversal_path.push((
-                        result,
-                        cont_lsn,
-                        Box::new(move || frozen_layer.traversal_id()),
-                    ));
+                    *read_count += 1;
+                    traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
                     continue 'outer;
                 }
             }
@@ -2891,7 +3118,6 @@ impl Timeline {
             if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                 let layer = guard.get_from_desc(&layer);
                 drop(guard);
-
                 // Get all the data needed to reconstruct the page version from this layer.
                 // But if we have an older cached page image, no need to go past that.
                 let lsn_floor = max(cached_lsn + 1, lsn_floor);
@@ -2904,14 +3130,7 @@ impl Timeline {
                 };
                 cont_lsn = lsn_floor;
                 *read_count += 1;
-                traversal_path.push((
-                    result,
-                    cont_lsn,
-                    Box::new({
-                        let layer = layer.to_owned();
-                        move || layer.traversal_id()
-                    }),
-                ));
+                traversal_path.push((result, cont_lsn, layer.traversal_id()));
                 continue 'outer;
             } else if timeline.ancestor_timeline.is_some() {
                 // Nothing on this timeline. Traverse to parent
@@ -2964,7 +3183,41 @@ impl Timeline {
             .await?;
 
             keyspace.remove_overlapping_with(&completed);
-            if keyspace.total_size() == 0 || timeline.ancestor_timeline.is_none() {
+
+            // Do not descend into the ancestor timeline for aux files.
+            // We don't return a blanket [`GetVectoredError::MissingKey`] to avoid
+            // stalling compaction.
+            // TODO(chi): this will need to be updated for aux files v2 storage
+            if keyspace.overlaps(&NON_INHERITED_RANGE) {
+                let removed = keyspace.remove_overlapping_with(&KeySpace {
+                    ranges: vec![NON_INHERITED_RANGE],
+                });
+
+                for range in removed.ranges {
+                    let mut key = range.start;
+                    while key < range.end {
+                        reconstruct_state.on_key_error(
+                            key,
+                            PageReconstructError::MissingKey(MissingKeyError {
+                                key,
+                                shard: self.shard_identity.get_shard_number(&key),
+                                cont_lsn,
+                                request_lsn,
+                                ancestor_lsn: None,
+                                traversal_path: Vec::default(),
+                                backtrace: if cfg!(test) {
+                                    Some(std::backtrace::Backtrace::force_capture())
+                                } else {
+                                    None
+                                },
+                            }),
+                        );
+                        key = key.next();
+                    }
+                }
+            }
+
+            if keyspace.total_raw_size() == 0 || timeline.ancestor_timeline.is_none() {
                 break;
             }
 
@@ -2977,14 +3230,24 @@ impl Timeline {
             timeline = &*timeline_owned;
         }
 
-        if keyspace.total_size() != 0 {
-            return Err(GetVectoredError::MissingKey(keyspace.start().unwrap()));
+        if keyspace.total_raw_size() != 0 {
+            return Err(GetVectoredError::MissingKey(MissingKeyError {
+                key: keyspace.start().unwrap(), /* better if we can store the full keyspace */
+                shard: self
+                    .shard_identity
+                    .get_shard_number(&keyspace.start().unwrap()),
+                cont_lsn,
+                request_lsn,
+                ancestor_lsn: Some(timeline.ancestor_lsn),
+                traversal_path: vec![],
+                backtrace: None,
+            }));
         }
 
         Ok(())
     }
 
-    /// Collect the reconstruct data for a ketspace from the specified timeline.
+    /// Collect the reconstruct data for a keyspace from the specified timeline.
     ///
     /// Maintain a fringe [`LayerFringe`] which tracks all the layers that intersect
     /// the current keyspace. The current keyspace of the search at any given timeline
@@ -3019,55 +3282,61 @@ impl Timeline {
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             completed_keyspace.merge(&keys_done_last_step);
 
-            let guard = timeline.layers.read().await;
-            let layers = guard.layer_map();
+            // Do not descent any further if the last layer we visited
+            // completed all keys in the keyspace it inspected. This is not
+            // required for correctness, but avoids visiting extra layers
+            // which turns out to be a perf bottleneck in some cases.
+            if !unmapped_keyspace.is_empty() {
+                let guard = timeline.layers.read().await;
+                let layers = guard.layer_map();
 
-            let in_memory_layer = layers.find_in_memory_layer(|l| {
-                let start_lsn = l.get_lsn_range().start;
-                cont_lsn > start_lsn
-            });
+                let in_memory_layer = layers.find_in_memory_layer(|l| {
+                    let start_lsn = l.get_lsn_range().start;
+                    cont_lsn > start_lsn
+                });
 
-            match in_memory_layer {
-                Some(l) => {
-                    let lsn_range = l.get_lsn_range().start..cont_lsn;
-                    fringe.update(
-                        ReadableLayer::InMemoryLayer(l),
-                        unmapped_keyspace.clone(),
-                        lsn_range,
-                    );
-                }
-                None => {
-                    for range in unmapped_keyspace.ranges.iter() {
-                        let results = layers.range_search(range.clone(), cont_lsn);
+                match in_memory_layer {
+                    Some(l) => {
+                        let lsn_range = l.get_lsn_range().start..cont_lsn;
+                        fringe.update(
+                            ReadableLayer::InMemoryLayer(l),
+                            unmapped_keyspace.clone(),
+                            lsn_range,
+                        );
+                    }
+                    None => {
+                        for range in unmapped_keyspace.ranges.iter() {
+                            let results = layers.range_search(range.clone(), cont_lsn);
 
-                        results
-                            .found
-                            .into_iter()
-                            .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                                (
-                                    ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
-                                    keyspace_accum.to_keyspace(),
-                                    lsn_floor..cont_lsn,
-                                )
-                            })
-                            .for_each(|(layer, keyspace, lsn_range)| {
-                                fringe.update(layer, keyspace, lsn_range)
-                            });
+                            results
+                                .found
+                                .into_iter()
+                                .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                                    (
+                                        ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
+                                        keyspace_accum.to_keyspace(),
+                                        lsn_floor..cont_lsn,
+                                    )
+                                })
+                                .for_each(|(layer, keyspace, lsn_range)| {
+                                    fringe.update(layer, keyspace, lsn_range)
+                                });
+                        }
                     }
                 }
-            }
 
-            // It's safe to drop the layer map lock after planning the next round of reads.
-            // The fringe keeps readable handles for the layers which are safe to read even
-            // if layers were compacted or flushed.
-            //
-            // The more interesting consideration is: "Why is the read algorithm still correct
-            // if the layer map changes while it is operating?". Doing a vectored read on a
-            // timeline boils down to pushing an imaginary lsn boundary downwards for each range
-            // covered by the read. The layer map tells us how to move the lsn downwards for a
-            // range at *a particular point in time*. It is fine for the answer to be different
-            // at two different time points.
-            drop(guard);
+                // It's safe to drop the layer map lock after planning the next round of reads.
+                // The fringe keeps readable handles for the layers which are safe to read even
+                // if layers were compacted or flushed.
+                //
+                // The more interesting consideration is: "Why is the read algorithm still correct
+                // if the layer map changes while it is operating?". Doing a vectored read on a
+                // timeline boils down to pushing an imaginary lsn boundary downwards for each range
+                // covered by the read. The layer map tells us how to move the lsn downwards for a
+                // range at *a particular point in time*. It is fine for the answer to be different
+                // at two different time points.
+                drop(guard);
+            }
 
             if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
                 let next_cont_lsn = lsn_range.start;
@@ -3082,6 +3351,8 @@ impl Timeline {
 
                 unmapped_keyspace = keyspace_to_read;
                 cont_lsn = next_cont_lsn;
+
+                reconstruct_state.on_layer_visited();
             } else {
                 break;
             }
@@ -3405,65 +3676,102 @@ impl Timeline {
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
-        let (layers_to_upload, delta_layer_to_add) =
-            if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
-                #[cfg(test)]
-                match &mut *self.flush_loop_state.lock().unwrap() {
-                    FlushLoopState::NotStarted | FlushLoopState::Exited => {
-                        panic!("flush loop not running")
-                    }
-                    FlushLoopState::Running {
-                        initdb_optimization_count,
-                        ..
-                    } => {
+
+        // Whether to directly create image layers for this flush, or flush them as delta layers
+        let create_image_layer =
+            lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1);
+
+        #[cfg(test)]
+        {
+            match &mut *self.flush_loop_state.lock().unwrap() {
+                FlushLoopState::NotStarted | FlushLoopState::Exited => {
+                    panic!("flush loop not running")
+                }
+                FlushLoopState::Running {
+                    expect_initdb_optimization,
+                    initdb_optimization_count,
+                    ..
+                } => {
+                    if create_image_layer {
                         *initdb_optimization_count += 1;
-                    }
-                }
-                // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
-                // require downloading anything during initial import.
-                let (partitioning, _lsn) = self
-                    .repartition(
-                        self.initdb_lsn,
-                        self.get_compaction_target_size(),
-                        EnumSet::empty(),
-                        ctx,
-                    )
-                    .await?;
-
-                if self.cancel.is_cancelled() {
-                    return Err(FlushLayerError::Cancelled);
-                }
-
-                // For image layers, we add them immediately into the layer map.
-                (
-                    self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
-                        .await?,
-                    None,
-                )
-            } else {
-                #[cfg(test)]
-                match &mut *self.flush_loop_state.lock().unwrap() {
-                    FlushLoopState::NotStarted | FlushLoopState::Exited => {
-                        panic!("flush loop not running")
-                    }
-                    FlushLoopState::Running {
-                        expect_initdb_optimization,
-                        ..
-                    } => {
+                    } else {
                         assert!(!*expect_initdb_optimization, "expected initdb optimization");
                     }
                 }
-                // Normal case, write out a L0 delta layer file.
-                // `create_delta_layer` will not modify the layer map.
-                // We will remove frozen layer and add delta layer in one atomic operation later.
-                let layer = self.create_delta_layer(&frozen_layer, ctx).await?;
-                (
-                    // FIXME: even though we have a single image and single delta layer assumption
-                    // we push them to vec
-                    vec![layer.clone()],
-                    Some(layer),
+            }
+        }
+
+        let (layers_to_upload, delta_layer_to_add) = if create_image_layer {
+            // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
+            // require downloading anything during initial import.
+            let ((rel_partition, metadata_partition), _lsn) = self
+                .repartition(
+                    self.initdb_lsn,
+                    self.get_compaction_target_size(),
+                    EnumSet::empty(),
+                    ctx,
                 )
+                .await?;
+
+            if self.cancel.is_cancelled() {
+                return Err(FlushLayerError::Cancelled);
+            }
+
+            // For metadata, always create delta layers.
+            let delta_layer = if !metadata_partition.parts.is_empty() {
+                assert_eq!(
+                    metadata_partition.parts.len(),
+                    1,
+                    "currently sparse keyspace should only contain a single aux file keyspace"
+                );
+                let metadata_keyspace = &metadata_partition.parts[0];
+                assert_eq!(
+                    metadata_keyspace.0.ranges.len(),
+                    1,
+                    "aux file keyspace should be a single range"
+                );
+                self.create_delta_layer(
+                    &frozen_layer,
+                    ctx,
+                    Some(metadata_keyspace.0.ranges[0].clone()),
+                )
+                .await?
+            } else {
+                None
             };
+
+            // For image layers, we add them immediately into the layer map.
+            let mut layers_to_upload = Vec::new();
+            layers_to_upload.extend(
+                self.create_image_layers(
+                    &rel_partition,
+                    self.initdb_lsn,
+                    ImageLayerCreationMode::Initial,
+                    ctx,
+                )
+                .await?,
+            );
+
+            if let Some(delta_layer) = delta_layer {
+                layers_to_upload.push(delta_layer.clone());
+                (layers_to_upload, Some(delta_layer))
+            } else {
+                (layers_to_upload, None)
+            }
+        } else {
+            // Normal case, write out a L0 delta layer file.
+            // `create_delta_layer` will not modify the layer map.
+            // We will remove frozen layer and add delta layer in one atomic operation later.
+            let Some(layer) = self.create_delta_layer(&frozen_layer, ctx, None).await? else {
+                panic!("delta layer cannot be empty if no filter is applied");
+            };
+            (
+                // FIXME: even though we have a single image and single delta layer assumption
+                // we push them to vec
+                vec![layer.clone()],
+                Some(layer),
+            )
+        };
 
         pausable_failpoint!("flush-layer-cancel-after-writing-layer-out-pausable");
 
@@ -3584,12 +3892,18 @@ impl Timeline {
         self: &Arc<Self>,
         frozen_layer: &Arc<InMemoryLayer>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<ResidentLayer> {
+        key_range: Option<Range<Key>>,
+    ) -> anyhow::Result<Option<ResidentLayer>> {
         let self_clone = Arc::clone(self);
         let frozen_layer = Arc::clone(frozen_layer);
         let ctx = ctx.attached_child();
         let work = async move {
-            let new_delta = frozen_layer.write_to_disk(&self_clone, &ctx).await?;
+            let Some(new_delta) = frozen_layer
+                .write_to_disk(&self_clone, &ctx, key_range)
+                .await?
+            else {
+                return Ok(None);
+            };
             // The write_to_disk() above calls writer.finish() which already did the fsync of the inodes.
             // We just need to fsync the directory in which these inodes are linked,
             // which we know to be the timeline directory.
@@ -3608,7 +3922,7 @@ impl Timeline {
                 .sync_all()
                 .await
                 .fatal_err("VirtualFile::sync_all timeline dir");
-            anyhow::Ok(new_delta)
+            anyhow::Ok(Some(new_delta))
         };
         // Before tokio-epoll-uring, we ran write_to_disk & the sync_all inside spawn_blocking.
         // Preserve that behavior to maintain the same behavior for `virtual_file_io_engine=std-fs`.
@@ -3635,19 +3949,20 @@ impl Timeline {
         partition_size: u64,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
+    ) -> anyhow::Result<((KeyPartitioning, SparseKeyPartitioning), Lsn)> {
         let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
             anyhow::bail!("repartition() called concurrently, this should not happen");
         };
-        if lsn < partitioning_guard.1 {
+        let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
+        if lsn < *partition_lsn {
             anyhow::bail!("repartition() called with LSN going backwards, this should not happen");
         }
 
-        let distance = lsn.0 - partitioning_guard.1 .0;
-        if partitioning_guard.1 != Lsn(0)
+        let distance = lsn.0 - partition_lsn.0;
+        if *partition_lsn != Lsn(0)
             && distance <= self.repartition_threshold
             && !flags.contains(CompactFlags::ForceRepartition)
         {
@@ -3656,37 +3971,24 @@ impl Timeline {
                 threshold = self.repartition_threshold,
                 "no repartitioning needed"
             );
-            return Ok((partitioning_guard.0.clone(), partitioning_guard.1));
+            return Ok((
+                (dense_partition.clone(), sparse_partition.clone()),
+                *partition_lsn,
+            ));
         }
 
-        let keyspace = self.collect_keyspace(lsn, ctx).await?;
-        let partitioning = keyspace.partition(partition_size);
-
-        *partitioning_guard = (partitioning, lsn);
+        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
+        let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
+        let sparse_partitioning = SparseKeyPartitioning {
+            parts: vec![sparse_ks],
+        }; // no partitioning for metadata keys for now
+        *partitioning_guard = ((dense_partitioning, sparse_partitioning), lsn);
 
         Ok((partitioning_guard.0.clone(), partitioning_guard.1))
     }
 
     // Is it time to create a new image layer for the given partition?
     async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
-        let last = self.last_image_layer_creation_check_at.load();
-        if lsn != Lsn(0) {
-            let distance = lsn
-                .checked_sub(last)
-                .expect("Attempt to compact with LSN going backwards");
-
-            let min_distance = self.get_image_layer_creation_check_threshold() as u64
-                * self.get_checkpoint_distance();
-
-            // Skip the expensive delta layer counting below if we've not ingested
-            // sufficient WAL since the last check.
-            if distance.0 < min_distance {
-                return false;
-            }
-        }
-
-        self.last_image_layer_creation_check_at.store(lsn);
-
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read().await;
@@ -3736,12 +4038,12 @@ impl Timeline {
         false
     }
 
-    #[tracing::instrument(skip_all, fields(%lsn, %force))]
+    #[tracing::instrument(skip_all, fields(%lsn, %mode))]
     async fn create_image_layers(
         self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,
         lsn: Lsn,
-        force: bool,
+        mode: ImageLayerCreationMode,
         ctx: &RequestContext,
     ) -> Result<Vec<ResidentLayer>, CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
@@ -3758,11 +4060,46 @@ impl Timeline {
         // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
         let mut start = Key::MIN;
 
+        let check_for_image_layers = {
+            let last_checks_at = self.last_image_layer_creation_check_at.load();
+            let distance = lsn
+                .checked_sub(last_checks_at)
+                .expect("Attempt to compact with LSN going backwards");
+            let min_distance = self.get_image_layer_creation_check_threshold() as u64
+                * self.get_checkpoint_distance();
+
+            // Skip the expensive delta layer counting if this timeline has not ingested sufficient
+            // WAL since the last check.
+            distance.0 >= min_distance
+        };
+
+        if check_for_image_layers {
+            self.last_image_layer_creation_check_at.store(lsn);
+        }
+
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
-            if !force && !self.time_for_new_image_layer(partition, lsn).await {
-                start = img_range.end;
-                continue;
+
+            if partition.overlaps(&Key::metadata_key_range()) {
+                // TODO(chi): The next patch will correctly create image layers for metadata keys, and it would be a
+                // rather big change. Keep this patch small for now.
+                match mode {
+                    ImageLayerCreationMode::Force | ImageLayerCreationMode::Try => {
+                        // skip image layer creation anyways for metadata keys.
+                        start = img_range.end;
+                        continue;
+                    }
+                    ImageLayerCreationMode::Initial => {
+                        return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
+                    }
+                }
+            } else if let ImageLayerCreationMode::Try = mode {
+                // check_for_image_layers = false -> skip
+                // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
+                if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
+                    start = img_range.end;
+                    continue;
+                }
             }
 
             let mut image_layer_writer = ImageLayerWriter::new(
@@ -3803,7 +4140,7 @@ impl Timeline {
                     key = key.next();
 
                     // Maybe flush `key_rest_accum`
-                    if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
+                    if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
                         || last_key_in_range
                     {
                         let results = self
@@ -4089,6 +4426,12 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let _timer = self
+            .metrics
+            .update_gc_info_histo
+            .start_timer()
+            .record_on_drop();
+
         // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
         //
         // Some unit tests depend on garbage-collection working even when
@@ -4134,9 +4477,8 @@ impl Timeline {
                 *self.get_latest_gc_cutoff_lsn()
             }
         } else {
-            // No time-based retention was configured. Set time-based cutoff to
-            // same as LSN based.
-            cutoff_horizon
+            // No time-based retention was configured. Interpret this as "keep no history".
+            self.get_last_record_lsn()
         };
 
         // Grab the lock and update the values
@@ -4656,35 +4998,7 @@ impl Timeline {
     }
 }
 
-type TraversalPathItem = (
-    ValueReconstructResult,
-    Lsn,
-    Box<dyn Send + FnOnce() -> TraversalId>,
-);
-
-/// Helper function for get_reconstruct_data() to add the path of layers traversed
-/// to an error, as anyhow context information.
-fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageReconstructError {
-    // We want the original 'msg' to be the outermost context. The outermost context
-    // is the most high-level information, which also gets propagated to the client.
-    let mut msg_iter = path
-        .into_iter()
-        .map(|(r, c, l)| {
-            format!(
-                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r,
-                c,
-                l(),
-            )
-        })
-        .chain(std::iter::once(msg));
-    // Construct initial message from the first traversed layer
-    let err = anyhow!(msg_iter.next().unwrap());
-
-    // Append all subsequent traversals, and the error message 'msg', as contexts.
-    let msg = msg_iter.fold(err, |err, msg| err.context(msg));
-    PageReconstructError::from(msg)
-}
+type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
 
 struct TimelineWriterState {
     open_layer: Arc<InMemoryLayer>,

@@ -118,6 +118,7 @@ pub(crate) struct ValuesReconstructState {
     pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
 
     keys_done: KeySpaceRandomAccum,
+    layers_visited: u32,
 }
 
 impl ValuesReconstructState {
@@ -125,6 +126,7 @@ impl ValuesReconstructState {
         Self {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),
+            layers_visited: 0,
         }
     }
 
@@ -134,6 +136,37 @@ impl ValuesReconstructState {
         if let Some(Ok(state)) = previous {
             if state.situation == ValueReconstructSituation::Continue {
                 self.keys_done.add_key(key);
+            }
+        }
+    }
+
+    pub(crate) fn on_layer_visited(&mut self) {
+        self.layers_visited += 1;
+    }
+
+    pub(crate) fn get_layers_visited(&self) -> u32 {
+        self.layers_visited
+    }
+
+    /// This function is called after reading a keyspace from a layer.
+    /// It checks if the read path has now moved past the cached Lsn for any keys.
+    ///
+    /// Implementation note: We intentionally iterate over the keys for which we've
+    /// already collected some reconstruct data. This avoids scaling complexity with
+    /// the size of the search space.
+    pub(crate) fn on_lsn_advanced(&mut self, keyspace: &KeySpace, advanced_to: Lsn) {
+        for (key, value) in self.keys.iter_mut() {
+            if !keyspace.contains(key) {
+                continue;
+            }
+
+            if let Ok(state) = value {
+                if state.situation != ValueReconstructSituation::Complete
+                    && state.get_cached_lsn() >= Some(advanced_to)
+                {
+                    state.situation = ValueReconstructSituation::Complete;
+                    self.keys_done.add_key(*key);
+                }
             }
         }
     }
@@ -162,11 +195,18 @@ impl ValuesReconstructState {
                         true
                     }
                     Value::WalRecord(rec) => {
-                        let reached_cache =
-                            state.get_cached_lsn().map(|clsn| clsn + 1) == Some(lsn);
+                        debug_assert!(
+                            Some(lsn) > state.get_cached_lsn(),
+                            "Attempt to collect a record below cached LSN for walredo: {} < {}",
+                            lsn,
+                            state
+                                .get_cached_lsn()
+                                .expect("Assertion can only fire if a cached lsn is present")
+                        );
+
                         let will_init = rec.will_init();
                         state.records.push((lsn, rec));
-                        will_init || reached_cache
+                        will_init
                     }
                 },
             };

@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use dashmap::DashSet;
@@ -13,13 +14,14 @@ use redis::{
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
     config::EndpointCacheConfig,
     context::RequestMonitoring,
     intern::{BranchIdInt, EndpointIdInt, ProjectIdInt},
-    metrics::{Metrics, RedisErrors},
+    metrics::{Metrics, RedisErrors, RedisEventsCount},
     rate_limiter::GlobalRateLimiter,
     redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider,
     EndpointId,
@@ -98,29 +100,47 @@ impl EndpointsCache {
         if let Some(endpoint_created) = key.endpoint_created {
             self.endpoints
                 .insert(EndpointIdInt::from(&endpoint_created.endpoint_id.into()));
+            Metrics::get()
+                .proxy
+                .redis_events_count
+                .inc(RedisEventsCount::EndpointCreated);
         }
         if let Some(branch_created) = key.branch_created {
             self.branches
                 .insert(BranchIdInt::from(&branch_created.branch_id.into()));
+            Metrics::get()
+                .proxy
+                .redis_events_count
+                .inc(RedisEventsCount::BranchCreated);
         }
         if let Some(project_created) = key.project_created {
             self.projects
                 .insert(ProjectIdInt::from(&project_created.project_id.into()));
+            Metrics::get()
+                .proxy
+                .redis_events_count
+                .inc(RedisEventsCount::ProjectCreated);
         }
     }
     pub async fn do_read(
         &self,
         mut con: ConnectionWithCredentialsProvider,
+        cancellation_token: CancellationToken,
     ) -> anyhow::Result<Infallible> {
         let mut last_id = "0-0".to_string();
         loop {
-            self.ready.store(false, Ordering::Release);
             if let Err(e) = con.connect().await {
                 tracing::error!("error connecting to redis: {:?}", e);
-                continue;
+                self.ready.store(false, Ordering::Release);
             }
             if let Err(e) = self.read_from_stream(&mut con, &mut last_id).await {
                 tracing::error!("error reading from redis: {:?}", e);
+                self.ready.store(false, Ordering::Release);
+            }
+            if cancellation_token.is_cancelled() {
+                info!("cancellation token is cancelled, exiting");
+                tokio::time::sleep(Duration::from_secs(60 * 60 * 24 * 7)).await;
+                // 1 week.
             }
             tokio::time::sleep(self.config.retry_interval).await;
         }

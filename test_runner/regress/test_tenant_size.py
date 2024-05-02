@@ -292,33 +292,12 @@ def test_single_branch_get_tenant_size_grows(
     Operate on single branch reading the tenants size after each transaction.
     """
 
-    # Disable automatic gc and compaction.
-    # The pitr_interval here is quite problematic, so we cannot really use it.
-    # it'd have to be calibrated per test executing env.
-
-    # there was a bug which was hidden if the create table and first batch of
-    # inserts is larger than gc_horizon. for example 0x20000 here hid the fact
-    # that there next_gc_cutoff could be smaller than initdb_lsn, which will
-    # obviously lead to issues when calculating the size.
-    gc_horizon = 0x3BA00
-
-    # it's a bit of a hack, but different versions of postgres have different
-    # amount of WAL generated for the same amount of data. so we need to
-    # adjust the gc_horizon accordingly.
-    if pg_version == PgVersion.V14:
-        gc_horizon = 0x4A000
-    elif pg_version == PgVersion.V15:
-        gc_horizon = 0x3BA00
-    elif pg_version == PgVersion.V16:
-        gc_horizon = 210000
-    else:
-        raise NotImplementedError(pg_version)
-
+    # Disable automatic compaction and GC, and set a long PITR interval: we will expect
+    # size to always increase with writes as all writes remain within the PITR
     tenant_config = {
         "compaction_period": "0s",
         "gc_period": "0s",
-        "pitr_interval": "0s",
-        "gc_horizon": gc_horizon,
+        "pitr_interval": "3600s",
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_config)
@@ -331,18 +310,6 @@ def test_single_branch_get_tenant_size_grows(
     collected_responses: List[Tuple[str, Lsn, int]] = []
 
     size_debug_file = open(test_output_dir / "size_debug.html", "w")
-
-    def check_size_change(
-        current_lsn: Lsn, initdb_lsn: Lsn, gc_horizon: int, size: int, prev_size: int
-    ):
-        if current_lsn - initdb_lsn >= gc_horizon:
-            assert (
-                size >= prev_size
-            ), f"tenant_size may grow or not grow, because we only add gc_horizon amount of WAL to initial snapshot size (Currently at: {current_lsn}, Init at: {initdb_lsn})"
-        else:
-            assert (
-                size > prev_size
-            ), f"tenant_size should grow, because we continue to add WAL to initial snapshot size (Currently at: {current_lsn}, Init at: {initdb_lsn})"
 
     def get_current_consistent_size(
         env: NeonEnv,
@@ -412,14 +379,6 @@ def test_single_branch_get_tenant_size_grows(
             )
 
             prev_size = collected_responses[-1][2]
-
-            # branch start shouldn't be past gc_horizon yet
-            # thus the size should grow as we insert more data
-            # "gc_horizon" is tuned so that it kicks in _after_ the
-            # insert phase, but before the update phase ends.
-            assert (
-                current_lsn - initdb_lsn <= gc_horizon
-            ), "Tuning of GC window is likely out-of-date"
             assert size > prev_size
 
             collected_responses.append(("INSERT", current_lsn, size))
@@ -439,8 +398,7 @@ def test_single_branch_get_tenant_size_grows(
             )
 
             prev_size = collected_responses[-1][2]
-
-            check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev_size)
+            assert size > prev_size
 
             collected_responses.append(("UPDATE", current_lsn, size))
 
@@ -457,8 +415,7 @@ def test_single_branch_get_tenant_size_grows(
             )
 
             prev_size = collected_responses[-1][2]
-
-            check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev_size)
+            assert size > prev_size
 
             collected_responses.append(("DELETE", current_lsn, size))
 
@@ -469,20 +426,20 @@ def test_single_branch_get_tenant_size_grows(
         with endpoint.cursor() as cur:
             cur.execute("DROP TABLE t0")
 
-        # Without setting a PITR interval, dropping the table doesn't reclaim any space
-        # from the user's point of view, because the DROP transaction is too small
-        # to fall out of gc_horizon.
+        # Dropping the table doesn't reclaim any space
+        # from the user's point of view, because the DROP transaction is still
+        # within pitr_interval.
         (current_lsn, size) = get_current_consistent_size(
             env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
         )
-        prev_size = collected_responses[-1][2]
-        check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev_size)
+        assert size >= prev_size
+        prev_size = size
 
-        # Set a tiny PITR interval to allow the DROP to impact the synthetic size
+        # Set a zero PITR interval to allow the DROP to impact the synthetic size
         # Because synthetic size calculation uses pitr interval when available,
         # when our tenant is configured with a tiny pitr interval, dropping a table should
         # cause synthetic size to go down immediately
-        tenant_config["pitr_interval"] = "1ms"
+        tenant_config["pitr_interval"] = "0s"
         env.pageserver.http_client().set_tenant_config(tenant_id, tenant_config)
         (current_lsn, size) = get_current_consistent_size(
             env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
@@ -493,10 +450,6 @@ def test_single_branch_get_tenant_size_grows(
         # the table, because the drop operation can still be undone in the PITR
         # defined by gc_horizon.
         collected_responses.append(("DROP", current_lsn, size))
-
-    # Should have gone past gc_horizon, otherwise gc_horizon is too large
-    bytes_written = current_lsn - initdb_lsn
-    assert bytes_written > gc_horizon
 
     # this isn't too many lines to forget for a while. observed while
     # developing these tests that locally the value is a bit more than what we

@@ -4,6 +4,7 @@ use crate::metrics::{
 };
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use anyhow::Context;
 use futures::Future;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
@@ -258,6 +259,12 @@ async fn handle_tenant_time_travel_remote_storage(
     json_response(StatusCode::OK, ())
 }
 
+fn map_reqwest_hyper_status(status: reqwest::StatusCode) -> Result<hyper::StatusCode, ApiError> {
+    hyper::StatusCode::from_u16(status.as_u16())
+        .context("invalid status code")
+        .map_err(ApiError::InternalServerError)
+}
+
 async fn handle_tenant_secondary_download(
     service: Arc<Service>,
     req: Request<Body>,
@@ -266,7 +273,7 @@ async fn handle_tenant_secondary_download(
     let wait = parse_query_param(&req, "wait_ms")?.map(Duration::from_millis);
 
     let (status, progress) = service.tenant_secondary_download(tenant_id, wait).await?;
-    json_response(status, progress)
+    json_response(map_reqwest_hyper_status(status)?, progress)
 }
 
 async fn handle_tenant_delete(
@@ -277,7 +284,10 @@ async fn handle_tenant_delete(
     check_permissions(&req, Scope::PageServerApi)?;
 
     deletion_wrapper(service, move |service| async move {
-        service.tenant_delete(tenant_id).await
+        service
+            .tenant_delete(tenant_id)
+            .await
+            .and_then(map_reqwest_hyper_status)
     })
     .await
 }
@@ -308,7 +318,10 @@ async fn handle_tenant_timeline_delete(
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
 
     deletion_wrapper(service, move |service| async move {
-        service.tenant_timeline_delete(tenant_id, timeline_id).await
+        service
+            .tenant_timeline_delete(tenant_id, timeline_id)
+            .await
+            .and_then(map_reqwest_hyper_status)
     })
     .await
 }
@@ -371,11 +384,9 @@ async fn handle_tenant_timeline_passthrough(
     }
 
     // We have a reqest::Response, would like a http::Response
-    let mut builder = hyper::Response::builder()
-        .status(resp.status())
-        .version(resp.version());
+    let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp.status())?);
     for (k, v) in resp.headers() {
-        builder = builder.header(k, v);
+        builder = builder.header(k.as_str(), v.as_bytes());
     }
 
     let response = builder
@@ -520,6 +531,18 @@ async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiErr
     let state = get_state(&req);
 
     json_response(StatusCode::OK, state.service.tenant_drop(tenant_id).await?)
+}
+
+async fn handle_tenant_import(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state.service.tenant_import(tenant_id).await?,
+    )
 }
 
 async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -758,6 +781,13 @@ pub fn make_router(
         })
         .post("/debug/v1/node/:node_id/drop", |r| {
             named_request_span(r, handle_node_drop, RequestName("debug_v1_node_drop"))
+        })
+        .post("/debug/v1/tenant/:tenant_id/import", |r| {
+            named_request_span(
+                r,
+                handle_tenant_import,
+                RequestName("debug_v1_tenant_import"),
+            )
         })
         .get("/debug/v1/tenant", |r| {
             named_request_span(r, handle_tenants_dump, RequestName("debug_v1_tenant"))

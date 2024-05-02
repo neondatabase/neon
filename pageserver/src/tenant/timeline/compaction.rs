@@ -9,13 +9,13 @@ use std::ops::{Deref, Range};
 use std::sync::Arc;
 
 use super::layer_manager::LayerManager;
-use super::{CompactFlags, DurationRecorder, RecordedDuration, Timeline};
+use super::{CompactFlags, DurationRecorder, ImageLayerCreationMode, RecordedDuration, Timeline};
 
 use anyhow::{anyhow, Context};
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
 use utils::id::TimelineId;
@@ -102,7 +102,7 @@ impl Timeline {
             )
             .await
         {
-            Ok((partitioning, lsn)) => {
+            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
                 let image_ctx = RequestContextBuilder::extend(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
@@ -115,17 +115,37 @@ impl Timeline {
 
                 // 3. Create new image layers for partitions that have been modified
                 // "enough".
-                let layers = self
+                let dense_layers = self
                     .create_image_layers(
-                        &partitioning,
+                        &dense_partitioning,
                         lsn,
-                        flags.contains(CompactFlags::ForceImageLayerCreation),
+                        if flags.contains(CompactFlags::ForceImageLayerCreation) {
+                            ImageLayerCreationMode::Force
+                        } else {
+                            ImageLayerCreationMode::Try
+                        },
                         &image_ctx,
                     )
                     .await
                     .map_err(anyhow::Error::from)?;
 
-                self.upload_new_image_layers(layers)?;
+                // For now, nothing will be produced...
+                let sparse_layers = self
+                    .create_image_layers(
+                        &sparse_partitioning.clone().into_dense(),
+                        lsn,
+                        if flags.contains(CompactFlags::ForceImageLayerCreation) {
+                            ImageLayerCreationMode::Force
+                        } else {
+                            ImageLayerCreationMode::Try
+                        },
+                        &image_ctx,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?;
+                assert!(sparse_layers.is_empty());
+
+                self.upload_new_image_layers(dense_layers)?;
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -758,8 +778,9 @@ impl Timeline {
             return Err(CompactionError::ShuttingDown);
         }
 
-        let keyspace = self.collect_keyspace(end_lsn, ctx).await?;
-        let mut adaptor = TimelineAdaptor::new(self, (end_lsn, keyspace));
+        let (dense_ks, _sparse_ks) = self.collect_keyspace(end_lsn, ctx).await?;
+        // TODO(chi): ignore sparse_keyspace for now, compact it in the future.
+        let mut adaptor = TimelineAdaptor::new(self, (end_lsn, dense_ks));
 
         pageserver_compaction::compact_tiered::compact_tiered(
             &mut adaptor,
@@ -830,6 +851,10 @@ impl CompactionJobExecutor for TimelineAdaptor {
     type ImageLayer = ResidentImageLayer;
 
     type RequestContext = crate::context::RequestContext;
+
+    fn get_shard_identity(&self) -> &ShardIdentity {
+        self.timeline.get_shard_identity()
+    }
 
     async fn get_layers(
         &mut self,
