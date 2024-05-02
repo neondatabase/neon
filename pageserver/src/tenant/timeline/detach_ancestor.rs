@@ -89,10 +89,10 @@ async fn copy_lsn_prefix(
     .await
     .map_err(CopyDeltaPrefix)?;
 
-    // likely shutdown
     let resident = layer
         .download_and_keep_resident()
         .await
+        // likely shutdown
         .map_err(RewrittenDeltaDownloadFailed)?;
 
     let records = resident
