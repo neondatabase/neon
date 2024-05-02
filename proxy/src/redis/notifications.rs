@@ -234,12 +234,13 @@ where
         crate::metrics::CancellationSource::FromRedis,
     ));
     let handler = MessageHandler::new(cache, cancellation_handler, region_id);
+    // 6h - 1m.
+    // There will be 1 minute overlap between two tasks. But at least we can be sure that no message is lost.
+    let interval = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60 - 60));
     loop {
         let cancellation_token = CancellationToken::new();
-        tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60 - 60))
-            .tick()
-            .await; // 6h - 1m.
-                    // There will be 1 minute overlap between two tasks. But at least we can be sure that no message is lost.
+        interval.tick().await;
+        
         tokio::spawn(handle_messages(
             handler.clone(),
             redis.clone(),
