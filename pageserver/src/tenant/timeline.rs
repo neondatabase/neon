@@ -4360,7 +4360,8 @@ impl Timeline {
         tenant: &crate::tenant::Tenant,
         options: AncestorDetachOptions,
         ctx: &RequestContext,
-    ) -> Result<PreparedTimelineDetach, DetachFromAncestorError> {
+    ) -> Result<(utils::completion::Completion, PreparedTimelineDetach), DetachFromAncestorError>
+    {
         use DetachFromAncestorError::*;
 
         if self.remote_client.as_ref().is_none() {
@@ -4396,7 +4397,7 @@ impl Timeline {
         // before we acquire the gate, we must mark the ancestor as having a detach operation
         // ongoing which will block other concurrent detach operations so we don't get to ackward
         // situations where there would be two branches trying to reparent earlier branches.
-        let (_guard, barrier) = utils::completion::channel();
+        let (guard, barrier) = utils::completion::channel();
 
         {
             let mut guard = tenant.ongoing_timeline_detach.lock().unwrap();
@@ -4574,10 +4575,9 @@ impl Timeline {
 
         // TODO: fsync directory again if we hardlinked something
 
-        Ok(PreparedTimelineDetach {
-            progress_guard: _guard,
-            layers: new_layers,
-        })
+        let prepared = PreparedTimelineDetach { layers: new_layers };
+
+        Ok((guard, prepared))
     }
 
     /// Completes the ancestor detach. This method is to be called while holding the
@@ -4596,10 +4596,7 @@ impl Timeline {
             .as_ref()
             .expect("has to have a remote timeline client for timeline ancestor detach");
 
-        let PreparedTimelineDetach {
-            progress_guard: _guard,
-            layers,
-        } = prepared;
+        let PreparedTimelineDetach { layers } = prepared;
 
         // publish the prepared layers before we reparent any of the timelines, so that on restart
         // reparented timelines find layers.
@@ -4738,7 +4735,6 @@ pub(crate) enum DetachFromAncestorError {
 }
 
 pub(crate) struct PreparedTimelineDetach {
-    progress_guard: utils::completion::Completion,
     layers: Vec<Layer>,
 }
 
