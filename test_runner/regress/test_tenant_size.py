@@ -621,7 +621,8 @@ def test_get_tenant_size_with_multiple_branches(
 
 def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
     """
-    Makes sure synthetic size can still be calculated even if one of the timelines is deleted.
+    Makes sure synthetic size can still be calculated even if one of the
+    timelines is deleted or the tenant is deleted.
     """
 
     env = neon_env_builder.init_start()
@@ -671,6 +672,10 @@ def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
             PageserverApiException, match="Failed to refresh gc_info before gathering inputs"
         ):
             completion.result()
+
+        env.pageserver.allowed_errors.append(
+            ".*Failed to refresh gc_info before gathering inputs.*"
+        )
 
 
 # Helper for tests that compare timeline_inputs
