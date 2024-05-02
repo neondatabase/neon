@@ -187,7 +187,8 @@ impl AzureBlobStorage {
             let stream = part
                 .data
                 .map(|r| r.map_err(io::Error::other))
-                .chain(SyncStream::from_pin(Box::pin(tail_stream)));
+                .chain(sync_wrapper::SyncStream::new(tail_stream));
+            //.chain(SyncStream::from_pin(Box::pin(tail_stream)));
 
             let download_stream = crate::support::DownloadStream::new(cancel_or_timeout_, stream);
 
@@ -672,34 +673,6 @@ where
             Initial { len, .. } => *len,
             Actual { len, .. } => *len,
             Cloned { len_was, .. } => *len_was,
-        }
-    }
-}
-
-/// A Stream wrapper that impls Sync even though the inner doesn't need to.
-struct SyncStream<T: Stream>(std::sync::Mutex<Pin<Box<T>>>);
-
-impl<T: Stream> SyncStream<T> {
-    fn from_pin(inner: Pin<Box<T>>) -> Self {
-        SyncStream(std::sync::Mutex::new(inner))
-    }
-}
-impl<T: Stream + Send> Stream for SyncStream<T> {
-    type Item = T::Item;
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let mut lock = self.0.lock().unwrap();
-        let lock: Pin<&mut T> = Pin::as_mut(&mut lock);
-        Stream::poll_next(lock, cx)
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        // We can't do async here and blocking locks will likely panic
-        if let Ok(lock) = self.0.lock() {
-            lock.size_hint()
-        } else {
-            (0, None)
         }
     }
 }
