@@ -1801,6 +1801,7 @@ class NeonCli(AbstractNeonCli):
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         pageserver_id: Optional[int] = None,
+        allow_multiple=False,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1824,6 +1825,8 @@ class NeonCli(AbstractNeonCli):
             args.extend(["--hot-standby", "true"])
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
+        if allow_multiple:
+            args.extend(["--allow-multiple"])
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -1835,6 +1838,7 @@ class NeonCli(AbstractNeonCli):
         safekeepers: Optional[List[int]] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
+        allow_multiple=False,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1849,6 +1853,8 @@ class NeonCli(AbstractNeonCli):
             args.append(endpoint_id)
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
+        if allow_multiple:
+            args.extend(["--allow-multiple"])
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -3299,6 +3305,7 @@ class Endpoint(PgProtocol):
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
         pageserver_id: Optional[int] = None,
+        allow_multiple: bool = False,
     ) -> "Endpoint":
         """
         Create a new Postgres endpoint.
@@ -3321,6 +3328,7 @@ class Endpoint(PgProtocol):
             pg_port=self.pg_port,
             http_port=self.http_port,
             pageserver_id=pageserver_id,
+            allow_multiple=allow_multiple,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
@@ -3337,7 +3345,10 @@ class Endpoint(PgProtocol):
         return self
 
     def start(
-        self, remote_ext_config: Optional[str] = None, pageserver_id: Optional[int] = None
+        self,
+        remote_ext_config: Optional[str] = None,
+        pageserver_id: Optional[int] = None,
+        allow_multiple: bool = False,
     ) -> "Endpoint":
         """
         Start the Postgres instance.
@@ -3353,6 +3364,7 @@ class Endpoint(PgProtocol):
             safekeepers=self.active_safekeepers,
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
+            allow_multiple=allow_multiple,
         )
         self.running = True
 
@@ -3482,6 +3494,7 @@ class Endpoint(PgProtocol):
         config_lines: Optional[List[str]] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
+        allow_multiple=False,
     ) -> "Endpoint":
         """
         Create an endpoint, apply config, and start Postgres.
@@ -3497,7 +3510,12 @@ class Endpoint(PgProtocol):
             hot_standby=hot_standby,
             lsn=lsn,
             pageserver_id=pageserver_id,
-        ).start(remote_ext_config=remote_ext_config, pageserver_id=pageserver_id)
+            allow_multiple=allow_multiple,
+        ).start(
+            remote_ext_config=remote_ext_config,
+            pageserver_id=pageserver_id,
+            allow_multiple=allow_multiple,
+        )
 
         log.info(f"Postgres startup took {time.time() - started_at} seconds")
 
