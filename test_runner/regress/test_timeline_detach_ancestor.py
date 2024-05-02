@@ -249,7 +249,7 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
         client.timeline_checkpoint(env.initial_tenant, timeline_id)
 
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
-    assert all_reparented == set([reparented, same_branchpoint])
+    assert all_reparented == {reparented, same_branchpoint}
 
     if restart_after:
         env.pageserver.stop()
