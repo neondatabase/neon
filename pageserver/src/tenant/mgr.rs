@@ -2,6 +2,7 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
+use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::LocationConfigMode;
@@ -253,17 +254,15 @@ impl TenantsMap {
     }
 }
 
+/// Precursor to deletion of a tenant dir: we do a fast rename to a tmp path, and then
+/// the slower actual deletion in the background.
+///
 /// This is "safe" in that that it won't leave behind a partially deleted directory
 /// at the original path, because we rename with TEMP_FILE_SUFFIX before starting deleting
 /// the contents.
 ///
 /// This is pageserver-specific, as it relies on future processes after a crash to check
 /// for TEMP_FILE_SUFFIX when loading things.
-async fn safe_remove_tenant_dir_all(path: impl AsRef<Utf8Path>) -> std::io::Result<()> {
-    let tmp_path = safe_rename_tenant_dir(path).await?;
-    fs::remove_dir_all(tmp_path).await
-}
-
 async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<Utf8PathBuf> {
     let parent = path
         .as_ref()
@@ -284,6 +283,28 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
     fs::rename(path.as_ref(), &tmp_path).await?;
     fs::File::open(parent).await?.sync_all().await?;
     Ok(tmp_path)
+}
+
+/// When we have moved a tenant's content to a temporary directory, we may delete it lazily in
+/// the background, and thereby avoid blocking any API requests on this deletion completing.
+fn spawn_background_purge(tmp_path: Utf8PathBuf) {
+    // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
+    // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
+    let task_tenant_id = None;
+
+    task_mgr::spawn(
+        task_mgr::BACKGROUND_RUNTIME.handle(),
+        TaskKind::MgmtRequest,
+        task_tenant_id,
+        None,
+        "tenant_files_delete",
+        false,
+        async move {
+            fs::remove_dir_all(tmp_path.as_path())
+                .await
+                .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
+        },
+    );
 }
 
 static TENANTS: Lazy<std::sync::RwLock<TenantsMap>> =
@@ -570,7 +591,11 @@ pub async fn init_tenant_mgr(
     );
     TENANT.startup_scheduled.inc_by(tenant_configs.len() as u64);
 
-    // Construct `Tenant` objects and start them running
+    // Accumulate futures for writing tenant configs, so that we can execute in parallel
+    let mut config_write_futs = Vec::new();
+
+    // Update the location configs according to the re-attach response and persist them to disk
+    tracing::info!("Updating {} location configs", tenant_configs.len());
     for (tenant_shard_id, location_conf) in tenant_configs {
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
 
@@ -597,18 +622,22 @@ pub async fn init_tenant_mgr(
         const DEFAULT_SECONDARY_CONF: SecondaryLocationConfig =
             SecondaryLocationConfig { warm: true };
 
-        // Update the location config according to the re-attach response
         if let Some(tenant_modes) = &tenant_modes {
             // We have a generation map: treat it as the authority for whether
             // this tenant is really attached.
             match tenant_modes.get(&tenant_shard_id) {
                 None => {
                     info!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Detaching tenant, control plane omitted it in re-attach response");
-                    if let Err(e) = safe_remove_tenant_dir_all(&tenant_dir_path).await {
-                        error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
-                            "Failed to remove detached tenant directory '{tenant_dir_path}': {e:?}",
-                        );
-                    }
+
+                    match safe_rename_tenant_dir(&tenant_dir_path).await {
+                        Ok(tmp_path) => {
+                            spawn_background_purge(tmp_path);
+                        }
+                        Err(e) => {
+                            error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                            "Failed to move detached tenant directory '{tenant_dir_path}': {e:?}");
+                        }
+                    };
 
                     // We deleted local content: move on to next tenant, don't try and spawn this one.
                     continue;
@@ -654,8 +683,32 @@ pub async fn init_tenant_mgr(
 
         // Presence of a generation number implies attachment: attach the tenant
         // if it wasn't already, and apply the generation number.
-        Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
+        config_write_futs.push(async move {
+            let r = Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await;
+            (tenant_shard_id, location_conf, r)
+        });
+    }
 
+    // Execute config writes with concurrency, to avoid bottlenecking on local FS write latency
+    tracing::info!(
+        "Writing {} location config files...",
+        config_write_futs.len()
+    );
+    let config_write_results = futures::stream::iter(config_write_futs)
+        .buffer_unordered(16)
+        .collect::<Vec<_>>()
+        .await;
+
+    tracing::info!(
+        "Spawning {} tenant shard locations...",
+        config_write_results.len()
+    );
+    // For those shards that have live configurations, construct `Tenant` or `SecondaryTenant` objects and start them running
+    for (tenant_shard_id, location_conf, config_write_result) in config_write_results {
+        // Errors writing configs are fatal
+        config_write_result?;
+
+        let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
         let shard_identity = location_conf.shard;
         let slot = match location_conf.mode {
             LocationMode::Attached(attached_conf) => {
@@ -1699,7 +1752,7 @@ impl TenantManager {
         let tmp_path = safe_rename_tenant_dir(&local_tenant_directory)
             .await
             .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))?;
-        self.spawn_background_purge(tmp_path);
+        spawn_background_purge(tmp_path);
 
         fail::fail_point!("shard-split-pre-finish", |_| Err(anyhow::anyhow!(
             "failpoint"
@@ -1854,28 +1907,6 @@ impl TenantManager {
         shutdown_all_tenants0(self.tenants).await
     }
 
-    /// When we have moved a tenant's content to a temporary directory, we may delete it lazily in
-    /// the background, and thereby avoid blocking any API requests on this deletion completing.
-    fn spawn_background_purge(&self, tmp_path: Utf8PathBuf) {
-        // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
-        // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
-        let task_tenant_id = None;
-
-        task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
-            TaskKind::MgmtRequest,
-            task_tenant_id,
-            None,
-            "tenant_files_delete",
-            false,
-            async move {
-                fs::remove_dir_all(tmp_path.as_path())
-                    .await
-                    .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
-            },
-        );
-    }
-
     pub(crate) async fn detach_tenant(
         &self,
         conf: &'static PageServerConf,
@@ -1892,7 +1923,7 @@ impl TenantManager {
                 deletion_queue_client,
             )
             .await?;
-        self.spawn_background_purge(tmp_path);
+        spawn_background_purge(tmp_path);
 
         Ok(())
     }

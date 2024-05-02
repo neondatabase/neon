@@ -48,6 +48,7 @@ use utils::{
 
 use crate::auth::check_permission;
 use crate::basebackup;
+use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
@@ -1236,6 +1237,13 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        fn map_basebackup_error(err: BasebackupError) -> QueryError {
+            match err {
+                BasebackupError::Client(e) => QueryError::Disconnected(ConnectionError::Io(e)),
+                BasebackupError::Server(e) => QueryError::Other(e),
+            }
+        }
+
         let started = std::time::Instant::now();
 
         // check that the timeline exists
@@ -1261,7 +1269,8 @@ impl PageServerHandler {
         let lsn_awaited_after = started.elapsed();
 
         // switch client to COPYOUT
-        pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
+        pgb.write_message_noflush(&BeMessage::CopyOutResponse)
+            .map_err(QueryError::Disconnected)?;
         self.flush_cancellable(pgb, &timeline.cancel).await?;
 
         // Send a tarball of the latest layer on the timeline. Compress if not
@@ -1276,7 +1285,8 @@ impl PageServerHandler {
                 full_backup,
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(map_basebackup_error)?;
         } else {
             let mut writer = pgb.copyout_writer();
             if gzip {
@@ -1297,9 +1307,13 @@ impl PageServerHandler {
                     full_backup,
                     ctx,
                 )
-                .await?;
+                .await
+                .map_err(map_basebackup_error)?;
                 // shutdown the encoder to ensure the gzip footer is written
-                encoder.shutdown().await?;
+                encoder
+                    .shutdown()
+                    .await
+                    .map_err(|e| QueryError::Disconnected(ConnectionError::Io(e)))?;
             } else {
                 basebackup::send_basebackup_tarball(
                     &mut writer,
@@ -1309,11 +1323,13 @@ impl PageServerHandler {
                     full_backup,
                     ctx,
                 )
-                .await?;
+                .await
+                .map_err(map_basebackup_error)?;
             }
         }
 
-        pgb.write_message_noflush(&BeMessage::CopyDone)?;
+        pgb.write_message_noflush(&BeMessage::CopyDone)
+            .map_err(QueryError::Disconnected)?;
         self.flush_cancellable(pgb, &timeline.cancel).await?;
 
         let basebackup_after = started

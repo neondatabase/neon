@@ -1,6 +1,8 @@
-use crate::{background_process, local_env::LocalEnv};
+use crate::{
+    background_process,
+    local_env::{LocalEnv, NeonStorageControllerConf},
+};
 use camino::{Utf8Path, Utf8PathBuf};
-use hyper::Method;
 use pageserver_api::{
     controller_api::{
         NodeConfigureRequest, NodeRegisterRequest, TenantCreateResponse, TenantLocateResponse,
@@ -14,6 +16,7 @@ use pageserver_api::{
 };
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
+use reqwest::Method;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{fs, str::FromStr};
 use tokio::process::Command;
@@ -32,14 +35,12 @@ pub struct StorageController {
     public_key: Option<String>,
     postgres_port: u16,
     client: reqwest::Client,
+    config: NeonStorageControllerConf,
 }
 
 const COMMAND: &str = "storage_controller";
 
 const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
-
-// Use a shorter pageserver unavailability interval than the default to speed up tests.
-const NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
@@ -135,6 +136,7 @@ impl StorageController {
             client: reqwest::ClientBuilder::new()
                 .build()
                 .expect("Failed to construct http client"),
+            config: env.storage_controller.clone(),
         }
     }
 
@@ -272,8 +274,6 @@ impl StorageController {
         // Run migrations on every startup, in case something changed.
         let database_url = self.setup_database().await?;
 
-        let max_unavailable: humantime::Duration = NEON_LOCAL_MAX_UNAVAILABLE_INTERVAL.into();
-
         let mut args = vec![
             "-l",
             &self.listen,
@@ -283,7 +283,7 @@ impl StorageController {
             "--database-url",
             &database_url,
             "--max-unavailable-interval",
-            &max_unavailable.to_string(),
+            &humantime::Duration::from(self.config.max_unavailable).to_string(),
         ]
         .into_iter()
         .map(|s| s.to_string())
@@ -379,7 +379,7 @@ impl StorageController {
     /// Simple HTTP request wrapper for calling into storage controller
     async fn dispatch<RQ, RS>(
         &self,
-        method: hyper::Method,
+        method: reqwest::Method,
         path: String,
         body: Option<RQ>,
     ) -> anyhow::Result<RS>

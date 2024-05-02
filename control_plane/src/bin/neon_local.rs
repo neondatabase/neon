@@ -1554,8 +1554,8 @@ fn cli() -> Command {
             Command::new("storage_controller")
                 .arg_required_else_help(true)
                 .about("Manage storage_controller")
-                .subcommand(Command::new("start").about("Start local pageserver").arg(pageserver_config_args.clone()))
-                .subcommand(Command::new("stop").about("Stop local pageserver")
+                .subcommand(Command::new("start").about("Start storage controller"))
+                .subcommand(Command::new("stop").about("Stop storage controller")
                             .arg(stop_mode_arg.clone()))
         )
         .subcommand(
