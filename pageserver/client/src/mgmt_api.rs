@@ -292,7 +292,6 @@ impl Client {
         lazy: bool,
     ) -> Result<()> {
         let req_body = TenantLocationConfigRequest {
-            tenant_id: None,
             config,
         };
 
