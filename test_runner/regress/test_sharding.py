@@ -1080,6 +1080,17 @@ def test_sharding_split_failures(
         finish_split()
         assert_split_done()
 
+    if isinstance(failure, StorageControllerFailpoint) and "post-complete" in failure.failpoint:
+        # On a post-complete failure, the controller will recover the post-split state
+        # after restart, but it will have missed the optimization part of the split function
+        # where secondary downloads are kicked off.  This means that reconcile_until_idle
+        # will take a very long time if we wait for all optimizations to complete, because
+        # those optimizations will wait for secondary downloads.
+        #
+        # Avoid that by configuring the tenant into Essential scheduling mode, so that it will
+        # skip optimizations when we're exercising this particular failpoint.
+        env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Essential"})
+
     # Having completed the split, pump the background reconciles to ensure that
     # the scheduler reaches an idle state
     env.storage_controller.reconcile_until_idle(timeout_secs=30)
