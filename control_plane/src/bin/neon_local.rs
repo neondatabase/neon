@@ -837,6 +837,8 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .copied()
                 .unwrap_or(false);
 
+            let allow_multiple = sub_args.get_flag("allow-multiple");
+
             let mode = match (lsn, hot_standby) {
                 (Some(lsn), false) => ComputeMode::Static(lsn),
                 (None, true) => ComputeMode::Replica,
@@ -854,7 +856,9 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 _ => {}
             }
 
-            cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id)?;
+            if !allow_multiple {
+                cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id)?;
+            }
 
             cplane.new_endpoint(
                 &endpoint_id,
@@ -883,6 +887,8 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             let remote_ext_config = sub_args.get_one::<String>("remote-ext-config");
 
+            let allow_multiple = sub_args.get_flag("allow-multiple");
+
             // If --safekeepers argument is given, use only the listed safekeeper nodes.
             let safekeepers =
                 if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
@@ -908,11 +914,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .cloned()
                 .unwrap_or_default();
 
-            cplane.check_conflicting_endpoints(
-                endpoint.mode,
-                endpoint.tenant_id,
-                endpoint.timeline_id,
-            )?;
+            if !allow_multiple {
+                cplane.check_conflicting_endpoints(
+                    endpoint.mode,
+                    endpoint.tenant_id,
+                    endpoint.timeline_id,
+                )?;
+            }
 
             let (pageservers, stripe_size) = if let Some(pageserver_id) = pageserver_id {
                 let conf = env.get_pageserver_conf(pageserver_id).unwrap();
@@ -1444,6 +1452,12 @@ fn cli() -> Command {
         .help("If set, will create test user `user` and `neondb` database. Requires `update-catalog = true`")
         .required(false);
 
+    let allow_multiple = Arg::new("allow-multiple")
+        .help("Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but useful for tests.")
+        .long("allow-multiple")
+        .action(ArgAction::SetTrue)
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1601,6 +1615,7 @@ fn cli() -> Command {
                     .arg(pg_version_arg.clone())
                     .arg(hot_standby_arg.clone())
                     .arg(update_catalog)
+                    .arg(allow_multiple.clone())
                 )
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
@@ -1609,6 +1624,7 @@ fn cli() -> Command {
                     .arg(safekeepers_arg)
                     .arg(remote_ext_config_args)
                     .arg(create_test_user)
+                    .arg(allow_multiple.clone())
                 )
                 .subcommand(Command::new("reconfigure")
                             .about("Reconfigure the endpoint")
