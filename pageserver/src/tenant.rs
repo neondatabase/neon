@@ -888,7 +888,7 @@ impl Tenant {
 
     #[instrument(skip_all)]
     pub(crate) async fn preload(
-        self: &Arc<Tenant>,
+        self: &Arc<Self>,
         remote_storage: &GenericRemoteStorage,
         cancel: CancellationToken,
     ) -> anyhow::Result<TenantPreload> {
@@ -918,9 +918,13 @@ impl Tenant {
 
         Ok(TenantPreload {
             deleting,
-            timelines: self
-                .load_timeline_metadata(remote_timeline_ids, remote_storage, cancel)
-                .await?,
+            timelines: Self::load_timeline_metadata(
+                self,
+                remote_timeline_ids,
+                remote_storage,
+                cancel,
+            )
+            .await?,
         })
     }
 
@@ -3402,7 +3406,11 @@ impl Tenant {
         // is in progress (which is not a common case).
         //
         // See more for on the issue #2748 condenced out of the initial PR review.
-        let mut shared_cache = self.cached_logical_sizes.lock().await;
+        let mut shared_cache = tokio::select! {
+            locked = self.cached_logical_sizes.lock() => locked,
+            _ = cancel.cancelled() => anyhow::bail!("cancelled"),
+            _ = self.cancel.cancelled() => anyhow::bail!("tenant is shutting down"),
+        };
 
         size::gather_inputs(
             self,
@@ -3664,6 +3672,7 @@ pub(crate) mod harness {
                 image_layer_creation_check_threshold: Some(
                     tenant_conf.image_layer_creation_check_threshold,
                 ),
+                switch_to_aux_file_v2: Some(tenant_conf.switch_to_aux_file_v2),
             }
         }
     }
@@ -3864,7 +3873,9 @@ mod tests {
     use hex_literal::hex;
     use pageserver_api::key::NON_INHERITED_RANGE;
     use pageserver_api::keyspace::KeySpace;
+    use pageserver_api::models::CompactionAlgorithm;
     use rand::{thread_rng, Rng};
+    use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
 
     static TEST_KEY: Lazy<Key> =
@@ -4504,9 +4515,21 @@ mod tests {
     async fn bulk_insert_compact_gc(
         timeline: Arc<Timeline>,
         ctx: &RequestContext,
+        lsn: Lsn,
+        repeat: usize,
+        key_count: usize,
+    ) -> anyhow::Result<()> {
+        let compact = true;
+        bulk_insert_maybe_compact_gc(timeline, ctx, lsn, repeat, key_count, compact).await
+    }
+
+    async fn bulk_insert_maybe_compact_gc(
+        timeline: Arc<Timeline>,
+        ctx: &RequestContext,
         mut lsn: Lsn,
         repeat: usize,
         key_count: usize,
+        compact: bool,
     ) -> anyhow::Result<()> {
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let mut blknum = 0;
@@ -4547,9 +4570,11 @@ mod tests {
                 )
                 .await?;
             timeline.freeze_and_flush().await?;
-            timeline
-                .compact(&CancellationToken::new(), EnumSet::empty(), ctx)
-                .await?;
+            if compact {
+                timeline
+                    .compact(&CancellationToken::new(), EnumSet::empty(), ctx)
+                    .await?;
+            }
             timeline.gc().await?;
         }
 
@@ -4653,7 +4678,9 @@ mod tests {
         for read in reads {
             info!("Doing vectored read on {:?}", read);
 
-            let vectored_res = tline.get_vectored_impl(read.clone(), reads_lsn, &ctx).await;
+            let vectored_res = tline
+                .get_vectored_impl(read.clone(), reads_lsn, ValuesReconstructState::new(), &ctx)
+                .await;
             tline
                 .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
                 .await;
@@ -4698,7 +4725,12 @@ mod tests {
         let read_lsn = child_timeline.get_last_record_lsn();
 
         let vectored_res = child_timeline
-            .get_vectored_impl(aux_keyspace.clone(), read_lsn, &ctx)
+            .get_vectored_impl(
+                aux_keyspace.clone(),
+                read_lsn,
+                ValuesReconstructState::new(),
+                &ctx,
+            )
             .await;
 
         child_timeline
@@ -4846,7 +4878,12 @@ mod tests {
             ranges: vec![key_near_gap..gap_at_key.next(), key_near_end..current_key],
         };
         let results = child_timeline
-            .get_vectored_impl(read.clone(), current_lsn, &ctx)
+            .get_vectored_impl(
+                read.clone(),
+                current_lsn,
+                ValuesReconstructState::new(),
+                &ctx,
+            )
             .await?;
 
         for (key, img_res) in results {
@@ -4979,6 +5016,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
+                    ValuesReconstructState::new(),
                     &ctx,
                 )
                 .await;
@@ -5019,7 +5057,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_random_updates")?;
+        let names_algorithms = [
+            ("test_random_updates_legacy", CompactionAlgorithm::Legacy),
+            ("test_random_updates_tiered", CompactionAlgorithm::Tiered),
+        ];
+        for (name, algorithm) in names_algorithms {
+            test_random_updates_algorithm(name, algorithm).await?;
+        }
+        Ok(())
+    }
+
+    async fn test_random_updates_algorithm(
+        name: &'static str,
+        compaction_algorithm: CompactionAlgorithm,
+    ) -> anyhow::Result<()> {
+        let mut harness = TenantHarness::create(name)?;
+        harness.tenant_conf.compaction_algorithm = compaction_algorithm;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -5084,7 +5137,7 @@ mod tests {
                 );
             }
 
-            // Perform a cycle of flush, compact, and GC
+            // Perform a cycle of flush, and GC
             let cutoff = tline.get_last_record_lsn();
             tline
                 .update_gc_info(
@@ -5096,9 +5149,6 @@ mod tests {
                 )
                 .await?;
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
-                .await?;
             tline.gc().await?;
         }
 
@@ -5379,19 +5429,36 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_at_max_lsn() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_read_at_max_lsn")?;
+        let names_algorithms = [
+            ("test_read_at_max_lsn_legacy", CompactionAlgorithm::Legacy),
+            ("test_read_at_max_lsn_tiered", CompactionAlgorithm::Tiered),
+        ];
+        for (name, algorithm) in names_algorithms {
+            test_read_at_max_lsn_algorithm(name, algorithm).await?;
+        }
+        Ok(())
+    }
+
+    async fn test_read_at_max_lsn_algorithm(
+        name: &'static str,
+        compaction_algorithm: CompactionAlgorithm,
+    ) -> anyhow::Result<()> {
+        let mut harness = TenantHarness::create(name)?;
+        harness.tenant_conf.compaction_algorithm = compaction_algorithm;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+        let compact = false;
+        bulk_insert_maybe_compact_gc(tline.clone(), &ctx, lsn, 50, 10000, compact).await?;
 
         let test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let read_lsn = Lsn(u64::MAX - 1);
 
-        assert!(tline.get(test_key, read_lsn, &ctx).await.is_ok());
+        let result = tline.get(test_key, read_lsn, &ctx).await;
+        assert!(result.is_ok(), "result is not Ok: {}", result.unwrap_err());
 
         Ok(())
     }

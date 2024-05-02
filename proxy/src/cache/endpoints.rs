@@ -21,7 +21,7 @@ use crate::{
     config::EndpointCacheConfig,
     context::RequestMonitoring,
     intern::{BranchIdInt, EndpointIdInt, ProjectIdInt},
-    metrics::{Metrics, RedisErrors},
+    metrics::{Metrics, RedisErrors, RedisEventsCount},
     rate_limiter::GlobalRateLimiter,
     redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider,
     EndpointId,
@@ -100,14 +100,26 @@ impl EndpointsCache {
         if let Some(endpoint_created) = key.endpoint_created {
             self.endpoints
                 .insert(EndpointIdInt::from(&endpoint_created.endpoint_id.into()));
+            Metrics::get()
+                .proxy
+                .redis_events_count
+                .inc(RedisEventsCount::EndpointCreated);
         }
         if let Some(branch_created) = key.branch_created {
             self.branches
                 .insert(BranchIdInt::from(&branch_created.branch_id.into()));
+            Metrics::get()
+                .proxy
+                .redis_events_count
+                .inc(RedisEventsCount::BranchCreated);
         }
         if let Some(project_created) = key.project_created {
             self.projects
                 .insert(ProjectIdInt::from(&project_created.project_id.into()));
+            Metrics::get()
+                .proxy
+                .redis_events_count
+                .inc(RedisEventsCount::ProjectCreated);
         }
     }
     pub async fn do_read(

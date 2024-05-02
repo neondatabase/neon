@@ -16,7 +16,7 @@ commands:
   - name: sql-exporter
     user: nobody
     sysvInitAction: respawn
-    shell: '/bin/sql_exporter -config.file=/etc/sql_exporter.yml'
+    shell: '/bin/sql_exporter -config.file=/etc/sql_exporter.yml -web.listen-address=:9399'
 shutdownHook: |
   su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
 files:

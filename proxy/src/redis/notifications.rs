@@ -11,7 +11,7 @@ use crate::{
     cache::project_info::ProjectInfoCache,
     cancellation::{CancelMap, CancellationHandler},
     intern::{ProjectIdInt, RoleNameInt},
-    metrics::{Metrics, RedisErrors},
+    metrics::{Metrics, RedisErrors, RedisEventsCount},
 };
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
@@ -118,6 +118,10 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                     "session_id",
                     &tracing::field::display(cancel_session.session_id),
                 );
+                Metrics::get()
+                    .proxy
+                    .redis_events_count
+                    .inc(RedisEventsCount::CancelSession);
                 if let Some(cancel_region) = cancel_session.region_id {
                     // If the message is not for this region, ignore it.
                     if cancel_region != self.region_id {
@@ -138,6 +142,17 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
             }
             _ => {
                 invalidate_cache(self.cache.clone(), msg.clone());
+                if matches!(msg, AllowedIpsUpdate { .. }) {
+                    Metrics::get()
+                        .proxy
+                        .redis_events_count
+                        .inc(RedisEventsCount::AllowedIpsUpdate);
+                } else if matches!(msg, PasswordUpdate { .. }) {
+                    Metrics::get()
+                        .proxy
+                        .redis_events_count
+                        .inc(RedisEventsCount::PasswordUpdate);
+                }
                 // It might happen that the invalid entry is on the way to be cached.
                 // To make sure that the entry is invalidated, let's repeat the invalidation in INVALIDATION_LAG seconds.
                 // TODO: include the version (or the timestamp) in the message and invalidate only if the entry is cached before the message.

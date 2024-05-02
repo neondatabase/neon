@@ -4,16 +4,21 @@ import threading
 import time
 from typing import List
 
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import DEFAULT_BRANCH_NAME, NeonEnvBuilder
 from fixtures.utils import query_scalar
 
 
-def test_local_file_cache_unlink(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder, build_type: str):
+    if build_type == "debug":
+        # Disable vectored read path cross validation since it makes the test time out.
+        neon_env_builder.pageserver_config_override = "validate_vectored_get=false"
+
+    env = neon_env_builder.init_start()
 
     cache_dir = os.path.join(env.repo_dir, "file_cache")
     os.mkdir(cache_dir)
 
+    env.neon_cli.create_branch("empty", ancestor_branch_name=DEFAULT_BRANCH_NAME)
     env.neon_cli.create_branch("test_local_file_cache_unlink", "empty")
 
     endpoint = env.endpoints.create_start(

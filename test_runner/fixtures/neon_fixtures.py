@@ -499,6 +499,7 @@ class NeonEnvBuilder:
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
         self.control_plane_compute_hook_api: Optional[str] = None
+        self.storage_controller_config: Optional[dict[Any, Any]] = None
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
@@ -506,6 +507,16 @@ class NeonEnvBuilder:
         if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
             self.pageserver_get_vectored_impl = "vectored"
             log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
+
+        self.pageserver_get_impl: Optional[str] = None
+        if os.getenv("PAGESERVER_GET_IMPL", "") == "vectored":
+            self.pageserver_get_impl = "vectored"
+            log.debug('Overriding pageserver get_impl config to "vectored"')
+
+        self.pageserver_validate_vectored_get: Optional[bool] = None
+        if (validate := os.getenv("PAGESERVER_VALIDATE_VEC_GET")) is not None:
+            self.pageserver_validate_vectored_get = bool(validate)
+            log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
 
         assert test_name.startswith(
             "test_"
@@ -1011,6 +1022,7 @@ class NeonEnv:
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
         self.pageserver_config_override = config.pageserver_config_override
+        self.storage_controller_config = config.storage_controller_config
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -1056,6 +1068,9 @@ class NeonEnv:
         if self.control_plane_compute_hook_api is not None:
             cfg["control_plane_compute_hook_api"] = self.control_plane_compute_hook_api
 
+        if self.storage_controller_config is not None:
+            cfg["storage_controller"] = self.storage_controller_config
+
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -1078,6 +1093,10 @@ class NeonEnv:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_get_vectored_impl is not None:
                 ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
+            if config.pageserver_get_impl is not None:
+                ps_cfg["get_impl"] = config.pageserver_get_impl
+            if config.pageserver_validate_vectored_get is not None:
+                ps_cfg["validate_vectored_get"] = config.pageserver_validate_vectored_get
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1120,12 +1139,9 @@ class NeonEnv:
         # bounce through retries on startup
         self.storage_controller.start()
 
-        def storage_controller_ready():
-            assert self.storage_controller.ready() is True
-
         # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
-        wait_until(30, 1, storage_controller_ready)
+        self.storage_controller.wait_until_ready()
 
         # Start up broker, pageserver and all safekeepers
         futs = []
@@ -1567,6 +1583,11 @@ class NeonCli(AbstractNeonCli):
         res = self.raw_cli(args)
         res.check_returncode()
         return tenant_id, timeline_id
+
+    def import_tenant(self, tenant_id: TenantId):
+        args = ["tenant", "import", "--tenant-id", str(tenant_id)]
+        res = self.raw_cli(args)
+        res.check_returncode()
 
     def set_default(self, tenant_id: TenantId):
         """
@@ -2024,6 +2045,15 @@ class NeonStorageController(MetricsGetter):
         else:
             raise RuntimeError(f"Unexpected status {status} from readiness endpoint")
 
+    def wait_until_ready(self):
+        t1 = time.time()
+
+        def storage_controller_ready():
+            assert self.ready() is True
+
+        wait_until(30, 1, storage_controller_ready)
+        return time.time() - t1
+
     def attach_hook_issue(
         self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
     ) -> int:
@@ -2111,7 +2141,7 @@ class NeonStorageController(MetricsGetter):
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[Dict[Any, Any]] = None,
-        placement_policy: Optional[str] = None,
+        placement_policy: Optional[Union[Dict[Any, Any] | str]] = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters
@@ -2200,6 +2230,13 @@ class NeonStorageController(MetricsGetter):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def tenant_import(self, tenant_id: TenantId):
+        self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/import",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def reconcile_all(self):
         r = self.request(
             "POST",
@@ -2214,10 +2251,21 @@ class NeonStorageController(MetricsGetter):
     def reconcile_until_idle(self, timeout_secs=30):
         start_at = time.time()
         n = 1
+        delay_sec = 0.5
+        delay_max = 5
         while n > 0:
             n = self.reconcile_all()
-            if time.time() - start_at > timeout_secs:
+            if n == 0:
+                break
+            elif time.time() - start_at > timeout_secs:
                 raise RuntimeError("Timeout in reconcile_until_idle")
+            else:
+                # Don't call again right away: if we're waiting for many reconciles that
+                # are blocked on the concurrency limit, it slows things down to call
+                # reconcile_all frequently.
+                time.sleep(delay_sec)
+                delay_sec *= 2
+                delay_sec = min(delay_sec, delay_max)
 
     def consistency_check(self):
         """
@@ -2291,20 +2339,24 @@ class NeonPageserver(PgProtocol):
         # The entries in the list are regular experessions.
         self.allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
-    def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
+    def timeline_dir(
+        self,
+        tenant_shard_id: Union[TenantId, TenantShardId],
+        timeline_id: Optional[TimelineId] = None,
+    ) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
         if timeline_id is None:
-            return self.tenant_dir(tenant_id) / "timelines"
-        return self.tenant_dir(tenant_id) / "timelines" / str(timeline_id)
+            return self.tenant_dir(tenant_shard_id) / "timelines"
+        return self.tenant_dir(tenant_shard_id) / "timelines" / str(timeline_id)
 
     def tenant_dir(
         self,
-        tenant_id: Optional[TenantId] = None,
+        tenant_shard_id: Optional[Union[TenantId, TenantShardId]] = None,
     ) -> Path:
         """Get a tenant directory's path based on the repo directory of the test environment"""
-        if tenant_id is None:
+        if tenant_shard_id is None:
             return self.workdir / "tenants"
-        return self.workdir / "tenants" / str(tenant_id)
+        return self.workdir / "tenants" / str(tenant_shard_id)
 
     def start(
         self,
@@ -2491,8 +2543,10 @@ class NeonPageserver(PgProtocol):
         client = self.http_client()
         return client.tenant_location_conf(tenant_id, config, **kwargs)
 
-    def read_tenant_location_conf(self, tenant_id: TenantId) -> dict[str, Any]:
-        path = self.tenant_dir(tenant_id) / "config-v1"
+    def read_tenant_location_conf(
+        self, tenant_shard_id: Union[TenantId, TenantShardId]
+    ) -> dict[str, Any]:
+        path = self.tenant_dir(tenant_shard_id) / "config-v1"
         log.info(f"Reading location conf from {path}")
         bytes = open(path, "r").read()
         try:
@@ -3696,13 +3750,15 @@ class S3Scrubber:
             log.warning(f"Scrub environment: {env}")
             log.warning(f"Output at: {output_path}")
 
-            raise RuntimeError("Remote storage scrub failed")
+            raise RuntimeError(f"Scrubber failed while running {args}")
 
         assert stdout is not None
         return stdout
 
     def scan_metadata(self) -> Any:
-        stdout = self.scrubber_cli(["scan-metadata", "--json"], timeout=30)
+        stdout = self.scrubber_cli(
+            ["scan-metadata", "--node-kind", "pageserver", "--json"], timeout=30
+        )
 
         try:
             return json.loads(stdout)
@@ -3710,6 +3766,13 @@ class S3Scrubber:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
             log.error(stdout)
             raise
+
+    def tenant_snapshot(self, tenant_id: TenantId, output_path: Path):
+        stdout = self.scrubber_cli(
+            ["tenant-snapshot", "--tenant-id", str(tenant_id), "--output-path", str(output_path)],
+            timeout=30,
+        )
+        log.info(f"tenant-snapshot output: {stdout}")
 
 
 def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) -> Path:

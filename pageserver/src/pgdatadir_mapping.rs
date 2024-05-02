@@ -9,6 +9,7 @@
 use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
+use crate::metrics::WAL_INGEST;
 use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
@@ -22,6 +23,7 @@ use pageserver_api::key::{
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
+use pageserver_api::keyspace::SparseKeySpace;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -175,7 +177,6 @@ impl Timeline {
         tag: RelTag,
         blknum: BlockNumber,
         version: Version<'_>,
-        latest: bool,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         if tag.relnode == 0 {
@@ -184,7 +185,7 @@ impl Timeline {
             ));
         }
 
-        let nblocks = self.get_rel_size(tag, version, latest, ctx).await?;
+        let nblocks = self.get_rel_size(tag, version, ctx).await?;
         if blknum >= nblocks {
             debug!(
                 "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
@@ -206,7 +207,6 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         version: Version<'_>,
-        latest: bool,
         ctx: &RequestContext,
     ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
@@ -214,7 +214,7 @@ impl Timeline {
         let rels = self.list_rels(spcnode, dbnode, version, ctx).await?;
 
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, version, latest, ctx).await?;
+            let n_blocks = self.get_rel_size(rel, version, ctx).await?;
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -225,7 +225,6 @@ impl Timeline {
         &self,
         tag: RelTag,
         version: Version<'_>,
-        latest: bool,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
@@ -239,7 +238,7 @@ impl Timeline {
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, version, latest, ctx).await?
+            && !self.get_rel_exists(tag, version, ctx).await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
@@ -262,7 +261,6 @@ impl Timeline {
         &self,
         tag: RelTag,
         version: Version<'_>,
-        _latest: bool,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
@@ -448,11 +446,6 @@ impl Timeline {
         // include physical changes from later commits that will be marked
         // as aborted, and will need to be vacuumed away.
         let commit_lsn = Lsn((low - 1) * 8);
-        // This maxing operation is for the edge case that the search above did
-        // set found_smaller to true but it never increased the lsn. Then, low
-        // is still the old min_lsn the subtraction above could possibly give a value
-        // below the anchestor_lsn.
-        let commit_lsn = commit_lsn.max(min_lsn);
         match (found_smaller, found_larger) {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
@@ -461,6 +454,12 @@ impl Timeline {
             }
             (false, true) => {
                 // Didn't find any commit timestamps smaller than the request
+                Ok(LsnForTimestamp::Past(min_lsn))
+            }
+            (true, _) if commit_lsn < min_lsn => {
+                // the search above did set found_smaller to true but it never increased the lsn.
+                // Then, low is still the old min_lsn, and the subtraction above gave a value
+                // below the min_lsn. We should never do that.
                 Ok(LsnForTimestamp::Past(min_lsn))
             }
             (true, false) => {
@@ -732,11 +731,13 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
+    ///
+    /// The return value is (dense keyspace, sparse keyspace).
     pub(crate) async fn collect_keyspace(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<KeySpace, CollectKeySpaceError> {
+    ) -> Result<(KeySpace, SparseKeySpace), CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -808,7 +809,12 @@ impl Timeline {
         if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
             result.add_key(AUX_FILES_KEY);
         }
-        Ok(result.to_keyspace())
+
+        Ok((
+            result.to_keyspace(),
+            /* AUX sparse key space */
+            SparseKeySpace(KeySpace::single(Key::metadata_aux_key_range())),
+        ))
     }
 
     /// Get cached size of relation if it not updated after specified LSN
@@ -1094,7 +1100,7 @@ impl<'a> DatadirModification<'a> {
     ) -> anyhow::Result<()> {
         let total_blocks = self
             .tline
-            .get_db_size(spcnode, dbnode, Version::Modified(self), true, ctx)
+            .get_db_size(spcnode, dbnode, Version::Modified(self), ctx)
             .await?;
 
         // Remove entry from dbdir
@@ -1193,7 +1199,7 @@ impl<'a> DatadirModification<'a> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         if self
             .tline
-            .get_rel_exists(rel, Version::Modified(self), true, ctx)
+            .get_rel_exists(rel, Version::Modified(self), ctx)
             .await?
         {
             let size_key = rel_size_to_key(rel);
@@ -1551,6 +1557,8 @@ impl<'a> DatadirModification<'a> {
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut writer = self.tline.writer().await;
 
+        let timer = WAL_INGEST.time_spent_on_ingest.start_timer();
+
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
@@ -1589,6 +1597,8 @@ impl<'a> DatadirModification<'a> {
         for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
             writer.update_directory_entries_count(kind, count as u64);
         }
+
+        timer.observe_duration();
 
         Ok(())
     }

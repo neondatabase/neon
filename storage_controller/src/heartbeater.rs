@@ -184,6 +184,19 @@ impl HeartbeaterTask {
                 }
             }
         }
+        tracing::info!(
+            "Heartbeat round complete for {} nodes, {} offline",
+            new_state.len(),
+            new_state
+                .values()
+                .filter(|s| match s {
+                    PageserverState::Available { .. } => {
+                        false
+                    }
+                    PageserverState::Offline => true,
+                })
+                .count()
+        );
 
         let mut deltas = Vec::new();
         let now = Instant::now();
