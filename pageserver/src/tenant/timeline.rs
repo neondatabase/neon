@@ -864,16 +864,15 @@ impl Timeline {
                             value
                         }
                     }
-                    None => {
-                        error!(
-                            "Expected {}, but singular vectored get returned nothing",
-                            key
-                        );
-                        Err(PageReconstructError::Other(anyhow!(
-                            "Singular vectored get did not return a value for {}",
-                            key
-                        )))
-                    }
+                    None => Err(PageReconstructError::MissingKey(MissingKeyError {
+                        key,
+                        shard: self.shard_identity.get_shard_number(&key),
+                        cont_lsn: Lsn(0),
+                        request_lsn: lsn,
+                        ancestor_lsn: None,
+                        traversal_path: Vec::new(),
+                        backtrace: None,
+                    })),
                 }
             }
         }
@@ -1107,12 +1106,15 @@ impl Timeline {
                     Err(Cancelled | AncestorStopping(_)) => {
                         return Err(GetVectoredError::Cancelled)
                     }
-                    // we only capture stuck_at_lsn=false now until we figure out https://github.com/neondatabase/neon/issues/7380
-                    Err(MissingKey(err)) if !NON_INHERITED_RANGE.contains(&key) => {
-                        // The vectored read path handles non inherited keys specially.
-                        // If such a a key cannot be reconstructed from the current timeline,
-                        // the vectored read path returns a key level error as opposed to a top
-                        // level error.
+                    Err(MissingKey(_))
+                        if NON_INHERITED_RANGE.contains(&key)
+                            || NON_INHERITED_SPARSE_RANGE.contains(&key) =>
+                    {
+                        // Ignore missing key error for aux key range. TODO: currently, we assume non_inherited_range == aux_key_range.
+                        // When we add more types of keys into the page server, we should revisit this part of code and throw errors
+                        // accordingly.
+                    }
+                    Err(MissingKey(err)) => {
                         return Err(GetVectoredError::MissingKey(err));
                     }
                     Err(Other(err))
@@ -3256,41 +3258,8 @@ impl Timeline {
             // Do not descend into the ancestor timeline for aux files.
             // We don't return a blanket [`GetVectoredError::MissingKey`] to avoid
             // stalling compaction.
-            // TODO(chi): this will need to be updated for aux files v2 storage
-            if keyspace.overlaps(&NON_INHERITED_RANGE)
-                || keyspace.overlaps(&NON_INHERITED_SPARSE_RANGE)
-            {
-                let removed = keyspace.remove_overlapping_with(&KeySpace {
-                    ranges: vec![NON_INHERITED_RANGE],
-                });
-
-                for range in removed.ranges {
-                    let mut key = range.start;
-                    while key < range.end {
-                        reconstruct_state.on_key_error(
-                            key,
-                            PageReconstructError::MissingKey(MissingKeyError {
-                                key,
-                                shard: self.shard_identity.get_shard_number(&key),
-                                cont_lsn,
-                                request_lsn,
-                                ancestor_lsn: None,
-                                traversal_path: Vec::default(),
-                                backtrace: if cfg!(test) {
-                                    Some(std::backtrace::Backtrace::force_capture())
-                                } else {
-                                    None
-                                },
-                            }),
-                        );
-                        key = key.next();
-                    }
-                }
-            }
-
-            // For sparse keyspace, remove overlapping and do not produce missing key error.
             keyspace.remove_overlapping_with(&KeySpace {
-                ranges: vec![NON_INHERITED_SPARSE_RANGE],
+                ranges: vec![NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE],
             });
 
             // Keyspace is fully retrieved, no ancestor timeline, or metadata scan (where we do not look
