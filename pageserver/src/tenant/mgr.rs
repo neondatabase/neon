@@ -2067,7 +2067,7 @@ impl TenantManager {
             }
             Err(_barrier) => {
                 slot_guard.revert();
-                // this really should not happen, at all, unless it was already going?
+                // this really should not happen, at all, unless shutdown was already going?
                 anyhow::bail!("Cannot restart Tenant, already shutting down");
             }
         }
