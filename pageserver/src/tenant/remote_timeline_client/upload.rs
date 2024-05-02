@@ -141,7 +141,7 @@ pub(super) async fn copy_timeline_layer(
     storage
         .copy_object(&source_path, &target_path, cancel)
         .await
-        .with_context(|| format!("adopt layer {source_path} to {target_path}"))
+        .with_context(|| format!("copy layer {source_path} to {target_path}"))
 }
 
 /// Uploads the given `initdb` data to the remote storage.
