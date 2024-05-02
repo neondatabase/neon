@@ -4,7 +4,7 @@ use pageserver_api::shard::TenantShardId;
 use s3_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use s3_scrubber::scan_pageserver_metadata::scan_metadata;
 use s3_scrubber::tenant_snapshot::SnapshotDownloader;
-use s3_scrubber::validate_safekeeper_timeline::validate_timelines;
+use s3_scrubber::validate_safekeeper_timeline::{fix_local_start_lsn, validate_timelines};
 use s3_scrubber::{
     init_logging, scan_safekeeper_metadata::scan_safekeeper_metadata, BucketConfig, ConsoleConfig,
     NodeKind, TraversingDepth,
@@ -55,6 +55,14 @@ enum Command {
         #[arg(long, default_value = None)]
         dump_db_table: Option<String>,
     },
+    TenantSnapshot {
+        #[arg(long = "tenant-id")]
+        tenant_id: TenantId,
+        #[arg(long = "concurrency", short = 'j', default_value_t = 8)]
+        concurrency: usize,
+        #[arg(short, long)]
+        output_path: Utf8PathBuf,
+    },
     #[command(verbatim_doc_comment)]
     ValidateTimelines {
         // points to db with debug dump
@@ -64,13 +72,10 @@ enum Command {
         // validation script will be written to this file
         script_file: String,
     },
-    TenantSnapshot {
-        #[arg(long = "tenant-id")]
-        tenant_id: TenantId,
-        #[arg(long = "concurrency", short = 'j', default_value_t = 8)]
-        concurrency: usize,
-        #[arg(short, long)]
-        output_path: Utf8PathBuf,
+    #[command(verbatim_doc_comment)]
+    FixLocalStartLsn {
+        // file with timelines to fix in "<tenant>/<timeline>" format, on each line
+        tli_list_file: String,
     },
 }
 
@@ -86,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         Command::PurgeGarbage { .. } => "purge-garbage",
         Command::TenantSnapshot { .. } => "tenant-snapshot",
         Command::ValidateTimelines { .. } => "validate-timelines",
+        Command::FixLocalStartLsn { .. } => "fix-local-start-lsn",
     };
     let _guard = init_logging(&format!(
         "{}_{}_{}_{}.log",
@@ -201,6 +207,13 @@ async fn main() -> anyhow::Result<()> {
                 script_file,
             )
             .await
+        }
+        Command::FixLocalStartLsn {
+            tli_list_file,
+        } => {
+            fix_local_start_lsn(
+                tli_list_file,
+            ).await
         }
     }
 }

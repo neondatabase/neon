@@ -1,7 +1,7 @@
 use std::{
     cmp::max,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex}, time::Duration,
 };
 
 use aws_sdk_s3::{types::ObjectIdentifier, Client};
@@ -10,7 +10,9 @@ use futures::stream::{StreamExt, TryStreamExt};
 use postgres_ffi::{XLogFileName, PG_TLI};
 use reqwest::Url;
 
-use tokio::{fs::File, io::AsyncWriteExt};
+use safekeeper::patch_control_file;
+use serde_json::json;
+use tokio::{fs::File, io::{AsyncBufReadExt, AsyncWriteExt, BufReader}};
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info, info_span, Instrument};
 use utils::{
@@ -59,6 +61,32 @@ impl SafekeeperClient {
 
         // this field is noisy
         response.acceptor_state.term_history.clear();
+
+        Ok(response)
+    }
+
+    pub async fn patch_control_file(
+        &self,
+        ttid: TenantTimelineId,
+        request: patch_control_file::Request,
+    ) -> anyhow::Result<patch_control_file::Response> {
+        // /v1/tenant/:tenant_id/timeline/:timeline_id/control_file
+
+        let req = self
+            .http_client
+            .patch(self.append_url(format!(
+                "v1/tenant/{}/timeline/{}/control_file",
+                ttid.tenant_id, ttid.timeline_id,
+            )))
+            .json(&request)
+            .bearer_auth(&self.token);
+
+        let response = req.send().await?;
+        let mut response: patch_control_file::Response = response.json().await?;
+
+        // this field is noisy
+        response.old_control_file.acceptor_state.term_history.0.clear();
+        response.new_control_file.acceptor_state.term_history.0.clear();
 
         Ok(response)
     }
@@ -333,6 +361,63 @@ AND timeline_id != 'e7cfa4a2bd15c88ff011d69feef4b076';",
     }
     file.flush().await?;
     drop(file);
+
+    Ok(())
+}
+
+pub async fn fix_local_start_lsn(tli_list_file: String) -> anyhow::Result<()> {
+    let sk_api_config = SafekeeperApiConfig::from_env()?;
+    let sk_api_client = SafekeeperClient::new(sk_api_config);
+
+    let mut tlis: Vec<TenantTimelineId> = Vec::new();
+
+    let file = File::open(tli_list_file).await?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+    
+    while let Some(line) = lines.next_line().await? {
+        let ttid = TenantTimelineId::from_str(&line)?;
+        tlis.push(ttid);
+    }
+    drop(lines);
+    
+    info!("Read {} timelines from the file, starting applying new local_start_lsn", tlis.len());
+
+    for ttid in tlis {
+        let res = fix_one_timeline(&sk_api_client, ttid).await;
+        if res.is_err() {
+            error!("error while fixing timeline {}: {:?}", ttid, res);
+        }
+    }
+
+    Ok(())
+}
+
+async fn fix_one_timeline(api_client: &SafekeeperClient, ttid: TenantTimelineId) -> anyhow::Result<()> {
+    // fetching current status from safekeeper HTTP API
+    let res = api_client.timeline_status(ttid).await;
+    if res.is_err() {
+        info!("skipping, failed to fetch info about timeline: {res:?}");
+    }
+    
+    let status = res?;
+    info!("status from sk: {status:?}");
+
+    if status.timeline_start_lsn == status.local_start_lsn {
+        info!("nothing to do, LSNs are equal");
+        return Ok(());
+    }
+
+    let request = patch_control_file::Request {
+        updates: json!({
+            "local_start_lsn": status.timeline_start_lsn.to_string(),
+        }),
+        apply_fields: vec!["local_start_lsn".to_string()],
+    };
+
+    info!("sending request {:?}", request);
+    let res = api_client.patch_control_file(ttid, request).await?;
+    info!("patch finished: {:?}", res);
 
     Ok(())
 }

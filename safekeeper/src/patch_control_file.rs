@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::{state::TimelinePersistentState, timeline::Timeline};
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Request {
     /// JSON object with fields to update
     pub updates: serde_json::Value,
@@ -14,7 +14,7 @@ pub struct Request {
     pub apply_fields: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Response {
     pub old_control_file: TimelinePersistentState,
     pub new_control_file: TimelinePersistentState,
