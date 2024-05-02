@@ -13,6 +13,7 @@ use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
 use anyhow::Result;
+use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::task;
@@ -139,7 +140,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         (&Method::GET, "/schema/objects") => {
             info!("serving /schema/objects GET request",);
             match get_schema_objects(compute).await {
-                Ok(res) => Response::new(Body::from(serde_json::to_string(&res).unwrap())),
+                Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
                 Err(_) => render_json_error(
                     "can't get schema objects",
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -154,7 +155,10 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             };
             info!("serving /schema/dump GET request with db_name: {db_name}",);
             match schema_dump(compute, &db_name).await {
-                Ok(res) => Response::new(Body::wrap_stream(res)),
+                Ok(res) => Response::builder()
+                    .header(CONTENT_TYPE, "text/plain")
+                    .body(Body::wrap_stream(res))
+                    .unwrap(),
                 Err(SchemaDumpError::DatabaseDoesNotExist) => {
                     render_json_error("database does not exist", StatusCode::NOT_FOUND)
                 }
@@ -335,7 +339,15 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
     };
     Response::builder()
         .status(status)
+        .header(CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::to_string(&error).unwrap()))
+        .unwrap()
+}
+
+fn render_json(body: Body) -> Response<Body> {
+    Response::builder()
+        .header(CONTENT_TYPE, "application/json")
+        .body(body)
         .unwrap()
 }
 
