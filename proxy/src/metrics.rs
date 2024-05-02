@@ -123,6 +123,9 @@ pub struct ProxyMetrics {
     /// Number of retries (per outcome, per retry_type).
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]))]
     pub retries_metric: HistogramVec<RetriesMetricSet, 9>,
+
+    /// Number of events consumed from redis (per event type).
+    pub redis_events_count: CounterVec<StaticLabelSet<RedisEventsCount>>,
 }
 
 #[derive(MetricGroup)]
@@ -529,4 +532,15 @@ pub struct RetriesMetricGroup {
 pub enum RetryType {
     WakeCompute,
     ConnectToCompute,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+#[label(singleton = "event")]
+pub enum RedisEventsCount {
+    EndpointCreated,
+    BranchCreated,
+    ProjectCreated,
+    CancelSession,
+    PasswordUpdate,
+    AllowedIpsUpdate,
 }
