@@ -588,7 +588,7 @@ impl LayerMap {
             let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
             coverage.push((kr, current_val.take()));
             current_key = change_key;
-            current_val = change_val.clone();
+            current_val.clone_from(&change_val);
         }
 
         // Add the final interval
@@ -689,11 +689,11 @@ impl LayerMap {
             }
 
             current_key = change_key;
-            current_val = change_val.clone();
+            current_val.clone_from(&change_val);
         }
 
         // Consider the last part
-        if let Some(val) = current_val {
+        if let Some(val) = &current_val {
             if val.get_lsn_range().end > lsn.start {
                 let kr = Key::from_i128(current_key)..Key::from_i128(end);
                 let lr = lsn.start..val.get_lsn_range().start;

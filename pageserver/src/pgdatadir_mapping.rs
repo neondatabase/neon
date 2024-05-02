@@ -279,7 +279,7 @@ impl Timeline {
 
         match RelDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
-                let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
+                let exists = dir.rels.contains(&(tag.relnode, tag.forknum));
                 Ok(exists)
             }
             Err(e) => Err(PageReconstructError::from(e)),
@@ -379,7 +379,7 @@ impl Timeline {
 
         match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
-                let exists = dir.segments.get(&segno).is_some();
+                let exists = dir.segments.contains(&segno);
                 Ok(exists)
             }
             Err(e) => Err(PageReconstructError::from(e)),
@@ -1143,7 +1143,7 @@ impl<'a> DatadirModification<'a> {
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
             .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
+        let mut rel_dir = if dbdir.dbdirs.contains_key(&(rel.spcnode, rel.dbnode)) {
             // Didn't exist. Update dbdir
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
             let buf = DbDirectory::ser(&dbdir).context("serialize db")?;

@@ -382,7 +382,7 @@ impl LocalEnv {
 
         // Find neon binaries.
         if env.neon_distrib_dir == Path::new("") {
-            env.neon_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
+            env::current_exe()?.parent().unwrap().clone_into(&mut env.neon_distrib_dir);
         }
 
         if env.pageservers.is_empty() {
