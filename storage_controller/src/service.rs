@@ -2641,6 +2641,45 @@ impl Service {
         Ok(results)
     }
 
+    /// Concurrently invoke a pageserver API call on many shards at once
+    pub(crate) async fn tenant_for_shards_api<T, O, F>(
+        &self,
+        locations: Vec<(TenantShardId, Node)>,
+        op: O,
+        warn_threshold: u32,
+        max_retries: u32,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Vec<mgmt_api::Result<T>>
+    where
+        O: Fn(TenantShardId, PageserverClient) -> F + Copy,
+        F: std::future::Future<Output = mgmt_api::Result<T>>,
+    {
+        let mut futs = FuturesUnordered::new();
+        let mut results = Vec::with_capacity(locations.len());
+
+        for (tenant_shard_id, node) in locations {
+            futs.push(async move {
+                node.with_client_retries(
+                    |client| op(tenant_shard_id, client),
+                    &self.config.jwt_token,
+                    warn_threshold,
+                    max_retries,
+                    timeout,
+                    cancel,
+                )
+                .await
+            });
+        }
+
+        while let Some(r) = futs.next().await {
+            let r = r.unwrap_or(Err(mgmt_api::Error::Cancelled));
+            results.push(r);
+        }
+
+        results
+    }
+
     pub(crate) async fn tenant_timeline_delete(
         &self,
         tenant_id: TenantId,
@@ -3090,11 +3129,14 @@ impl Service {
     ) -> (
         TenantShardSplitResponse,
         Vec<(TenantShardId, NodeId, ShardStripeSize)>,
+        Vec<ReconcilerWaiter>,
     ) {
         let mut response = TenantShardSplitResponse {
             new_shards: Vec::new(),
         };
         let mut child_locations = Vec::new();
+        let mut waiters = Vec::new();
+
         {
             let mut locked = self.inner.write().unwrap();
 
@@ -3173,14 +3215,112 @@ impl Service {
                         tracing::warn!("Failed to schedule child shard {child}: {e}");
                     }
                     // In the background, attach secondary locations for the new shards
-                    self.maybe_reconcile_shard(&mut child_state, nodes);
+                    if let Some(waiter) = self.maybe_reconcile_shard(&mut child_state, nodes) {
+                        waiters.push(waiter);
+                    }
 
                     tenants.insert(child, child_state);
                     response.new_shards.push(child);
                 }
             }
+            (response, child_locations, waiters)
+        }
+    }
 
-            (response, child_locations)
+    async fn tenant_shard_split_start_secondaries(
+        &self,
+        tenant_id: TenantId,
+        waiters: Vec<ReconcilerWaiter>,
+    ) {
+        // Wait for initial reconcile of child shards, this creates the secondary locations
+        if let Err(e) = self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
+            // This is not a failure to split: it's some issue reconciling the new child shards, perhaps
+            // their secondaries couldn't be attached.
+            tracing::warn!("Failed to reconcile after split: {e}");
+            return;
+        }
+
+        // Take the state lock to discover the attached & secondary intents for all shards
+        let (attached, secondary) = {
+            let locked = self.inner.read().unwrap();
+            let mut attached = Vec::new();
+            let mut secondary = Vec::new();
+
+            for (tenant_shard_id, shard) in
+                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+            {
+                let Some(node_id) = shard.intent.get_attached() else {
+                    // Unexpected.  Race with a PlacementPolicy change?
+                    tracing::warn!(
+                        "No attached node on {tenant_shard_id} immediately after shard split!"
+                    );
+                    continue;
+                };
+
+                let Some(secondary_node_id) = shard.intent.get_secondary().first() else {
+                    // No secondary location.  Nothing for us to do.
+                    continue;
+                };
+
+                let attached_node = locked
+                    .nodes
+                    .get(node_id)
+                    .expect("Pageservers may not be deleted while referenced");
+
+                let secondary_node = locked
+                    .nodes
+                    .get(secondary_node_id)
+                    .expect("Pageservers may not be deleted while referenced");
+
+                attached.push((*tenant_shard_id, attached_node.clone()));
+                secondary.push((*tenant_shard_id, secondary_node.clone()));
+            }
+            (attached, secondary)
+        };
+
+        if secondary.is_empty() {
+            // No secondary locations; nothing for us to do
+            return;
+        }
+
+        for result in self
+            .tenant_for_shards_api(
+                attached,
+                |tenant_shard_id, client| async move {
+                    client.tenant_heatmap_upload(tenant_shard_id).await
+                },
+                1,
+                1,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await
+        {
+            if let Err(e) = result {
+                tracing::warn!("Error calling heatmap upload after shard split: {e}");
+                return;
+            }
+        }
+
+        for result in self
+            .tenant_for_shards_api(
+                secondary,
+                |tenant_shard_id, client| async move {
+                    client
+                        .tenant_secondary_download(tenant_shard_id, Some(Duration::ZERO))
+                        .await
+                },
+                1,
+                1,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await
+        {
+            if let Err(e) = result {
+                tracing::warn!("Error calling secondary download after shard split: {e}");
+                return;
+            }
         }
     }
 
@@ -3214,8 +3354,8 @@ impl Service {
             .do_tenant_shard_split(tenant_id, shard_split_params)
             .await;
 
-        match r {
-            Ok(r) => Ok(r),
+        let (response, waiters) = match r {
+            Ok(r) => r,
             Err(e) => {
                 // Split might be part-done, we must do work to abort it.
                 tracing::warn!("Enqueuing background abort of split on {tenant_id}");
@@ -3228,9 +3368,17 @@ impl Service {
                     })
                     // Ignore error sending: that just means we're shutting down: aborts are ephemeral so it's fine to drop it.
                     .ok();
-                Err(e)
+                return Err(e);
             }
-        }
+        };
+
+        // The split is now complete.  As an optimization, we will trigger all the child shards to upload
+        // a heatmap immediately, and all their secondary locations to start downloading: this avoids waiting
+        // for the background heatmap/download interval before secondaries get warm enough to migrate shards
+        // in [`Self::optimize_all`]
+        self.tenant_shard_split_start_secondaries(tenant_id, waiters)
+            .await;
+        Ok(response)
     }
 
     fn prepare_tenant_shard_split(
@@ -3380,7 +3528,7 @@ impl Service {
         &self,
         tenant_id: TenantId,
         params: ShardSplitParams,
-    ) -> Result<TenantShardSplitResponse, ApiError> {
+    ) -> Result<(TenantShardSplitResponse, Vec<ReconcilerWaiter>), ApiError> {
         // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
         // request could occur here, deleting or mutating the tenant.  begin_shard_split checks that the
         // parent shards exist as expected, but it would be neater to do the above pre-checks within the
@@ -3582,7 +3730,7 @@ impl Service {
         ));
 
         // Replace all the shards we just split with their children: this phase is infallible.
-        let (response, child_locations) =
+        let (response, child_locations, waiters) =
             self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
 
         // Send compute notifications for all the new shards
@@ -3609,7 +3757,7 @@ impl Service {
             }
         }
 
-        Ok(response)
+        Ok((response, waiters))
     }
 
     pub(crate) async fn tenant_shard_migrate(
