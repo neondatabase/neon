@@ -13,7 +13,9 @@ use crate::{
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{ScheduleContext, ScheduleMode},
-    tenant_shard::ReconcileNeeded,
+    tenant_shard::{
+        MigrateAttachment, ReconcileNeeded, ScheduleOptimization, ScheduleOptimizationAction,
+    },
 };
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -709,7 +711,7 @@ impl Service {
                 let reconciles_spawned = self.reconcile_all();
                 if reconciles_spawned == 0 {
                     // Run optimizer only when we didn't find any other work to do
-                    self.optimize_all();
+                    self.optimize_all().await;
                 }
             }
               _ = self.cancel.cancelled() => return
@@ -4373,25 +4375,68 @@ impl Service {
     /// To put it more briefly: whereas the scheduler respects soft constraints in a ScheduleContext at
     /// the time of scheduling, this function looks for cases where a better-scoring location is available
     /// according to those same soft constraints.
-    fn optimize_all(&self) -> usize {
-        let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
-        let pageservers = nodes.clone();
-
-        let mut schedule_context = ScheduleContext::default();
-
-        let mut reconciles_spawned = 0;
-
-        let mut tenant_shards: Vec<&TenantShard> = Vec::new();
-
+    async fn optimize_all(&self) -> usize {
         // Limit on how many shards' optmizations each call to this function will execute.  Combined
         // with the frequency of background calls, this acts as an implicit rate limit that runs a small
         // trickle of optimizations in the background, rather than executing a large number in parallel
         // when a change occurs.
-        const MAX_OPTIMIZATIONS_PER_PASS: usize = 2;
+        const MAX_OPTIMIZATIONS_EXEC_PER_PASS: usize = 2;
+
+        // Synchronous prepare: scan shards for possible scheduling optimizations
+        let candidate_work = self.optimize_all_plan();
+        let candidate_work_len = candidate_work.len();
+
+        // Asynchronous validate: I/O to pageservers to make sure shards are in a good state to apply validation
+        let validated_work = self.optimize_all_validate(candidate_work).await;
+
+        let was_work_filtered = validated_work.len() != candidate_work_len;
+
+        // Synchronous apply: update the shards' intent states according to validated optimisations
+        let mut reconciles_spawned = 0;
+        let mut optimizations_applied = 0;
+        let mut locked = self.inner.write().unwrap();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
+        for (tenant_shard_id, optimization) in validated_work {
+            let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
+                // Shard was dropped between planning and execution;
+                continue;
+            };
+            if shard.apply_optimization(scheduler, optimization) {
+                optimizations_applied += 1;
+                if self.maybe_reconcile_shard(shard, nodes).is_some() {
+                    reconciles_spawned += 1;
+                }
+            }
+
+            if optimizations_applied >= MAX_OPTIMIZATIONS_EXEC_PER_PASS {
+                break;
+            }
+        }
+
+        if was_work_filtered {
+            // If we filtered any work out during validation, ensure we return a nonzero value to indicate
+            // to callers that the system is not in a truly quiet state, it's going to do some work as soon
+            // as these validations start passing.
+            reconciles_spawned = std::cmp::max(reconciles_spawned, 1);
+        }
+
+        reconciles_spawned
+    }
+
+    fn optimize_all_plan(&self) -> Vec<(TenantShardId, ScheduleOptimization)> {
+        let mut schedule_context = ScheduleContext::default();
+
+        let mut tenant_shards: Vec<&TenantShard> = Vec::new();
+
+        // How many candidate optimizations we will generate, before evaluating them for readniess: setting
+        // this higher than the execution limit gives us a chance to execute some work even if the first
+        // few optimizations we find are not ready.
+        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 8;
 
         let mut work = Vec::new();
 
+        let mut locked = self.inner.write().unwrap();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
         for (tenant_shard_id, shard) in tenants.iter() {
             if tenant_shard_id.is_shard_zero() {
                 // Reset accumulators on the first shard in a tenant
@@ -4400,7 +4445,7 @@ impl Service {
                 tenant_shards.clear();
             }
 
-            if work.len() >= MAX_OPTIMIZATIONS_PER_PASS {
+            if work.len() >= MAX_OPTIMIZATIONS_PLAN_PER_PASS {
                 break;
             }
 
@@ -4472,18 +4517,96 @@ impl Service {
             }
         }
 
-        for (tenant_shard_id, optimization) in work {
-            let shard = tenants
-                .get_mut(&tenant_shard_id)
-                .expect("We held lock from place we got this ID");
-            shard.apply_optimization(scheduler, optimization);
+        work
+    }
 
-            if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
-                reconciles_spawned += 1;
+    async fn optimize_all_validate(
+        &self,
+        candidate_work: Vec<(TenantShardId, ScheduleOptimization)>,
+    ) -> Vec<(TenantShardId, ScheduleOptimization)> {
+        // Take a clone of the node map to use outside the lock in async validation phase
+        let validation_nodes = { self.inner.read().unwrap().nodes.clone() };
+
+        // Validate our plans: this is an async phase where we may do I/O to pageservers to
+        // check that the state of locations is acceptable to run the optimization, such as
+        // checking that a secondary location is sufficiently warmed-up to cleanly cut over
+        // in a live migration.
+        let mut validated_work = Vec::new();
+        for (tenant_shard_id, optimization) in candidate_work {
+            let validated = match optimization.action {
+                ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                    old_attached_node_id: _,
+                    new_attached_node_id,
+                }) => {
+                    match validation_nodes.get(&new_attached_node_id) {
+                        None => {
+                            // Node was dropped between planning and validation
+                            false
+                        }
+                        Some(node) => {
+                            if !node.is_available() {
+                                tracing::info!("Skipping optimization migration of {tenant_shard_id} to {new_attached_node_id} because node unavailable");
+                                false
+                            } else {
+                                // Call into pageserver API to find out if the destination secondary location is warm enough for a reasonably smooth migration: we
+                                // do this so that we avoid spawning a Reconciler that would have to wait minutes/hours for a destination to warm up: that reconciler
+                                // would hold a precious reconcile semaphore unit the whole time it was waiting for the destination to warm up.
+                                let secondary_status = node
+                                    .with_client_retries(
+                                        |client| async move {
+                                            client.tenant_secondary_status(tenant_shard_id).await
+                                        },
+                                        &self.config.jwt_token,
+                                        1,
+                                        1,
+                                        SHORT_RECONCILE_TIMEOUT,
+                                        &self.cancel,
+                                    )
+                                    .await;
+
+                                match secondary_status {
+                                    None => {
+                                        // Cancelled during call
+                                        false
+                                    }
+                                    Some(Err(e)) => {
+                                        tracing::info!("Skipping migration of {tenant_shard_id} to {new_attached_node_id}, error querying secondary: {e}");
+                                        false
+                                    }
+                                    Some(Ok(progress)) => {
+                                        // We require secondary locations to have less than 10GiB of downloads pending before we will use
+                                        // them in an optimization
+                                        const DOWNLOAD_FRESHNESS_THRESHOLD: u64 =
+                                            10 * 1024 * 1024 * 1024;
+
+                                        if progress.bytes_total == 0
+                                            || progress.bytes_total - progress.bytes_downloaded
+                                                > DOWNLOAD_FRESHNESS_THRESHOLD
+                                        {
+                                            tracing::info!("Skipping migration of {tenant_shard_id} to {new_attached_node_id} because secondary isn't ready: {progress:?}");
+                                            false
+                                        } else {
+                                            // Location looks ready: proceed
+                                            true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ScheduleOptimizationAction::ReplaceSecondary(_) => {
+                    // No extra checks needed to replace a secondary: this does not interrupt client access
+                    true
+                }
+            };
+
+            if validated {
+                validated_work.push((tenant_shard_id, optimization));
             }
         }
 
-        reconciles_spawned
+        validated_work
     }
 
     /// Useful for tests: run whatever work a background [`Self::reconcile_all`] would have done, but
@@ -4491,10 +4614,12 @@ impl Service {
     /// put the system into a quiescent state where future background reconciliations won't do anything.
     pub(crate) async fn reconcile_all_now(&self) -> Result<usize, ReconcileWaitError> {
         let reconciles_spawned = self.reconcile_all();
-        if reconciles_spawned == 0 {
+        let reconciles_spawned = if reconciles_spawned == 0 {
             // Only optimize when we are otherwise idle
-            self.optimize_all();
-        }
+            self.optimize_all().await
+        } else {
+            reconciles_spawned
+        };
 
         let waiters = {
             let mut waiters = Vec::new();

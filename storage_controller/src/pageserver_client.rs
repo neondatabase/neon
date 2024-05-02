@@ -114,6 +114,18 @@ impl PageserverClient {
         )
     }
 
+    pub(crate) async fn tenant_secondary_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<SecondaryProgress> {
+        measured_request!(
+            "tenant_secondary_status",
+            crate::metrics::Method::Get,
+            &self.node_id_label,
+            self.inner.tenant_secondary_status(tenant_shard_id).await
+        )
+    }
+
     pub(crate) async fn location_config(
         &self,
         tenant_shard_id: TenantShardId,
