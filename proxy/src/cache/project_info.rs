@@ -161,9 +161,8 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
         }
         *listeners_guard -= 1;
         if *listeners_guard == 0 {
-            let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
             self.ttl_disabled_since_us
-                .store(new_ttl, std::sync::atomic::Ordering::SeqCst);
+                .store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
