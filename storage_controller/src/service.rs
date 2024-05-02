@@ -21,7 +21,6 @@ use control_plane::storage_controller::{
 };
 use diesel::result::DatabaseErrorKind;
 use futures::{stream::FuturesUnordered, StreamExt};
-use hyper::StatusCode;
 use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
@@ -33,6 +32,7 @@ use pageserver_api::{
     },
     models::{SecondaryProgress, TenantConfigRequest},
 };
+use reqwest::StatusCode;
 
 use crate::pageserver_client::PageserverClient;
 use pageserver_api::{
