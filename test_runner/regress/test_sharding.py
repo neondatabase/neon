@@ -287,6 +287,11 @@ def test_sharding_split_smoke(
         == shard_count
     )
 
+    # Make secondary downloads slow: this exercises the storage controller logic for not migrating an attachment
+    # during post-split optimization until the secondary is ready
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "return(1000)")])
+
     env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
 
     post_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
@@ -300,7 +305,7 @@ def test_sharding_split_smoke(
 
     # Enough background reconciliations should result in the shards being properly distributed.
     # Run this before the workload, because its LSN-waiting code presumes stable locations.
-    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.reconcile_until_idle(timeout_secs=60)
 
     workload.validate()
 
@@ -341,6 +346,10 @@ def test_sharding_split_smoke(
     )
     assert cancelled_reconciles is not None and int(cancelled_reconciles) == 0
     assert errored_reconciles is not None and int(errored_reconciles) == 0
+
+    # We should see that the migration of shards after the split waited for secondaries to warm up
+    # before happening
+    assert env.storage_controller.log_contains(".*Skipping.*because secondary isn't ready.*")
 
     env.storage_controller.consistency_check()
 
