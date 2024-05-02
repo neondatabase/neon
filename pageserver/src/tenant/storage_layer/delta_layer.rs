@@ -1139,14 +1139,13 @@ impl DeltaLayerInner {
         Ok(all_keys)
     }
 
-    /// Using the given writer, write out a truncated version, where LSNs higher than the
-    /// truncate_at are missing.
+    /// Using the given writer, write out a version which has the earlier Lsns than `until`.
     ///
     /// Return the amount of key value records pushed to the writer.
     pub(super) async fn copy_prefix(
         &self,
         writer: &mut DeltaLayerWriter,
-        truncate_at: Lsn,
+        until: Lsn,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         use crate::tenant::vectored_blob_io::{
@@ -1232,7 +1231,7 @@ impl DeltaLayerInner {
 
             prev = Option::from(item);
 
-            let actionable = actionable.filter(|x| x.0.lsn < truncate_at);
+            let actionable = actionable.filter(|x| x.0.lsn < until);
 
             let builder = if let Some((meta, offsets)) = actionable {
                 // extend or create a new builder
