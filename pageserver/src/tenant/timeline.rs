@@ -4516,8 +4516,7 @@ impl Timeline {
                 }
             }
 
-            // FIXME: the fsync should be mandatory, after both rewrites and copies in the case of
-            // failpoint usage
+            // FIXME: the fsync should be mandatory, after both rewrites and copies
             if wrote_any {
                 let timeline_dir = VirtualFile::open(
                     &self
