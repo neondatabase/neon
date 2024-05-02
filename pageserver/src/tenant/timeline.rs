@@ -4449,7 +4449,7 @@ impl Timeline {
 
         let (filtered_layers, straddling_branchpoint, rest_of_historic) = {
             // we do not need to start from our layers, because they can only be layers that come
-            // *after* our
+            // *after* ancestor_lsn
             let layers = tokio::select! {
                 guard = ancestor.layers.read() => guard,
                 _ = self.cancel.cancelled() => {
