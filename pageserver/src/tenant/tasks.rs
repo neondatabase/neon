@@ -12,6 +12,7 @@ use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
+use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{backoff, completion};
@@ -44,6 +45,7 @@ pub(crate) enum BackgroundLoopKind {
     Compaction,
     Gc,
     Eviction,
+    IngestHouseKeeping,
     ConsumptionMetricsCollectMetrics,
     ConsumptionMetricsSyntheticSizeWorker,
     InitialLogicalSizeCalculation,
@@ -127,6 +129,30 @@ pub fn start_background_loops(
                 };
                 gc_loop(tenant, cancel)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
+                    .await;
+                Ok(())
+            }
+        },
+    );
+
+    task_mgr::spawn(
+        BACKGROUND_RUNTIME.handle(),
+        TaskKind::IngestHousekeeping,
+        Some(tenant_shard_id),
+        None,
+        &format!("ingest housekeeping for tenant {tenant_shard_id}"),
+        false,
+        {
+            let tenant = Arc::clone(tenant);
+            let background_jobs_can_start = background_jobs_can_start.cloned();
+            async move {
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()) },
+                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                };
+                ingest_housekeeping_loop(tenant, cancel)
+                    .instrument(info_span!("ingest_housekeeping_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
                 Ok(())
             }
@@ -379,6 +405,52 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
 }
 
+async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
+    TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
+    async {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    return;
+                },
+                tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
+                    ControlFlow::Break(()) => return,
+                    ControlFlow::Continue(()) => (),
+                },
+            }
+
+            // We run ingest housekeeping with the same frequency as compaction: it is not worth
+            // having a distinct setting.  But we don't run it in the same task, because compaction
+            // blocks on acquiring the background job semaphore.
+            let period = tenant.get_compaction_period();
+
+            // Jitter the period by +/- 5%
+            let period =
+                rand::thread_rng().gen_range((period * (95)) / 100..(period * (105)) / 100);
+
+            // Always sleep first: we do not need to do ingest housekeeping early in the lifetime of
+            // a tenant, since it won't have started writing any ephemeral files yet.
+            if tokio::time::timeout(period, cancel.cancelled())
+                .await
+                .is_ok()
+            {
+                break;
+            }
+
+            let started_at = Instant::now();
+            tenant.ingest_housekeeping().await;
+
+            warn_when_period_overrun(
+                started_at.elapsed(),
+                period,
+                BackgroundLoopKind::IngestHouseKeeping,
+            );
+        }
+    }
+    .await;
+    TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
+}
+
 async fn wait_for_active_tenant(tenant: &Arc<Tenant>) -> ControlFlow<()> {
     // if the tenant has a proper status already, no need to wait for anything
     if tenant.current_state() == TenantState::Active {
@@ -420,8 +492,6 @@ pub(crate) async fn random_init_delay(
     period: Duration,
     cancel: &CancellationToken,
 ) -> Result<(), Cancelled> {
-    use rand::Rng;
-
     if period == Duration::ZERO {
         return Ok(());
     }

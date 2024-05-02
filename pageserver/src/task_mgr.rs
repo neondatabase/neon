@@ -319,6 +319,9 @@ pub enum TaskKind {
     // Eviction. One per timeline.
     Eviction,
 
+    // Ingest housekeeping (flushing ephemeral layers on time threshold or disk pressure)
+    IngestHousekeeping,
+
     /// See [`crate::disk_usage_eviction_task`].
     DiskUsageEviction,
 

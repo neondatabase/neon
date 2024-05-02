@@ -1408,11 +1408,11 @@ impl Timeline {
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
 
-    /// If there is no writer, and conditions for rolling the latest layer are met, then freeze it.
-    ///
-    /// This is for use in background housekeeping, to provide guarantees of layers closing eventually
-    /// even if there are no ongoing writes to drive that.
-    async fn maybe_freeze_ephemeral_layer(&self) {
+    // Check if an open ephemeral layer should be closed: this provides
+    // background enforcement of checkpoint interval if there is no active WAL receiver, to avoid keeping
+    // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
+    // ephemeral layer bytes has been breached.
+    pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
         let Ok(_write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
@@ -1534,11 +1534,6 @@ impl Timeline {
 
             (guard, permit)
         };
-
-        // Prior to compaction, check if an open ephemeral layer should be closed: this provides
-        // background enforcement of checkpoint interval if there is no active WAL receiver, to avoid keeping
-        // an ephemeral layer open forever when idle.
-        self.maybe_freeze_ephemeral_layer().await;
 
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
