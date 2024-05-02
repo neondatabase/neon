@@ -1143,7 +1143,7 @@ impl<'a> DatadirModification<'a> {
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
             .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let mut rel_dir = if let hash_map::Entry::Occupied(mut e) =
+        let mut rel_dir = if let hash_map::Entry::Vacant(e) =
             dbdir.dbdirs.entry((rel.spcnode, rel.dbnode))
         {
             // Didn't exist. Update dbdir
