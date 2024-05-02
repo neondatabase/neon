@@ -1143,9 +1143,11 @@ impl<'a> DatadirModification<'a> {
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
             .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let mut rel_dir = if dbdir.dbdirs.contains_key(&(rel.spcnode, rel.dbnode)) {
+        let mut rel_dir = if let hash_map::Entry::Occupied(mut e) =
+            dbdir.dbdirs.entry(&(rel.spcnode, rel.dbnode))
+        {
             // Didn't exist. Update dbdir
-            dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
+            e.insert(false);
             let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
             self.pending_directory_entries
                 .push((DirectoryKind::Db, dbdir.dbdirs.len()));
