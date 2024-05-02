@@ -4738,15 +4738,7 @@ mod tests {
             .await;
 
         let images = vectored_res?;
-        let mut key = NON_INHERITED_RANGE.start;
-        while key < NON_INHERITED_RANGE.end {
-            assert!(matches!(
-                images[&key],
-                Err(PageReconstructError::MissingKey(_))
-            ));
-            key = key.next();
-        }
-
+        assert!(images.is_empty());
         Ok(())
     }
 

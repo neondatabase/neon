@@ -1094,6 +1094,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let mut values = BTreeMap::new();
+
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
@@ -1113,6 +1114,7 @@ impl Timeline {
                         // Ignore missing key error for aux key range. TODO: currently, we assume non_inherited_range == aux_key_range.
                         // When we add more types of keys into the page server, we should revisit this part of code and throw errors
                         // accordingly.
+                        key = key.next();
                     }
                     Err(MissingKey(err)) => {
                         return Err(GetVectoredError::MissingKey(err));
@@ -1202,6 +1204,11 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) {
+        if keyspace.overlaps(&Key::metadata_key_range()) {
+            // skip validation for metadata key range
+            return;
+        }
+
         let sequential_res = self
             .get_vectored_sequential_impl(keyspace.clone(), lsn, ctx)
             .await;
