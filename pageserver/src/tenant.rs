@@ -2837,10 +2837,21 @@ impl Tenant {
 
             // FIXME: using questionmark here is wrong: either the whole tenant is shutting down,
             // or a single timeline is getting deleted, we should at most log the error
-            let cutoffs = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await?;
+            let res = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await;
 
-            let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
-            assert!(old.is_none());
+            match res {
+                Ok(cutoffs) => {
+                    let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
+                    assert!(old.is_none());
+                }
+                Err(e) => {
+                    tracing::info!(timeline_id = %timeline.timeline_id, "ignoring failure to find gc cutoffs: {e:#}");
+                }
+            }
+        }
+
+        if !self.is_active() {
+            anyhow::bail!("shutting down");
         }
 
         // grab mutex to prevent new timelines from being created here; avoid doing long operations
