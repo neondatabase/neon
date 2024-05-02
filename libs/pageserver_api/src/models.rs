@@ -430,8 +430,6 @@ pub struct StatusResponse {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantLocationConfigRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tenant_id: Option<TenantShardId>,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
 }

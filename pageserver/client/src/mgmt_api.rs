@@ -291,10 +291,7 @@ impl Client {
         flush_ms: Option<std::time::Duration>,
         lazy: bool,
     ) -> Result<()> {
-        let req_body = TenantLocationConfigRequest {
-            tenant_id: None,
-            config,
-        };
+        let req_body = TenantLocationConfigRequest { config };
 
         let mut path = reqwest::Url::parse(&format!(
             "{}/v1/tenant/{}/location_config",
