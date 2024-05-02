@@ -4746,12 +4746,17 @@ impl Service {
                     const DOWNLOAD_FRESHNESS_THRESHOLD: u64 = 10 * 1024 * 1024 * 1024;
 
                     if progress.bytes_total == 0
+                        || progress.bytes_total < DOWNLOAD_FRESHNESS_THRESHOLD
+                            && progress.bytes_downloaded != progress.bytes_total
                         || progress.bytes_total - progress.bytes_downloaded
                             > DOWNLOAD_FRESHNESS_THRESHOLD
                     {
                         tracing::info!("Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}");
                     } else {
                         // Location looks ready: proceed
+                        tracing::info!(
+                            "{tenant_shard_id} secondary on {node} is warm enough for migration: {progress:?}"
+                        );
                         validated_work.push((tenant_shard_id, optimization))
                     }
                 }
