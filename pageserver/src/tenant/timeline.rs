@@ -4627,13 +4627,13 @@ impl Timeline {
                 let is_same = Arc::ptr_eq(&ancestor, tl_ancestor);
                 let is_earlier = tl.get_ancestor_lsn() <= ancestor_lsn;
 
-                let deleting = tl
+                let is_deleting = tl
                     .delete_progress
                     .try_lock()
                     .map(|flow| !flow.is_not_started())
                     .unwrap_or(true);
 
-                if is_same && is_earlier && !deleting {
+                if is_same && is_earlier && !is_deleting {
                     Some(tl.clone())
                 } else {
                     None
