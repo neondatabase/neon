@@ -4733,6 +4733,7 @@ pub(crate) struct PreparedTimelineDetach {
     layers: Vec<Layer>,
 }
 
+/// TODO: this should be part of PageserverConf because we cannot easily modify cplane arguments.
 #[derive(Debug)]
 pub(crate) struct AncestorDetachOptions {
     pub(crate) rewrite_concurrency: std::num::NonZeroUsize,
