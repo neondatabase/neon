@@ -4564,6 +4564,7 @@ mod tests {
 
             timeline.freeze_and_flush().await?;
             if compact {
+                // this requires timeline to be &Arc<Timeline>
                 timeline.compact(&cancel, EnumSet::empty(), ctx).await?;
             }
 
