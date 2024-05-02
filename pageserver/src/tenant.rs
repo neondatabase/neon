@@ -62,6 +62,7 @@ use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
+use self::timeline::GcInfo;
 use self::timeline::TimelineResources;
 use self::timeline::WaitLsnError;
 use crate::config::PageServerConf;
@@ -2885,9 +2886,12 @@ impl Tenant {
                 ))
                 .map(|&x| x.1)
                 .collect();
-            timeline
-                .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
-                .await?;
+            let cutoffs = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await?;
+
+            *timeline.gc_info.write().unwrap() = GcInfo {
+                retain_lsns: branchpoints,
+                cutoffs,
+            };
 
             gc_timelines.push(timeline);
         }

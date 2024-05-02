@@ -1194,7 +1194,7 @@ impl Timeline {
                                " - keyspace={:?} lsn={}"),
                        seq_err, keyspace, lsn) },
             (Ok(_), Err(GetVectoredError::GetReadyAncestorError(GetReadyAncestorError::AncestorLsnTimeout(_)))) => {
-                // Sequential get runs after vectored get, so it is possible for the later 
+                // Sequential get runs after vectored get, so it is possible for the later
                 // to time out while waiting for its ancestor's Lsn to become ready and for the
                 // former to succeed (it essentially has a doubled wait time).
             },
@@ -4437,23 +4437,14 @@ impl Timeline {
     ///
     /// The 'pitr' duration is used to calculate a 'pitr_cutoff', which can be used to determine
     /// whether a record is needed for PITR.
-    ///
-    /// NOTE: This function holds a short-lived lock to protect the 'gc_info'
-    /// field, so that the three values passed as argument are stored
-    /// atomically. But the caller is responsible for ensuring that no new
-    /// branches are created that would need to be included in 'retain_lsns',
-    /// for example. The caller should hold `Tenant::gc_cs` lock to ensure
-    /// that.
-    ///
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
-    pub(super) async fn update_gc_info(
+    pub(super) async fn find_gc_cutoffs(
         &self,
-        retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<GcCutoffs> {
         let _timer = self
             .metrics
             .update_gc_info_histo
@@ -4509,16 +4500,10 @@ impl Timeline {
             self.get_last_record_lsn()
         };
 
-        // Grab the lock and update the values
-        *self.gc_info.write().unwrap() = GcInfo {
-            retain_lsns,
-            cutoffs: GcCutoffs {
-                horizon: cutoff_horizon,
-                pitr: pitr_cutoff,
-            },
-        };
-
-        Ok(())
+        Ok(GcCutoffs {
+            horizon: cutoff_horizon,
+            pitr: pitr_cutoff,
+        })
     }
 
     /// Garbage collect layer files on a timeline that are no longer needed.
