@@ -4532,7 +4532,6 @@ impl Timeline {
             }
         }
 
-        // because we hold the layers, they will not be removed from remote storage.
         let mut tasks = tokio::task::JoinSet::new();
         let limiter = Arc::new(tokio::sync::Semaphore::new(options.copy_concurrency.get()));
 
