@@ -4675,13 +4675,15 @@ impl Service {
         // Take a clone of the node map to use outside the lock in async validation phase
         let validation_nodes = { self.inner.read().unwrap().nodes.clone() };
 
+        let mut want_secondary_status = Vec::new();
+
         // Validate our plans: this is an async phase where we may do I/O to pageservers to
         // check that the state of locations is acceptable to run the optimization, such as
         // checking that a secondary location is sufficiently warmed-up to cleanly cut over
         // in a live migration.
         let mut validated_work = Vec::new();
         for (tenant_shard_id, optimization) in candidate_work {
-            let validated = match optimization.action {
+            match optimization.action {
                 ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
                     old_attached_node_id: _,
                     new_attached_node_id,
@@ -4689,68 +4691,70 @@ impl Service {
                     match validation_nodes.get(&new_attached_node_id) {
                         None => {
                             // Node was dropped between planning and validation
-                            false
                         }
                         Some(node) => {
                             if !node.is_available() {
                                 tracing::info!("Skipping optimization migration of {tenant_shard_id} to {new_attached_node_id} because node unavailable");
-                                false
                             } else {
-                                // Call into pageserver API to find out if the destination secondary location is warm enough for a reasonably smooth migration: we
-                                // do this so that we avoid spawning a Reconciler that would have to wait minutes/hours for a destination to warm up: that reconciler
-                                // would hold a precious reconcile semaphore unit the whole time it was waiting for the destination to warm up.
-                                let secondary_status = node
-                                    .with_client_retries(
-                                        |client| async move {
-                                            client.tenant_secondary_status(tenant_shard_id).await
-                                        },
-                                        &self.config.jwt_token,
-                                        1,
-                                        1,
-                                        SHORT_RECONCILE_TIMEOUT,
-                                        &self.cancel,
-                                    )
-                                    .await;
-
-                                match secondary_status {
-                                    None => {
-                                        // Cancelled during call
-                                        false
-                                    }
-                                    Some(Err(e)) => {
-                                        tracing::info!("Skipping migration of {tenant_shard_id} to {new_attached_node_id}, error querying secondary: {e}");
-                                        false
-                                    }
-                                    Some(Ok(progress)) => {
-                                        // We require secondary locations to have less than 10GiB of downloads pending before we will use
-                                        // them in an optimization
-                                        const DOWNLOAD_FRESHNESS_THRESHOLD: u64 =
-                                            10 * 1024 * 1024 * 1024;
-
-                                        if progress.bytes_total == 0
-                                            || progress.bytes_total - progress.bytes_downloaded
-                                                > DOWNLOAD_FRESHNESS_THRESHOLD
-                                        {
-                                            tracing::info!("Skipping migration of {tenant_shard_id} to {new_attached_node_id} because secondary isn't ready: {progress:?}");
-                                            false
-                                        } else {
-                                            // Location looks ready: proceed
-                                            true
-                                        }
-                                    }
-                                }
+                                // Accumulate optimizations that require fetching secondary status, so that we can execute these
+                                // remote API requests concurrently.
+                                want_secondary_status.push((
+                                    tenant_shard_id,
+                                    node.clone(),
+                                    optimization,
+                                ));
                             }
                         }
                     }
                 }
                 ScheduleOptimizationAction::ReplaceSecondary(_) => {
                     // No extra checks needed to replace a secondary: this does not interrupt client access
-                    true
+                    validated_work.push((tenant_shard_id, optimization))
                 }
             };
+        }
 
-            if validated {
-                validated_work.push((tenant_shard_id, optimization));
+        // Call into pageserver API to find out if the destination secondary location is warm enough for a reasonably smooth migration: we
+        // do this so that we avoid spawning a Reconciler that would have to wait minutes/hours for a destination to warm up: that reconciler
+        // would hold a precious reconcile semaphore unit the whole time it was waiting for the destination to warm up.
+        let results = self
+            .tenant_for_shards_api(
+                want_secondary_status
+                    .iter()
+                    .map(|i| (i.0, i.1.clone()))
+                    .collect(),
+                |tenant_shard_id, client| async move {
+                    client.tenant_secondary_status(tenant_shard_id).await
+                },
+                1,
+                1,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await;
+
+        for ((tenant_shard_id, node, optimization), secondary_status) in
+            want_secondary_status.into_iter().zip(results.into_iter())
+        {
+            match secondary_status {
+                Err(e) => {
+                    tracing::info!("Skipping migration of {tenant_shard_id} to {node}, error querying secondary: {e}");
+                }
+                Ok(progress) => {
+                    // We require secondary locations to have less than 10GiB of downloads pending before we will use
+                    // them in an optimization
+                    const DOWNLOAD_FRESHNESS_THRESHOLD: u64 = 10 * 1024 * 1024 * 1024;
+
+                    if progress.bytes_total == 0
+                        || progress.bytes_total - progress.bytes_downloaded
+                            > DOWNLOAD_FRESHNESS_THRESHOLD
+                    {
+                        tracing::info!("Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}");
+                    } else {
+                        // Location looks ready: proceed
+                        validated_work.push((tenant_shard_id, optimization))
+                    }
+                }
             }
         }
 
