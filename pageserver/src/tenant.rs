@@ -5162,6 +5162,8 @@ mod tests {
 
         let mut keyspace = KeySpaceAccum::new();
 
+        let cancel = CancellationToken::new();
+
         // Track when each page was last modified. Used to assert that
         // a read sees the latest page version.
         let mut updated = [Lsn(0); NUM_KEYS];
@@ -5225,21 +5227,11 @@ mod tests {
             }
 
             // Perform a cycle of flush, compact, and GC
-            let cutoff = tline.get_last_record_lsn();
-            tline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    &ctx,
-                )
-                .await?;
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+            tenant
+                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
-            tline.gc().await?;
         }
 
         Ok(())
