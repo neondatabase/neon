@@ -4432,8 +4432,8 @@ impl Timeline {
 
                 res.map_err(FlushAncestor)?;
 
-                // we do not need to wait for uploads to complete, because we only want to see the file
-                // on disk.
+                // we do not need to wait for uploads to complete but we do need `struct Layer`,
+                // copying delta prefix is unsupported currently for `InMemoryLayer`.
                 tracing::info!(
                     elapsed_ms = started_at.elapsed().as_millis(),
                     "froze and flushed the ancestor"
