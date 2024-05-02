@@ -1439,13 +1439,11 @@ impl Timeline {
                 // we are a sharded tenant and have skipped some WAL
                 let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
                 if last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
-                    // This should be somewhat rare, so we log it at INFO level.
-                    //
-                    // We checked for checkpoint timeout so that a shard without any
-                    // data ingested (yet) doesn't write a remote index as soon as it
+                    // Only do this if have been layer-less longer than get_checkpoint_timeout, so that a shard
+                    // without any data ingested (yet) doesn't write a remote index as soon as it
                     // sees its LSN advance: we only do this if we've been layer-less
                     // for some time.
-                    tracing::info!(
+                    tracing::debug!(
                         "Advancing disk_consistent_lsn past WAL ingest gap {} -> {}",
                         disk_consistent_lsn,
                         last_record_lsn
