@@ -1833,6 +1833,7 @@ mod tests {
         context::RequestContext,
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
+            storage_layer::layer::local_layer_path,
             Tenant, Timeline,
         },
         DEFAULT_PG_VERSION,
@@ -2015,11 +2016,20 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, contents): (LayerFileName, Vec<u8>)| {
-            std::fs::write(timeline_path.join(name.file_name()), &contents).unwrap();
+
+            let local_path = local_layer_path(
+                harness.conf,
+                &timeline.tenant_shard_id,
+                &timeline.timeline_id,
+                &name,
+                &generation,
+            );
+            std::fs::write(&local_path, &contents).unwrap();
 
             Layer::for_resident(
                 harness.conf,
                 &timeline,
+                local_path,
                 name,
                 LayerFileMetadata::new(contents.len() as u64, generation, shard),
             )
@@ -2156,19 +2166,22 @@ mod tests {
             ..
         } = TestSetup::new("metrics").await.unwrap();
         let client = timeline.remote_client.as_ref().unwrap();
-        let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
+        let local_path = local_layer_path(
+            harness.conf,
+            &timeline.tenant_shard_id,
+            &timeline.timeline_id,
+            &layer_file_name_1,
+            &harness.generation,
+        );
         let content_1 = dummy_contents("foo");
-        std::fs::write(
-            timeline_path.join(layer_file_name_1.file_name()),
-            &content_1,
-        )
-        .unwrap();
+        std::fs::write(&local_path, &content_1).unwrap();
 
         let layer_file_1 = Layer::for_resident(
             harness.conf,
             &timeline,
+            local_path,
             layer_file_name_1.clone(),
             LayerFileMetadata::new(content_1.len() as u64, harness.generation, harness.shard),
         );

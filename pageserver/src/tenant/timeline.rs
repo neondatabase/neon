@@ -58,6 +58,7 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::tenant::storage_layer::layer::local_layer_path;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::TimelineMetadata,
@@ -2409,8 +2410,8 @@ impl Timeline {
 
                 for discovered in discovered {
                     let (name, kind) = match discovered {
-                        Discovered::Layer(file_name, file_size) => {
-                            discovered_layers.push((file_name, file_size));
+                        Discovered::Layer(layer_file_name, local_path, file_size) => {
+                            discovered_layers.push((layer_file_name, local_path, file_size));
                             continue;
                         }
                         Discovered::Metadata => {
@@ -2455,7 +2456,7 @@ impl Timeline {
                 let mut needs_cleanup = Vec::new();
                 let mut total_physical_size = 0;
 
-                for (name, decision) in decided {
+                for (name, local_path, decision) in decided {
                     let decision = match decision {
                         Ok(UseRemote { local, remote }) => {
                             // Remote is authoritative, but we may still choose to retain
@@ -2465,26 +2466,23 @@ impl Timeline {
                                 // the correct generation.
                                 UseLocal(remote)
                             } else {
-                                path.push(name.file_name());
-                                init::cleanup_local_file_for_remote(&path, &local, &remote)?;
-                                path.pop();
+                                let local_path = local_path.as_ref().expect("Locally found layer must have path");
+                                init::cleanup_local_file_for_remote(local_path, &local, &remote)?;
                                 UseRemote { local, remote }
                             }
                         }
                         Ok(decision) => decision,
                         Err(DismissedLayer::Future { local }) => {
                             if local.is_some() {
-                                path.push(name.file_name());
-                                init::cleanup_future_layer(&path, &name, disk_consistent_lsn)?;
-                                path.pop();
+                                let local_path = local_path.expect("Locally found layer must have path");
+                                init::cleanup_future_layer(&local_path, &name, disk_consistent_lsn)?;
                             }
                             needs_cleanup.push(name);
                             continue;
                         }
                         Err(DismissedLayer::LocalOnly(local)) => {
-                            path.push(name.file_name());
-                            init::cleanup_local_only_file(&path, &name, &local)?;
-                            path.pop();
+                            let local_path = local_path.expect("Locally found layer must have path");
+                            init::cleanup_local_only_file(&local_path, &name, &local)?;
                             // this file never existed remotely, we will have to do rework
                             continue;
                         }
@@ -2500,7 +2498,18 @@ impl Timeline {
                     let layer = match decision {
                         UseLocal(m) => {
                             total_physical_size += m.file_size();
-                            Layer::for_resident(conf, &this, name, m).drop_eviction_guard()
+
+                            let local_path = local_path.unwrap_or_else(|| {
+                                local_layer_path(
+                                    conf,
+                                    &this.tenant_shard_id,
+                                    &this.timeline_id,
+                                    &name,
+                                    &m.generation,
+                                )
+                            });
+
+                            Layer::for_resident(conf, &this, local_path, name, m).drop_eviction_guard()
                         }
                         Evicted(remote) | UseRemote { remote, .. } => {
                             Layer::for_evicted(conf, &this, name, remote)
