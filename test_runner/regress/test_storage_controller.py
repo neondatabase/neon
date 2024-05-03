@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -1257,6 +1258,53 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     # Quiesce any background reconciliation before doing consistency check
     env.storage_controller.reconcile_until_idle(timeout_secs=10)
     env.storage_controller.consistency_check()
+
+
+def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that when lock on resource (tenants, nodes) is held for too long it is
+    traced in logs.
+    """
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Lock on.*",
+            ".*Scheduling is disabled by policy.*",
+            f".*Operation TimelineCreate on key {tenant_id} has waited.*",
+        ]
+    )
+
+    # Apply failpoint
+    env.storage_controller.configure_failpoints(
+        ("tenant-update-policy-exclusive-lock", "return(31000)")
+    )
+
+    # This will hold the exclusive for enough time to cause an warning
+    def update_tenent_policy():
+        env.storage_controller.tenant_policy_update(
+            tenant_id=tenant_id,
+            body={
+                "scheduling": "Stop",
+            },
+        )
+
+    thread_update_tenant_policy = threading.Thread(target=update_tenent_policy)
+    thread_update_tenant_policy.start()
+
+    # Make sure the update policy thread has started
+    time.sleep(1)
+    # This will not be able to access and will log a warning
+    timeline_id = TimelineId.generate()
+    env.storage_controller.pageserver_api().timeline_create(
+        pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
+    )
+    thread_update_tenant_policy.join(timeout=10)
+
+    env.storage_controller.assert_log_contains("Lock on UpdatePolicy was held for")
+    env.storage_controller.assert_log_contains(
+        f"Operation TimelineCreate on key {tenant_id} has waited"
+    )
 
 
 @pytest.mark.parametrize("remote_storage", [RemoteStorageKind.LOCAL_FS, s3_storage()])

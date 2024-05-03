@@ -40,6 +40,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 measured.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
 
 diesel = { version = "2.1.4", features = ["serde_json", "postgres", "r2d2"] }
 diesel_migrations = { version = "2.1.0" }
