@@ -290,26 +290,12 @@ fn main() -> Result<()> {
 
     // Resize swap to the desired size if the compute spec says so
     if let (Some(size_bytes), true) = (swap_size_bytes, resize_swap_on_bind) {
-        // TODO(cloud#12047/sharnoff): For avoid 'swapoff' hitting during postgres startup, we need
-        // to run resize-swap to completion *before* starting postgres.
+        // To avoid 'swapoff' hitting postgres startup, we need to run resize-swap to completion
+        // *before* starting postgres.
         //
-        // Maybe we want to do this asynchronously in the future? If so, we should probably set
-        // SkipSwapon for VMs before doing that (so that we're not running 'swapoff' during or
-        // after postgres startup).
-        // We may also *not* want to do it asynchronously, so we can guarantee that the swap is
-        // actually available before postgres starts (otherwise we may have potential issues).
-        // Or maybe the startup delay isn't worth it, and if postgres OOMs it'll restart
-        // successfully once the swap is added.
-        //
-        // ---
-        //
-        // run `/neonvm/bin/resize-swap --once {size_bytes}`
-        //
-        // Passing '--once' causes resize-swap to delete itself after successful completion, which
-        // means that if compute_ctl restarts later, we won't end up calling 'swapoff' while
-        // postgres is running.
-        //
-        // NOTE: resize-swap is dumb. If present, --once MUST be the first arg.
+        // In theory, we could do this asynchronously if SkipSwapon was enabled for VMs, but this
+        // carries a risk of introducing hard-to-debug issues - e.g. if postgres sometimes gets
+        // OOM-killed during startup because swap wasn't available yet.
         match resize_swap(size_bytes) {
             Ok(()) => {
                 let size_gib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
