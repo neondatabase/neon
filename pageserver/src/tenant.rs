@@ -62,9 +62,9 @@ use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
-use self::timeline::GcInfo;
 use self::timeline::TimelineResources;
 use self::timeline::WaitLsnError;
+use self::timeline::{GcCutoffs, GcInfo};
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -2812,7 +2812,48 @@ impl Tenant {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
-        // grab mutex to prevent new timelines from being created here.
+        // before taking the gc_cs lock, do the heavier weight finding of gc_cutoff points for
+        // currently visible timelines.
+        let timelines = self
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|tl| match target_timeline_id.as_ref() {
+                Some(target) => &tl.timeline_id == target,
+                None => true,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut gc_cutoffs: HashMap<TimelineId, GcCutoffs> =
+            HashMap::with_capacity(timelines.len());
+
+        for timeline in timelines.iter() {
+            let cutoff = timeline
+                .get_last_record_lsn()
+                .checked_sub(horizon)
+                .unwrap_or(Lsn(0));
+
+            let res = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await;
+
+            match res {
+                Ok(cutoffs) => {
+                    let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
+                    assert!(old.is_none());
+                }
+                Err(e) => {
+                    tracing::warn!(timeline_id = %timeline.timeline_id, "ignoring failure to find gc cutoffs: {e:#}");
+                }
+            }
+        }
+
+        if !self.is_active() {
+            anyhow::bail!("shutting down");
+        }
+
+        // grab mutex to prevent new timelines from being created here; avoid doing long operations
+        // because that will stall branch creation.
         let gc_cs = self.gc_cs.lock().await;
 
         // Scan all timelines. For each timeline, remember the timeline ID and
@@ -2874,11 +2915,6 @@ impl Tenant {
                 }
             }
 
-            let cutoff = timeline
-                .get_last_record_lsn()
-                .checked_sub(horizon)
-                .unwrap_or(Lsn(0));
-
             let branchpoints: Vec<Lsn> = all_branchpoints
                 .range((
                     Included((timeline_id, Lsn(0))),
@@ -2886,12 +2922,27 @@ impl Tenant {
                 ))
                 .map(|&x| x.1)
                 .collect();
-            let cutoffs = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await?;
 
-            *timeline.gc_info.write().unwrap() = GcInfo {
-                retain_lsns: branchpoints,
-                cutoffs,
-            };
+            {
+                let mut target = timeline.gc_info.write().unwrap();
+
+                match gc_cutoffs.remove(&timeline_id) {
+                    Some(cutoffs) => {
+                        *target = GcInfo {
+                            retain_lsns: branchpoints,
+                            cutoffs,
+                        };
+                    }
+                    None => {
+                        // reasons for this being unavailable:
+                        // - this timeline was created while we were finding cutoffs
+                        // - lsn for timestamp search fails for this timeline repeatedly
+                        //
+                        // in both cases, refreshing the branchpoints is correct.
+                        target.retain_lsns = branchpoints;
+                    }
+                };
+            }
 
             gc_timelines.push(timeline);
         }

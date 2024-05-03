@@ -118,9 +118,6 @@ pub(super) async fn gather_inputs(
     ctx: &RequestContext,
 ) -> anyhow::Result<ModelInputs> {
     // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
-    //
-    // FIXME: if a single timeline is deleted while refresh gc info is ongoing, we will fail the
-    // whole computation. It does not make sense from the billing perspective.
     tenant
         .refresh_gc_info(cancel, ctx)
         .await
@@ -220,6 +217,8 @@ pub(super) async fn gather_inputs(
             // this assumes there are no other retain_lsns than the branchpoints
             .map(|lsn| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
+
+        drop(gc_info);
 
         // Add branch points we collected earlier, just in case there were any that were
         // not present in retain_lsns. We will remove any duplicates below later.
