@@ -121,11 +121,11 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
 
     cur = endpoint_main.connect().cursor()
     # Create table, and insert rows, each in a separate transaction
-    # Disable synchronous_commit to make this initialization go faster.
+    # Enable synchronous commit as we are timing sensitive
     #
     # Each row contains current insert LSN and the current timestamp, when
     # the row was inserted.
-    cur.execute("SET synchronous_commit=off")
+    cur.execute("SET synchronous_commit=on")
     cur.execute("CREATE TABLE foo (x integer)")
     tbl = []
     for i in range(1000):
@@ -134,7 +134,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
         after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
         tbl.append([i, after_timestamp, after_lsn])
-        time.sleep(0.01)
+        time.sleep(0.005)
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions
