@@ -114,6 +114,27 @@ impl PageserverClient {
         )
     }
 
+    pub(crate) async fn tenant_secondary_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<SecondaryProgress> {
+        measured_request!(
+            "tenant_secondary_status",
+            crate::metrics::Method::Get,
+            &self.node_id_label,
+            self.inner.tenant_secondary_status(tenant_shard_id).await
+        )
+    }
+
+    pub(crate) async fn tenant_heatmap_upload(&self, tenant_id: TenantShardId) -> Result<()> {
+        measured_request!(
+            "tenant_heatmap_upload",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner.tenant_heatmap_upload(tenant_id).await
+        )
+    }
+
     pub(crate) async fn location_config(
         &self,
         tenant_shard_id: TenantShardId,

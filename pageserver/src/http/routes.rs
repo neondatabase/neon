@@ -2160,6 +2160,27 @@ async fn secondary_download_handler(
     json_response(status, progress)
 }
 
+async fn secondary_status_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+
+    let Some(secondary_tenant) = state
+        .tenant_manager
+        .get_secondary_tenant_shard(tenant_shard_id)
+    else {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Shard {} not found", tenant_shard_id).into(),
+        ));
+    };
+
+    let progress = secondary_tenant.progress.lock().unwrap().clone();
+
+    json_response(StatusCode::OK, progress)
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -2520,6 +2541,9 @@ pub fn make_router(
         })
         .put("/v1/deletion_queue/flush", |r| {
             api_handler(r, deletion_queue_flush)
+        })
+        .get("/v1/tenant/:tenant_shard_id/secondary/status", |r| {
+            api_handler(r, secondary_status_handler)
         })
         .post("/v1/tenant/:tenant_shard_id/secondary/download", |r| {
             api_handler(r, secondary_download_handler)
