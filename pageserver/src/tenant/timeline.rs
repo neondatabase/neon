@@ -863,9 +863,13 @@ impl Timeline {
                 // Initialise the reconstruct state for the key with the cache
                 // entry returned above.
                 let mut reconstruct_state = ValuesReconstructState::new();
-                let mut key_state = VectoredValueReconstructState::default();
-                key_state.img = cached_page_img;
-                reconstruct_state.keys.insert(key, Ok(key_state));
+
+                // Only add the cached image to the reconstruct state when it exists.
+                if cached_page_img.is_some() {
+                    let mut key_state = VectoredValueReconstructState::default();
+                    key_state.img = cached_page_img;
+                    reconstruct_state.keys.insert(key, Ok(key_state));
+                }
 
                 let vectored_res = self
                     .get_vectored_impl(keyspace.clone(), lsn, reconstruct_state, ctx)
