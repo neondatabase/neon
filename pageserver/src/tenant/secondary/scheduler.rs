@@ -23,13 +23,21 @@ const MIN_SCHEDULING_INTERVAL: Duration = Duration::from_secs(1);
 /// Jitter a Duration by an integer percentage.  Returned values are uniform
 /// in the range 100-pct..100+pct (i.e. a 5% jitter is 5% either way: a ~10% range)
 pub(super) fn period_jitter(d: Duration, pct: u32) -> Duration {
-    rand::thread_rng().gen_range((d * (100 - pct)) / 100..(d * (100 + pct)) / 100)
+    if d == Duration::ZERO {
+        d
+    } else {
+        rand::thread_rng().gen_range((d * (100 - pct)) / 100..(d * (100 + pct)) / 100)
+    }
 }
 
 /// When a periodic task first starts, it should wait for some time in the range 0..period, so
 /// that starting many such tasks at the same time spreads them across the time range.
 pub(super) fn period_warmup(period: Duration) -> Duration {
-    rand::thread_rng().gen_range(Duration::ZERO..period)
+    if period == Duration::ZERO {
+        period
+    } else {
+        rand::thread_rng().gen_range(Duration::ZERO..period)
+    }
 }
 
 /// Scheduling helper for background work across many tenants.
