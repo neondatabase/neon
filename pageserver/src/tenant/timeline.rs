@@ -16,7 +16,10 @@ use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
-    key::{AUX_FILES_KEY, NON_INHERITED_RANGE},
+    key::{
+        AUX_FILES_KEY, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+        NON_INHERITED_SPARSE_RANGE,
+    },
     keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
         CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
@@ -55,7 +58,6 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::TimelineMetadata,
@@ -76,6 +78,9 @@ use crate::{
 };
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
+};
+use crate::{
+    metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 use crate::{
@@ -885,16 +890,15 @@ impl Timeline {
                             value
                         }
                     }
-                    None => {
-                        error!(
-                            "Expected {}, but singular vectored get returned nothing",
-                            key
-                        );
-                        Err(PageReconstructError::Other(anyhow!(
-                            "Singular vectored get did not return a value for {}",
-                            key
-                        )))
-                    }
+                    None => Err(PageReconstructError::MissingKey(MissingKeyError {
+                        key,
+                        shard: self.shard_identity.get_shard_number(&key),
+                        cont_lsn: Lsn(0),
+                        request_lsn: lsn,
+                        ancestor_lsn: None,
+                        traversal_path: Vec::new(),
+                        backtrace: None,
+                    })),
                 }
             }
         }
@@ -1044,6 +1048,70 @@ impl Timeline {
         res
     }
 
+    /// Scan the keyspace and return all existing key-values in the keyspace. This currently uses vectored
+    /// get underlying. Normal vectored get would throw an error when a key in the keyspace is not found
+    /// during the search, but for the scan interface, it returns all existing key-value pairs, and does
+    /// not expect each single key in the key space will be found. The semantics is closer to the RocksDB
+    /// scan iterator interface. We could optimize this interface later to avoid some checks in the vectored
+    /// get path to maintain and split the probing and to-be-probe keyspace. We also need to ensure that
+    /// the scan operation will not cause OOM in the future.
+    #[allow(dead_code)]
+    pub(crate) async fn scan(
+        &self,
+        keyspace: KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        if !lsn.is_valid() {
+            return Err(GetVectoredError::InvalidLsn(lsn));
+        }
+
+        trace!(
+            "key-value scan request for {:?}@{} from task kind {:?}",
+            keyspace,
+            lsn,
+            ctx.task_kind()
+        );
+
+        // We should generalize this into Keyspace::contains in the future.
+        for range in &keyspace.ranges {
+            if range.start.field1 < METADATA_KEY_BEGIN_PREFIX
+                || range.end.field1 >= METADATA_KEY_END_PREFIX
+            {
+                return Err(GetVectoredError::Other(anyhow::anyhow!(
+                    "only metadata keyspace can be scanned"
+                )));
+            }
+        }
+
+        let start = crate::metrics::SCAN_LATENCY
+            .for_task_kind(ctx.task_kind())
+            .map(ScanLatencyOngoingRecording::start_recording);
+
+        // start counting after throttle so that throttle time
+        // is always less than observation time
+        let throttled = self
+            .timeline_get_throttle
+            // assume scan = 1 quota for now until we find a better way to process this
+            .throttle(ctx, 1)
+            .await;
+
+        let vectored_res = self
+            .get_vectored_impl(
+                keyspace.clone(),
+                lsn,
+                ValuesReconstructState::default(),
+                ctx,
+            )
+            .await;
+
+        if let Some(recording) = start {
+            recording.observe(throttled);
+        }
+
+        vectored_res
+    }
+
     /// Not subject to [`Self::timeline_get_throttle`].
     pub(super) async fn get_vectored_sequential_impl(
         &self,
@@ -1052,6 +1120,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let mut values = BTreeMap::new();
+
         for range in keyspace.ranges {
             let mut key = range.start;
             while key != range.end {
@@ -1064,12 +1133,16 @@ impl Timeline {
                     Err(Cancelled | AncestorStopping(_)) => {
                         return Err(GetVectoredError::Cancelled)
                     }
-                    // we only capture stuck_at_lsn=false now until we figure out https://github.com/neondatabase/neon/issues/7380
-                    Err(MissingKey(err)) if !NON_INHERITED_RANGE.contains(&key) => {
-                        // The vectored read path handles non inherited keys specially.
-                        // If such a a key cannot be reconstructed from the current timeline,
-                        // the vectored read path returns a key level error as opposed to a top
-                        // level error.
+                    Err(MissingKey(_))
+                        if NON_INHERITED_RANGE.contains(&key)
+                            || NON_INHERITED_SPARSE_RANGE.contains(&key) =>
+                    {
+                        // Ignore missing key error for aux key range. TODO: currently, we assume non_inherited_range == aux_key_range.
+                        // When we add more types of keys into the page server, we should revisit this part of code and throw errors
+                        // accordingly.
+                        key = key.next();
+                    }
+                    Err(MissingKey(err)) => {
                         return Err(GetVectoredError::MissingKey(err));
                     }
                     Err(Other(err))
@@ -1157,6 +1230,11 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) {
+        if keyspace.overlaps(&Key::metadata_key_range()) {
+            // skip validation for metadata key range
+            return;
+        }
+
         let sequential_res = self
             .get_vectored_sequential_impl(keyspace.clone(), lsn, ctx)
             .await;
@@ -3209,36 +3287,12 @@ impl Timeline {
             // Do not descend into the ancestor timeline for aux files.
             // We don't return a blanket [`GetVectoredError::MissingKey`] to avoid
             // stalling compaction.
-            // TODO(chi): this will need to be updated for aux files v2 storage
-            if keyspace.overlaps(&NON_INHERITED_RANGE) {
-                let removed = keyspace.remove_overlapping_with(&KeySpace {
-                    ranges: vec![NON_INHERITED_RANGE],
-                });
+            keyspace.remove_overlapping_with(&KeySpace {
+                ranges: vec![NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE],
+            });
 
-                for range in removed.ranges {
-                    let mut key = range.start;
-                    while key < range.end {
-                        reconstruct_state.on_key_error(
-                            key,
-                            PageReconstructError::MissingKey(MissingKeyError {
-                                key,
-                                shard: self.shard_identity.get_shard_number(&key),
-                                cont_lsn,
-                                request_lsn,
-                                ancestor_lsn: None,
-                                traversal_path: Vec::default(),
-                                backtrace: if cfg!(test) {
-                                    Some(std::backtrace::Backtrace::force_capture())
-                                } else {
-                                    None
-                                },
-                            }),
-                        );
-                        key = key.next();
-                    }
-                }
-            }
-
+            // Keyspace is fully retrieved, no ancestor timeline, or metadata scan (where we do not look
+            // into ancestor timelines). TODO: is there any other metadata which we want to inherit?
             if keyspace.total_raw_size() == 0 || timeline.ancestor_timeline.is_none() {
                 break;
             }

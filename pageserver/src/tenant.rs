@@ -3925,7 +3925,7 @@ mod tests {
     use crate::DEFAULT_PG_VERSION;
     use bytes::BytesMut;
     use hex_literal::hex;
-    use pageserver_api::key::NON_INHERITED_RANGE;
+    use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::CompactionAlgorithm;
     use rand::{thread_rng, Rng};
@@ -4791,15 +4791,7 @@ mod tests {
             .await;
 
         let images = vectored_res?;
-        let mut key = NON_INHERITED_RANGE.start;
-        while key < NON_INHERITED_RANGE.end {
-            assert!(matches!(
-                images[&key],
-                Err(PageReconstructError::MissingKey(_))
-            ));
-            key = key.next();
-        }
-
+        assert!(images.is_empty());
         Ok(())
     }
 
@@ -5497,6 +5489,118 @@ mod tests {
 
         let result = tline.get(test_key, read_lsn, &ctx).await;
         assert!(result.is_ok(), "result is not Ok: {}", result.unwrap_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_scan() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_scan")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        const NUM_KEYS: usize = 1000;
+        const STEP: usize = 100; // random update + scan base_key + idx * STEP
+
+        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        base_key.field1 = AUX_KEY_PREFIX;
+        let mut test_key = base_key;
+
+        // Track when each page was last modified. Used to assert that
+        // a read sees the latest page version.
+        let mut updated = [Lsn(0); NUM_KEYS];
+
+        let mut lsn = Lsn(0x10);
+        #[allow(clippy::needless_range_loop)]
+        for blknum in 0..NUM_KEYS {
+            lsn = Lsn(lsn.0 + 0x10);
+            test_key.field6 = (blknum * STEP) as u32;
+            let mut writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            updated[blknum] = lsn;
+            drop(writer);
+        }
+
+        let keyspace = KeySpace::single(base_key..base_key.add((NUM_KEYS * STEP) as u32));
+
+        for _ in 0..10 {
+            // Read all the blocks
+            for (blknum, last_lsn) in updated.iter().enumerate() {
+                test_key.field6 = (blknum * STEP) as u32;
+                assert_eq!(
+                    tline.get(test_key, lsn, &ctx).await?,
+                    test_img(&format!("{} at {}", blknum, last_lsn))
+                );
+            }
+
+            let mut cnt = 0;
+            for (key, value) in tline
+                .get_vectored_impl(
+                    keyspace.clone(),
+                    lsn,
+                    ValuesReconstructState::default(),
+                    &ctx,
+                )
+                .await?
+            {
+                let blknum = key.field6 as usize;
+                let value = value?;
+                assert!(blknum % STEP == 0);
+                let blknum = blknum / STEP;
+                assert_eq!(
+                    value,
+                    test_img(&format!("{} at {}", blknum, updated[blknum]))
+                );
+                cnt += 1;
+            }
+
+            assert_eq!(cnt, NUM_KEYS);
+
+            for _ in 0..NUM_KEYS {
+                lsn = Lsn(lsn.0 + 0x10);
+                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                test_key.field6 = (blknum * STEP) as u32;
+                let mut writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
+                    )
+                    .await?;
+                writer.finish_write(lsn);
+                drop(writer);
+                updated[blknum] = lsn;
+            }
+
+            // Perform a cycle of flush, compact, and GC
+            let cutoff = tline.get_last_record_lsn();
+            tline
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &CancellationToken::new(),
+                    &ctx,
+                )
+                .await?;
+            tline.freeze_and_flush().await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
+            tline.gc().await?;
+        }
 
         Ok(())
     }

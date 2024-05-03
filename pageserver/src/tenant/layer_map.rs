@@ -588,7 +588,7 @@ impl LayerMap {
             let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
             coverage.push((kr, current_val.take()));
             current_key = change_key;
-            current_val = change_val.clone();
+            current_val.clone_from(&change_val);
         }
 
         // Add the final interval
@@ -672,12 +672,12 @@ impl LayerMap {
         // Loop through the delta coverage and recurse on each part
         for (change_key, change_val) in version.delta_coverage.range(start..end) {
             // If there's a relevant delta in this part, add 1 and recurse down
-            if let Some(val) = current_val {
+            if let Some(val) = &current_val {
                 if val.get_lsn_range().end > lsn.start {
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
                     if !kr.is_empty() {
-                        let base_count = Self::is_reimage_worthy(&val, key) as usize;
+                        let base_count = Self::is_reimage_worthy(val, key) as usize;
                         let new_limit = limit.map(|l| l - base_count);
                         let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
                         max_stacked_deltas = std::cmp::max(
@@ -689,17 +689,17 @@ impl LayerMap {
             }
 
             current_key = change_key;
-            current_val = change_val.clone();
+            current_val.clone_from(&change_val);
         }
 
         // Consider the last part
-        if let Some(val) = current_val {
+        if let Some(val) = &current_val {
             if val.get_lsn_range().end > lsn.start {
                 let kr = Key::from_i128(current_key)..Key::from_i128(end);
                 let lr = lsn.start..val.get_lsn_range().start;
 
                 if !kr.is_empty() {
-                    let base_count = Self::is_reimage_worthy(&val, key) as usize;
+                    let base_count = Self::is_reimage_worthy(val, key) as usize;
                     let new_limit = limit.map(|l| l - base_count);
                     let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
                     max_stacked_deltas = std::cmp::max(
