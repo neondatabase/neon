@@ -279,6 +279,8 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
             assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
             assert ep.safe_psql(f"SELECT count(*) FROM audit WHERE starts = {starts}")[0][0] == 1
 
+
+    # delete the timelines to confirm detach actually worked
     client.timeline_delete(env.initial_tenant, after)
     wait_timeline_detail_404(client, env.initial_tenant, after, 10, 1.0)
 
