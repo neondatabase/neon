@@ -625,7 +625,8 @@ impl<'de> serde::Deserialize<'de> for RemoteStorageConfig {
 impl serde::Serialize for RemoteStorageConfig {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde::Serializer {
+        S: serde::Serializer,
+    {
         todo!()
     }
 }

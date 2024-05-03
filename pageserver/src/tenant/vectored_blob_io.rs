@@ -25,7 +25,6 @@ use utils::vec_map::VecMap;
 
 use crate::virtual_file::VirtualFile;
 
-
 /// Metadata bundled with the start and end offset of a blob.
 #[derive(Copy, Clone, Debug)]
 pub struct BlobMeta {

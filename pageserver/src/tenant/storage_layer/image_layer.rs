@@ -35,7 +35,7 @@ use crate::tenant::storage_layer::{
 };
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, MaxVectoredReadBytes, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
+    BlobFlag, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
 };
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
@@ -45,6 +45,7 @@ use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
+use pageserver_api::config::MaxVectoredReadBytes;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;

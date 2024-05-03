@@ -6,11 +6,6 @@ use serde_with::serde_as;
 use std::{collections::HashMap, num::NonZeroUsize, str::FromStr, time::Duration};
 use utils::logging::LogFormat;
 
-pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
-pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
-pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
-pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
-
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
 // as a separate structure.  This information is not neeed by the pageserver
 // itself, it is only used for registering the pageserver with the control
@@ -44,8 +39,7 @@ pub struct ConfigToml {
     pub superuser: String,
     pub page_cache_size: usize,
     pub max_file_descriptors: usize,
-    pub workdir: Utf8PathBuf,
-    pub pg_distrib_dir: Utf8PathBuf,
+    pub pg_distrib_dir: Option<Utf8PathBuf>,
     pub http_auth_type: AuthType,
     pub pg_auth_type: AuthType,
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
@@ -81,7 +75,7 @@ pub struct ConfigToml {
     // types which are transformed (potentially impurely) into a different type that is then used in PageServerConfig runtime type
     pub concurrent_tenant_warmup: NonZeroUsize,
     pub concurrent_tenant_size_logical_size_queries: NonZeroUsize,
-    pub virtual_file_io_engine: crate::models::virtual_file::IoEngineKind,
+    pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -201,48 +195,53 @@ pub enum WalRedoProcessKind {
     Async,
 }
 
+pub mod defaults {
+    use const_format::formatcp;
+
+    pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
+    pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
+    pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
+    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
+
+    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
+    pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
+
+    pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
+
+    pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
+    pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
+
+    pub const DEFAULT_LOG_FORMAT: &str = "plain";
+
+    pub const DEFAULT_CONCURRENT_TENANT_WARMUP: usize = 8;
+
+    pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
+    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "0s";
+    pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
+    pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
+    pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
+
+    pub const DEFAULT_HEATMAP_UPLOAD_CONCURRENCY: usize = 8;
+    pub const DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY: usize = 1;
+
+    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
+
+    pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
+
+    pub const DEFAULT_GET_IMPL: &str = "legacy";
+
+    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
+
+    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
+
+    pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
+
+    pub const DEFAULT_WALREDO_PROCESS_KIND: &str = "sync";
+}
+
 impl Default for ConfigToml {
     fn default() -> Self {
-        pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
-        pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
-
-        pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
-
-        pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
-        pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
-
-        pub const DEFAULT_LOG_FORMAT: &str = "plain";
-
-        pub const DEFAULT_CONCURRENT_TENANT_WARMUP: usize = 8;
-
-        pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
-        pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "0s";
-        pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
-        pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
-        pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
-
-        pub const DEFAULT_HEATMAP_UPLOAD_CONCURRENCY: usize = 8;
-        pub const DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY: usize = 1;
-
-        pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
-
-        #[cfg(target_os = "linux")]
-        pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "tokio-epoll-uring";
-
-        #[cfg(not(target_os = "linux"))]
-        pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
-
-        pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
-
-        pub const DEFAULT_GET_IMPL: &str = "legacy";
-
-        pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
-
-        pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
-
-        pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
-
-        pub const DEFAULT_WALREDO_PROCESS_KIND: &str = "sync";
+        use defaults::*;
 
         Self {
             listen_pg_addr: (DEFAULT_PG_LISTEN_ADDR.to_string()),
@@ -255,8 +254,7 @@ impl Default for ConfigToml {
             superuser: (DEFAULT_SUPERUSER.to_string()),
             page_cache_size: (DEFAULT_PAGE_CACHE_SIZE),
             max_file_descriptors: (DEFAULT_MAX_FILE_DESCRIPTORS),
-            workdir: (Utf8PathBuf::new()),
-            pg_distrib_dir: Utf8PathBuf::from("./pg_install"), // TODO: formely, this was std::env::current_dir()
+            pg_distrib_dir: None, // Utf8PathBuf::from("./pg_install"), // TODO: formely, this was std::env::current_dir()
             http_auth_type: (AuthType::Trust),
             pg_auth_type: (AuthType::Trust),
             auth_validation_public_key_path: (None),
@@ -310,7 +308,7 @@ impl Default for ConfigToml {
 
             ingest_batch_size: (DEFAULT_INGEST_BATCH_SIZE),
 
-            virtual_file_io_engine: (DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
+            virtual_file_io_engine: None,
 
             get_vectored_impl: (DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
             get_impl: (DEFAULT_GET_IMPL.parse().unwrap()),

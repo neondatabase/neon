@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use pageserver_api::{reltag::RelTag, shard::TenantShardId};
+use pageserver_api::{config::WalRedoProcessKind, reltag::RelTag, shard::TenantShardId};
 use utils::lsn::Lsn;
 
 use crate::{config::PageServerConf, walrecord::NeonWalRecord};
@@ -15,31 +15,33 @@ mod process_impl {
     pub(super) mod process_std;
 }
 
-
-
-pub(crate) enum process {
-    sync(process_impl::process_std::walredoprocess),
-    async(process_impl::process_async::walredoprocess),
+pub(crate) enum Process {
+    Sync(process_impl::process_std::WalRedoProcess),
+    Async(process_impl::process_async::WalRedoProcess),
 }
 
-impl process {
+impl Process {
     #[inline(always)]
     pub fn launch(
-        conf: &'static pageserverconf,
-        tenant_shard_id: tenantshardid,
+        conf: &'static PageServerConf,
+        tenant_shard_id: TenantShardId,
         pg_version: u32,
-    ) -> anyhow::result<self> {
-        ok(match conf.walredo_process_kind {
-            kind::sync => self::sync(process_impl::process_std::walredoprocess::launch(
-                conf,
-                tenant_shard_id,
-                pg_version,
-            )?),
-            Kind::Async => Self::Async(process_impl::process_async::WalRedoProcess::launch(
-                conf,
-                tenant_shard_id,
-                pg_version,
-            )?),
+    ) -> anyhow::Result<Self> {
+        Ok(match conf.walredo_process_kind {
+            pageserver_api::config::WalRedoProcessKind::Sync => {
+                Self::Sync(process_impl::process_std::WalRedoProcess::launch(
+                    conf,
+                    tenant_shard_id,
+                    pg_version,
+                )?)
+            }
+            pageserver_api::config::WalRedoProcessKind::Async => {
+                Self::Async(process_impl::process_async::WalRedoProcess::launch(
+                    conf,
+                    tenant_shard_id,
+                    pg_version,
+                )?)
+            }
         })
     }
 
@@ -71,10 +73,10 @@ impl process {
         }
     }
 
-    pub(crate) fn kind(&self) -> Kind {
+    pub(crate) fn kind(&self) -> WalRedoProcessKind {
         match self {
-            Process::Sync(_) => Kind::Sync,
-            Process::Async(_) => Kind::Async,
+            Process::Sync(_) => WalRedoProcessKind::Sync,
+            Process::Async(_) => WalRedoProcessKind::Async,
         }
     }
 }

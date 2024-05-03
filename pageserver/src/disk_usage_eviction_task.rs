@@ -47,7 +47,7 @@ use std::{
 };
 
 use anyhow::Context;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{config::DiskUsageEvictionTaskConfig, shard::TenantShardId};
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -77,7 +77,6 @@ pub enum EvictionOrder {
     ///
     /// This strategy is unfair when some tenants grow faster than others towards the slower
     /// growing.
-    #[default]
     AbsoluteAccessed,
 
     /// Order the layers to be evicted by how recently they have been accessed relatively within
@@ -296,7 +295,7 @@ async fn disk_usage_eviction_task_iteration(
         storage,
         usage_pre,
         tenant_manager,
-        task_config.eviction_order,
+        task_config.eviction_order.into(),
         cancel,
     )
     .await;

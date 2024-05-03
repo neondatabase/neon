@@ -20,7 +20,7 @@
 
 /// Process lifecycle and abstracction for the IPC protocol.
 mod process;
-pub use process::Kind as ProcessKind;
+pub use pageserver_api::config::WalRedoProcessKind as ProcessKind;
 
 /// Code to apply [`NeonWalRecord`]s.
 pub(crate) mod apply_neon;

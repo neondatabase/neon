@@ -16,6 +16,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
+    config::{GetImpl, GetVectoredImpl},
     key::{AUX_FILES_KEY, NON_INHERITED_RANGE},
     keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
@@ -711,8 +712,6 @@ impl From<GetReadyAncestorError> for PageReconstructError {
         }
     }
 }
-
-
 
 pub(crate) enum WaitLsnWaiter<'a> {
     Timeline(&'a Timeline),

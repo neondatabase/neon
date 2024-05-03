@@ -1973,7 +1973,7 @@ async fn disk_usage_eviction_run(
         evict_bytes: u64,
 
         #[serde(default)]
-        eviction_order: crate::disk_usage_eviction_task::EvictionOrder,
+        eviction_order: pageserver_api::config::EvictionOrder,
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -2016,7 +2016,7 @@ async fn disk_usage_eviction_run(
         storage,
         usage,
         &state.tenant_manager,
-        config.eviction_order,
+        config.eviction_order.into(),
         &cancel,
     )
     .await;

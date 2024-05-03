@@ -61,9 +61,7 @@ pub mod mock {
     use regex::Regex;
     use tracing::log::info;
 
-    use pageserver_api::config::statvfs::mock::Behavior;
-
-
+    pub use pageserver_api::config::statvfs::mock::Behavior;
 
     pub fn get(tenants_dir: &Utf8Path, behavior: &Behavior) -> nix::Result<Statvfs> {
         info!("running mocked statvfs");
