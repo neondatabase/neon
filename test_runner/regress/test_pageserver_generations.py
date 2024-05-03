@@ -10,6 +10,7 @@ of the pageserver are:
 """
 
 import enum
+import os
 import re
 import time
 from typing import Optional
@@ -691,3 +692,49 @@ def test_multi_attach(
 
     # All data we wrote while multi-attached remains readable
     workload.validate(pageservers[2].id)
+
+
+def test_upgrade_generationless_local_file_paths(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Test pageserver behavior when startup up with local layer paths without
+    generation numbers: it should accept these layer files, and avoid doing
+    a delete/download cycle on them.
+    """
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(1000)
+
+    env.pageserver.stop()
+
+    # Rename the local paths to legacy format, to simulate what
+    # we would see when upgrading
+    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
+    files_renamed = 0
+    for filename in os.listdir(timeline_dir):
+        path = os.path.join(timeline_dir, filename)
+        log.info(f"Found file {path}")
+        if path.endswith("-00000001"):
+            new_path = path[:-9]
+            os.rename(path, new_path)
+            log.info(f"Renamed {path} -> {new_path}")
+            files_renamed += 1
+
+    assert files_renamed > 0
+
+    env.pageserver.start()
+
+    workload.validate()
+
+    # Assert that there were no on-demand downloads
+    assert (
+        env.pageserver.http_client().get_metric_value(
+            "pageserver_remote_ondemand_downloaded_layers_total"
+        )
+        == 0
+    )
