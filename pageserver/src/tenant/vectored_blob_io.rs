@@ -25,8 +25,6 @@ use utils::vec_map::VecMap;
 
 use crate::virtual_file::VirtualFile;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct MaxVectoredReadBytes(pub NonZeroUsize);
 
 /// Metadata bundled with the start and end offset of a blob.
 #[derive(Copy, Clone, Debug)]

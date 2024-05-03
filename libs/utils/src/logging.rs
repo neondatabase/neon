@@ -5,7 +5,9 @@ use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, EnumVariantNames};
 
-#[derive(EnumString, EnumVariantNames, Eq, PartialEq, Debug, Clone, Copy)]
+#[derive(
+    EnumString, strum_macros::Display, EnumVariantNames, Eq, PartialEq, Debug, Clone, Copy,
+)]
 #[strum(serialize_all = "snake_case")]
 pub enum LogFormat {
     Plain,
@@ -271,6 +273,14 @@ impl SecretString {
 impl From<String> for SecretString {
     fn from(s: String) -> Self {
         Self(s)
+    }
+}
+
+impl FromStr for SecretString {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_string()))
     }
 }
 

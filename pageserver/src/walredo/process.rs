@@ -15,39 +15,22 @@ mod process_impl {
     pub(super) mod process_std;
 }
 
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    strum_macros::IntoStaticStr,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-)]
-#[strum(serialize_all = "kebab-case")]
-#[repr(u8)]
-pub enum Kind {
-    Sync,
-    Async,
+
+
+pub(crate) enum process {
+    sync(process_impl::process_std::walredoprocess),
+    async(process_impl::process_async::walredoprocess),
 }
 
-pub(crate) enum Process {
-    Sync(process_impl::process_std::WalRedoProcess),
-    Async(process_impl::process_async::WalRedoProcess),
-}
-
-impl Process {
+impl process {
     #[inline(always)]
     pub fn launch(
-        conf: &'static PageServerConf,
-        tenant_shard_id: TenantShardId,
+        conf: &'static pageserverconf,
+        tenant_shard_id: tenantshardid,
         pg_version: u32,
-    ) -> anyhow::Result<Self> {
-        Ok(match conf.walredo_process_kind {
-            Kind::Sync => Self::Sync(process_impl::process_std::WalRedoProcess::launch(
+    ) -> anyhow::result<self> {
+        ok(match conf.walredo_process_kind {
+            kind::sync => self::sync(process_impl::process_std::walredoprocess::launch(
                 conf,
                 tenant_shard_id,
                 pg_version,

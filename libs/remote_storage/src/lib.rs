@@ -613,6 +613,23 @@ impl Debug for AzureConfig {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for RemoteStorageConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        todo!()
+    }
+}
+
+impl serde::Serialize for RemoteStorageConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+        todo!()
+    }
+}
+
 impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
 

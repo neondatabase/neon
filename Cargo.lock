@@ -998,6 +998,9 @@ name = "camino"
 version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c59e92b5a388f549b863a7bea62612c09f24c8393560709a54558a9abdfb3b9c"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "camino-tempfile"
@@ -3725,6 +3728,7 @@ dependencies = [
  "bincode",
  "byteorder",
  "bytes",
+ "camino",
  "chrono",
  "const_format",
  "enum-map",
@@ -3732,11 +3736,16 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "itertools",
+ "nix 0.27.1",
+ "postgres_backend",
  "postgres_ffi",
  "rand 0.8.5",
+ "remote_storage",
+ "reqwest 0.12.4",
  "serde",
  "serde_json",
  "serde_with",
+ "storage_broker",
  "strum",
  "strum_macros",
  "thiserror",
