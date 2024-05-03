@@ -1,7 +1,9 @@
 use crate::{
     auth::{self, backend::AuthRateLimiter},
+    console::locks::ApiLocks,
     rate_limiter::RateBucketInfo,
     serverless::GlobalConnPoolOptions,
+    Host,
 };
 use anyhow::{bail, ensure, Context, Ok};
 use itertools::Itertools;
@@ -34,6 +36,7 @@ pub struct ProxyConfig {
     pub handshake_timeout: Duration,
     pub aws_region: String,
     pub wake_compute_retry_config: RetryConfig,
+    pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute_retry_config: RetryConfig,
 }
 
@@ -587,6 +590,9 @@ pub struct WakeComputeLockOptions {
 impl WakeComputeLockOptions {
     /// Default options for [`crate::console::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
+    /// Default options for [`crate::console::provider::ApiLocks`].
+    pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
+        "shards=64,permits=50,epoch=10m,timeout=2s";
 
     // pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "shards=32,permits=4,epoch=10m,timeout=1s";
 
