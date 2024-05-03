@@ -201,8 +201,12 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
 
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.append(
-        ".*initial size calculation failed: downloading failed, possibly for shutdown"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*initial size calculation failed: downloading failed, possibly for shutdown",
+            # after restart this is likely to happen if there is other load on the runner
+            "failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+        ]
     )
 
     client = env.pageserver.http_client()
@@ -278,7 +282,6 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
         with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
             assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
             assert ep.safe_psql(f"SELECT count(*) FROM audit WHERE starts = {starts}")[0][0] == 1
-
 
     # delete the timelines to confirm detach actually worked
     client.timeline_delete(env.initial_tenant, after)
