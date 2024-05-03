@@ -14,15 +14,15 @@ use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
 use control_plane::{broker, local_env};
+use pageserver_api::config::{
+    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
+};
 use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::models::{
     ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
 };
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
-use pageserver_api::{
-    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
-    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
-};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
 use safekeeper_api::{

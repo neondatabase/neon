@@ -51,7 +51,7 @@ pub mod defaults {
     use crate::tenant::config::defaults::*;
     use const_format::formatcp;
 
-    pub use pageserver_api::{
+    pub use pageserver_api::config::{
         DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
         DEFAULT_PG_LISTEN_PORT,
     };
