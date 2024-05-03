@@ -244,6 +244,22 @@ files:
         values: [approximate_working_set_size]
         query: |
           select neon.approximate_working_set_size(false) as approximate_working_set_size;
+
+      - metric_name: current_lsn
+        type: gauge
+        help: 'Current LSN of the database'
+        key_labels:
+        values: [lsn]
+        query: |
+          select pg_current_wal_lsn() as lsn;
+
+      - metric_name: replication_lag
+        type: gauge
+        help: 'Time since last LSN was replayed'
+        key_labels:
+        values: [replication_lag]
+        query: |
+          select now()-pg_last_xact_replay_timestamp() as replication_lag
   - filename: neon_collector_autoscaling.yml
     content: |
       collector_name: neon_collector_autoscaling
@@ -296,6 +312,21 @@ files:
         query: |
           select neon.approximate_working_set_size(false) as approximate_working_set_size;
 
+      - metric_name: current_lsn
+        type: gauge
+        help: 'Current LSN of the database'
+        key_labels:
+        values: [lsn]
+        query: |
+          select pg_current_wal_lsn() as lsn;
+
+      - metric_name: replication_lag
+        type: gauge
+        help: 'Time since last LSN was replayed'
+        key_labels:
+        values: [replication_lag]
+        query: |
+          select now()-pg_last_xact_replay_timestamp() as replication_lag
 build: |
   # Build cgroup-tools
   #
