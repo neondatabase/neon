@@ -110,7 +110,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
 
 # Test pageserver get_timestamp_of_lsn API
-@pytest.mark.repeat(50)
+@pytest.mark.repeat(300)
 def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     key_not_found_error = r".*could not find data for key.*"
 
@@ -134,7 +134,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
         after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
         tbl.append([i, after_timestamp, after_lsn])
-        time.sleep(0.005)
+        time.sleep(0.01)
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions
