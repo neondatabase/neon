@@ -912,7 +912,7 @@ pub fn make_router(
                 RequestName("v1_tenant_timeline"),
             )
         })
-        // Tenant detail GET passthrough to shard zero
+        // Tenant detail GET passthrough to shard zero:
         .get("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(
                 r,
@@ -920,13 +920,14 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
-        // Timeline GET passthrough to shard zero.  Note that the `*` in the URL is a wildcard: any future
-        // timeline GET APIs will be implicitly included.
-        .get("/v1/tenant/:tenant_id/timeline*", |r| {
+        // The `*` in the  URL is a wildcard: any tenant/timeline GET APIs on the pageserver
+        // are implicitly exposed here.  This must be last in the list to avoid
+        // taking precedence over other GET methods we might implement by hand.
+        .get("/v1/tenant/:tenant_id/*", |r| {
             tenant_service_handler(
                 r,
                 handle_tenant_timeline_passthrough,
-                RequestName("v1_tenant_timeline_passthrough"),
+                RequestName("v1_tenant_passthrough"),
             )
         })
 }
