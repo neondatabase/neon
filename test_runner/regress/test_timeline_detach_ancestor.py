@@ -293,8 +293,7 @@ def test_detached_receives_flushes_while_being_detached(
     neon_env_builder: NeonEnvBuilder, restart_after: bool
 ):
     """
-    Specifically the flush is received before restart, after making the remote storage change.
-    This requires that layer file flushes do not overwrite ancestor_timeline_id.
+    Makes sure that the timeline is able to receive writes through-out the detach process.
     """
     write_to_branch_first = True
 
