@@ -12,7 +12,7 @@ pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LI
 // itself, it is only used for registering the pageserver with the control
 // plane and/or storage controller.
 //
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NodeMetadata {
     #[serde(rename = "host")]
     pub postgres_host: String,

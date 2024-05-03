@@ -248,12 +248,13 @@ impl PageServerNode {
         // situation: the metadata is written by some other script.
         std::fs::write(
             metadata_path,
-            serde_json::to_vec(&serde_json::json!({
-                "host": "localhost",
-                "port": self.pg_connection_config.port(),
-                "http_host": "localhost",
-                "http_port": http_port,
-            }))
+            serde_json::to_vec(&pageserver_api::config::NodeMetadata {
+                postgres_host: "localhost".to_string(),
+                postgres_port: self.pg_connection_config.port(),
+                http_host: "localhost".to_string(),
+                http_port,
+                other: HashMap::new(),
+            })
             .unwrap(),
         )
         .expect("Failed to write metadata file");
