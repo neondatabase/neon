@@ -2843,7 +2843,7 @@ impl Tenant {
                     assert!(old.is_none());
                 }
                 Err(e) => {
-                    tracing::info!(timeline_id = %timeline.timeline_id, "ignoring failure to find gc cutoffs: {e:#}");
+                    tracing::warn!(timeline_id = %timeline.timeline_id, "ignoring failure to find gc cutoffs: {e:#}");
                 }
             }
         }
