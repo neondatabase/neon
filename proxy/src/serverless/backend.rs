@@ -191,7 +191,7 @@ impl ConnectMechanism for TokioMechanism {
         timeout: Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let host = node_info.config.get_host()?;
-        let _permit = self.locks.get_permit(&host).await?;
+        let permit = self.locks.get_permit(&host).await?;
 
         let mut config = (*node_info.config).clone();
         let config = config
@@ -203,7 +203,7 @@ impl ConnectMechanism for TokioMechanism {
         let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
         let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
         drop(pause);
-        drop(_permit);
+        drop(permit);
 
         tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
         Ok(poll_client(

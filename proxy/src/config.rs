@@ -576,7 +576,7 @@ impl RetryConfig {
 }
 
 /// Helper for cmdline cache options parsing.
-pub struct WakeComputeLockOptions {
+pub struct ConcurrencyLockOptions {
     /// The number of shards the lock map should have
     pub shards: usize,
     /// The number of allowed concurrent requests for each endpoitn
@@ -587,12 +587,12 @@ pub struct WakeComputeLockOptions {
     pub timeout: Duration,
 }
 
-impl WakeComputeLockOptions {
+impl ConcurrencyLockOptions {
     /// Default options for [`crate::console::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
     /// Default options for [`crate::console::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
-        "shards=64,permits=50,epoch=10m,timeout=2s";
+        "shards=64,permits=50,epoch=10m,timeout=500ms";
 
     // pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "shards=32,permits=4,epoch=10m,timeout=1s";
 
@@ -642,7 +642,7 @@ impl WakeComputeLockOptions {
     }
 }
 
-impl FromStr for WakeComputeLockOptions {
+impl FromStr for ConcurrencyLockOptions {
     type Err = anyhow::Error;
 
     fn from_str(options: &str) -> Result<Self, Self::Err> {
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn test_parse_lock_options() -> anyhow::Result<()> {
-        let WakeComputeLockOptions {
+        let ConcurrencyLockOptions {
             epoch,
             permits,
             shards,
@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(shards, 32);
         assert_eq!(permits, 4);
 
-        let WakeComputeLockOptions {
+        let ConcurrencyLockOptions {
             epoch,
             permits,
             shards,
@@ -700,7 +700,7 @@ mod tests {
         assert_eq!(shards, 16);
         assert_eq!(permits, 8);
 
-        let WakeComputeLockOptions {
+        let ConcurrencyLockOptions {
             epoch,
             permits,
             shards,

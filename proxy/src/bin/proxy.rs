@@ -118,10 +118,10 @@ struct ProxyCliArgs {
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     wake_compute_cache: String,
     /// lock for `wake_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
-    #[clap(long, default_value = config::WakeComputeLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
+    #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
     wake_compute_lock: String,
     /// lock for `connect_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
-    #[clap(long, default_value = config::WakeComputeLockOptions::DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK)]
+    #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK)]
     connect_compute_lock: String,
     /// Allow self-signed certificates for compute nodes (for testing)
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
@@ -532,7 +532,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 endpoint_cache_config,
             )));
 
-            let config::WakeComputeLockOptions {
+            let config::ConcurrencyLockOptions {
                 shards,
                 permits,
                 epoch,
@@ -573,7 +573,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         }
     };
 
-    let config::WakeComputeLockOptions {
+    let config::ConcurrencyLockOptions {
         shards,
         permits,
         epoch,
