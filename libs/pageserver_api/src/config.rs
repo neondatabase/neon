@@ -1,5 +1,9 @@
 use camino::Utf8PathBuf;
 use const_format::formatcp;
+
+#[cfg(test)]
+mod tests;
+
 use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use serde_with::serde_as;
@@ -11,7 +15,7 @@ use utils::logging::LogFormat;
 // itself, it is only used for registering the pageserver with the control
 // plane and/or storage controller.
 //
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NodeMetadata {
     #[serde(rename = "host")]
     pub postgres_host: String,

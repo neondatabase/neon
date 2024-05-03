@@ -1535,7 +1535,7 @@ mod tests {
 
         let harness = TenantHarness::create("switch_to_same_availability_zone")?;
         let mut state = dummy_state(&harness).await;
-        state.conf.availability_zone = test_az.clone();
+        state.conf.availability_zone.clone_from(&test_az);
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
 
@@ -1568,7 +1568,7 @@ mod tests {
         // We have another safekeeper with the same commit_lsn, and it have the same availability zone as
         // the current pageserver.
         let mut same_az_sk = dummy_broker_sk_timeline(current_lsn.0, "same_az", now);
-        same_az_sk.timeline.availability_zone = test_az.clone();
+        same_az_sk.timeline.availability_zone.clone_from(&test_az);
 
         state.wal_stream_candidates = HashMap::from([
             (

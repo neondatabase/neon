@@ -76,14 +76,11 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn write_buffered<S: IoBuf>(
+    pub async fn write_buffered<S: IoBuf + Send>(
         &mut self,
         chunk: Slice<S>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, S)>
-    where
-        S: IoBuf + Send,
-    {
+    ) -> std::io::Result<(usize, S)> {
         let chunk_len = chunk.len();
         // avoid memcpy for the middle of the chunk
         if chunk.len() >= self.buf().cap() {
