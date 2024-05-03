@@ -20,6 +20,7 @@
 mod zero_padded;
 
 use crate::{
+    context::RequestContext,
     page_cache::PAGE_SZ,
     virtual_file::owned_buffers_io::{
         self,
@@ -60,8 +61,12 @@ where
         self.buffered_writer.as_inner().as_inner()
     }
 
-    pub async fn write_all_borrowed(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buffered_writer.write_buffered_borrowed(buf).await
+    pub async fn write_all_borrowed(
+        &mut self,
+        buf: &[u8],
+        ctx: &RequestContext,
+    ) -> std::io::Result<usize> {
+        self.buffered_writer.write_buffered_borrowed(buf, ctx).await
     }
 
     pub fn bytes_written(&self) -> u64 {

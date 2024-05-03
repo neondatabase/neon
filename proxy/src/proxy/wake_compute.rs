@@ -6,7 +6,7 @@ use crate::metrics::{
     WakeupFailureKind,
 };
 use crate::proxy::retry::retry_after;
-use hyper::StatusCode;
+use hyper1::StatusCode;
 use std::ops::ControlFlow;
 use tracing::{error, info, warn};
 

@@ -333,6 +333,17 @@ def test_download_remote_layers_api(
         }
     )
 
+    # This test triggers layer download failures on demand. It is possible to modify the failpoint
+    # during a `Timeline::get_vectored` right between the vectored read and it's validation read.
+    # This means that one of the reads can fail while the other one succeeds and vice versa.
+    # TODO(vlad): Remove this block once the vectored read path validation goes away.
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*initial_size_calculation.*Vectored get failed with downloading evicted layer file failed, but sequential get did not.*"
+            ".*initial_size_calculation.*Sequential get failed with downloading evicted layer file failed, but vectored get did not.*"
+        ]
+    )
+
     endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()

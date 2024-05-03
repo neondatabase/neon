@@ -662,7 +662,7 @@ impl Timeline {
                             writer
                                 .take()
                                 .unwrap()
-                                .finish(prev_key.unwrap().next(), self)
+                                .finish(prev_key.unwrap().next(), self, ctx)
                                 .await?,
                         );
                         writer = None;
@@ -704,7 +704,11 @@ impl Timeline {
                     );
                 }
 
-                writer.as_mut().unwrap().put_value(key, lsn, value).await?;
+                writer
+                    .as_mut()
+                    .unwrap()
+                    .put_value(key, lsn, value, ctx)
+                    .await?;
             } else {
                 debug!(
                     "Dropping key {} during compaction (it belongs on shard {:?})",
@@ -720,7 +724,7 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next(), self).await?);
+            new_layers.push(writer.finish(prev_key.unwrap().next(), self, ctx).await?);
         }
 
         // Sync layers
@@ -1114,7 +1118,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
 
             let value = val.load(ctx).await?;
 
-            writer.put_value(key, lsn, value).await?;
+            writer.put_value(key, lsn, value, ctx).await?;
 
             prev = Some((key, lsn));
         }
@@ -1130,7 +1134,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         });
 
         let new_delta_layer = writer
-            .finish(prev.unwrap().0.next(), &self.timeline)
+            .finish(prev.unwrap().0.next(), &self.timeline, ctx)
             .await?;
 
         self.new_deltas.push(new_delta_layer);
@@ -1200,11 +1204,11 @@ impl TimelineAdaptor {
                         }
                     }
                 };
-                image_layer_writer.put_image(key, img).await?;
+                image_layer_writer.put_image(key, img, ctx).await?;
                 key = key.next();
             }
         }
-        let image_layer = image_layer_writer.finish(&self.timeline).await?;
+        let image_layer = image_layer_writer.finish(&self.timeline, ctx).await?;
 
         self.new_images.push(image_layer);
 

@@ -65,7 +65,7 @@ impl ControlPlaneClient {
         let mut client = reqwest::ClientBuilder::new();
 
         if let Some(jwt) = &conf.control_plane_api_token {
-            let mut headers = hyper::HeaderMap::new();
+            let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(
                 "Authorization",
                 format!("Bearer {}", jwt.get_contents()).parse().unwrap(),

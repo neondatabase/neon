@@ -64,6 +64,7 @@ use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use self::timeline::TimelineResources;
 use self::timeline::WaitLsnError;
+use self::timeline::{GcCutoffs, GcInfo};
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -86,7 +87,6 @@ use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
-use std::cmp::min;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -2812,7 +2812,48 @@ impl Tenant {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
-        // grab mutex to prevent new timelines from being created here.
+        // before taking the gc_cs lock, do the heavier weight finding of gc_cutoff points for
+        // currently visible timelines.
+        let timelines = self
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|tl| match target_timeline_id.as_ref() {
+                Some(target) => &tl.timeline_id == target,
+                None => true,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut gc_cutoffs: HashMap<TimelineId, GcCutoffs> =
+            HashMap::with_capacity(timelines.len());
+
+        for timeline in timelines.iter() {
+            let cutoff = timeline
+                .get_last_record_lsn()
+                .checked_sub(horizon)
+                .unwrap_or(Lsn(0));
+
+            let res = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await;
+
+            match res {
+                Ok(cutoffs) => {
+                    let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
+                    assert!(old.is_none());
+                }
+                Err(e) => {
+                    tracing::warn!(timeline_id = %timeline.timeline_id, "ignoring failure to find gc cutoffs: {e:#}");
+                }
+            }
+        }
+
+        if !self.is_active() {
+            anyhow::bail!("shutting down");
+        }
+
+        // grab mutex to prevent new timelines from being created here; avoid doing long operations
+        // because that will stall branch creation.
         let gc_cs = self.gc_cs.lock().await;
 
         // Scan all timelines. For each timeline, remember the timeline ID and
@@ -2874,11 +2915,6 @@ impl Tenant {
                 }
             }
 
-            let cutoff = timeline
-                .get_last_record_lsn()
-                .checked_sub(horizon)
-                .unwrap_or(Lsn(0));
-
             let branchpoints: Vec<Lsn> = all_branchpoints
                 .range((
                     Included((timeline_id, Lsn(0))),
@@ -2886,9 +2922,27 @@ impl Tenant {
                 ))
                 .map(|&x| x.1)
                 .collect();
-            timeline
-                .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
-                .await?;
+
+            {
+                let mut target = timeline.gc_info.write().unwrap();
+
+                match gc_cutoffs.remove(&timeline_id) {
+                    Some(cutoffs) => {
+                        *target = GcInfo {
+                            retain_lsns: branchpoints,
+                            cutoffs,
+                        };
+                    }
+                    None => {
+                        // reasons for this being unavailable:
+                        // - this timeline was created while we were finding cutoffs
+                        // - lsn for timestamp search fails for this timeline repeatedly
+                        //
+                        // in both cases, refreshing the branchpoints is correct.
+                        target.retain_lsns = branchpoints;
+                    }
+                };
+            }
 
             gc_timelines.push(timeline);
         }
@@ -2977,7 +3031,7 @@ impl Tenant {
         // and then the planned GC cutoff
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
-            let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
+            let cutoff = gc_info.min_cutoff();
             if start_lsn < cutoff {
                 return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
                     "invalid branch start lsn: less than planned GC cutoff {cutoff}"
@@ -4513,18 +4567,20 @@ mod tests {
     }
 
     async fn bulk_insert_compact_gc(
-        timeline: Arc<Timeline>,
+        tenant: &Tenant,
+        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         lsn: Lsn,
         repeat: usize,
         key_count: usize,
     ) -> anyhow::Result<()> {
         let compact = true;
-        bulk_insert_maybe_compact_gc(timeline, ctx, lsn, repeat, key_count, compact).await
+        bulk_insert_maybe_compact_gc(tenant, timeline, ctx, lsn, repeat, key_count, compact).await
     }
 
     async fn bulk_insert_maybe_compact_gc(
-        timeline: Arc<Timeline>,
+        tenant: &Tenant,
+        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         mut lsn: Lsn,
         repeat: usize,
@@ -4536,6 +4592,8 @@ mod tests {
 
         // Enforce that key range is monotonously increasing
         let mut keyspace = KeySpaceAccum::new();
+
+        let cancel = CancellationToken::new();
 
         for _ in 0..repeat {
             for _ in 0..key_count {
@@ -4558,24 +4616,19 @@ mod tests {
                 blknum += 1;
             }
 
-            let cutoff = timeline.get_last_record_lsn();
-
-            timeline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    ctx,
-                )
-                .await?;
             timeline.freeze_and_flush().await?;
             if compact {
-                timeline
-                    .compact(&CancellationToken::new(), EnumSet::empty(), ctx)
-                    .await?;
+                // this requires timeline to be &Arc<Timeline>
+                timeline.compact(&cancel, EnumSet::empty(), ctx).await?;
             }
-            timeline.gc().await?;
+
+            // this doesn't really need to use the timeline_id target, but it is closer to what it
+            // originally was.
+            let res = tenant
+                .gc_iteration(Some(timeline.timeline_id), 0, Duration::ZERO, &cancel, ctx)
+                .await?;
+
+            assert_eq!(res.layers_removed, 0, "this never removes anything");
         }
 
         Ok(())
@@ -4594,7 +4647,7 @@ mod tests {
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+        bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         Ok(())
     }
@@ -4625,7 +4678,7 @@ mod tests {
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+        bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         let guard = tline.layers.read().await;
         guard.layer_map().dump(true, &ctx).await?;
@@ -5079,6 +5132,7 @@ mod tests {
             .await?;
 
         const NUM_KEYS: usize = 1000;
+        let cancel = CancellationToken::new();
 
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
@@ -5138,18 +5192,10 @@ mod tests {
             }
 
             // Perform a cycle of flush, and GC
-            let cutoff = tline.get_last_record_lsn();
-            tline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    &ctx,
-                )
-                .await?;
             tline.freeze_and_flush().await?;
-            tline.gc().await?;
+            tenant
+                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .await?;
         }
 
         Ok(())
@@ -5169,6 +5215,8 @@ mod tests {
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let mut keyspace = KeySpaceAccum::new();
+
+        let cancel = CancellationToken::new();
 
         // Track when each page was last modified. Used to assert that
         // a read sees the latest page version.
@@ -5233,21 +5281,11 @@ mod tests {
             }
 
             // Perform a cycle of flush, compact, and GC
-            let cutoff = tline.get_last_record_lsn();
-            tline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    &ctx,
-                )
-                .await?;
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+            tenant
+                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
-            tline.gc().await?;
         }
 
         Ok(())
@@ -5452,7 +5490,7 @@ mod tests {
 
         let lsn = Lsn(0x10);
         let compact = false;
-        bulk_insert_maybe_compact_gc(tline.clone(), &ctx, lsn, 50, 10000, compact).await?;
+        bulk_insert_maybe_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000, compact).await?;
 
         let test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let read_lsn = Lsn(u64::MAX - 1);

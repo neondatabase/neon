@@ -4,6 +4,7 @@ use crate::metrics::{
 };
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use anyhow::Context;
 use futures::Future;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
@@ -258,6 +259,12 @@ async fn handle_tenant_time_travel_remote_storage(
     json_response(StatusCode::OK, ())
 }
 
+fn map_reqwest_hyper_status(status: reqwest::StatusCode) -> Result<hyper::StatusCode, ApiError> {
+    hyper::StatusCode::from_u16(status.as_u16())
+        .context("invalid status code")
+        .map_err(ApiError::InternalServerError)
+}
+
 async fn handle_tenant_secondary_download(
     service: Arc<Service>,
     req: Request<Body>,
@@ -266,7 +273,7 @@ async fn handle_tenant_secondary_download(
     let wait = parse_query_param(&req, "wait_ms")?.map(Duration::from_millis);
 
     let (status, progress) = service.tenant_secondary_download(tenant_id, wait).await?;
-    json_response(status, progress)
+    json_response(map_reqwest_hyper_status(status)?, progress)
 }
 
 async fn handle_tenant_delete(
@@ -277,7 +284,10 @@ async fn handle_tenant_delete(
     check_permissions(&req, Scope::PageServerApi)?;
 
     deletion_wrapper(service, move |service| async move {
-        service.tenant_delete(tenant_id).await
+        service
+            .tenant_delete(tenant_id)
+            .await
+            .and_then(map_reqwest_hyper_status)
     })
     .await
 }
@@ -308,7 +318,10 @@ async fn handle_tenant_timeline_delete(
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
 
     deletion_wrapper(service, move |service| async move {
-        service.tenant_timeline_delete(tenant_id, timeline_id).await
+        service
+            .tenant_timeline_delete(tenant_id, timeline_id)
+            .await
+            .and_then(map_reqwest_hyper_status)
     })
     .await
 }
@@ -371,11 +384,9 @@ async fn handle_tenant_timeline_passthrough(
     }
 
     // We have a reqest::Response, would like a http::Response
-    let mut builder = hyper::Response::builder()
-        .status(resp.status())
-        .version(resp.version());
+    let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp.status())?);
     for (k, v) in resp.headers() {
-        builder = builder.header(k, v);
+        builder = builder.header(k.as_str(), v.as_bytes());
     }
 
     let response = builder
@@ -901,7 +912,7 @@ pub fn make_router(
                 RequestName("v1_tenant_timeline"),
             )
         })
-        // Tenant detail GET passthrough to shard zero
+        // Tenant detail GET passthrough to shard zero:
         .get("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(
                 r,
@@ -909,13 +920,14 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
-        // Timeline GET passthrough to shard zero.  Note that the `*` in the URL is a wildcard: any future
-        // timeline GET APIs will be implicitly included.
-        .get("/v1/tenant/:tenant_id/timeline*", |r| {
+        // The `*` in the  URL is a wildcard: any tenant/timeline GET APIs on the pageserver
+        // are implicitly exposed here.  This must be last in the list to avoid
+        // taking precedence over other GET methods we might implement by hand.
+        .get("/v1/tenant/:tenant_id/*", |r| {
             tenant_service_handler(
                 r,
                 handle_tenant_timeline_passthrough,
-                RequestName("v1_tenant_timeline_passthrough"),
+                RequestName("v1_tenant_passthrough"),
             )
         })
 }

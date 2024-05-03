@@ -210,6 +210,7 @@ use tracing::{debug, error, info, instrument, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
+use crate::context::RequestContext;
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::metrics::{
     MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
@@ -505,6 +506,7 @@ impl RemoteTimelineClient {
         layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
         cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) -> anyhow::Result<u64> {
         let downloaded_size = {
             let _unfinished_gauge_guard = self.metrics.call_begin(
@@ -522,6 +524,7 @@ impl RemoteTimelineClient {
                 layer_file_name,
                 layer_metadata,
                 cancel,
+                ctx,
             )
             .measure_remote_op(
                 RemoteOpFileKind::Layer,

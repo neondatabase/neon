@@ -20,12 +20,14 @@ use crate::{
 
 use futures::Future;
 use pageserver_api::shard::TenantShardId;
-use rand::Rng;
 use remote_storage::{GenericRemoteStorage, TimeoutOrCancel};
 
 use super::{
     heatmap::HeatMapTenant,
-    scheduler::{self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs},
+    scheduler::{
+        self, period_jitter, period_warmup, JobGenerator, RunningJob, SchedulingResult,
+        TenantBackgroundJobs,
+    },
     CommandRequest, UploadCommand,
 };
 use tokio_util::sync::CancellationToken;
@@ -181,15 +183,11 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             let state = self
                 .tenants
                 .entry(*tenant.get_tenant_shard_id())
-                .or_insert_with(|| {
-                    let jittered_period = rand::thread_rng().gen_range(Duration::ZERO..period);
-
-                    UploaderTenantState {
-                        tenant: Arc::downgrade(&tenant),
-                        last_upload: None,
-                        next_upload: Some(now.checked_add(jittered_period).unwrap_or(now)),
-                        last_digest: None,
-                    }
+                .or_insert_with(|| UploaderTenantState {
+                    tenant: Arc::downgrade(&tenant),
+                    last_upload: None,
+                    next_upload: Some(now.checked_add(period_warmup(period)).unwrap_or(now)),
+                    last_digest: None,
                 });
 
             // Decline to do the upload if insufficient time has passed
@@ -274,7 +272,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
 
             let next_upload = tenant
                 .get_heatmap_period()
-                .and_then(|period| now.checked_add(period));
+                .and_then(|period| now.checked_add(period_jitter(period, 5)));
 
             WriteComplete {
                     tenant_shard_id: *tenant.get_tenant_shard_id(),

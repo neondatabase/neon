@@ -325,7 +325,7 @@ pub struct Timeline {
 
     // List of child timelines and their branch points. This is needed to avoid
     // garbage collecting data that is still needed by the child timelines.
-    pub gc_info: std::sync::RwLock<GcInfo>,
+    pub(crate) gc_info: std::sync::RwLock<GcInfo>,
 
     // It may change across major versions so for simplicity
     // keep it after running initdb for a timeline.
@@ -409,33 +409,59 @@ pub struct WalReceiverInfo {
     pub last_received_msg_ts: u128,
 }
 
-///
 /// Information about how much history needs to be retained, needed by
 /// Garbage Collection.
-///
-pub struct GcInfo {
+#[derive(Default)]
+pub(crate) struct GcInfo {
     /// Specific LSNs that are needed.
     ///
     /// Currently, this includes all points where child branches have
     /// been forked off from. In the future, could also include
     /// explicit user-defined snapshot points.
-    pub retain_lsns: Vec<Lsn>,
+    pub(crate) retain_lsns: Vec<Lsn>,
 
-    /// In addition to 'retain_lsns', keep everything newer than this
-    /// point.
+    /// The cutoff coordinates, which are combined by selecting the minimum.
+    pub(crate) cutoffs: GcCutoffs,
+}
+
+impl GcInfo {
+    pub(crate) fn min_cutoff(&self) -> Lsn {
+        self.cutoffs.select_min()
+    }
+}
+
+/// The `GcInfo` component describing which Lsns need to be retained.
+#[derive(Debug)]
+pub(crate) struct GcCutoffs {
+    /// Keep everything newer than this point.
     ///
     /// This is calculated by subtracting 'gc_horizon' setting from
     /// last-record LSN
     ///
     /// FIXME: is this inclusive or exclusive?
-    pub horizon_cutoff: Lsn,
+    pub(crate) horizon: Lsn,
 
     /// In addition to 'retain_lsns' and 'horizon_cutoff', keep everything newer than this
     /// point.
     ///
     /// This is calculated by finding a number such that a record is needed for PITR
     /// if only if its LSN is larger than 'pitr_cutoff'.
-    pub pitr_cutoff: Lsn,
+    pub(crate) pitr: Lsn,
+}
+
+impl Default for GcCutoffs {
+    fn default() -> Self {
+        Self {
+            horizon: Lsn::INVALID,
+            pitr: Lsn::INVALID,
+        }
+    }
+}
+
+impl GcCutoffs {
+    fn select_min(&self) -> Lsn {
+        std::cmp::min(self.horizon, self.pitr)
+    }
 }
 
 /// An error happened in a get() operation.
@@ -464,7 +490,6 @@ pub(crate) enum PageReconstructError {
 
 #[derive(Debug)]
 pub struct MissingKeyError {
-    stuck_at_lsn: bool,
     key: Key,
     shard: ShardNumber,
     cont_lsn: Lsn,
@@ -476,23 +501,13 @@ pub struct MissingKeyError {
 
 impl std::fmt::Display for MissingKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.stuck_at_lsn {
-            // Records are found in this timeline but no image layer or initial delta record was found.
-            write!(
-                f,
-                "could not find layer with more data for key {} (shard {:?}) at LSN {}, request LSN {}",
-                self.key, self.shard, self.cont_lsn, self.request_lsn
-            )?;
-            if let Some(ref ancestor_lsn) = self.ancestor_lsn {
-                write!(f, ", ancestor {}", ancestor_lsn)?;
-            }
-        } else {
-            // No records in this timeline.
-            write!(
-                f,
-                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}",
-                self.key, self.shard, self.cont_lsn, self.request_lsn
-            )?;
+        write!(
+            f,
+            "could not find data for key {} (shard {:?}) at LSN {}, request LSN {}",
+            self.key, self.shard, self.cont_lsn, self.request_lsn
+        )?;
+        if let Some(ref ancestor_lsn) = self.ancestor_lsn {
+            write!(f, ", ancestor {}", ancestor_lsn)?;
         }
 
         if !self.traversal_path.is_empty() {
@@ -568,8 +583,8 @@ pub(crate) enum GetVectoredError {
     #[error("Requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
 
-    #[error("Requested key {0} not found")]
-    MissingKey(Key),
+    #[error("Requested key not found: {0}")]
+    MissingKey(MissingKeyError),
 
     #[error(transparent)]
     GetReadyAncestorError(GetReadyAncestorError),
@@ -678,7 +693,7 @@ impl From<GetVectoredError> for PageReconstructError {
             GetVectoredError::Cancelled => PageReconstructError::Cancelled,
             GetVectoredError::InvalidLsn(_) => PageReconstructError::Other(anyhow!("Invalid LSN")),
             err @ GetVectoredError::Oversized(_) => PageReconstructError::Other(err.into()),
-            err @ GetVectoredError::MissingKey(_) => PageReconstructError::Other(err.into()),
+            GetVectoredError::MissingKey(err) => PageReconstructError::MissingKey(err),
             GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
             GetVectoredError::Other(err) => PageReconstructError::Other(err),
         }
@@ -1050,15 +1065,12 @@ impl Timeline {
                         return Err(GetVectoredError::Cancelled)
                     }
                     // we only capture stuck_at_lsn=false now until we figure out https://github.com/neondatabase/neon/issues/7380
-                    Err(MissingKey(MissingKeyError {
-                        stuck_at_lsn: false,
-                        ..
-                    })) if !NON_INHERITED_RANGE.contains(&key) => {
+                    Err(MissingKey(err)) if !NON_INHERITED_RANGE.contains(&key) => {
                         // The vectored read path handles non inherited keys specially.
                         // If such a a key cannot be reconstructed from the current timeline,
                         // the vectored read path returns a key level error as opposed to a top
                         // level error.
-                        return Err(GetVectoredError::MissingKey(key));
+                        return Err(GetVectoredError::MissingKey(err));
                     }
                     Err(Other(err))
                         if err
@@ -1154,7 +1166,7 @@ impl Timeline {
             match (lhs, rhs) {
                 (Oversized(l), Oversized(r)) => l == r,
                 (InvalidLsn(l), InvalidLsn(r)) => l == r,
-                (MissingKey(l), MissingKey(r)) => l == r,
+                (MissingKey(l), MissingKey(r)) => l.key == r.key,
                 (GetReadyAncestorError(_), GetReadyAncestorError(_)) => true,
                 (Other(_), Other(_)) => true,
                 _ => false,
@@ -1169,7 +1181,7 @@ impl Timeline {
                                " - keyspace={:?} lsn={}"),
                        seq_err, keyspace, lsn) },
             (Ok(_), Err(GetVectoredError::GetReadyAncestorError(GetReadyAncestorError::AncestorLsnTimeout(_)))) => {
-                // Sequential get runs after vectored get, so it is possible for the later 
+                // Sequential get runs after vectored get, so it is possible for the later
                 // to time out while waiting for its ancestor's Lsn to become ready and for the
                 // former to succeed (it essentially has a doubled wait time).
             },
@@ -2111,11 +2123,7 @@ impl Timeline {
 
                 write_lock: tokio::sync::Mutex::new(None),
 
-                gc_info: std::sync::RwLock::new(GcInfo {
-                    retain_lsns: Vec::new(),
-                    horizon_cutoff: Lsn(0),
-                    pitr_cutoff: Lsn(0),
-                }),
+                gc_info: std::sync::RwLock::new(GcInfo::default()),
 
                 latest_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
                 initdb_lsn: metadata.initdb_lsn(),
@@ -2948,7 +2956,7 @@ trait TraversalLayerExt {
 
 impl TraversalLayerExt for Layer {
     fn traversal_id(&self) -> TraversalId {
-        Arc::clone(self.local_path_str())
+        Arc::clone(self.debug_str())
     }
 }
 
@@ -3024,7 +3032,6 @@ impl Timeline {
                             // Didn't make any progress in last iteration. Error out to avoid
                             // getting stuck in the loop.
                             return Err(PageReconstructError::MissingKey(MissingKeyError {
-                                stuck_at_lsn: true,
                                 key,
                                 shard: self.shard_identity.get_shard_number(&key),
                                 cont_lsn: Lsn(cont_lsn.0 - 1),
@@ -3039,7 +3046,6 @@ impl Timeline {
                 }
                 ValueReconstructResult::Missing => {
                     return Err(PageReconstructError::MissingKey(MissingKeyError {
-                        stuck_at_lsn: false,
                         key,
                         shard: self.shard_identity.get_shard_number(&key),
                         cont_lsn,
@@ -3215,7 +3221,6 @@ impl Timeline {
                         reconstruct_state.on_key_error(
                             key,
                             PageReconstructError::MissingKey(MissingKeyError {
-                                stuck_at_lsn: false,
                                 key,
                                 shard: self.shard_identity.get_shard_number(&key),
                                 cont_lsn,
@@ -3248,7 +3253,17 @@ impl Timeline {
         }
 
         if keyspace.total_raw_size() != 0 {
-            return Err(GetVectoredError::MissingKey(keyspace.start().unwrap()));
+            return Err(GetVectoredError::MissingKey(MissingKeyError {
+                key: keyspace.start().unwrap(), /* better if we can store the full keyspace */
+                shard: self
+                    .shard_identity
+                    .get_shard_number(&keyspace.start().unwrap()),
+                cont_lsn,
+                request_lsn,
+                ancestor_lsn: Some(timeline.ancestor_lsn),
+                traversal_path: vec![],
+                backtrace: None,
+            }));
         }
 
         Ok(())
@@ -4186,7 +4201,7 @@ impl Timeline {
                             };
 
                             // Write all the keys we just read into our new image layer.
-                            image_layer_writer.put_image(img_key, img).await?;
+                            image_layer_writer.put_image(img_key, img, ctx).await?;
                             wrote_keys = true;
                         }
                     }
@@ -4197,7 +4212,7 @@ impl Timeline {
                 // Normal path: we have written some data into the new image layer for this
                 // partition, so flush it to disk.
                 start = img_range.end;
-                let image_layer = image_layer_writer.finish(self).await?;
+                let image_layer = image_layer_writer.finish(self, ctx).await?;
                 image_layers.push(image_layer);
             } else {
                 // Special case: the image layer may be empty if this is a sharded tenant and the
@@ -4408,24 +4423,13 @@ impl Timeline {
         Ok(())
     }
 
-    /// Update information about which layer files need to be retained on
+    /// Find the Lsns above which layer files need to be retained on
     /// garbage collection. This is separate from actually performing the GC,
     /// and is updated more frequently, so that compaction can remove obsolete
     /// page versions more aggressively.
     ///
     /// TODO: that's wishful thinking, compaction doesn't actually do that
     /// currently.
-    ///
-    /// The caller specifies how much history is needed with the 3 arguments:
-    ///
-    /// retain_lsns: keep a version of each page at these LSNs
-    /// cutoff_horizon: also keep everything newer than this LSN
-    /// pitr: the time duration required to keep data for PITR
-    ///
-    /// The 'retain_lsns' list is currently used to prevent removing files that
-    /// are needed by child timelines. In the future, the user might be able to
-    /// name additional points in time to retain. The caller is responsible for
-    /// collecting that information.
     ///
     /// The 'cutoff_horizon' point is used to retain recent versions that might still be
     /// needed by read-only nodes. (As of this writing, the caller just passes
@@ -4434,28 +4438,21 @@ impl Timeline {
     ///
     /// The 'pitr' duration is used to calculate a 'pitr_cutoff', which can be used to determine
     /// whether a record is needed for PITR.
-    ///
-    /// NOTE: This function holds a short-lived lock to protect the 'gc_info'
-    /// field, so that the three values passed as argument are stored
-    /// atomically. But the caller is responsible for ensuring that no new
-    /// branches are created that would need to be included in 'retain_lsns',
-    /// for example. The caller should hold `Tenant::gc_cs` lock to ensure
-    /// that.
-    ///
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
-    pub(super) async fn update_gc_info(
+    pub(super) async fn find_gc_cutoffs(
         &self,
-        retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<GcCutoffs> {
         let _timer = self
             .metrics
-            .update_gc_info_histo
+            .find_gc_cutoffs_histo
             .start_timer()
             .record_on_drop();
+
+        pausable_failpoint!("Timeline::find_gc_cutoffs-pausable");
 
         // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
         //
@@ -4506,14 +4503,10 @@ impl Timeline {
             self.get_last_record_lsn()
         };
 
-        // Grab the lock and update the values
-        *self.gc_info.write().unwrap() = GcInfo {
-            retain_lsns,
-            horizon_cutoff: cutoff_horizon,
-            pitr_cutoff,
-        };
-
-        Ok(())
+        Ok(GcCutoffs {
+            horizon: cutoff_horizon,
+            pitr: pitr_cutoff,
+        })
     }
 
     /// Garbage collect layer files on a timeline that are no longer needed.
@@ -4542,8 +4535,8 @@ impl Timeline {
         let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
             let gc_info = self.gc_info.read().unwrap();
 
-            let horizon_cutoff = min(gc_info.horizon_cutoff, self.get_disk_consistent_lsn());
-            let pitr_cutoff = gc_info.pitr_cutoff;
+            let horizon_cutoff = min(gc_info.cutoffs.horizon, self.get_disk_consistent_lsn());
+            let pitr_cutoff = gc_info.cutoffs.pitr;
             let retain_lsns = gc_info.retain_lsns.clone();
             (horizon_cutoff, pitr_cutoff, retain_lsns)
         };
