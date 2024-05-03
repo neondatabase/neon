@@ -9,7 +9,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use serde;
 use serde::de::IntoDeserializer;
-use std::{collections::HashMap, env};
+use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
@@ -333,26 +333,6 @@ impl<T: Clone> BuilderValue<T> {
             },
         }
     }
-}
-
-// Certain metadata (e.g. externally-addressable name, AZ) is delivered
-// as a separate structure.  This information is not neeed by the pageserver
-// itself, it is only used for registering the pageserver with the control
-// plane and/or storage controller.
-//
-#[derive(serde::Deserialize)]
-pub(crate) struct NodeMetadata {
-    #[serde(rename = "host")]
-    pub(crate) postgres_host: String,
-    #[serde(rename = "port")]
-    pub(crate) postgres_port: u16,
-    pub(crate) http_host: String,
-    pub(crate) http_port: u16,
-
-    // Deployment tools may write fields to the metadata file beyond what we
-    // use in this type: this type intentionally only names fields that require.
-    #[serde(flatten)]
-    pub(crate) other: HashMap<String, serde_json::Value>,
 }
 
 // needed to simplify config construction
