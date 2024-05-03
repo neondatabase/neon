@@ -192,6 +192,9 @@ impl Timeline {
         let mut drop_layers = Vec::new();
         let layers_to_rewrite: Vec<Layer> = Vec::new();
 
+        // We will use the PITR cutoff as a condition for rewriting layers.
+        let pitr_cutoff = self.gc_info.read().unwrap().cutoffs.pitr;
+
         let layers = self.layers.read().await;
         for layer_desc in layers.layer_map().iter_historic_layers() {
             let layer = layers.get_from_desc(&layer_desc);
@@ -250,9 +253,9 @@ impl Timeline {
 
             // Don't bother re-writing a layer if it is within the PITR window: it will age-out eventually
             // without incurring the I/O cost of a rewrite.
-            if layer_desc.get_lsn_range().end >= self.gc_info.read().unwrap().pitr_cutoff {
+            if layer_desc.get_lsn_range().end >= pitr_cutoff {
                 debug!(layer=%layer, "Skipping rewrite of layer still in PITR window ({} >= {})",
-                    layer_desc.get_lsn_range().end, self.gc_info.read().unwrap().pitr_cutoff);
+                    layer_desc.get_lsn_range().end, pitr_cutoff);
                 continue;
             }
 
