@@ -5,6 +5,12 @@ commands:
     user: root
     sysvInitAction: sysinit
     shell: 'cgconfigparser -l /etc/cgconfig.conf -s 1664'
+  # restrict permissions on /neonvm/bin/resize-swap, because we grant access to compute_ctl for
+  # running it as root.
+  - name: chmod-resize-swap
+    user: root
+    sysvInitAction: sysinit
+    shell: 'chmod 711 /neonvm/bin/resize-swap'
   - name: pgbouncer
     user: postgres
     sysvInitAction: respawn
@@ -366,8 +372,7 @@ merge: |
       && apt update \
       && apt install --no-install-recommends -y \
              sudo \
-      && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-      && chmod 711 /neonvm/bin/resize-swap
+      && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
   COPY compute_ctl-resize-swap /etc/sudoers.d/compute_ctl-resize-swap
 
   COPY cgconfig.conf /etc/cgconfig.conf
