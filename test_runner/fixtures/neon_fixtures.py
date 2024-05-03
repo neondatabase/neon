@@ -75,7 +75,6 @@ from fixtures.safekeeper.utils import are_walreceivers_absent
 from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
-    AuxFileStore,
     allure_add_grafana_links,
     allure_attach_from_dir,
     assert_no_errors,
@@ -83,6 +82,7 @@ from fixtures.utils import (
     subprocess_capture,
     wait_until,
 )
+from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
