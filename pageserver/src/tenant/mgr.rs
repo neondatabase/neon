@@ -246,6 +246,7 @@ impl TenantsMap {
         }
     }
 
+    #[cfg(all(debug_assertions, not(test)))]
     pub(crate) fn len(&self) -> usize {
         match self {
             TenantsMap::Initializing => 0,
@@ -746,6 +747,7 @@ pub async fn init_tenant_mgr(
             }
         };
 
+        METRICS.slot_inserted(&slot);
         tenants.insert(tenant_shard_id, slot);
     }
 
@@ -753,7 +755,7 @@ pub async fn init_tenant_mgr(
 
     let mut tenants_map = TENANTS.write().unwrap();
     assert!(matches!(&*tenants_map, &TenantsMap::Initializing));
-    METRICS.tenant_slots.set(tenants.len() as u64);
+
     *tenants_map = TenantsMap::Open(tenants);
 
     Ok(TenantManager {
@@ -823,6 +825,14 @@ fn tenant_spawn(
 
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
     let mut join_set = JoinSet::new();
+
+    #[cfg(all(debug_assertions, not(test)))]
+    {
+        // Check that our metrics properly tracked the size of the tenants map.  This is a convenient location to check,
+        // as it happens implicitly at the end of tests etc.
+        let m = tenants.read().unwrap();
+        debug_assert_eq!(METRICS.slots_total(), m.len() as u64);
+    }
 
     // Atomically, 1. create the shutdown tasks and 2. prevent creation of new tenants.
     let (total_in_progress, total_attached) = {
@@ -2428,10 +2438,13 @@ impl SlotGuard {
                 TenantsMap::Open(m) => m,
             };
 
+            METRICS.slot_inserted(&new_value);
+
             let replaced = m.insert(self.tenant_shard_id, new_value);
             self.upserted = true;
-
-            METRICS.tenant_slots.set(m.len() as u64);
+            if let Some(replaced) = replaced.as_ref() {
+                METRICS.slot_removed(replaced);
+            }
 
             replaced
         };
@@ -2541,9 +2554,13 @@ impl Drop for SlotGuard {
                 }
 
                 if self.old_value_is_shutdown() {
+                    METRICS.slot_removed(entry.get());
                     entry.remove();
                 } else {
-                    entry.insert(self.old_value.take().unwrap());
+                    let inserting = self.old_value.take().unwrap();
+                    METRICS.slot_inserted(&inserting);
+                    let replaced = entry.insert(inserting);
+                    METRICS.slot_removed(&replaced);
                 }
             }
             Entry::Vacant(_) => {
@@ -2554,8 +2571,6 @@ impl Drop for SlotGuard {
                 );
             }
         }
-
-        METRICS.tenant_slots.set(m.len() as u64);
     }
 }
 
@@ -2635,7 +2650,9 @@ fn tenant_map_acquire_slot_impl(
             }
             _ => {
                 let (completion, barrier) = utils::completion::channel();
-                v.insert(TenantSlot::InProgress(barrier));
+                let inserting = TenantSlot::InProgress(barrier);
+                METRICS.slot_inserted(&inserting);
+                v.insert(inserting);
                 tracing::debug!("Vacant, inserted InProgress");
                 Ok(SlotGuard::new(*tenant_shard_id, None, completion))
             }
@@ -2671,7 +2688,10 @@ fn tenant_map_acquire_slot_impl(
                 _ => {
                     // Happy case: the slot was not in any state that violated our mode
                     let (completion, barrier) = utils::completion::channel();
-                    let old_value = o.insert(TenantSlot::InProgress(barrier));
+                    let in_progress = TenantSlot::InProgress(barrier);
+                    METRICS.slot_inserted(&in_progress);
+                    let old_value = o.insert(in_progress);
+                    METRICS.slot_removed(&old_value);
                     tracing::debug!("Occupied, replaced with InProgress");
                     Ok(SlotGuard::new(
                         *tenant_shard_id,
