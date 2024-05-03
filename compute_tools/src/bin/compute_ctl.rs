@@ -71,13 +71,22 @@ const BUILD_TAG_DEFAULT: &str = "latest";
 fn main() -> Result<()> {
     let (build_tag, clap_args) = init()?;
 
-    let (startup_context_guard, cli_result) = process_cli(&clap_args)?;
+    let (pg_handle, start_pg_result) =
+    {
+        // Enter startup tracing context
+        let _startup_context_guard = startup_context_from_env();
 
-    let wait_spec_result = wait_spec(build_tag, cli_result)?;
+        let cli_result = process_cli(&clap_args)?;
 
-    let (pg_handle, start_pg_result) = start_postgres(&clap_args, wait_spec_result)?;
+        let wait_spec_result = wait_spec(build_tag, cli_result)?;
 
-    let wait_pg_result = wait_postgres(pg_handle, startup_context_guard)?;
+        start_postgres(&clap_args, wait_spec_result)?
+
+        // Startup is finished, exit the startup tracing context
+    };
+
+    // PostgreSQL is now running, if startup was successful. Wait until it exits.
+    let wait_pg_result = wait_postgres(pg_handle)?;
 
     cleanup_and_exit(start_pg_result, wait_pg_result)
 }
@@ -100,40 +109,8 @@ fn init() -> Result<(String, clap::ArgMatches)> {
     Ok((build_tag, cli().get_matches()))
 }
 
-fn process_cli(
-    matches: &clap::ArgMatches,
-) -> Result<(Option<opentelemetry::ContextGuard>, ProcessCliResult)> {
-    let pgbin_default = "postgres";
-    let pgbin = matches
-        .get_one::<String>("pgbin")
-        .map(|s| s.as_str())
-        .unwrap_or(pgbin_default);
-
-    let ext_remote_storage = matches
-        .get_one::<String>("remote-ext-config")
-        // Compatibility hack: if the control plane specified any remote-ext-config
-        // use the default value for extension storage proxy gateway.
-        // Remove this once the control plane is updated to pass the gateway URL
-        .map(|conf| {
-            if conf.starts_with("http") {
-                conf.trim_end_matches('/')
-            } else {
-                "http://pg-ext-s3-gateway"
-            }
-        });
-
-    let http_port = *matches
-        .get_one::<u16>("http-port")
-        .expect("http-port is required");
-    let pgdata = matches
-        .get_one::<String>("pgdata")
-        .expect("PGDATA path is required");
-    let connstr = matches
-        .get_one::<String>("connstr")
-        .expect("Postgres connection string is required");
-    let spec_json = matches.get_one::<String>("spec");
-    let spec_path = matches.get_one::<String>("spec-path");
-
+fn startup_context_from_env() -> Option<opentelemetry::ContextGuard>
+{
     // Extract OpenTelemetry context for the startup actions from the
     // TRACEPARENT and TRACESTATE env variables, and attach it to the current
     // tracing context.
@@ -170,7 +147,7 @@ fn process_cli(
     if let Ok(val) = std::env::var("TRACESTATE") {
         startup_tracing_carrier.insert("tracestate".to_string(), val);
     }
-    let startup_context_guard = if !startup_tracing_carrier.is_empty() {
+    if !startup_tracing_carrier.is_empty() {
         use opentelemetry::propagation::TextMapPropagator;
         use opentelemetry::sdk::propagation::TraceContextPropagator;
         let guard = TraceContextPropagator::new()
@@ -180,8 +157,42 @@ fn process_cli(
         Some(guard)
     } else {
         None
-    };
+    }
+}
 
+fn process_cli(
+    matches: &clap::ArgMatches,
+) -> Result<ProcessCliResult> {
+    let pgbin_default = "postgres";
+    let pgbin = matches
+        .get_one::<String>("pgbin")
+        .map(|s| s.as_str())
+        .unwrap_or(pgbin_default);
+
+    let ext_remote_storage = matches
+        .get_one::<String>("remote-ext-config")
+        // Compatibility hack: if the control plane specified any remote-ext-config
+        // use the default value for extension storage proxy gateway.
+        // Remove this once the control plane is updated to pass the gateway URL
+        .map(|conf| {
+            if conf.starts_with("http") {
+                conf.trim_end_matches('/')
+            } else {
+                "http://pg-ext-s3-gateway"
+            }
+        });
+
+    let http_port = *matches
+        .get_one::<u16>("http-port")
+        .expect("http-port is required");
+    let pgdata = matches
+        .get_one::<String>("pgdata")
+        .expect("PGDATA path is required");
+    let connstr = matches
+        .get_one::<String>("connstr")
+        .expect("Postgres connection string is required");
+    let spec_json = matches.get_one::<String>("spec");
+    let spec_path = matches.get_one::<String>("spec-path");
     let compute_id = matches.get_one::<String>("compute-id");
     let control_plane_uri = matches.get_one::<String>("control-plane-uri");
 
@@ -234,9 +245,7 @@ fn process_cli(
         live_config_allowed,
     };
 
-    // TODO: Move startup_context_guard out of this function. It's here right now only because
-    // that's where it was before, and moving it would've made the diff big.
-    Ok((startup_context_guard, result))
+    Ok(result)
 }
 
 struct ProcessCliResult<'clap> {
@@ -455,17 +464,11 @@ struct StartPostgresResult {
 
 fn wait_postgres(
     pg: Option<PostgresHandle>,
-    startup_context_guard: Option<opentelemetry::ContextGuard>,
 ) -> Result<WaitPostgresResult> {
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
     let mut exit_code = None;
     if let Some((mut pg, logs_handle)) = pg {
-        // Startup is finished, exit the startup tracing span
-        // TODO: Probably easier to drop startup_context_guard outside this function. It's here
-        // right now because keeping it here reduced the size of the diff.
-        drop(startup_context_guard);
-
         let ecode = pg
             .wait()
             .expect("failed to start waiting on Postgres process");
