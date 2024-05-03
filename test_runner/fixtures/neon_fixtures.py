@@ -1104,7 +1104,6 @@ class NeonEnv:
                     self,
                     ps_id,
                     port=pageserver_port,
-                    config_override=self.pageserver_config_override,
                 )
             )
             cfg["pageservers"].append(ps_cfg)
@@ -2373,15 +2372,12 @@ class NeonPageserver(PgProtocol, LogUtils):
 
     TEMP_FILE_SUFFIX = "___temp"
 
-    def __init__(
-        self, env: NeonEnv, id: int, port: PageserverPort, config_override: Optional[str] = None
-    ):
+    def __init__(self, env: NeonEnv, id: int, port: PageserverPort):
         super().__init__(host="localhost", port=port.pg, user="cloud_admin")
         self.env = env
         self.id = id
         self.running = False
         self.service_port = port
-        self.config_override = config_override
         self.version = env.get_binary_version("pageserver")
         self.logfile = self.workdir / "pageserver.log"
         # After a test finishes, we will scrape the log to see if there are any
