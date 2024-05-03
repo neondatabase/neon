@@ -200,7 +200,7 @@ impl LayerManager {
             metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         for l in compact_from {
-            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr, true);
+            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
     }
@@ -210,24 +210,15 @@ impl LayerManager {
         &mut self,
         rewrite_layers: &[(Layer, ResidentLayer)],
         drop_layers: &[Layer],
-        metrics: &TimelineMetrics,
+        _metrics: &TimelineMetrics,
     ) {
         let mut updates = self.layer_map.batch_update();
-        for (old_layer, new_layer) in rewrite_layers {
-            debug_assert!(old_layer.layer_desc().key_range == new_layer.layer_desc().key_range);
-            debug_assert!(old_layer.layer_desc().lsn_range == new_layer.layer_desc().lsn_range);
 
-            Self::delete_historic_layer(old_layer, &mut updates, &mut self.layer_fmgr, false);
-            Self::insert_historic_layer(
-                new_layer.as_ref().clone(),
-                &mut updates,
-                &mut self.layer_fmgr,
-            );
-            // TODO: update metrics to subtract the one we're over-writing
-            metrics.record_new_file_metrics(new_layer.layer_desc().file_size);
-        }
+        // TODO: implement rewrites (currently this code path only used for drops)
+        assert!(rewrite_layers.is_empty());
+
         for l in drop_layers {
-            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr, true);
+            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
     }
@@ -236,7 +227,7 @@ impl LayerManager {
     pub(crate) fn finish_gc_timeline(&mut self, gc_layers: &[Layer]) {
         let mut updates = self.layer_map.batch_update();
         for doomed_layer in gc_layers {
-            Self::delete_historic_layer(doomed_layer, &mut updates, &mut self.layer_fmgr, true);
+            Self::delete_historic_layer(doomed_layer, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush()
     }
@@ -258,7 +249,6 @@ impl LayerManager {
         layer: &Layer,
         updates: &mut BatchedUpdates<'_>,
         mapping: &mut LayerFileManager<Layer>,
-        physical: bool,
     ) {
         let desc = layer.layer_desc();
 
@@ -269,9 +259,7 @@ impl LayerManager {
         //      map index without actually rebuilding the index.
         updates.remove_historic(desc);
         mapping.remove(layer);
-        if physical {
-            layer.delete_on_drop();
-        }
+        layer.delete_on_drop();
     }
 
     pub(crate) fn likely_resident_layers(&self) -> impl Iterator<Item = Layer> + '_ {

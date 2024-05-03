@@ -4387,13 +4387,6 @@ impl Timeline {
             remote_client.schedule_compaction_update(&drop_layers, &upload_layers)?;
         }
 
-        // Safety: we are now dropping the ResidentLayer handles that prevented eviction of the old version
-        // of layers we rewrote.
-        // FIXME: we must not race with anyone setting wanted_deleted on this layer!  e.g. GC or eviction.  They would
-        // end up deleting the _new_ local layer before it gets uploaded.
-
-        drop_wlock(guard);
-
         Ok(())
     }
 
