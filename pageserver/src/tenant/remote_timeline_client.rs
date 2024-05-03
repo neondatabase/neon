@@ -1383,13 +1383,21 @@ impl RemoteTimelineClient {
 
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref layer, ref layer_metadata) => {
-                    let path = layer.local_path();
+                    let local_path = layer.local_path();
+
+                    let remote_path = remote_layer_path(
+                        &self.tenant_shard_id.tenant_id,
+                        &self.timeline_id,
+                        layer_metadata.shard,
+                        &layer.layer_desc().filename(),
+                        layer_metadata.generation,
+                    );
+
                     upload::upload_timeline_layer(
-                        self.conf,
                         &self.storage_impl,
-                        path,
+                        local_path,
+                        &remote_path,
                         layer_metadata,
-                        self.generation,
                         &self.cancel,
                     )
                     .measure_remote_op(
@@ -1816,29 +1824,6 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
         Some((_, gen_suffix)) => Generation::parse_suffix(gen_suffix),
         None => None,
     }
-}
-
-/// Files on the remote storage are stored with paths, relative to the workdir.
-/// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
-///
-/// Errors if the path provided does not start from pageserver's workdir.
-pub fn remote_path(
-    conf: &PageServerConf,
-    local_path: &Utf8Path,
-    generation: Generation,
-) -> anyhow::Result<RemotePath> {
-    let stripped = local_path
-        .strip_prefix(&conf.workdir)
-        .context("Failed to strip workdir prefix")?;
-
-    let suffixed = format!("{0}{1}", stripped, generation.get_suffix());
-
-    RemotePath::new(Utf8Path::new(&suffixed)).with_context(|| {
-        format!(
-            "to resolve remote part of path {:?} for base {:?}",
-            local_path, conf.workdir
-        )
-    })
 }
 
 #[cfg(test)]
