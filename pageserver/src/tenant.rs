@@ -2820,7 +2820,7 @@ impl Tenant {
             .unwrap()
             .values()
             .filter(|tl| match target_timeline_id.as_ref() {
-                Some(required) => &tl.timeline_id == required,
+                Some(target) => &tl.timeline_id == target,
                 None => true,
             })
             .cloned()
