@@ -136,7 +136,7 @@ async fn download_object<'a>(
     src_path: &RemotePath,
     dst_path: &Utf8PathBuf,
     cancel: &CancellationToken,
-    ctx: &RequestContext,
+    #[cfg_attr(target_os = "macos", allow(unused_variables))] ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
     let res = match crate::virtual_file::io_engine::get() {
         crate::virtual_file::io_engine::IoEngine::NotSet => panic!("unset"),
