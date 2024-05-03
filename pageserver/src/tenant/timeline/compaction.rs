@@ -22,7 +22,6 @@ use tracing::{debug, info, info_span, trace, warn, Instrument};
 use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
-use crate::tenant::remote_timeline_client::index::IndexLayerMetadata;
 use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
 use crate::tenant::timeline::{drop_rlock, is_rel_fsm_block_key, is_rel_vm_block_key, Hole};
 use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter};
@@ -209,11 +208,10 @@ impl Timeline {
             let layer_raw_page_count = ShardedRange::raw_size(&layer_desc.get_key_range());
             if layer_local_page_count == 0 {
                 // This ancestral layer only covers keys that belong to other shards.
-                // We do very verbose logging here, including the full metadata: if we had some critical bug that caused
-                // us to incorrectly drop layers, this would simplify manually reinstating those layers.
-                info!(layer=%layer,
-                    "dropping layer after shard split, contains no keys for this shard.  Old metadata: {}",
-                    serde_json::to_string(&IndexLayerMetadata::from(layer.metadata())).unwrap()
+                // We include the full metadata in the log: if we had some critical bug that caused
+                // us to incorrectly drop layers, this would simplify manually debugging + reinstating those layers.
+                info!(%layer, old_metadata=?layer.metadata(),
+                    "dropping layer after shard split, contains no keys for this shard.",
                 );
 
                 if cfg!(debug_assertions) {
@@ -233,7 +231,7 @@ impl Timeline {
             } else if layer_local_page_count != u32::MAX
                 && layer_local_page_count == layer_raw_page_count
             {
-                debug!(layer=%layer,
+                debug!(%layer,
                     "layer is entirely shard local ({} keys), no need to filter it",
                     layer_local_page_count
                 );
@@ -244,7 +242,7 @@ impl Timeline {
             if layer_local_page_count != u32::MAX
                 && layer_local_page_count > layer_raw_page_count / 2
             {
-                debug!(layer=%layer,
+                debug!(%layer,
                     "layer is already mostly local ({}/{}), not rewriting",
                     layer_local_page_count,
                     layer_raw_page_count
@@ -254,14 +252,14 @@ impl Timeline {
             // Don't bother re-writing a layer if it is within the PITR window: it will age-out eventually
             // without incurring the I/O cost of a rewrite.
             if layer_desc.get_lsn_range().end >= pitr_cutoff {
-                debug!(layer=%layer, "Skipping rewrite of layer still in PITR window ({} >= {})",
+                debug!(%layer, "Skipping rewrite of layer still in PITR window ({} >= {})",
                     layer_desc.get_lsn_range().end, pitr_cutoff);
                 continue;
             }
 
             if layer_desc.is_delta() {
                 // We do not yet implement rewrite of delta layers
-                debug!(layer=%layer, "Skipping rewrite of delta layer");
+                debug!(%layer, "Skipping rewrite of delta layer");
                 continue;
             }
 
@@ -272,12 +270,12 @@ impl Timeline {
             if layer.metadata().generation == self.generation
                 && layer.metadata().shard.shard_count == self.shard_identity.count
             {
-                debug!(layer=%layer, "Skipping rewrite, is not from old generation");
+                debug!(%layer, "Skipping rewrite, is not from old generation");
                 continue;
             }
 
             if layers_to_rewrite.len() >= rewrite_max {
-                tracing::info!(layer=%layer, "Will rewrite layer on a future compaction, already rewrote {}",
+                tracing::info!(%layer, "Will rewrite layer on a future compaction, already rewrote {}",
                     layers_to_rewrite.len()
                 );
                 continue;
@@ -285,7 +283,7 @@ impl Timeline {
 
             // Fall through: all our conditions for doing a rewrite passed.
             // TODO: implement rewriting
-            tracing::debug!(layer=%layer, "Would rewrite layer");
+            tracing::debug!(%layer, "Would rewrite layer");
         }
 
         // Drop the layers read lock: we will acquire it for write in [`Self::rewrite_layers`]
