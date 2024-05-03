@@ -17,7 +17,7 @@ use crate::{
     scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
-use std::{sync::Arc, time::Duration};
+use std::{hash::Hash, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tracing::info;
@@ -447,16 +447,16 @@ impl ApiCaches {
 }
 
 /// Various caches for [`console`](super).
-pub struct ApiLocks {
+pub struct ApiLocks<K> {
     name: &'static str,
-    node_locks: DashMap<EndpointCacheKey, Arc<Semaphore>>,
+    node_locks: DashMap<K, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
     epoch: std::time::Duration,
     metrics: &'static ApiLockMetrics,
 }
 
-impl ApiLocks {
+impl<K: Hash + Eq + Clone> ApiLocks<K> {
     pub fn new(
         name: &'static str,
         permits: usize,
@@ -475,10 +475,7 @@ impl ApiLocks {
         })
     }
 
-    pub async fn get_wake_compute_permit(
-        &self,
-        key: &EndpointCacheKey,
-    ) -> Result<WakeComputePermit, errors::WakeComputeError> {
+    pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, errors::WakeComputeError> {
         if self.permits == 0 {
             return Ok(WakeComputePermit { permit: None });
         }
