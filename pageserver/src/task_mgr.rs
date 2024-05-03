@@ -363,6 +363,8 @@ pub enum TaskKind {
 
     EphemeralFilePreWarmPageCache,
 
+    LayerDownload,
+
     #[cfg(test)]
     UnitTest,
 }

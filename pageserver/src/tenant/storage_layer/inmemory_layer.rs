@@ -659,14 +659,14 @@ impl InMemoryLayer {
                 let will_init = Value::des(&buf)?.will_init();
                 let res;
                 (buf, res) = delta_layer_writer
-                    .put_value_bytes(*key, *lsn, buf, will_init)
+                    .put_value_bytes(*key, *lsn, buf, will_init, &ctx)
                     .await;
                 res?;
             }
         }
 
         // MAX is used here because we identify L0 layers by full key range
-        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline).await?;
+        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline, &ctx).await?;
         Ok(Some(delta_layer))
     }
 }

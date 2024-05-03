@@ -357,7 +357,7 @@ impl ImageLayer {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, ctx).await;
         res?;
         Ok(())
     }
@@ -677,9 +677,14 @@ impl ImageLayerWriterInner {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
+    async fn put_image(
+        &mut self,
+        key: Key,
+        img: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(img).await;
+        let (_img, res) = self.blob_writer.write_blob(img, ctx).await;
         // TODO: re-use the buffer for `img` further upstack
         let off = res?;
 
@@ -693,7 +698,11 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    async fn finish(self, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
+    async fn finish(
+        self,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -704,7 +713,7 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf).await;
+            let (_buf, res) = file.write_all(buf, ctx).await;
             res?;
         }
 
@@ -724,7 +733,7 @@ impl ImageLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, ctx).await;
         res?;
 
         let metadata = file
@@ -806,8 +815,13 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_image(key, img).await
+    pub async fn put_image(
+        &mut self,
+        key: Key,
+        img: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
     ///
@@ -816,8 +830,9 @@ impl ImageLayerWriter {
     pub(crate) async fn finish(
         mut self,
         timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<super::ResidentLayer> {
-        self.inner.take().unwrap().finish(timeline).await
+        self.inner.take().unwrap().finish(timeline, ctx).await
     }
 }
 

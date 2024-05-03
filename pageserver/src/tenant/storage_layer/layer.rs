@@ -14,9 +14,10 @@ use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::repository::Key;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
@@ -939,11 +940,20 @@ impl LayerInner {
             return Err(DownloadError::DownloadRequired);
         }
 
+        let download_ctx = ctx
+            .map(|ctx| ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download))
+            .unwrap_or(RequestContext::new(
+                TaskKind::LayerDownload,
+                DownloadBehavior::Download,
+            ));
+
         async move {
             tracing::info!(%reason, "downloading on-demand");
 
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-            let res = self.download_init_and_wait(timeline, permit).await?;
+            let res = self
+                .download_init_and_wait(timeline, permit, download_ctx)
+                .await?;
             scopeguard::ScopeGuard::into_inner(init_cancelled);
             Ok(res)
         }
@@ -982,6 +992,7 @@ impl LayerInner {
         self: &Arc<Self>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: RequestContext,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -1011,7 +1022,7 @@ impl LayerInner {
                     .await
                     .unwrap();
 
-                let res = this.download_and_init(timeline, permit).await;
+                let res = this.download_and_init(timeline, permit, &ctx).await;
 
                 if let Err(res) = tx.send(res) {
                     match res {
@@ -1054,6 +1065,7 @@ impl LayerInner {
         self: &Arc<LayerInner>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Arc<DownloadedLayer>> {
         let client = timeline
             .remote_client
@@ -1061,7 +1073,12 @@ impl LayerInner {
             .expect("checked before download_init_and_wait");
 
         let result = client
-            .download_layer_file(&self.desc.filename(), &self.metadata(), &timeline.cancel)
+            .download_layer_file(
+                &self.desc.filename(),
+                &self.metadata(),
+                &timeline.cancel,
+                ctx,
+            )
             .await;
 
         match result {

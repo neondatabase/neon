@@ -74,7 +74,7 @@ impl EphemeralFile {
     pub(crate) async fn write_blob(
         &mut self,
         srcbuf: &[u8],
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> Result<u64, io::Error> {
         let pos = self.rw.bytes_written();
 
@@ -83,15 +83,15 @@ impl EphemeralFile {
             // short one-byte length header
             let len_buf = [srcbuf.len() as u8];
 
-            self.rw.write_all_borrowed(&len_buf).await?;
+            self.rw.write_all_borrowed(&len_buf, ctx).await?;
         } else {
             let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
             len_buf[0] |= 0x80;
-            self.rw.write_all_borrowed(&len_buf).await?;
+            self.rw.write_all_borrowed(&len_buf, ctx).await?;
         }
 
         // Write the payload
-        self.rw.write_all_borrowed(srcbuf).await?;
+        self.rw.write_all_borrowed(srcbuf, ctx).await?;
 
         Ok(pos)
     }

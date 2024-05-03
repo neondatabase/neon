@@ -97,7 +97,7 @@ impl ShardCount {
 
     /// The internal value of a ShardCount may be zero, which means "1 shard, but use
     /// legacy format for TenantShardId that excludes the shard suffix", also known
-    /// as `TenantShardId::unsharded`.
+    /// as [`TenantShardId::unsharded`].
     ///
     /// This method returns the actual number of shards, i.e. if our internal value is
     /// zero, we return 1 (unsharded tenants have 1 shard).
@@ -116,7 +116,9 @@ impl ShardCount {
         self.0
     }
 
-    ///
+    /// Whether the `ShardCount` is for an unsharded tenant, so uses one shard but
+    /// uses the legacy format for `TenantShardId`. See also the documentation for
+    /// [`Self::count`].
     pub fn is_unsharded(&self) -> bool {
         self.0 == 0
     }

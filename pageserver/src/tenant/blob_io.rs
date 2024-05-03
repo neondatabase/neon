@@ -130,8 +130,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     async fn write_all_unbuffered<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         src_buf: B,
+        ctx: &RequestContext,
     ) -> (B::Buf, Result<(), Error>) {
-        let (src_buf, res) = self.inner.write_all(src_buf).await;
+        let (src_buf, res) = self.inner.write_all(src_buf, ctx).await;
         let nbytes = match res {
             Ok(nbytes) => nbytes,
             Err(e) => return (src_buf, Err(e)),
@@ -142,9 +143,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
 
     #[inline(always)]
     /// Flushes the internal buffer to the underlying `VirtualFile`.
-    pub async fn flush_buffer(&mut self) -> Result<(), Error> {
+    pub async fn flush_buffer(&mut self, ctx: &RequestContext) -> Result<(), Error> {
         let buf = std::mem::take(&mut self.buf);
-        let (mut buf, res) = self.inner.write_all(buf).await;
+        let (mut buf, res) = self.inner.write_all(buf, ctx).await;
         res?;
         buf.clear();
         self.buf = buf;
@@ -165,10 +166,11 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         src_buf: B,
+        ctx: &RequestContext,
     ) -> (B::Buf, Result<(), Error>) {
         if !BUFFERED {
             assert!(self.buf.is_empty());
-            return self.write_all_unbuffered(src_buf).await;
+            return self.write_all_unbuffered(src_buf, ctx).await;
         }
         let remaining = Self::CAPACITY - self.buf.len();
         let src_buf_len = src_buf.bytes_init();
@@ -183,7 +185,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         }
         // Then, if the buffer is full, flush it out
         if self.buf.len() == Self::CAPACITY {
-            if let Err(e) = self.flush_buffer().await {
+            if let Err(e) = self.flush_buffer(ctx).await {
                 return (Slice::into_inner(src_buf), Err(e));
             }
         }
@@ -199,7 +201,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 assert_eq!(copied, src_buf.len());
                 Slice::into_inner(src_buf)
             } else {
-                let (src_buf, res) = self.write_all_unbuffered(src_buf).await;
+                let (src_buf, res) = self.write_all_unbuffered(src_buf, ctx).await;
                 if let Err(e) = res {
                     return (src_buf, Err(e));
                 }
@@ -216,6 +218,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     pub async fn write_blob<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         srcbuf: B,
+        ctx: &RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
         let offset = self.offset;
 
@@ -227,7 +230,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             if len < 128 {
                 // Short blob. Write a 1-byte length header
                 io_buf.put_u8(len as u8);
-                self.write_all(io_buf).await
+                self.write_all(io_buf, ctx).await
             } else {
                 // Write a 4-byte length header
                 if len > 0x7fff_ffff {
@@ -242,7 +245,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 let mut len_buf = (len as u32).to_be_bytes();
                 len_buf[0] |= 0x80;
                 io_buf.extend_from_slice(&len_buf[..]);
-                self.write_all(io_buf).await
+                self.write_all(io_buf, ctx).await
             }
         }
         .await;
@@ -251,7 +254,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             Ok(_) => (),
             Err(e) => return (Slice::into_inner(srcbuf.slice(..)), Err(e)),
         }
-        let (srcbuf, res) = self.write_all(srcbuf).await;
+        let (srcbuf, res) = self.write_all(srcbuf, ctx).await;
         (srcbuf, res.map(|_| offset))
     }
 }
@@ -261,8 +264,8 @@ impl BlobWriter<true> {
     ///
     /// This function flushes the internal buffer before giving access
     /// to the underlying `VirtualFile`.
-    pub async fn into_inner(mut self) -> Result<VirtualFile, Error> {
-        self.flush_buffer().await?;
+    pub async fn into_inner(mut self, ctx: &RequestContext) -> Result<VirtualFile, Error> {
+        self.flush_buffer(ctx).await?;
         Ok(self.inner)
     }
 
@@ -299,16 +302,16 @@ mod tests {
             let file = VirtualFile::create(pathbuf.as_path()).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
-                let (_, res) = wtr.write_blob(blob.clone()).await;
+                let (_, res) = wtr.write_blob(blob.clone(), &ctx).await;
                 let offs = res?;
                 offsets.push(offs);
             }
             // Write out one page worth of zeros so that we can
             // read again with read_blk
-            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ]).await;
+            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ], &ctx).await;
             let offs = res?;
             println!("Writing final blob at offs={offs}");
-            wtr.flush_buffer().await?;
+            wtr.flush_buffer(&ctx).await?;
         }
 
         let file = VirtualFile::open(pathbuf.as_path()).await?;

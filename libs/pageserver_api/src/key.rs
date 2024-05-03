@@ -80,7 +80,7 @@ impl Key {
     }
 
     /// Get the range of metadata keys.
-    pub fn metadata_key_range() -> Range<Self> {
+    pub const fn metadata_key_range() -> Range<Self> {
         Key {
             field1: METADATA_KEY_BEGIN_PREFIX,
             field2: 0,
@@ -572,14 +572,17 @@ pub const AUX_FILES_KEY: Key = Key {
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
 
+/// Non inherited range for vectored get.
 pub const NON_INHERITED_RANGE: Range<Key> = AUX_FILES_KEY..AUX_FILES_KEY.next();
+/// Sparse keyspace range for vectored get. Missing key error will be ignored for this range.
+pub const NON_INHERITED_SPARSE_RANGE: Range<Key> = Key::metadata_key_range();
 
 // AUX_FILES currently stores only data for logical replication (slots etc), and
 // we don't preserve these on a branch because safekeepers can't follow timeline
 // switch (and generally it likely should be optional), so ignore these.
 #[inline(always)]
 pub fn is_inherited_key(key: Key) -> bool {
-    !NON_INHERITED_RANGE.contains(&key)
+    !NON_INHERITED_RANGE.contains(&key) && !NON_INHERITED_SPARSE_RANGE.contains(&key)
 }
 
 #[inline(always)]

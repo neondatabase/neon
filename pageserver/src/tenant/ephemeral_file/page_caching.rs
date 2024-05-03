@@ -35,10 +35,14 @@ impl RW {
         self.page_cache_file_id
     }
 
-    pub(crate) async fn write_all_borrowed(&mut self, srcbuf: &[u8]) -> Result<usize, io::Error> {
+    pub(crate) async fn write_all_borrowed(
+        &mut self,
+        srcbuf: &[u8],
+        ctx: &RequestContext,
+    ) -> Result<usize, io::Error> {
         // It doesn't make sense to proactively fill the page cache on the Pageserver write path
         // because Compute is unlikely to access recently written data.
-        self.rw.write_all_borrowed(srcbuf).await
+        self.rw.write_all_borrowed(srcbuf, ctx).await
     }
 
     pub(crate) fn bytes_written(&self) -> u64 {
@@ -134,6 +138,7 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
     >(
         &mut self,
         buf: B,
+        ctx: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
         let buf = buf.slice(..);
         let saved_bounds = buf.bounds(); // save for reconstructing the Slice from iobuf after the IO is done
@@ -150,7 +155,7 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
         );
 
         // Do the IO.
-        let iobuf = match self.file.write_all(buf).await {
+        let iobuf = match self.file.write_all(buf, ctx).await {
             (iobuf, Ok(nwritten)) => {
                 assert_eq!(nwritten, buflen);
                 iobuf
