@@ -1,8 +1,8 @@
 import re
 import time
 from datetime import datetime, timedelta, timezone
-import pytest
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.pageserver.http import PageserverApiException
