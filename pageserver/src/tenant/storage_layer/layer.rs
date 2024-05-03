@@ -4,12 +4,13 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::ShardIndex;
+use pageserver_api::shard::{ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 use tracing::Instrument;
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
@@ -121,6 +122,21 @@ impl PartialEq for Layer {
     fn eq(&self, other: &Self) -> bool {
         Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
     }
+}
+
+pub(crate) fn local_layer_path(
+    conf: &PageServerConf,
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+    layer_file_name: &LayerFileName,
+    generation: &Generation,
+) -> Utf8PathBuf {
+    let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
+    timeline_path.join(format!(
+        "{}{}",
+        layer_file_name.file_name(),
+        generation.get_suffix()
+    ))
 }
 
 impl Layer {
@@ -718,9 +734,13 @@ impl LayerInner {
         generation: Generation,
         shard: ShardIndex,
     ) -> Self {
-        let path = conf
-            .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id)
-            .join(desc.filename().to_string());
+        let path = local_layer_path(
+            conf,
+            &timeline.tenant_shard_id,
+            &timeline.timeline_id,
+            &desc.filename(),
+            &generation,
+        );
 
         let (inner, version, init_status) = if let Some(inner) = downloaded {
             let version = inner.version;
