@@ -430,6 +430,7 @@ impl GcInfo {
     }
 }
 
+/// The `GcInfo` component describing which Lsns need to be retained.
 #[derive(Debug)]
 pub(crate) struct GcCutoffs {
     /// Keep everything newer than this point.
@@ -4411,24 +4412,13 @@ impl Timeline {
         Ok(())
     }
 
-    /// Update information about which layer files need to be retained on
+    /// Find the Lsns above which layer files need to be retained on
     /// garbage collection. This is separate from actually performing the GC,
     /// and is updated more frequently, so that compaction can remove obsolete
     /// page versions more aggressively.
     ///
     /// TODO: that's wishful thinking, compaction doesn't actually do that
     /// currently.
-    ///
-    /// The caller specifies how much history is needed with the 3 arguments:
-    ///
-    /// retain_lsns: keep a version of each page at these LSNs
-    /// cutoff_horizon: also keep everything newer than this LSN
-    /// pitr: the time duration required to keep data for PITR
-    ///
-    /// The 'retain_lsns' list is currently used to prevent removing files that
-    /// are needed by child timelines. In the future, the user might be able to
-    /// name additional points in time to retain. The caller is responsible for
-    /// collecting that information.
     ///
     /// The 'cutoff_horizon' point is used to retain recent versions that might still be
     /// needed by read-only nodes. (As of this writing, the caller just passes
