@@ -2835,8 +2835,6 @@ impl Tenant {
                 .checked_sub(horizon)
                 .unwrap_or(Lsn(0));
 
-            // FIXME: using questionmark here is wrong: either the whole tenant is shutting down,
-            // or a single timeline is getting deleted, we should at most log the error
             let res = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await;
 
             match res {
