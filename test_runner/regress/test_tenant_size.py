@@ -673,9 +673,14 @@ def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
         ):
             completion.result()
 
-        env.pageserver.allowed_errors.append(
-            ".*Failed to refresh gc_info before gathering inputs.*"
-        )
+    # this happens on both cases
+    env.pageserver.allowed_errors.append(
+        ".*ignoring failure to find gc cutoffs: timeline shutting down.*"
+    )
+    # this happens only in the case of deletion (http response logging)
+    env.pageserver.allowed_errors.append(
+        ".*Failed to refresh gc_info before gathering inputs.*"
+    )
 
 
 # Helper for tests that compare timeline_inputs
