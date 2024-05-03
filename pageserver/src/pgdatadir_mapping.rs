@@ -1143,23 +1143,22 @@ impl<'a> DatadirModification<'a> {
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
             .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let mut rel_dir = if let hash_map::Entry::Vacant(e) =
-            dbdir.dbdirs.entry((rel.spcnode, rel.dbnode))
-        {
-            // Didn't exist. Update dbdir
-            e.insert(false);
-            let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
-            self.pending_directory_entries
-                .push((DirectoryKind::Db, dbdir.dbdirs.len()));
-            self.put(DBDIR_KEY, Value::Image(buf.into()));
+        let mut rel_dir =
+            if let hash_map::Entry::Vacant(e) = dbdir.dbdirs.entry((rel.spcnode, rel.dbnode)) {
+                // Didn't exist. Update dbdir
+                e.insert(false);
+                let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
+                self.pending_directory_entries
+                    .push((DirectoryKind::Db, dbdir.dbdirs.len()));
+                self.put(DBDIR_KEY, Value::Image(buf.into()));
 
-            // and create the RelDirectory
-            RelDirectory::default()
-        } else {
-            // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
-                .context("deserialize db")?
-        };
+                // and create the RelDirectory
+                RelDirectory::default()
+            } else {
+                // reldir already exists, fetch it
+                RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
+                    .context("deserialize db")?
+            };
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
