@@ -489,11 +489,12 @@ def assert_no_errors(log_file, service, allowed_errors):
 
 @enum.unique
 class AuxFileStore(str, enum.Enum):
-    V1 = "v1"
-    V2 = "v2"
+    V1 = "V1"
+    V2 = "V2"
+    CrossValidation = "CrossValidation"
 
     def __repr__(self) -> str:
-        return f"'aux{self.value}'"
+        return f"'aux-{self.value}'"
 
     def __str__(self) -> str:
-        return f"'aux{self.value}'"
+        return f"'aux-{self.value}'"

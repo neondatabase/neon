@@ -33,7 +33,7 @@ def pageserver_virtual_file_io_engine() -> Optional[str]:
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_aux_file_v2() -> Optional[AuxFileStore]:
+def pageserver_aux_file_policy() -> Optional[AuxFileStore]:
     return None
 
 
