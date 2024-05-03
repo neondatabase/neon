@@ -230,6 +230,10 @@ def test_storage_controller_passthrough(
     }
     assert status["state"]["slug"] == "Active"
 
+    (synthetic_size, size_inputs) = client.tenant_size_and_modelinputs(env.initial_tenant)
+    assert synthetic_size > 0
+    assert "segments" in size_inputs
+
     env.storage_controller.consistency_check()
 
 
