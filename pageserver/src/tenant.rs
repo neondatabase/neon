@@ -2812,6 +2812,8 @@ impl Tenant {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
+        // before taking the gc_cs lock, do the heavier weight finding of gc_cutoff points for
+        // currently visible timelines.
         let timelines = self
             .timelines
             .lock()
@@ -2827,8 +2829,6 @@ impl Tenant {
         let mut gc_cutoffs: HashMap<TimelineId, GcCutoffs> =
             HashMap::with_capacity(timelines.len());
 
-        // before taking the gc_cs lock, do the heavier weight finding of gc_cutoff points for
-        // currently visible timelines.
         for timeline in timelines.iter() {
             let cutoff = timeline
                 .get_last_record_lsn()
