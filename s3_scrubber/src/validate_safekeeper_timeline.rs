@@ -1,5 +1,5 @@
 use std::{
-    cmp::max,
+    cmp::{max, min},
     str::FromStr,
     sync::{Arc, Mutex}, time::Duration,
 };
@@ -108,6 +108,18 @@ struct DumpedTimeline {
     sk_id: u64,
 }
 
+fn parse_commit_lsn(formatted_string: &str) -> Option<Lsn> {
+    // Split the string by the underscore '_'
+    let parts: Vec<&str> = formatted_string.split('_').collect();
+    
+    // The fourth element (index 3) is `commit_lsn.0`, formatted as a hexadecimal string
+    if parts.len() > 3 {
+        Some(Lsn(u64::from_str_radix(parts[3], 16).ok()?))
+    } else {
+        None
+    }
+}
+
 /// Check a single safekeeper timeline with local_start_lsn != timeline_start_lsn.
 /// The function will find the segment at local_start_lsn and will try to generate a script to verify it.
 /// 
@@ -178,8 +190,7 @@ async fn validate_timeline(
             .unwrap();
 
         let another_segment = vec.iter().find(|obj| {
-            // find another partial segments with the same LSNs
-            obj.key != segment_of_interest.key && obj.key.starts_with(partial_prefix)
+            obj.key != segment_of_interest.key
         });
 
         if another_segment.is_none() {
@@ -187,6 +198,25 @@ async fn validate_timeline(
             return Ok(());
         }
         let another_segment = another_segment.unwrap();
+
+        let ours_commit_lsn = parse_commit_lsn(&segment_of_interest.key);
+        if ours_commit_lsn.is_none() {
+            info!("failed to parse commit_lsn from {}", &segment_of_interest.key);
+            return Ok(());
+        }
+        let ours_commit_lsn = ours_commit_lsn.unwrap();
+
+        let their_commit_lsn = parse_commit_lsn(&another_segment.key);
+        if their_commit_lsn.is_none() {
+            info!("failed to parse commit_lsn from {}", &another_segment.key);
+            return Ok(());
+        }
+        let their_commit_lsn = their_commit_lsn.unwrap();
+
+        let min_commit_lsn = min(ours_commit_lsn, their_commit_lsn);
+        let strip_offset = min_commit_lsn.segment_offset(WAL_SEGSIZE);
+
+        info!("found ours_commit_lsn={ours_commit_lsn}, their_commit_lsn={their_commit_lsn}, min={min_commit_lsn}, offset={strip_offset}");
 
         let ours_str = format!("./tmp/ours");
         let ours = Utf8Path::new(&ours_str);
@@ -208,7 +238,11 @@ async fn validate_timeline(
             &their,
         ).await?;
 
-        let cmd = "cmp -l ./tmp/ours ./tmp/their";
+        let cmd = format!(
+            "truncate --size={} ./tmp/ours && truncate --size={} ./tmp/their && cmp -l ./tmp/ours ./tmp/their",
+            strip_offset,
+            strip_offset,
+        );
 
         // Execute the command using `bash -c`
         let mut process = Command::new("bash")
@@ -267,7 +301,7 @@ async fn validate_timeline(
     info!("downloaded file to {}", path);
 
     let waldump_cmd =         format!(
-        "./pg_install/v{}/bin/pg_waldump -i{} ./tmp/{} > /dev/null",
+        "./pg_install/v{}/bin/pg_waldump -i{} ./tmp/{}",
         status.pg_info.pg_version / 10000,
         if segment_start_lsn < timeline_start_lsn {
             format!(" -s {}", timeline_start_lsn)
@@ -392,7 +426,6 @@ pub async fn validate_timelines(
         where
         timeline_start_lsn != local_start_lsn
 AND sk_id = 51
-AND local_start_lsn > backup_lsn
 AND timeline_id != '13a865b39537d5538e0ea74c926d9c6f'
 AND timeline_id != 'c5e944b5c13628ba8fe128b01e7e663d'
 AND timeline_id != 'e7cfa4a2bd15c88ff011d69feef4b076';",

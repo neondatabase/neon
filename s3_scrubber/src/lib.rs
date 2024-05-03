@@ -292,6 +292,7 @@ pub fn init_logging(file_name: &str) -> WorkerGuard {
         .with_writer(file_writer);
     let stderr_logs = fmt::Layer::new()
         .with_target(false)
+        .with_ansi(false)
         .with_writer(std::io::stderr);
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
