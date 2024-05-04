@@ -228,14 +228,14 @@ fn main() -> Result<()> {
 
     // If this is a pooled VM, prewarm before starting HTTP server and becoming
     // available for binding. Prewarming helps Postgres start quicker later,
-    // because QEMU will already have it's memory allocated from the host, and
+    // because QEMU will already have its memory allocated from the host, and
     // the necessary binaries will already be cached.
     if !spec_set {
         compute.prewarm_postgres()?;
     }
 
-    // Launch http service first, so we were able to serve control-plane
-    // requests, while configuration is still in progress.
+    // Launch http service first, so that we can serve control-plane requests
+    // while configuration is still in progress.
     let _http_handle =
         launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
@@ -255,21 +255,22 @@ fn main() -> Result<()> {
                 break;
             }
         }
+
+        // Record for how long we slept waiting for the spec.
+        let now = Utc::now();
+        state.metrics.wait_for_spec_ms = now
+            .signed_duration_since(state.start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+
+        // Reset start time, so that the total startup time that is calculated later will
+        // not include the time that we waited for the spec.
+        state.start_time = now;
     }
 
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
-
-    // Record for how long we slept waiting for the spec.
-    state.metrics.wait_for_spec_ms = Utc::now()
-        .signed_duration_since(state.start_time)
-        .to_std()
-        .unwrap()
-        .as_millis() as u64;
-    // Reset start time to the actual start of the configuration, so that
-    // total startup time was properly measured at the end.
-    state.start_time = Utc::now();
-
     state.status = ComputeStatus::Init;
     compute.state_changed.notify_all();
 
