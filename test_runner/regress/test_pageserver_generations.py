@@ -530,9 +530,11 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # incident, but it might be unavoidable: if so, we want to be able to start up
     # and serve clients.
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
-    replaced = env.pageserver.patch_config_toml_nonrecursive({
-        "control_plane_emergency_mode": True,
-    })
+    replaced = env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "control_plane_emergency_mode": True,
+        }
+    )
     env.pageserver.start()
 
     # The pageserver should provide service to clients

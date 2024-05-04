@@ -144,6 +144,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
         config["compaction_period"] = "3s"
         config["gc_period"] = "0s"
         return True
+
     env.pageserver.edit_config_toml(patch_default_tenant_config)
     env.pageserver.start(
         # this does print more than we want, but the number should be comparable between runs
