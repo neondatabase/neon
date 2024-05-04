@@ -28,6 +28,7 @@ serde_with.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 tokio-util.workspace = true

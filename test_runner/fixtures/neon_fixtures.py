@@ -14,7 +14,7 @@ import textwrap
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -1709,42 +1709,52 @@ class NeonCli(AbstractNeonCli):
         force: Optional[str] = None,
         pageserver_config_override: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
-        with tempfile.NamedTemporaryFile(mode="w+") as tmp:
-            tmp.write(toml.dumps(config))
-            tmp.flush()
+        remote_storage = self.env.pageserver_remote_storage
 
-            cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
+        ps_toml = {}
+        if remote_storage is not None:
+            remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
+            ps_toml["remote_storage"] = remote_storage_toml_table
+
+        env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
+        if env_overrides is not None:
+            for o in env_overrides.split(";"):
+                override = toml.loads(o)
+                for key, value in override.items():
+                    ps_toml[key] = value
+
+        if pageserver_config_override is not None:
+            for o in pageserver_config_override.split(";"):
+                override = toml.loads(o)
+                for key, value in override.items():
+                    ps_toml[key] = value
+
+        with ExitStack() as stack:
+            ps_toml_file = stack.enter_context(tempfile.NamedTemporaryFile(mode="w+"))
+            ps_toml_file.write(toml.dumps(ps_toml))
+            ps_toml_file.flush()
+
+            neon_local_config = stack.enter_context(tempfile.NamedTemporaryFile(mode="w+"))
+            neon_local_config.write(toml.dumps(config))
+            neon_local_config.flush()
+
+            cmd = [
+                "init",
+                f"--config={neon_local_config.name}",
+                "--pg-version",
+                self.env.pg_version,
+                f"--pageserver-config-overrides-file={ps_toml_file.name}",
+            ]
 
             if force is not None:
                 cmd.extend(["--force", force])
-
-            remote_storage = self.env.pageserver_remote_storage
-
-            if remote_storage is not None:
-                remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
-
-                cmd.append(
-                    f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
-                )
-
-            env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
-            if env_overrides is not None:
-                cmd += [
-                    f"--pageserver-config-override={o.strip()}" for o in env_overrides.split(";")
-                ]
-
-            if pageserver_config_override is not None:
-                cmd += [
-                    f"--pageserver-config-override={o.strip()}"
-                    for o in pageserver_config_override.split(";")
-                ]
 
             s3_env_vars = None
             if isinstance(remote_storage, S3Storage):
                 s3_env_vars = remote_storage.access_env_vars()
             res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
-            return res
+        return res
 
     def storage_controller_start(self):
         cmd = ["storage_controller", "start"]

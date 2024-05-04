@@ -6,7 +6,7 @@ use std::env::{var, VarError};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, ops::ControlFlow, str::FromStr};
+use std::{env, ops::ControlFlow};
 
 use anyhow::{anyhow, Context};
 use camino::Utf8Path;
@@ -183,13 +183,13 @@ fn initialize_config(
     };
 
     // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
+    let conf = PageServerConf::parse_and_validate(&config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
     if init {
         info!("Writing pageserver config to '{cfg_file_path}'");
 
-        std::fs::write(cfg_file_path, effective_config.to_string())
+        std::fs::write(cfg_file_path, config.to_string())
             .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
         info!("Config successfully written to '{cfg_file_path}'")
     }
