@@ -450,7 +450,8 @@ class NeonEnvBuilder:
         test_output_dir: Path,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
-        pageserver_config_override: Optional[str] = None,
+        # toml that will be decomposed into `--config-override` flags during `pageserver --init`
+        pageserver_init_overrides: Optional[str] = None,
         num_safekeepers: int = 1,
         num_pageservers: int = 1,
         # Use non-standard SK ids to check for various parsing bugs
@@ -477,7 +478,7 @@ class NeonEnvBuilder:
         self.broker = broker
         self.run_id = run_id
         self.mock_s3_server: MockS3Server = mock_s3_server
-        self.pageserver_config_override = pageserver_config_override
+        self.pageserver_init_overrides = pageserver_init_overrides
         self.num_safekeepers = num_safekeepers
         self.num_pageservers = num_pageservers
         self.safekeepers_id_start = safekeepers_id_start
@@ -1021,7 +1022,6 @@ class NeonEnv:
         self.neon_local_binpath = config.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
-        self.pageserver_config_override = config.pageserver_config_override
         self.storage_controller_config = config.storage_controller_config
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
@@ -1131,7 +1131,11 @@ class NeonEnv:
             cfg["safekeepers"].append(sk_cfg)
 
         log.info(f"Config: {cfg}")
-        self.neon_cli.init(cfg, force=config.config_init_force)
+        self.neon_cli.init(
+            cfg,
+            force=config.config_init_force,
+            pageserver_init_overrides=config.pageserver_init_overrides,
+        )
 
     def start(self):
         # Storage controller starts first, so that pageserver /re-attach calls don't
@@ -1703,6 +1707,7 @@ class NeonCli(AbstractNeonCli):
         self,
         config: Dict[str, Any],
         force: Optional[str] = None,
+        pageserver_init_overrides: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(toml.dumps(config))
@@ -1718,7 +1723,7 @@ class NeonCli(AbstractNeonCli):
             append_pageserver_param_overrides(
                 params_to_update=cmd,
                 remote_storage=storage,
-                pageserver_config_override=self.env.pageserver_config_override,
+                pageserver_config_override=pageserver_init_overrides,
             )
 
             s3_env_vars = None
@@ -1749,7 +1754,6 @@ class NeonCli(AbstractNeonCli):
         append_pageserver_param_overrides(
             params_to_update=start_args,
             remote_storage=storage,
-            pageserver_config_override=self.env.pageserver_config_override,
         )
 
         if isinstance(storage, S3Storage):

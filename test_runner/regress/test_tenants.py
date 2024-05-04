@@ -89,7 +89,7 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
 
 def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.pageserver_config_override = "availability_zone='test_ps_az'"
+    neon_env_builder.pageserver_init_overrides = "availability_zone='test_ps_az'"
 
     env = neon_env_builder.init_start()
     tenant_1, _ = env.neon_cli.create_tenant()

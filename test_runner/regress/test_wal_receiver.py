@@ -9,7 +9,7 @@ from fixtures.types import Lsn, TenantId
 # Ensures that walreceiver does not run without any data inserted and only starts after the insertion.
 def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
     # Trigger WAL wait timeout faster
-    neon_env_builder.pageserver_config_override = "wait_lsn_timeout = '1s'"
+    neon_env_builder.pageserver_init_overrides = "wait_lsn_timeout = '1s'"
     env = neon_env_builder.init_start()
     env.pageserver.http_client()
 
@@ -42,7 +42,7 @@ def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
 # Kills one of the safekeepers and ensures that only the active ones are printed in the state.
 def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuilder):
     # Trigger WAL wait timeout faster
-    neon_env_builder.pageserver_config_override = """
+    neon_env_builder.pageserver_init_overrides = """
         wait_lsn_timeout = "1s"
         tenant_config={walreceiver_connect_timeout = "2s", lagging_wal_timeout = "2s"}
     """

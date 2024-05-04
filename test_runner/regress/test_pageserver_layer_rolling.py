@@ -241,7 +241,7 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
     ephemeral_bytes_per_memory_kb = (max_dirty_data * 1024) // system_memory
     assert ephemeral_bytes_per_memory_kb > 0
 
-    neon_env_builder.pageserver_config_override = f"""
+    neon_env_builder.pageserver_init_overrides = f"""
         ephemeral_bytes_per_memory_kb={ephemeral_bytes_per_memory_kb}
         """
 

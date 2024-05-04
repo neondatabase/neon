@@ -54,7 +54,7 @@ def test_metric_collection(
     #
     # Disable time-based pitr, we will use the manual GC calls
     # to trigger remote storage operations in a controlled way
-    neon_env_builder.pageserver_config_override = f"""
+    neon_env_builder.pageserver_init_overrides = f"""
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
         metric_collection_bucket={remote_storage_to_toml_inline_table(neon_env_builder.pageserver_remote_storage)}
@@ -216,7 +216,7 @@ def test_metric_collection_cleans_up_tempfile(
     #
     # Disable time-based pitr, we will use the manual GC calls
     # to trigger remote storage operations in a controlled way
-    neon_env_builder.pageserver_config_override = f"""
+    neon_env_builder.pageserver_init_overrides = f"""
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
         cached_metric_collection_interval="0s"

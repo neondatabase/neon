@@ -34,7 +34,7 @@ def test_pg_regress(
 
     if build_type == "debug":
         # Disable vectored read path cross validation since it makes the test time out.
-        neon_env_builder.pageserver_config_override = "validate_vectored_get=false"
+        neon_env_builder.pageserver_init_overrides = "validate_vectored_get=false"
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()

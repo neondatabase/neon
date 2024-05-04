@@ -70,7 +70,7 @@ def test_remote_storage_backup_and_restore(
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
     # that they are present after the test.
-    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
+    neon_env_builder.pageserver_init_overrides = "test_remote_failures=1"
 
     data_id = 1
     data = "just some data"

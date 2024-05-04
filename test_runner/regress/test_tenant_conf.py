@@ -15,7 +15,7 @@ from fixtures.utils import wait_until
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     """Test per tenant configuration"""
     # set some non-default global config
-    neon_env_builder.pageserver_config_override = """
+    neon_env_builder.pageserver_init_overrides = """
 page_cache_size=444;
 wait_lsn_timeout='111 s';
 [tenant_config]
