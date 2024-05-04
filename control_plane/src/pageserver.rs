@@ -157,6 +157,15 @@ impl PageServerNode {
             }
         }
 
+        if !cli_overrides
+            .iter()
+            .any(|c| c.starts_with("remote_storage"))
+        {
+            overrides.push(format!(
+                "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
+            ));
+        }
+
         if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
@@ -211,14 +220,6 @@ impl PageServerNode {
             format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
         })?;
         let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
-        if !config_overrides
-            .iter()
-            .any(|c| c.starts_with("remote_storage"))
-        {
-            args.push(Cow::Owned(format!(
-                "--pageserver-config-override=remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
-            )));
-        }
         args.push(Cow::Borrowed("--init"));
 
         let init_output = Command::new(self.env.pageserver_bin())
