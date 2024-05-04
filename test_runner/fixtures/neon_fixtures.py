@@ -1718,17 +1718,30 @@ class NeonCli(AbstractNeonCli):
             if force is not None:
                 cmd.extend(["--force", force])
 
-            storage = self.env.pageserver_remote_storage
+            remote_storage = self.env.pageserver_remote_storage
 
-            append_pageserver_param_overrides(
-                params_to_update=cmd,
-                remote_storage=storage,
-                pageserver_config_override=pageserver_init_overrides,
-            )
+            if remote_storage is not None:
+                remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
+
+                cmd.append(
+                    f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
+                )
+
+            env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
+            if env_overrides is not None:
+                cmd += [
+                    f"--pageserver-config-override={o.strip()}" for o in env_overrides.split(";")
+                ]
+
+            if pageserver_init_overrides is not None:
+                cmd += [
+                    f"--pageserver-config-override={o.strip()}"
+                    for o in pageserver_init_overrides.split(";")
+                ]
 
             s3_env_vars = None
-            if isinstance(storage, S3Storage):
-                s3_env_vars = storage.access_env_vars()
+            if isinstance(remote_storage, S3Storage):
+                s3_env_vars = remote_storage.access_env_vars()
             res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
             return res
@@ -1751,10 +1764,6 @@ class NeonCli(AbstractNeonCli):
     ) -> "subprocess.CompletedProcess[str]":
         start_args = ["pageserver", "start", f"--id={id}", *overrides]
         storage = self.env.pageserver_remote_storage
-        append_pageserver_param_overrides(
-            params_to_update=start_args,
-            remote_storage=storage,
-        )
 
         if isinstance(storage, S3Storage):
             s3_env_vars = storage.access_env_vars()
@@ -2587,33 +2596,6 @@ class NeonPageserver(PgProtocol, LogUtils):
         return client.tenant_load(
             tenant_id, generation=self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         )
-
-
-def append_pageserver_param_overrides(
-    params_to_update: List[str],
-    remote_storage: Optional[RemoteStorage],
-    pageserver_config_override: Optional[str] = None,
-):
-    if remote_storage is not None:
-        remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
-
-        params_to_update.append(
-            f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
-        )
-    else:
-        params_to_update.append('--pageserver-config-override=remote_storage=""')
-
-    env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
-    if env_overrides is not None:
-        params_to_update += [
-            f"--pageserver-config-override={o.strip()}" for o in env_overrides.split(";")
-        ]
-
-    if pageserver_config_override is not None:
-        params_to_update += [
-            f"--pageserver-config-override={o.strip()}"
-            for o in pageserver_config_override.split(";")
-        ]
 
 
 class PgBin:
