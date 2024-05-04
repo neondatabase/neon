@@ -12,7 +12,6 @@ from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 
-# test that we cannot override node id after init
 def test_pageserver_init_node_id(
     neon_simple_env: NeonEnv, neon_binpath: Path, pg_distrib_dir: Path
 ):
@@ -49,7 +48,7 @@ def test_pageserver_init_node_id(
 
     bad_reinit = run_pageserver(good_init_cmd)
     assert bad_reinit.returncode == 1, "pageserver refuses to init if already exists"
-    assert "already exists, cannot init it" in bad_reinit.stderr
+    assert "config file already exists" in bad_reinit.stderr
 
 
 def check_client(env: NeonEnv, client: PageserverHttpClient):
