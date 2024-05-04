@@ -72,19 +72,23 @@ const BUILD_TAG_DEFAULT: &str = "latest";
 fn main() -> Result<()> {
     let (build_tag, clap_args) = init()?;
 
-    let cli_args = process_cli(&clap_args)?;
+    let (pg_handle, start_pg_result) = {
+        // Enter startup tracing context
+        let _startup_context_guard = startup_context_from_env();
 
-    // Enter startup tracing context
-    let startup_context_guard = startup_context_from_env();
+        let cli_args = process_cli(&clap_args)?;
 
-    let cli_spec = try_spec_from_cli(&clap_args, &cli_args)?;
+        let cli_spec = try_spec_from_cli(&clap_args, &cli_args)?;
 
-    let wait_spec_result = wait_spec(build_tag, cli_args, cli_spec)?;
+        let wait_spec_result = wait_spec(build_tag, cli_args, cli_spec)?;
 
-    let (pg_handle, start_pg_result) = start_postgres(&clap_args, wait_spec_result)?;
+        start_postgres(&clap_args, wait_spec_result)?
+
+        // Startup is finished, exit the startup tracing span
+    };
 
     // PostgreSQL is now running, if startup was successful. Wait until it exits.
-    let wait_pg_result = wait_postgres(pg_handle, startup_context_guard)?;
+    let wait_pg_result = wait_postgres(pg_handle)?;
 
     let delay_exit = cleanup_after_postgres_exit(start_pg_result)?;
 
@@ -531,19 +535,11 @@ struct StartPostgresResult {
     vm_monitor: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
-fn wait_postgres(
-    pg: Option<PostgresHandle>,
-    startup_context_guard: Option<opentelemetry::ContextGuard>,
-) -> Result<WaitPostgresResult> {
+fn wait_postgres(pg: Option<PostgresHandle>) -> Result<WaitPostgresResult> {
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
     let mut exit_code = None;
     if let Some((mut pg, logs_handle)) = pg {
-        // Startup is finished, exit the startup tracing span
-        // TODO: Probably easier to drop startup_context_guard outside this function. It's here
-        // right now because keeping it here reduced the size of the diff.
-        drop(startup_context_guard);
-
         let ecode = pg
             .wait()
             .expect("failed to start waiting on Postgres process");
