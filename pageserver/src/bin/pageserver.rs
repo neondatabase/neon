@@ -155,6 +155,9 @@ fn initialize_config(
 
     let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
         Ok(mut f) => {
+            if init {
+                anyhow::bail!("config file already exists: {cfg_file_path}");
+            }
             let md = f.metadata().context("stat config file")?;
             if md.is_file() {
                 let mut s = String::new();
