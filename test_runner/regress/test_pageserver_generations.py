@@ -220,7 +220,12 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
     env.storage_controller.node_register(env.pageserver)
 
-    env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
+    replaced_config = env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "control_plane_api": "",
+        }
+    )
+    env.pageserver.start()
     env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
     env.neon_cli.create_tenant(
@@ -251,8 +256,8 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
         assert parse_generation_suffix(key) is None
 
     env.pageserver.stop()
-
     # Starting without the override that disabled control_plane_api
+    env.pageserver.patch_config_toml_nonrecursive(replaced_config)
     env.pageserver.start()
 
     generate_uploads_and_deletions(env, pageserver=env.pageserver, init=False)
@@ -525,9 +530,10 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # incident, but it might be unavoidable: if so, we want to be able to start up
     # and serve clients.
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
-    env.pageserver.start(
-        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
-    )
+    replaced = env.pageserver.patch_config_toml_nonrecursive({
+        "control_plane_emergency_mode": True,
+    })
+    env.pageserver.start()
 
     # The pageserver should provide service to clients
     generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)
@@ -549,6 +555,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     # The pageserver should work fine when subsequently restarted in non-emergency mode
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
+    env.pageserver.patch_config_toml_nonrecursive(replaced)
     env.pageserver.start()
 
     generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)

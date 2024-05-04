@@ -1746,10 +1746,9 @@ class NeonCli(AbstractNeonCli):
     def pageserver_start(
         self,
         id: int,
-        overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
     ) -> "subprocess.CompletedProcess[str]":
-        start_args = ["pageserver", "start", f"--id={id}", *overrides]
+        start_args = ["pageserver", "start", f"--id={id}"]
         storage = self.env.pageserver_remote_storage
         append_pageserver_param_overrides(
             params_to_update=start_args,
@@ -2412,9 +2411,47 @@ class NeonPageserver(PgProtocol, LogUtils):
             return self.workdir / "tenants"
         return self.workdir / "tenants" / str(tenant_shard_id)
 
+    @property
+    def config_toml_path(self) -> Path:
+        return self.workdir / "pageserver.toml"
+
+    def edit_config_toml(self, edit_fn: Callable[[Dict[str, Any]], bool]):
+        """
+        Edit the pageserver's config toml file in place.
+
+        The `edit_fn` is to manipulate the dict, and if it returns True, the file will be written.
+        If it returns False, no changes are made to the file system.
+        """
+        path = self.config_toml_path
+        with open(path, "r") as f:
+            config = toml.load(f)
+        save = edit_fn(config)
+        if save:
+            with open(path, "w") as f:
+                toml.dump(config, f)
+
+    def patch_config_toml_nonrecursive(self, patch: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Non-recursively merge the given `patch` dict into the existing config toml, using `dict.update()`.
+        Returns the replaced values.
+        If there was no previous value, the key is mapped to None.
+        This allows to restore the original value by calling this method with the returned dict.
+        """
+        replacements = {}
+
+        def doit(config: Dict[str, Any]) -> bool:
+            while len(patch) > 0:
+                key, new = patch.popitem()
+                old = config.get(key, None)
+                config[key] = new
+                replacements[key] = old
+            return True
+
+        self.edit_config_toml(doit)
+        return replacements
+
     def start(
         self,
-        overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
     ) -> "NeonPageserver":
         """
@@ -2424,9 +2461,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         """
         assert self.running is False
 
-        self.env.neon_cli.pageserver_start(
-            self.id, overrides=overrides, extra_env_vars=extra_env_vars
-        )
+        self.env.neon_cli.pageserver_start(self.id, extra_env_vars=extra_env_vars)
         self.running = True
         return self
 

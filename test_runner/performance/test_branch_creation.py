@@ -140,10 +140,12 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
 
     # start without gc so we can time compaction with less noise; use shorter
     # period for compaction so it starts earlier
+    def patch_default_tenant_config(config):
+        config["compaction_period"] = "3s"
+        config["gc_period"] = "0s"
+        return True
+    env.pageserver.edit_config_toml(patch_default_tenant_config)
     env.pageserver.start(
-        overrides=(
-            "--pageserver-config-override=tenant_config={ compaction_period = '3s', gc_period = '0s' }",
-        ),
         # this does print more than we want, but the number should be comparable between runs
         extra_env_vars={
             "RUST_LOG": f"[compaction_loop{{tenant_id={env.initial_tenant}}}]=debug,info"
