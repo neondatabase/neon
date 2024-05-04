@@ -40,18 +40,10 @@ Note the `[remote_storage]` section: it's a [table](https://toml.io/en/v1.0.0#ta
 
 - or can be placed anywhere if rewritten in identical form as [inline table](https://toml.io/en/v1.0.0#inline-table): `remote_storage = {foo = 2}`
 
-### Config values
-
-All values can be passed as an argument to the pageserver binary, using the `-c` parameter and specified as a valid TOML string. All tables should be passed in the inline form.
-
-Example: `${PAGESERVER_BIN} -c "checkpoint_timeout = '10 m'" -c "remote_storage={local_path='/some/local/path/'}"`
-
-Note that TOML distinguishes between strings and integers, the former require single or double quotes around them.
-
 #### broker_endpoint
 
 A storage broker endpoint to connect and pull the information from. Default is
-`'http://127.0.0.1:50051'`. 
+`'http://127.0.0.1:50051'`.
 
 #### checkpoint_distance
 
@@ -158,7 +150,7 @@ The default distrib dir is `./pg_install/`.
 A directory in the file system, where pageserver will store its files.
 The default is `./.neon/`.
 
-This parameter has a special CLI alias (`-D`) and can not be overridden with regular `-c` way.
+This parameter has a special CLI alias (`-D`).
 
 ##### Remote storage
 

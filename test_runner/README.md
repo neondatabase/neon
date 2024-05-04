@@ -80,8 +80,6 @@ should go.
 
 Useful parameters and commands:
 
-`--pageserver-config-override=${value}` `-c` values to pass into pageserver through neon_local cli
-
 `--preserve-database-files` to preserve pageserver (layer) and safekeer (segment) timeline files on disk
 after running a test suite. Such files might be large, so removed by default; but might be useful for debugging or creation of svg images with layer file contents.
 

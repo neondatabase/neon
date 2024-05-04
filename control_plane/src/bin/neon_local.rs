@@ -375,7 +375,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     // Initialize pageserver, create initial tenant and timeline.
     for ps_conf in &env.pageservers {
         PageServerNode::from_env(&env, ps_conf)
-            .initialize(&pageserver_config_overrides(init_match))
+            .initialize()
             .unwrap_or_else(|e| {
                 eprintln!("pageserver init failed: {e:?}");
                 exit(1);
@@ -395,15 +395,6 @@ fn get_default_pageserver(env: &local_env::LocalEnv) -> PageServerNode {
         .first()
         .expect("Config is validated to contain at least one pageserver");
     PageServerNode::from_env(env, ps_conf)
-}
-
-fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
-    init_match
-        .get_many::<String>("pageserver-config-override")
-        .into_iter()
-        .flatten()
-        .map(String::as_str)
-        .collect()
 }
 
 async fn handle_tenant(
@@ -1068,10 +1059,7 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
-            if let Err(e) = get_pageserver(env, subcommand_args)?
-                .start(&pageserver_config_overrides(subcommand_args))
-                .await
-            {
+            if let Err(e) = get_pageserver(env, subcommand_args)?.start().await {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1244,10 +1232,7 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
-        if let Err(e) = pageserver
-            .start(&pageserver_config_overrides(sub_match))
-            .await
-        {
+        if let Err(e) = pageserver.start().await {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1387,13 +1372,6 @@ fn cli() -> Command {
         .help("If 'immediate', don't flush repository data at shutdown")
         .required(false)
         .value_name("stop-mode");
-
-    let pageserver_config_args = Arg::new("pageserver-config-override")
-        .long("pageserver-config-override")
-        .num_args(1)
-        .action(ArgAction::Append)
-        .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'config-override' CLI parameter docs for more")
-        .required(false);
 
     let remote_ext_config_args = Arg::new("remote-ext-config")
         .long("remote-ext-config")

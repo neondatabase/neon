@@ -77,7 +77,7 @@ impl PageServerNode {
     /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
     ///
     /// These all end up on the command line of the `pageserver` binary.
-    fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
+    fn neon_local_overrides(&self) -> Vec<String> {
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
@@ -179,9 +179,9 @@ impl PageServerNode {
     }
 
     /// Initializes a pageserver node by creating its config with the overrides provided.
-    pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+    pub fn initialize(&self) -> anyhow::Result<()> {
         // First, run `pageserver --init` and wait for it to write a config into FS and exit.
-        self.pageserver_init(config_overrides)
+        self.pageserver_init()
             .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
     }
 
@@ -197,11 +197,11 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
-        self.start_node(config_overrides).await
+    pub async fn start(&self) -> anyhow::Result<()> {
+        self.start_node().await
     }
 
-    fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+    fn pageserver_init(&self) -> anyhow::Result<()> {
         let datadir = self.repo_path();
         let node_id = self.conf.id;
         println!(
@@ -219,7 +219,7 @@ impl PageServerNode {
         let datadir_path_str = datadir.to_str().with_context(|| {
             format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
         })?;
-        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
+        let mut args = self.pageserver_basic_args(datadir_path_str);
         args.push(Cow::Borrowed("--init"));
 
         let init_output = Command::new(self.env.pageserver_bin())
@@ -262,7 +262,7 @@ impl PageServerNode {
         Ok(())
     }
 
-    async fn start_node(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+    async fn start_node(&self) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
@@ -279,7 +279,7 @@ impl PageServerNode {
                 self.conf.id, datadir,
             )
         })?;
-        let args = self.pageserver_basic_args(config_overrides, datadir_path_str);
+        let args = self.pageserver_basic_args(datadir_path_str);
         background_process::start_process(
             "pageserver",
             &datadir,
@@ -301,14 +301,10 @@ impl PageServerNode {
         Ok(())
     }
 
-    fn pageserver_basic_args<'a>(
-        &self,
-        config_overrides: &'a [&'a str],
-        datadir_path_str: &'a str,
-    ) -> Vec<Cow<'a, str>> {
+    fn pageserver_basic_args<'a>(&self, datadir_path_str: &'a str) -> Vec<Cow<'a, str>> {
         let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
 
-        let overrides = self.neon_local_overrides(config_overrides);
+        let overrides = self.neon_local_overrides();
         for config_override in overrides {
             args.push(Cow::Borrowed("-c"));
             args.push(Cow::Owned(config_override));
