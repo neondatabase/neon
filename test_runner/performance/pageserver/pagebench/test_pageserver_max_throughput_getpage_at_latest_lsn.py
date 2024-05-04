@@ -66,7 +66,7 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
     # configure cache sizes like in prod
     page_cache_size = 16384
     max_file_descriptors = 500000
-    neon_env_builder.pageserver_init_overrides = (
+    neon_env_builder.pageserver_config_override = (
         f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
     )
     params.update(

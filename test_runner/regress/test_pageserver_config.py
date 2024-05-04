@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import (
 
 @pytest.mark.parametrize("kind", ["sync", "async"])
 def test_walredo_process_kind_config(neon_env_builder: NeonEnvBuilder, kind: str):
-    neon_env_builder.pageserver_init_overrides = f"walredo_process_kind = '{kind}'"
+    neon_env_builder.pageserver_config_override = f"walredo_process_kind = '{kind}'"
     # ensure it starts
     env = neon_env_builder.init_start()
     # ensure the metric is set

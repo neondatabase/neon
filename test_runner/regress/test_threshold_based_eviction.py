@@ -27,7 +27,7 @@ def test_threshold_based_eviction(
     # imitates its accesses. We'll use a non-existent endpoint to make it fail.
     # The synthetic size calculation will run regardless.
     host, port = httpserver_listen_address
-    neon_env_builder.pageserver_init_overrides = f"""
+    neon_env_builder.pageserver_config_override = f"""
         metric_collection_interval="1s"
         synthetic_size_calculation_interval="2s"
         metric_collection_endpoint="http://{host}:{port}/nonexistent"

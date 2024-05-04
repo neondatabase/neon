@@ -107,7 +107,7 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
     # that they are present after the test.
-    neon_env_builder.pageserver_init_overrides = "test_remote_failures=1"
+    neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
