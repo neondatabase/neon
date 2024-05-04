@@ -74,110 +74,6 @@ impl PageServerNode {
         }
     }
 
-    /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
-    ///
-    /// These all end up on the command line of the `pageserver` binary.
-    fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
-        // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
-        let pg_distrib_dir_param = format!(
-            "pg_distrib_dir='{}'",
-            self.env.pg_distrib_dir_raw().display()
-        );
-
-        let PageServerConf {
-            id,
-            listen_pg_addr,
-            listen_http_addr,
-            pg_auth_type,
-            http_auth_type,
-            virtual_file_io_engine,
-            get_vectored_impl,
-            get_impl,
-            validate_vectored_get,
-        } = &self.conf;
-
-        let id = format!("id={}", id);
-
-        let http_auth_type_param = format!("http_auth_type='{}'", http_auth_type);
-        let listen_http_addr_param = format!("listen_http_addr='{}'", listen_http_addr);
-
-        let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
-        let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
-        let virtual_file_io_engine = if let Some(virtual_file_io_engine) = virtual_file_io_engine {
-            format!("virtual_file_io_engine='{virtual_file_io_engine}'")
-        } else {
-            String::new()
-        };
-        let get_vectored_impl = if let Some(get_vectored_impl) = get_vectored_impl {
-            format!("get_vectored_impl='{get_vectored_impl}'")
-        } else {
-            String::new()
-        };
-        let get_impl = if let Some(get_impl) = get_impl {
-            format!("get_impl='{get_impl}'")
-        } else {
-            String::new()
-        };
-        let validate_vectored_get = if let Some(validate_vectored_get) = validate_vectored_get {
-            format!("validate_vectored_get={validate_vectored_get}")
-        } else {
-            String::new()
-        };
-
-        let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
-
-        let mut overrides = vec![
-            id,
-            pg_distrib_dir_param,
-            http_auth_type_param,
-            pg_auth_type_param,
-            listen_http_addr_param,
-            listen_pg_addr_param,
-            broker_endpoint_param,
-            virtual_file_io_engine,
-            get_vectored_impl,
-            get_impl,
-            validate_vectored_get,
-        ];
-
-        if let Some(control_plane_api) = &self.env.control_plane_api {
-            overrides.push(format!(
-                "control_plane_api='{}'",
-                control_plane_api.as_str()
-            ));
-
-            // Storage controller uses the same auth as pageserver: if JWT is enabled
-            // for us, we will also need it to talk to them.
-            if matches!(http_auth_type, AuthType::NeonJWT) {
-                let jwt_token = self
-                    .env
-                    .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
-                    .unwrap();
-                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
-            }
-        }
-
-        if !cli_overrides
-            .iter()
-            .any(|c| c.starts_with("remote_storage"))
-        {
-            overrides.push(format!(
-                "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
-            ));
-        }
-
-        if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
-            // Keys are generated in the toplevel repo dir, pageservers' workdirs
-            // are one level below that, so refer to keys with ../
-            overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
-        }
-
-        // Apply the user-provided overrides
-        overrides.extend(cli_overrides.iter().map(|&c| c.to_owned()));
-
-        overrides
-    }
-
     /// Initializes a pageserver node by creating its config with the overrides provided.
     pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         // First, run `pageserver --init` and wait for it to write a config into FS and exit.
@@ -219,7 +115,124 @@ impl PageServerNode {
         let datadir_path_str = datadir.to_str().with_context(|| {
             format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
         })?;
-        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
+        let mut args = {
+            let this = &self;
+            let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
+
+            let overrides = {
+                let this = &this;
+                // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
+                let pg_distrib_dir_param = format!(
+                    "pg_distrib_dir='{}'",
+                    this.env.pg_distrib_dir_raw().display()
+                );
+
+                let PageServerConf {
+                    id,
+                    listen_pg_addr,
+                    listen_http_addr,
+                    pg_auth_type,
+                    http_auth_type,
+                    virtual_file_io_engine,
+                    get_vectored_impl,
+                    get_impl,
+                    validate_vectored_get,
+                } = &this.conf;
+
+                let id = format!("id={}", id);
+
+                let http_auth_type_param = format!("http_auth_type='{}'", http_auth_type);
+                let listen_http_addr_param = format!("listen_http_addr='{}'", listen_http_addr);
+
+                let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
+                let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
+                let virtual_file_io_engine =
+                    if let Some(virtual_file_io_engine) = virtual_file_io_engine {
+                        format!("virtual_file_io_engine='{virtual_file_io_engine}'")
+                    } else {
+                        String::new()
+                    };
+                let get_vectored_impl = if let Some(get_vectored_impl) = get_vectored_impl {
+                    format!("get_vectored_impl='{get_vectored_impl}'")
+                } else {
+                    String::new()
+                };
+                let get_impl = if let Some(get_impl) = get_impl {
+                    format!("get_impl='{get_impl}'")
+                } else {
+                    String::new()
+                };
+                let validate_vectored_get =
+                    if let Some(validate_vectored_get) = validate_vectored_get {
+                        format!("validate_vectored_get={validate_vectored_get}")
+                    } else {
+                        String::new()
+                    };
+
+                let broker_endpoint_param =
+                    format!("broker_endpoint='{}'", this.env.broker.client_url());
+
+                let mut overrides = vec![
+                    id,
+                    pg_distrib_dir_param,
+                    http_auth_type_param,
+                    pg_auth_type_param,
+                    listen_http_addr_param,
+                    listen_pg_addr_param,
+                    broker_endpoint_param,
+                    virtual_file_io_engine,
+                    get_vectored_impl,
+                    get_impl,
+                    validate_vectored_get,
+                ];
+
+                if let Some(control_plane_api) = &this.env.control_plane_api {
+                    overrides.push(format!(
+                        "control_plane_api='{}'",
+                        control_plane_api.as_str()
+                    ));
+
+                    // Storage controller uses the same auth as pageserver: if JWT is enabled
+                    // for us, we will also need it to talk to them.
+                    if matches!(http_auth_type, AuthType::NeonJWT) {
+                        let jwt_token = this
+                            .env
+                            .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
+                            .unwrap();
+                        overrides.push(format!("control_plane_api_token='{}'", jwt_token));
+                    }
+                }
+
+                if !config_overrides
+                    .iter()
+                    .any(|c| c.starts_with("remote_storage"))
+                {
+                    overrides.push(format!(
+                        "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
+                    ));
+                }
+
+                if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
+                    // Keys are generated in the toplevel repo dir, pageservers' workdirs
+                    // are one level below that, so refer to keys with ../
+                    overrides.push(
+                        "auth_validation_public_key_path='../auth_public_key.pem'".to_owned(),
+                    );
+                }
+
+                // Apply the user-provided overrides
+                overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
+
+                overrides
+            };
+
+            for config_override in overrides {
+                args.push(Cow::Borrowed("--config-override"));
+                args.push(Cow::Owned(config_override));
+            }
+
+            args
+        };
         args.push(Cow::Borrowed("--init"));
 
         let init_output = Command::new(self.env.pageserver_bin())
@@ -279,12 +292,16 @@ impl PageServerNode {
                 self.conf.id, datadir,
             )
         })?;
-        let args = self.pageserver_basic_args(config_overrides, datadir_path_str);
+        let mut args = vec!["-D", datadir_path_str];
+        for config_override in config_overrides {
+            args.push("--config-override");
+            args.push(*config_override);
+        }
         background_process::start_process(
             "pageserver",
             &datadir,
             &self.env.pageserver_bin(),
-            args.iter().map(Cow::as_ref),
+            args,
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
@@ -299,22 +316,6 @@ impl PageServerNode {
         .await?;
 
         Ok(())
-    }
-
-    fn pageserver_basic_args<'a>(
-        &self,
-        config_overrides: &'a [&'a str],
-        datadir_path_str: &'a str,
-    ) -> Vec<Cow<'a, str>> {
-        let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
-
-        let overrides = self.neon_local_overrides(config_overrides);
-        for config_override in overrides {
-            args.push(Cow::Borrowed("-c"));
-            args.push(Cow::Owned(config_override));
-        }
-
-        args
     }
 
     fn pageserver_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
