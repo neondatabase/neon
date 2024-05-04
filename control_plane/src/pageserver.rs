@@ -198,7 +198,7 @@ impl PageServerNode {
     }
 
     pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
-        self.start_node(config_overrides, false).await
+        self.start_node(config_overrides).await
     }
 
     fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
@@ -262,11 +262,7 @@ impl PageServerNode {
         Ok(())
     }
 
-    async fn start_node(
-        &self,
-        config_overrides: &[&str],
-        update_config: bool,
-    ) -> anyhow::Result<()> {
+    async fn start_node(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
@@ -283,10 +279,7 @@ impl PageServerNode {
                 self.conf.id, datadir,
             )
         })?;
-        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
-        if update_config {
-            args.push(Cow::Borrowed("--update-config"));
-        }
+        let args = self.pageserver_basic_args(config_overrides, datadir_path_str);
         background_process::start_process(
             "pageserver",
             &datadir,

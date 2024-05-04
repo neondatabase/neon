@@ -51,9 +51,6 @@ def test_pageserver_init_node_id(
     assert bad_reinit.returncode == 1, "pageserver refuses to init if already exists"
     assert "already exists, cannot init it" in bad_reinit.stderr
 
-    bad_update = run_pageserver(["--update-config", "-c", "id = 3"])
-    assert bad_update.returncode == 1, "pageserver should not allow updating node id"
-    assert "has node id already, it cannot be overridden" in bad_update.stderr
 
 
 def check_client(env: NeonEnv, client: PageserverHttpClient):
