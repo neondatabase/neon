@@ -31,7 +31,7 @@ def test_pageserver_compaction_smoke(neon_env_builder: NeonEnvBuilder):
 
     # Effectively disable the page cache to rely only on image layers
     # to shorten reads.
-    neon_env_builder.pageserver_init_overrides = """
+    neon_env_builder.pageserver_config_override = """
 page_cache_size=10
 """
 

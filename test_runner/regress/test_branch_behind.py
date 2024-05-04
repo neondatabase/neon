@@ -11,7 +11,7 @@ from fixtures.utils import print_gc_result, query_scalar
 #
 def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # Disable pitr, because here we want to test branch creation after GC
-    neon_env_builder.pageserver_init_overrides = "tenant_config={pitr_interval = '0 sec'}"
+    neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
 
     error_regexes = [

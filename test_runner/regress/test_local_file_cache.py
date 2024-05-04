@@ -11,7 +11,7 @@ from fixtures.utils import query_scalar
 def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder, build_type: str):
     if build_type == "debug":
         # Disable vectored read path cross validation since it makes the test time out.
-        neon_env_builder.pageserver_init_overrides = "validate_vectored_get=false"
+        neon_env_builder.pageserver_config_override = "validate_vectored_get=false"
 
     env = neon_env_builder.init_start()
 

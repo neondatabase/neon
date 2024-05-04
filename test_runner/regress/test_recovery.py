@@ -10,7 +10,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 #
 def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     # Override default checkpointer settings to run it more often
-    neon_env_builder.pageserver_init_overrides = "tenant_config={checkpoint_distance = 1048576}"
+    neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
 
     env = neon_env_builder.init_start()
     env.pageserver.is_testing_enabled_or_skip()

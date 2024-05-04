@@ -451,7 +451,7 @@ class NeonEnvBuilder:
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
         # toml that will be decomposed into `--config-override` flags during `pageserver --init`
-        pageserver_init_overrides: Optional[str] = None,
+        pageserver_config_override: Optional[str] = None,
         num_safekeepers: int = 1,
         num_pageservers: int = 1,
         # Use non-standard SK ids to check for various parsing bugs
@@ -478,7 +478,7 @@ class NeonEnvBuilder:
         self.broker = broker
         self.run_id = run_id
         self.mock_s3_server: MockS3Server = mock_s3_server
-        self.pageserver_init_overrides = pageserver_init_overrides
+        self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.num_pageservers = num_pageservers
         self.safekeepers_id_start = safekeepers_id_start
@@ -1134,7 +1134,7 @@ class NeonEnv:
         self.neon_cli.init(
             cfg,
             force=config.config_init_force,
-            pageserver_init_overrides=config.pageserver_init_overrides,
+            pageserver_config_override=config.pageserver_config_override,
         )
 
     def start(self):
@@ -1707,7 +1707,7 @@ class NeonCli(AbstractNeonCli):
         self,
         config: Dict[str, Any],
         force: Optional[str] = None,
-        pageserver_init_overrides: Optional[str] = None,
+        pageserver_config_override: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(toml.dumps(config))
@@ -1733,10 +1733,10 @@ class NeonCli(AbstractNeonCli):
                     f"--pageserver-config-override={o.strip()}" for o in env_overrides.split(";")
                 ]
 
-            if pageserver_init_overrides is not None:
+            if pageserver_config_override is not None:
                 cmd += [
                     f"--pageserver-config-override={o.strip()}"
-                    for o in pageserver_init_overrides.split(";")
+                    for o in pageserver_config_override.split(";")
                 ]
 
             s3_env_vars = None
