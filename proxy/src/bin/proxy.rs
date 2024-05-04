@@ -118,8 +118,11 @@ struct ProxyCliArgs {
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     wake_compute_cache: String,
     /// lock for `wake_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
-    #[clap(long, default_value = config::WakeComputeLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
+    #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
     wake_compute_lock: String,
+    /// lock for `connect_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
+    #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK)]
+    connect_compute_lock: String,
     /// Allow self-signed certificates for compute nodes (for testing)
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     allow_self_signed_compute: bool,
@@ -529,24 +532,21 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 endpoint_cache_config,
             )));
 
-            let config::WakeComputeLockOptions {
+            let config::ConcurrencyLockOptions {
                 shards,
                 permits,
                 epoch,
                 timeout,
             } = args.wake_compute_lock.parse()?;
             info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
-            let locks = Box::leak(Box::new(
-                console::locks::ApiLocks::new(
-                    "wake_compute_lock",
-                    permits,
-                    shards,
-                    timeout,
-                    epoch,
-                    &Metrics::get().wake_compute_lock,
-                )
-                .unwrap(),
-            ));
+            let locks = Box::leak(Box::new(console::locks::ApiLocks::new(
+                "wake_compute_lock",
+                permits,
+                shards,
+                timeout,
+                epoch,
+                &Metrics::get().wake_compute_lock,
+            )?));
             tokio::spawn(locks.garbage_collect_worker());
 
             let url = args.auth_endpoint.parse()?;
@@ -572,6 +572,23 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             auth::BackendType::Link(MaybeOwned::Owned(url), ())
         }
     };
+
+    let config::ConcurrencyLockOptions {
+        shards,
+        permits,
+        epoch,
+        timeout,
+    } = args.connect_compute_lock.parse()?;
+    info!(permits, shards, ?epoch, "Using NodeLocks (connect_compute)");
+    let connect_compute_locks = console::locks::ApiLocks::new(
+        "connect_compute_lock",
+        permits,
+        shards,
+        timeout,
+        epoch,
+        &Metrics::get().proxy.connect_compute_lock,
+    )?;
+
     let http_config = HttpConfig {
         request_timeout: args.sql_over_http.sql_over_http_timeout,
         pool_options: GlobalConnPoolOptions {
@@ -607,10 +624,13 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         region: args.region.clone(),
         aws_region: args.aws_region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
+        connect_compute_locks,
         connect_to_compute_retry_config: config::RetryConfig::parse(
             &args.connect_to_compute_retry,
         )?,
     }));
+
+    tokio::spawn(config.connect_compute_locks.garbage_collect_worker());
 
     Ok(config)
 }

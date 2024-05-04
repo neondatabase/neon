@@ -5504,6 +5504,8 @@ mod tests {
         const NUM_KEYS: usize = 1000;
         const STEP: usize = 100; // random update + scan base_key + idx * STEP
 
+        let cancel = CancellationToken::new();
+
         let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
         base_key.field1 = AUX_KEY_PREFIX;
         let mut test_key = base_key;
@@ -5585,21 +5587,11 @@ mod tests {
             }
 
             // Perform a cycle of flush, compact, and GC
-            let cutoff = tline.get_last_record_lsn();
-            tline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    &ctx,
-                )
-                .await?;
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+            tenant
+                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
-            tline.gc().await?;
         }
 
         Ok(())

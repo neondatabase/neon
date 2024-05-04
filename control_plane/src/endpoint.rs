@@ -554,6 +554,7 @@ impl Endpoint {
             format_version: 1.0,
             operation_uuid: None,
             features: self.features.clone(),
+            swap_size_bytes: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used

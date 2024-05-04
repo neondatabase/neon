@@ -301,7 +301,10 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let mut node = connect_to_compute(
         ctx,
-        &TcpMechanism { params: &params },
+        &TcpMechanism {
+            params: &params,
+            locks: &config.connect_compute_locks,
+        },
         &user_info,
         mode.allow_self_signed_compute(config),
         config.wake_compute_retry_config,
