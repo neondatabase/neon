@@ -2603,12 +2603,6 @@ def append_pageserver_param_overrides(
     else:
         params_to_update.append('--pageserver-config-override=remote_storage=""')
 
-    env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
-    if env_overrides is not None:
-        params_to_update += [
-            f"--pageserver-config-override={o.strip()}" for o in env_overrides.split(";")
-        ]
-
     if pageserver_config_override is not None:
         params_to_update += [
             f"--pageserver-config-override={o.strip()}"
