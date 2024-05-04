@@ -52,7 +52,6 @@ def test_pageserver_init_node_id(
     assert "already exists, cannot init it" in bad_reinit.stderr
 
 
-
 def check_client(env: NeonEnv, client: PageserverHttpClient):
     pg_version = env.pg_version
     initial_tenant = env.initial_tenant
