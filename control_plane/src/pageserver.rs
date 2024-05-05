@@ -73,48 +73,11 @@ impl PageServerNode {
         }
     }
 
-    /// Initializes a pageserver node by creating its config with the overrides provided.
-    pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
-        // First, run `pageserver --init` and wait for it to write a config into FS and exit.
-        self.pageserver_init(config_overrides)
-            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
-    }
-
-    pub fn repo_path(&self) -> PathBuf {
-        self.env.pageserver_data_dir(self.conf.id)
-    }
-
-    /// The pid file is created by the pageserver process, with its pid stored inside.
-    /// Other pageservers cannot lock the same file and overwrite it for as long as the current
-    /// pageserver runs. (Unless someone removes the file manually; never do that!)
-    fn pid_file(&self) -> Utf8PathBuf {
-        Utf8PathBuf::from_path_buf(self.repo_path().join("pageserver.pid"))
-            .expect("non-Unicode path")
-    }
-
-    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
-        self.start_node(config_overrides).await
-    }
-
-    fn pageserver_init(&self, cli_overrides: &[&str]) -> anyhow::Result<()> {
-        let datadir = self.repo_path();
-        let node_id = self.conf.id;
-        println!(
-            "Initializing pageserver node {} at '{}' in {:?}",
-            node_id,
-            self.pg_connection_config.raw_address(),
-            datadir
-        );
-        io::stdout().flush()?;
-
-        if !datadir.exists() {
-            std::fs::create_dir(&datadir)?;
-        }
-
-        let datadir_path_str = datadir.to_str().with_context(|| {
-            format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
-        })?;
-
+    /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
+    ///
+    /// These all end up on the command line of the `pageserver` binary.
+    fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
+        // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
@@ -211,10 +174,56 @@ impl PageServerNode {
         // Apply the user-provided overrides
         overrides.extend(cli_overrides.iter().map(|&c| c.to_owned()));
 
+        overrides
+    }
+
+    /// Initializes a pageserver node by creating its config with the overrides provided.
+    pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+        // First, run `pageserver --init` and wait for it to write a config into FS and exit.
+        self.pageserver_init(config_overrides)
+            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
+    }
+
+    pub fn repo_path(&self) -> PathBuf {
+        self.env.pageserver_data_dir(self.conf.id)
+    }
+
+    /// The pid file is created by the pageserver process, with its pid stored inside.
+    /// Other pageservers cannot lock the same file and overwrite it for as long as the current
+    /// pageserver runs. (Unless someone removes the file manually; never do that!)
+    fn pid_file(&self) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(self.repo_path().join("pageserver.pid"))
+            .expect("non-Unicode path")
+    }
+
+    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+        self.start_node(config_overrides).await
+    }
+
+    fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+        let datadir = self.repo_path();
+        let node_id = self.conf.id;
+        println!(
+            "Initializing pageserver node {} at '{}' in {:?}",
+            node_id,
+            self.pg_connection_config.raw_address(),
+            datadir
+        );
+        io::stdout().flush()?;
+
+        if !datadir.exists() {
+            std::fs::create_dir(&datadir)?;
+        }
+
+        let datadir_path_str = datadir.to_str().with_context(|| {
+            format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
+        })?;
+
         // `pageserver --init` merges the `--config-override`s into a built-in default config,
         // then writes out the merged product to `pageserver.toml`.
         // TODO: just write the full `pageserver.toml` and get rid of `--config-override`.
         let mut args = vec!["--init", "--workdir", datadir_path_str];
+        let overrides = self.neon_local_overrides(config_overrides);
         for piece in &overrides {
             args.push("--config-override");
             args.push(piece);
