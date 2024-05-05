@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -7,8 +6,8 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
-from fixtures.remote_storage import s3_storage
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
+from fixtures.remote_storage import s3_storage
 
 
 @pytest.mark.parametrize("duration", [30])
@@ -72,12 +71,12 @@ def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     bytes_per_layer = 10 * (1024**2)
     env = neon_env_builder.init_start(
         initial_tenant_conf={
-            "pitr_interval": "1000d", # let's not make it get in the way
+            "pitr_interval": "1000d",  # let's not make it get in the way
             "gc_period": "0s",  # disable periodic gc to avoid noise
             "compaction_period": "0s",  # disable L0=>L1 compaction
-            "checkpoint_timeout": "10years", # rely solely on checkpoint_distance
-            "checkpoint_distance": bytes_per_layer, # 10M instead of 256M to create more smaller layers
-            "image_creation_threshold": 100000, # don't create image layers ever
+            "checkpoint_timeout": "10years",  # rely solely on checkpoint_distance
+            "checkpoint_distance": bytes_per_layer,  # 10M instead of 256M to create more smaller layers
+            "image_creation_threshold": 100000,  # don't create image layers ever
         }
     )
 
@@ -87,11 +86,14 @@ def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as ep:
         ep.safe_psql("CREATE TABLE data (random_text text)")
-        bytes_per_row = 512 # make big enough so WAL record size doesn't dominate
+        bytes_per_row = 512  # make big enough so WAL record size doesn't dominate
         desired_layers = 300
         desired_bytes = bytes_per_layer * desired_layers
         nrows = desired_bytes / bytes_per_row
-        ep.safe_psql(f"INSERT INTO data SELECT lpad(i::text, {bytes_per_row}, '0') FROM generate_series(1, {int(nrows)})  as i", options="-c statement_timeout=0")
+        ep.safe_psql(
+            f"INSERT INTO data SELECT lpad(i::text, {bytes_per_row}, '0') FROM generate_series(1, {int(nrows)})  as i",
+            options="-c statement_timeout=0",
+        )
         wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
     # TODO: this is a bit imprecise, there could be frozen layers being written out that we don't observe here
     wait_for_upload_queue_empty(client, tenant_id, timeline_id)
