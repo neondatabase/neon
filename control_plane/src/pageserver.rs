@@ -73,48 +73,11 @@ impl PageServerNode {
         }
     }
 
-    /// Initializes a pageserver node by creating its config with the overrides provided.
-    pub fn initialize(&self, cli_overrides: &toml_edit::Document) -> anyhow::Result<()> {
-        // First, run `pageserver --init` and wait for it to write a config into FS and exit.
-        self.pageserver_init(cli_overrides)
-            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
-    }
-
-    pub fn repo_path(&self) -> PathBuf {
-        self.env.pageserver_data_dir(self.conf.id)
-    }
-
-    /// The pid file is created by the pageserver process, with its pid stored inside.
-    /// Other pageservers cannot lock the same file and overwrite it for as long as the current
-    /// pageserver runs. (Unless someone removes the file manually; never do that!)
-    fn pid_file(&self) -> Utf8PathBuf {
-        Utf8PathBuf::from_path_buf(self.repo_path().join("pageserver.pid"))
-            .expect("non-Unicode path")
-    }
-
-    pub async fn start(&self) -> anyhow::Result<()> {
-        self.start_node().await
-    }
-
-    fn pageserver_init(&self, cli_overrides: &toml_edit::Document) -> anyhow::Result<()> {
-        let datadir = self.repo_path();
-        let node_id = self.conf.id;
-        println!(
-            "Initializing pageserver node {} at '{}' in {:?}",
-            node_id,
-            self.pg_connection_config.raw_address(),
-            datadir
-        );
-        io::stdout().flush()?;
-
-        if !datadir.exists() {
-            std::fs::create_dir(&datadir)?;
-        }
-
-        let datadir_path_str = datadir.to_str().with_context(|| {
-            format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
-        })?;
-
+    /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
+    ///
+    /// These all end up on the command line of the `pageserver` binary.
+    fn neon_local_overrides(&self, cli_overrides: &toml_edit::Document) -> Vec<String> {
+        // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
@@ -162,7 +125,7 @@ impl PageServerNode {
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
-        let mut config_pieces = vec![
+        let mut overrides = vec![
             id,
             pg_distrib_dir_param,
             http_auth_type_param,
@@ -177,7 +140,7 @@ impl PageServerNode {
         ];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
-            config_pieces.push(format!(
+            overrides.push(format!(
                 "control_plane_api='{}'",
                 control_plane_api.as_str()
             ));
@@ -189,34 +152,79 @@ impl PageServerNode {
                     .env
                     .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
                     .unwrap();
-                config_pieces.push(format!("control_plane_api_token='{}'", jwt_token));
+                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
             }
         }
 
         if !cli_overrides.contains_key("remote_storage") {
-            config_pieces.push(format!(
+            overrides.push(format!(
                 "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
             ));
         }
+
         if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
-            config_pieces
-                .push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
+            overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
         }
 
-        // Add the CLI overrides last, so they can override any of the above.
-        config_pieces.push(cli_overrides.to_string());
+        // Apply the user-provided overrides
+        overrides.push(cli_overrides.to_string());
 
-        // `pageserver --init` merges the `--config-override`s into the default config,
+        overrides
+    }
+
+    /// Initializes a pageserver node by creating its config with the overrides provided.
+    pub fn initialize(&self, config_overrides: &toml_edit::Document) -> anyhow::Result<()> {
+        // First, run `pageserver --init` and wait for it to write a config into FS and exit.
+        self.pageserver_init(config_overrides)
+            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
+    }
+
+    pub fn repo_path(&self) -> PathBuf {
+        self.env.pageserver_data_dir(self.conf.id)
+    }
+
+    /// The pid file is created by the pageserver process, with its pid stored inside.
+    /// Other pageservers cannot lock the same file and overwrite it for as long as the current
+    /// pageserver runs. (Unless someone removes the file manually; never do that!)
+    fn pid_file(&self) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(self.repo_path().join("pageserver.pid"))
+            .expect("non-Unicode path")
+    }
+
+    pub async fn start(&self) -> anyhow::Result<()> {
+        self.start_node().await
+    }
+
+    fn pageserver_init(&self, config_overrides: &toml_edit::Document) -> anyhow::Result<()> {
+        let datadir = self.repo_path();
+        let node_id = self.conf.id;
+        println!(
+            "Initializing pageserver node {} at '{}' in {:?}",
+            node_id,
+            self.pg_connection_config.raw_address(),
+            datadir
+        );
+        io::stdout().flush()?;
+
+        if !datadir.exists() {
+            std::fs::create_dir(&datadir)?;
+        }
+
+        let datadir_path_str = datadir.to_str().with_context(|| {
+            format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
+        })?;
+
+        // `pageserver --init` merges the `--config-override`s into a built-in default config,
         // then writes out the merged product to `pageserver.toml`.
         // TODO: just write the full `pageserver.toml` and get rid of `--config-override`.
-        let mut args = vec!["--init", "-D", datadir_path_str];
-        for piece in &config_pieces {
+        let mut args = vec!["--init", "--workdir", datadir_path_str];
+        let overrides = self.neon_local_overrides(config_overrides);
+        for piece in &overrides {
             args.push("--config-override");
             args.push(piece);
         }
-
         let init_output = Command::new(self.env.pageserver_bin())
             .args(args)
             .envs(self.pageserver_env_variables()?)
