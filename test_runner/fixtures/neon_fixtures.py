@@ -1727,12 +1727,6 @@ class NeonCli(AbstractNeonCli):
                     f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
                 )
 
-            env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
-            if env_overrides is not None:
-                cmd += [
-                    f"--pageserver-config-override={o.strip()}" for o in env_overrides.split(";")
-                ]
-
             if pageserver_config_override is not None:
                 cmd += [
                     f"--pageserver-config-override={o.strip()}"

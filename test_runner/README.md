@@ -76,12 +76,9 @@ you can use `--pg-version` argument.
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
-`NEON_PAGESERVER_OVERRIDES`: add a `;`-separated set of configs that will be passed as
 `RUST_LOG`: logging configuration to pass into Neon CLI
 
 Useful parameters and commands:
-
-`--pageserver-config-override=${value}` `-c` values to pass into pageserver through neon_local cli
 
 `--preserve-database-files` to preserve pageserver (layer) and safekeer (segment) timeline files on disk
 after running a test suite. Such files might be large, so removed by default; but might be useful for debugging or creation of svg images with layer file contents.
