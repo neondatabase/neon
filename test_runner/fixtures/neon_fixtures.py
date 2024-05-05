@@ -1716,13 +1716,6 @@ class NeonCli(AbstractNeonCli):
             remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
             ps_config["remote_storage"] = remote_storage_toml_table
 
-        env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
-        if env_overrides is not None:
-            for o in env_overrides.split(";"):
-                override = toml.loads(o)
-                for key, value in override.items():
-                    ps_config[key] = value
-
         if pageserver_config_override is not None:
             for o in pageserver_config_override.split(";"):
                 override = toml.loads(o)
