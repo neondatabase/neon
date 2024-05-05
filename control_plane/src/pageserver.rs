@@ -119,6 +119,7 @@ impl PageServerNode {
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
         );
+
         let PageServerConf {
             id,
             listen_pg_addr,
@@ -130,9 +131,12 @@ impl PageServerNode {
             get_impl,
             validate_vectored_get,
         } = &self.conf;
+
         let id = format!("id={}", id);
+
         let http_auth_type_param = format!("http_auth_type='{}'", http_auth_type);
         let listen_http_addr_param = format!("listen_http_addr='{}'", listen_http_addr);
+
         let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
         let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
         let virtual_file_io_engine = if let Some(virtual_file_io_engine) = virtual_file_io_engine {
@@ -155,7 +159,9 @@ impl PageServerNode {
         } else {
             String::new()
         };
+
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
+
         let mut overrides = vec![
             id,
             pg_distrib_dir_param,
@@ -169,6 +175,7 @@ impl PageServerNode {
             get_impl,
             validate_vectored_get,
         ];
+
         if let Some(control_plane_api) = &self.env.control_plane_api {
             overrides.push(format!(
                 "control_plane_api='{}'",
@@ -185,7 +192,7 @@ impl PageServerNode {
                 overrides.push(format!("control_plane_api_token='{}'", jwt_token));
             }
         }
-        // Pageserver doesn't support running without a remote storage anymore.
+
         if !cli_overrides
             .iter()
             .any(|c| c.starts_with("remote_storage"))
@@ -194,6 +201,7 @@ impl PageServerNode {
                 "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
             ));
         }
+
         if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
