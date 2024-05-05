@@ -6,7 +6,7 @@ use std::env::{var, VarError};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, ops::ControlFlow};
+use std::{env, ops::ControlFlow, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use camino::Utf8Path;
@@ -153,8 +153,7 @@ fn initialize_config(
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
     let init = arg_matches.get_flag("init");
 
-    // Load the config file from disk or use the default config if in init mode.
-    let config: toml_edit::Document = match std::fs::File::open(cfg_file_path) {
+    let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
         Ok(mut f) => {
             if init {
                 anyhow::bail!("config file already exists: {cfg_file_path}");
@@ -163,33 +162,46 @@ fn initialize_config(
             if md.is_file() {
                 let mut s = String::new();
                 f.read_to_string(&mut s).context("read config file")?;
-                s.parse().context("parse config file toml")?
+                Some(s.parse().context("parse config file toml")?)
             } else {
                 anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if init {
-                DEFAULT_CONFIG_FILE
-                    .parse()
-                    .expect("unit tests ensure this works")
-            } else {
-                anyhow::bail!("config file not found: {cfg_file_path}");
-            }
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
         }
     };
 
+    let mut effective_config = file_contents.unwrap_or_else(|| {
+        DEFAULT_CONFIG_FILE
+            .parse()
+            .expect("unit tests ensure this works")
+    });
+
+    // Patch with overrides from the command line
+    if let Some(values) = arg_matches.get_many::<String>("config-override") {
+        for option_line in values {
+            let doc = toml_edit::Document::from_str(option_line).with_context(|| {
+                format!("Option '{option_line}' could not be parsed as a toml document")
+            })?;
+
+            for (key, item) in doc.iter() {
+                effective_config.insert(key, item.clone());
+            }
+        }
+    }
+
+    debug!("Resulting toml: {effective_config}");
+
     // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(&config, workdir)
+    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
     if init {
         info!("Writing pageserver config to '{cfg_file_path}'");
 
-        std::fs::write(cfg_file_path, config.to_string())
+        std::fs::write(cfg_file_path, effective_config.to_string())
             .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
         info!("Config successfully written to '{cfg_file_path}'")
     }
@@ -739,6 +751,16 @@ fn cli() -> Command {
                 .short('D')
                 .long("workdir")
                 .help("Working directory for the pageserver"),
+        )
+        // See `settings.md` for more details on the extra configuration patameters pageserver can process
+        .arg(
+            Arg::new("config-override")
+                .long("config-override")
+                .short('c')
+                .num_args(1)
+                .action(ArgAction::Append)
+                .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there). \
+                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
         .arg(
             Arg::new("enabled-features")

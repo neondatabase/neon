@@ -359,7 +359,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     };
 
     let pageserver_config_overrides: toml_edit::Document =
-        if let Some(path) = init_match.get_one::<PathBuf>("pageserver-config-overrides-file") {
+        if let Some(path) = init_match.get_one::<PathBuf>("pageserver-config") {
             std::fs::read_to_string(path)
                 .context("load pageserver config overrides file")?
                 .parse()
@@ -1444,11 +1444,11 @@ fn cli() -> Command {
                         .value_name("config"),
                 )
                 .arg(
-                    Arg::new("pageserver-config-overrides-file")
-                        .long("pageserver-config-overrides-file")
+                    Arg::new("pageserver-config")
+                        .long("pageserver-config")
                         .required(false)
                         .value_parser(value_parser!(PathBuf))
-                        .value_name("pageserver-config-overrides-file"),
+                        .value_name("pageserver-config"),
                 )
                 .arg(pg_version_arg.clone())
                 .arg(force_arg)

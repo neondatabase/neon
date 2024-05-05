@@ -1711,28 +1711,28 @@ class NeonCli(AbstractNeonCli):
     ) -> "subprocess.CompletedProcess[str]":
         remote_storage = self.env.pageserver_remote_storage
 
-        ps_toml = {}
+        ps_config = {}
         if remote_storage is not None:
             remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
-            ps_toml["remote_storage"] = remote_storage_toml_table
+            ps_config["remote_storage"] = remote_storage_toml_table
 
         env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
         if env_overrides is not None:
             for o in env_overrides.split(";"):
                 override = toml.loads(o)
                 for key, value in override.items():
-                    ps_toml[key] = value
+                    ps_config[key] = value
 
         if pageserver_config_override is not None:
             for o in pageserver_config_override.split(";"):
                 override = toml.loads(o)
                 for key, value in override.items():
-                    ps_toml[key] = value
+                    ps_config[key] = value
 
         with ExitStack() as stack:
-            ps_toml_file = stack.enter_context(tempfile.NamedTemporaryFile(mode="w+"))
-            ps_toml_file.write(toml.dumps(ps_toml))
-            ps_toml_file.flush()
+            ps_config_file = stack.enter_context(tempfile.NamedTemporaryFile(mode="w+"))
+            ps_config_file.write(toml.dumps(ps_config))
+            ps_config_file.flush()
 
             neon_local_config = stack.enter_context(tempfile.NamedTemporaryFile(mode="w+"))
             neon_local_config.write(toml.dumps(config))
@@ -1743,7 +1743,7 @@ class NeonCli(AbstractNeonCli):
                 f"--config={neon_local_config.name}",
                 "--pg-version",
                 self.env.pg_version,
-                f"--pageserver-config-overrides-file={ps_toml_file.name}",
+                f"--pageserver-config={ps_config_file.name}",
             ]
 
             if force is not None:
