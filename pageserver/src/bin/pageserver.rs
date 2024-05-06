@@ -3,6 +3,7 @@
 //! Main entry point for the Page Server executable.
 
 use std::env::{var, VarError};
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, ops::ControlFlow, str::FromStr};
@@ -151,37 +152,34 @@ fn initialize_config(
     workdir: &Utf8Path,
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
     let init = arg_matches.get_flag("init");
-    let update_config = init || arg_matches.get_flag("update-config");
 
-    let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
-        if init {
-            anyhow::bail!(
-                "Config file '{cfg_file_path}' already exists, cannot init it, use --update-config to update it",
-            );
+    let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
+        Ok(mut f) => {
+            if init {
+                anyhow::bail!("config file already exists: {cfg_file_path}");
+            }
+            let md = f.metadata().context("stat config file")?;
+            if md.is_file() {
+                let mut s = String::new();
+                f.read_to_string(&mut s).context("read config file")?;
+                Some(s.parse().context("parse config file toml")?)
+            } else {
+                anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
+            }
         }
-        // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
-            .with_context(|| format!("Failed to read pageserver config at '{cfg_file_path}'"))?;
-        (
-            cfg_file_contents
-                .parse::<toml_edit::Document>()
-                .with_context(|| {
-                    format!("Failed to parse '{cfg_file_path}' as pageserver config")
-                })?,
-            true,
-        )
-    } else if cfg_file_path.exists() {
-        anyhow::bail!("Config file '{cfg_file_path}' exists but is not a regular file");
-    } else {
-        // We're initializing the tenant, so there's no config file yet
-        (
-            DEFAULT_CONFIG_FILE
-                .parse::<toml_edit::Document>()
-                .context("could not parse built-in config file")?,
-            false,
-        )
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
+        }
     };
 
+    let mut effective_config = file_contents.unwrap_or_else(|| {
+        DEFAULT_CONFIG_FILE
+            .parse()
+            .expect("unit tests ensure this works")
+    });
+
+    // Patch with overrides from the command line
     if let Some(values) = arg_matches.get_many::<String>("config-override") {
         for option_line in values {
             let doc = toml_edit::Document::from_str(option_line).with_context(|| {
@@ -189,22 +187,21 @@ fn initialize_config(
             })?;
 
             for (key, item) in doc.iter() {
-                if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
-                    anyhow::bail!("Pageserver config file exists at '{cfg_file_path}' and has node id already, it cannot be overridden");
-                }
-                toml.insert(key, item.clone());
+                effective_config.insert(key, item.clone());
             }
         }
     }
 
-    debug!("Resulting toml: {toml}");
-    let conf = PageServerConf::parse_and_validate(&toml, workdir)
+    debug!("Resulting toml: {effective_config}");
+
+    // Construct the runtime representation
+    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
-    if update_config {
+    if init {
         info!("Writing pageserver config to '{cfg_file_path}'");
 
-        std::fs::write(cfg_file_path, toml.to_string())
+        std::fs::write(cfg_file_path, effective_config.to_string())
             .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
         info!("Config successfully written to '{cfg_file_path}'")
     }
@@ -763,12 +760,6 @@ fn cli() -> Command {
                 .action(ArgAction::Append)
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there). \
                 Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
-        )
-        .arg(
-            Arg::new("update-config")
-                .long("update-config")
-                .action(ArgAction::SetTrue)
-                .help("Update the config file when started"),
         )
         .arg(
             Arg::new("enabled-features")
