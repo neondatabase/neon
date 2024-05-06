@@ -585,9 +585,20 @@ impl DeleteTenantFlow {
 
                     // FIXME: we should not be modifying this from outside of mgr.rs.
                     // This will go away when we simplify deletion (https://github.com/neondatabase/neon/issues/5080)
-                    crate::metrics::TENANT_MANAGER
-                        .tenant_slots
-                        .set(locked.len() as u64);
+
+                    // Update stats
+                    match &removed {
+                        TenantsMapRemoveResult::Occupied(slot) => {
+                            crate::metrics::TENANT_MANAGER.slot_removed(slot);
+                        }
+                        TenantsMapRemoveResult::InProgress(barrier) => {
+                            crate::metrics::TENANT_MANAGER
+                                .slot_removed(&TenantSlot::InProgress(barrier.clone()));
+                        }
+                        TenantsMapRemoveResult::Vacant => {
+                            // Nothing changed in map, no metric update
+                        }
+                    }
 
                     match removed {
                         TenantsMapRemoveResult::Occupied(TenantSlot::Attached(tenant)) => {

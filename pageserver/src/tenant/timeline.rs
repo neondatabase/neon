@@ -1498,11 +1498,11 @@ impl Timeline {
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
 
-    /// If there is no writer, and conditions for rolling the latest layer are met, then freeze it.
-    ///
-    /// This is for use in background housekeeping, to provide guarantees of layers closing eventually
-    /// even if there are no ongoing writes to drive that.
-    async fn maybe_freeze_ephemeral_layer(&self) {
+    // Check if an open ephemeral layer should be closed: this provides
+    // background enforcement of checkpoint interval if there is no active WAL receiver, to avoid keeping
+    // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
+    // ephemeral layer bytes has been breached.
+    pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
         let Ok(_write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
@@ -1529,13 +1529,11 @@ impl Timeline {
                 // we are a sharded tenant and have skipped some WAL
                 let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
                 if last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
-                    // This should be somewhat rare, so we log it at INFO level.
-                    //
-                    // We checked for checkpoint timeout so that a shard without any
-                    // data ingested (yet) doesn't write a remote index as soon as it
+                    // Only do this if have been layer-less longer than get_checkpoint_timeout, so that a shard
+                    // without any data ingested (yet) doesn't write a remote index as soon as it
                     // sees its LSN advance: we only do this if we've been layer-less
                     // for some time.
-                    tracing::info!(
+                    tracing::debug!(
                         "Advancing disk_consistent_lsn past WAL ingest gap {} -> {}",
                         disk_consistent_lsn,
                         last_record_lsn
@@ -1624,11 +1622,6 @@ impl Timeline {
 
             (guard, permit)
         };
-
-        // Prior to compaction, check if an open ephemeral layer should be closed: this provides
-        // background enforcement of checkpoint interval if there is no active WAL receiver, to avoid keeping
-        // an ephemeral layer open forever when idle.
-        self.maybe_freeze_ephemeral_layer().await;
 
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
