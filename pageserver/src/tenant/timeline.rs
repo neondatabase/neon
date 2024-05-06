@@ -61,9 +61,12 @@ use std::{
 };
 
 use crate::tenant::storage_layer::layer::local_layer_path;
-use crate::tenant::{
-    layer_map::{LayerMap, SearchResult},
-    metadata::TimelineMetadata,
+use crate::{
+    aux_file::AuxFileSizeEstimator,
+    tenant::{
+        layer_map::{LayerMap, SearchResult},
+        metadata::TimelineMetadata,
+    },
 };
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -409,6 +412,8 @@ pub struct Timeline {
 
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
+
+    pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
 }
 
 pub struct WalReceiverInfo {
@@ -2257,6 +2262,8 @@ impl Timeline {
                     dir: None,
                     n_deltas: 0,
                 }),
+
+                aux_file_size_estimator: AuxFileSizeEstimator::new(),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
