@@ -312,8 +312,12 @@ async fn main_impl(
                     let (rel_tag, block_no) =
                         key_to_rel_block(key).expect("we filter non-rel-block keys out above");
                     PagestreamGetPageRequest {
-                        latest: rng.gen_bool(args.req_latest_probability),
-                        lsn: r.timeline_lsn,
+                        request_lsn: if rng.gen_bool(args.req_latest_probability) {
+                            Lsn::MAX
+                        } else {
+                            r.timeline_lsn
+                        },
+                        not_modified_since: r.timeline_lsn,
                         rel: rel_tag,
                         blkno: block_no,
                     }

@@ -14,15 +14,15 @@ use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
 use control_plane::{broker, local_env};
+use pageserver_api::config::{
+    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
+};
 use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::models::{
     ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
 };
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
-use pageserver_api::{
-    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
-    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
-};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
 use safekeeper_api::{
@@ -417,6 +417,54 @@ async fn handle_tenant(
                 println!("{} {:?}", t.id, t.state);
             }
         }
+        Some(("import", import_match)) => {
+            let tenant_id = parse_tenant_id(import_match)?.unwrap_or_else(TenantId::generate);
+
+            let storage_controller = StorageController::from_env(env);
+            let create_response = storage_controller.tenant_import(tenant_id).await?;
+
+            let shard_zero = create_response
+                .shards
+                .first()
+                .expect("Import response omitted shards");
+
+            let attached_pageserver_id = shard_zero.node_id;
+            let pageserver =
+                PageServerNode::from_env(env, env.get_pageserver_conf(attached_pageserver_id)?);
+
+            println!(
+                "Imported tenant {tenant_id}, attached to pageserver {attached_pageserver_id}"
+            );
+
+            let timelines = pageserver
+                .http_client
+                .list_timelines(shard_zero.shard_id)
+                .await?;
+
+            // Pick a 'main' timeline that has no ancestors, the rest will get arbitrary names
+            let main_timeline = timelines
+                .iter()
+                .find(|t| t.ancestor_timeline_id.is_none())
+                .expect("No timelines found")
+                .timeline_id;
+
+            let mut branch_i = 0;
+            for timeline in timelines.iter() {
+                let branch_name = if timeline.timeline_id == main_timeline {
+                    "main".to_string()
+                } else {
+                    branch_i += 1;
+                    format!("branch_{branch_i}")
+                };
+
+                println!(
+                    "Importing timeline {tenant_id}/{} as branch {branch_name}",
+                    timeline.timeline_id
+                );
+
+                env.register_branch_mapping(branch_name, tenant_id, timeline.timeline_id)?;
+            }
+        }
         Some(("create", create_match)) => {
             let tenant_conf: HashMap<_, _> = create_match
                 .get_many::<String>("config")
@@ -789,6 +837,8 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .copied()
                 .unwrap_or(false);
 
+            let allow_multiple = sub_args.get_flag("allow-multiple");
+
             let mode = match (lsn, hot_standby) {
                 (Some(lsn), false) => ComputeMode::Static(lsn),
                 (None, true) => ComputeMode::Replica,
@@ -806,7 +856,9 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 _ => {}
             }
 
-            cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id)?;
+            if !allow_multiple {
+                cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id)?;
+            }
 
             cplane.new_endpoint(
                 &endpoint_id,
@@ -835,6 +887,8 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             let remote_ext_config = sub_args.get_one::<String>("remote-ext-config");
 
+            let allow_multiple = sub_args.get_flag("allow-multiple");
+
             // If --safekeepers argument is given, use only the listed safekeeper nodes.
             let safekeepers =
                 if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
@@ -860,11 +914,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .cloned()
                 .unwrap_or_default();
 
-            cplane.check_conflicting_endpoints(
-                endpoint.mode,
-                endpoint.tenant_id,
-                endpoint.timeline_id,
-            )?;
+            if !allow_multiple {
+                cplane.check_conflicting_endpoints(
+                    endpoint.mode,
+                    endpoint.tenant_id,
+                    endpoint.timeline_id,
+                )?;
+            }
 
             let (pageservers, stripe_size) = if let Some(pageserver_id) = pageserver_id {
                 let conf = env.get_pageserver_conf(pageserver_id).unwrap();
@@ -1231,7 +1287,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
-                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast " }, false) {
+                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast" }, false) {
                     eprintln!("postgres stop failed: {e:#}");
                 }
             }
@@ -1396,6 +1452,12 @@ fn cli() -> Command {
         .help("If set, will create test user `user` and `neondb` database. Requires `update-catalog = true`")
         .required(false);
 
+    let allow_multiple = Arg::new("allow-multiple")
+        .help("Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but useful for tests.")
+        .long("allow-multiple")
+        .action(ArgAction::SetTrue)
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1417,6 +1479,7 @@ fn cli() -> Command {
         .subcommand(
             Command::new("timeline")
             .about("Manage timelines")
+            .arg_required_else_help(true)
             .subcommand(Command::new("list")
                 .about("List all timelines, available to this pageserver")
                 .arg(tenant_id_arg.clone()))
@@ -1479,6 +1542,8 @@ fn cli() -> Command {
             .subcommand(Command::new("config")
                 .arg(tenant_id_arg.clone())
                 .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false)))
+            .subcommand(Command::new("import").arg(tenant_id_arg.clone().required(true))
+                .about("Import a tenant that is present in remote storage, and create branches for its timelines"))
         )
         .subcommand(
             Command::new("pageserver")
@@ -1503,8 +1568,8 @@ fn cli() -> Command {
             Command::new("storage_controller")
                 .arg_required_else_help(true)
                 .about("Manage storage_controller")
-                .subcommand(Command::new("start").about("Start local pageserver").arg(pageserver_config_args.clone()))
-                .subcommand(Command::new("stop").about("Stop local pageserver")
+                .subcommand(Command::new("start").about("Start storage controller"))
+                .subcommand(Command::new("stop").about("Stop storage controller")
                             .arg(stop_mode_arg.clone()))
         )
         .subcommand(
@@ -1550,6 +1615,7 @@ fn cli() -> Command {
                     .arg(pg_version_arg.clone())
                     .arg(hot_standby_arg.clone())
                     .arg(update_catalog)
+                    .arg(allow_multiple.clone())
                 )
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
@@ -1558,6 +1624,7 @@ fn cli() -> Command {
                     .arg(safekeepers_arg)
                     .arg(remote_ext_config_args)
                     .arg(create_test_user)
+                    .arg(allow_multiple.clone())
                 )
                 .subcommand(Command::new("reconfigure")
                             .about("Reconfigure the endpoint")

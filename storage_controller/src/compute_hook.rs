@@ -3,11 +3,13 @@ use std::{collections::HashMap, time::Duration};
 
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
-use hyper::{Method, StatusCode};
+use futures::StreamExt;
+use hyper::StatusCode;
 use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+use tracing::{info_span, Instrument};
 use utils::{
     backoff::{self},
     id::{NodeId, TenantId},
@@ -16,6 +18,8 @@ use utils::{
 use crate::service::Config;
 
 const SLOWDOWN_DELAY: Duration = Duration::from_secs(5);
+
+const NOTIFY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) const API_CONCURRENCY: usize = 32;
 
@@ -242,6 +246,10 @@ pub(super) struct ComputeHook {
 
     // This lock is only used in testing enviroments, to serialize calls into neon_lock
     neon_local_lock: tokio::sync::Mutex<()>,
+
+    // We share a client across all notifications to enable connection re-use etc when
+    // sending large numbers of notifications
+    client: reqwest::Client,
 }
 
 impl ComputeHook {
@@ -251,12 +259,18 @@ impl ComputeHook {
             .clone()
             .map(|jwt| format!("Bearer {}", jwt));
 
+        let client = reqwest::ClientBuilder::new()
+            .timeout(NOTIFY_REQUEST_TIMEOUT)
+            .build()
+            .expect("Failed to construct HTTP client");
+
         Self {
             state: Default::default(),
             config,
             authorization_header,
             neon_local_lock: Default::default(),
             api_concurrency: tokio::sync::Semaphore::new(API_CONCURRENCY),
+            client,
         }
     }
 
@@ -310,12 +324,11 @@ impl ComputeHook {
 
     async fn do_notify_iteration(
         &self,
-        client: &reqwest::Client,
         url: &String,
         reconfigure_request: &ComputeHookNotifyRequest,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let req = client.request(Method::PUT, url);
+        let req = self.client.request(reqwest::Method::PUT, url);
         let req = if let Some(value) = &self.authorization_header {
             req.header(reqwest::header::AUTHORIZATION, value)
         } else {
@@ -334,8 +347,10 @@ impl ComputeHook {
         };
 
         // Treat all 2xx responses as success
-        if response.status() >= StatusCode::OK && response.status() < StatusCode::MULTIPLE_CHOICES {
-            if response.status() != StatusCode::OK {
+        if response.status() >= reqwest::StatusCode::OK
+            && response.status() < reqwest::StatusCode::MULTIPLE_CHOICES
+        {
+            if response.status() != reqwest::StatusCode::OK {
                 // Non-200 2xx response: it doesn't make sense to retry, but this is unexpected, so
                 // log a warning.
                 tracing::warn!(
@@ -349,7 +364,7 @@ impl ComputeHook {
 
         // Error response codes
         match response.status() {
-            StatusCode::TOO_MANY_REQUESTS => {
+            reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 // TODO: 429 handling should be global: set some state visible to other requests
                 // so that they will delay before starting, rather than all notifications trying
                 // once before backing off.
@@ -358,20 +373,30 @@ impl ComputeHook {
                     .ok();
                 Err(NotifyError::SlowDown)
             }
-            StatusCode::LOCKED => {
+            reqwest::StatusCode::LOCKED => {
                 // We consider this fatal, because it's possible that the operation blocking the control one is
                 // also the one that is waiting for this reconcile.  We should let the reconciler calling
                 // this hook fail, to give control plane a chance to un-lock.
                 tracing::info!("Control plane reports tenant is locked, dropping out of notify");
                 Err(NotifyError::Busy)
             }
-            StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-            | StatusCode::BAD_GATEWAY => Err(NotifyError::Unavailable(response.status())),
-            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                Err(NotifyError::Fatal(response.status()))
+            reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                Err(NotifyError::Unavailable(StatusCode::SERVICE_UNAVAILABLE))
             }
-            _ => Err(NotifyError::Unexpected(response.status())),
+            reqwest::StatusCode::GATEWAY_TIMEOUT => {
+                Err(NotifyError::Unavailable(StatusCode::GATEWAY_TIMEOUT))
+            }
+            reqwest::StatusCode::BAD_GATEWAY => {
+                Err(NotifyError::Unavailable(StatusCode::BAD_GATEWAY))
+            }
+
+            reqwest::StatusCode::BAD_REQUEST => Err(NotifyError::Fatal(StatusCode::BAD_REQUEST)),
+            reqwest::StatusCode::UNAUTHORIZED => Err(NotifyError::Fatal(StatusCode::UNAUTHORIZED)),
+            reqwest::StatusCode::FORBIDDEN => Err(NotifyError::Fatal(StatusCode::FORBIDDEN)),
+            status => Err(NotifyError::Unexpected(
+                hyper::StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            )),
         }
     }
 
@@ -381,8 +406,6 @@ impl ComputeHook {
         reconfigure_request: &ComputeHookNotifyRequest,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let client = reqwest::Client::new();
-
         // We hold these semaphore units across all retries, rather than only across each
         // HTTP request: this is to preserve fairness and avoid a situation where a retry might
         // time out waiting for a semaphore.
@@ -394,7 +417,7 @@ impl ComputeHook {
             .map_err(|_| NotifyError::ShuttingDown)?;
 
         backoff::retry(
-            || self.do_notify_iteration(&client, url, reconfigure_request, cancel),
+            || self.do_notify_iteration(url, reconfigure_request, cancel),
             |e| {
                 matches!(
                     e,
@@ -411,48 +434,37 @@ impl ComputeHook {
         .and_then(|x| x)
     }
 
-    /// Call this to notify the compute (postgres) tier of new pageservers to use
-    /// for a tenant.  notify() is called by each shard individually, and this function
-    /// will decide whether an update to the tenant is sent.  An update is sent on the
-    /// condition that:
-    /// - We know a pageserver for every shard.
-    /// - All the shards have the same shard_count (i.e. we are not mid-split)
-    ///
-    /// Cancellation token enables callers to drop out, e.g. if calling from a Reconciler
-    /// that is cancelled.
-    ///
-    /// This function is fallible, including in the case that the control plane is transiently
-    /// unavailable.  A limited number of retries are done internally to efficiently hide short unavailability
-    /// periods, but we don't retry forever.  The **caller** is responsible for handling failures and
-    /// ensuring that they eventually call again to ensure that the compute is eventually notified of
-    /// the proper pageserver nodes for a tenant.
-    #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), node_id))]
-    pub(super) async fn notify(
+    /// Synchronous phase: update the per-tenant state for the next intended notification
+    fn notify_prepare(
         &self,
         tenant_shard_id: TenantShardId,
         node_id: NodeId,
         stripe_size: ShardStripeSize,
+    ) -> MaybeSendResult {
+        let mut state_locked = self.state.lock().unwrap();
+
+        use std::collections::hash_map::Entry;
+        let tenant = match state_locked.entry(tenant_shard_id.tenant_id) {
+            Entry::Vacant(e) => e.insert(ComputeHookTenant::new(
+                tenant_shard_id,
+                stripe_size,
+                node_id,
+            )),
+            Entry::Occupied(e) => {
+                let tenant = e.into_mut();
+                tenant.update(tenant_shard_id, stripe_size, node_id);
+                tenant
+            }
+        };
+        tenant.maybe_send(tenant_shard_id.tenant_id, None)
+    }
+
+    async fn notify_execute(
+        &self,
+        maybe_send_result: MaybeSendResult,
+        tenant_shard_id: TenantShardId,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let maybe_send_result = {
-            let mut state_locked = self.state.lock().unwrap();
-
-            use std::collections::hash_map::Entry;
-            let tenant = match state_locked.entry(tenant_shard_id.tenant_id) {
-                Entry::Vacant(e) => e.insert(ComputeHookTenant::new(
-                    tenant_shard_id,
-                    stripe_size,
-                    node_id,
-                )),
-                Entry::Occupied(e) => {
-                    let tenant = e.into_mut();
-                    tenant.update(tenant_shard_id, stripe_size, node_id);
-                    tenant
-                }
-            };
-            tenant.maybe_send(tenant_shard_id.tenant_id, None)
-        };
-
         // Process result: we may get an update to send, or we may have to wait for a lock
         // before trying again.
         let (request, mut send_lock_guard) = match maybe_send_result {
@@ -460,7 +472,12 @@ impl ComputeHook {
                 return Ok(());
             }
             MaybeSendResult::AwaitLock(send_lock) => {
-                let send_locked = send_lock.lock_owned().await;
+                let send_locked = tokio::select! {
+                    guard = send_lock.lock_owned() => {guard},
+                    _ = cancel.cancelled() => {
+                        return Err(NotifyError::ShuttingDown)
+                    }
+                };
 
                 // Lock order: maybe_send is called within the `[Self::state]` lock, and takes the send lock, but here
                 // we have acquired the send lock and take `[Self::state]` lock.  This is safe because maybe_send only uses
@@ -498,6 +515,94 @@ impl ComputeHook {
             *send_lock_guard = Some(request);
         }
         result
+    }
+
+    /// Infallible synchronous fire-and-forget version of notify(), that sends its results to
+    /// a channel.  Something should consume the channel and arrange to try notifying again
+    /// if something failed.
+    pub(super) fn notify_background(
+        self: &Arc<Self>,
+        notifications: Vec<(TenantShardId, NodeId, ShardStripeSize)>,
+        result_tx: tokio::sync::mpsc::Sender<Result<(), (TenantShardId, NotifyError)>>,
+        cancel: &CancellationToken,
+    ) {
+        let mut maybe_sends = Vec::new();
+        for (tenant_shard_id, node_id, stripe_size) in notifications {
+            let maybe_send_result = self.notify_prepare(tenant_shard_id, node_id, stripe_size);
+            maybe_sends.push((tenant_shard_id, maybe_send_result))
+        }
+
+        let this = self.clone();
+        let cancel = cancel.clone();
+
+        tokio::task::spawn(async move {
+            // Construct an async stream of futures to invoke the compute notify function: we do this
+            // in order to subsequently use .buffered() on the stream to execute with bounded parallelism.  The
+            // ComputeHook semaphore already limits concurrency, but this way we avoid constructing+polling lots of futures which
+            // would mostly just be waiting on that semaphore.
+            let mut stream = futures::stream::iter(maybe_sends)
+                .map(|(tenant_shard_id, maybe_send_result)| {
+                    let this = this.clone();
+                    let cancel = cancel.clone();
+
+                    async move {
+                        this
+                            .notify_execute(maybe_send_result, tenant_shard_id, &cancel)
+                            .await.map_err(|e| (tenant_shard_id, e))
+                    }.instrument(info_span!(
+                        "notify_background", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()
+                    ))
+                })
+                .buffered(API_CONCURRENCY);
+
+            loop {
+                tokio::select! {
+                    next = stream.next() => {
+                        match next {
+                            Some(r) => {
+                                result_tx.send(r).await.ok();
+                            },
+                            None => {
+                                tracing::info!("Finished sending background compute notifications");
+                                break;
+                            }
+                        }
+                    },
+                    _ = cancel.cancelled() => {
+                        tracing::info!("Shutdown while running background compute notifications");
+                        break;
+                    }
+                };
+            }
+        });
+    }
+
+    /// Call this to notify the compute (postgres) tier of new pageservers to use
+    /// for a tenant.  notify() is called by each shard individually, and this function
+    /// will decide whether an update to the tenant is sent.  An update is sent on the
+    /// condition that:
+    /// - We know a pageserver for every shard.
+    /// - All the shards have the same shard_count (i.e. we are not mid-split)
+    ///
+    /// Cancellation token enables callers to drop out, e.g. if calling from a Reconciler
+    /// that is cancelled.
+    ///
+    /// This function is fallible, including in the case that the control plane is transiently
+    /// unavailable.  A limited number of retries are done internally to efficiently hide short unavailability
+    /// periods, but we don't retry forever.  The **caller** is responsible for handling failures and
+    /// ensuring that they eventually call again to ensure that the compute is eventually notified of
+    /// the proper pageserver nodes for a tenant.
+    #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), node_id))]
+    pub(super) async fn notify(
+        &self,
+        tenant_shard_id: TenantShardId,
+        node_id: NodeId,
+        stripe_size: ShardStripeSize,
+        cancel: &CancellationToken,
+    ) -> Result<(), NotifyError> {
+        let maybe_send_result = self.notify_prepare(tenant_shard_id, node_id, stripe_size);
+        self.notify_execute(maybe_send_result, tenant_shard_id, cancel)
+            .await
     }
 }
 

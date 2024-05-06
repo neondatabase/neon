@@ -14,9 +14,10 @@ use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::repository::Key;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
@@ -113,6 +114,12 @@ impl std::fmt::Debug for Layer {
 impl AsLayerDesc for Layer {
     fn layer_desc(&self) -> &PersistentLayerDesc {
         self.0.layer_desc()
+    }
+}
+
+impl PartialEq for Layer {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
     }
 }
 
@@ -330,6 +337,12 @@ impl Layer {
             .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
+            .map_err(|err| match err {
+                GetVectoredError::Other(err) => GetVectoredError::Other(
+                    err.context(format!("get_values_reconstruct_data for layer {self}")),
+                ),
+                err => err,
+            })
     }
 
     /// Download the layer if evicted.
@@ -387,6 +400,10 @@ impl Layer {
 
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.0.path
+    }
+
+    pub(crate) fn debug_str(&self) -> &Arc<str> {
+        &self.0.debug_str
     }
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
@@ -511,6 +528,9 @@ struct LayerInner {
     /// Full path to the file; unclear if this should exist anymore.
     path: Utf8PathBuf,
 
+    /// String representation of the layer, used for traversal id.
+    debug_str: Arc<str>,
+
     desc: PersistentLayerDesc,
 
     /// Timeline access is needed for remote timeline client and metrics.
@@ -604,9 +624,17 @@ enum Status {
 
 impl Drop for LayerInner {
     fn drop(&mut self) {
+        // if there was a pending eviction, mark it cancelled here to balance metrics
+        if let Some((ResidentOrWantedEvicted::WantedEvicted(..), _)) = self.inner.take_and_deinit()
+        {
+            // eviction has already been started
+            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
+
+            // eviction request is intentionally not honored as no one is present to wait for it
+            // and we could be delaying shutdown for nothing.
+        }
+
         if !*self.wanted_deleted.get_mut() {
-            // should we try to evict if the last wish was for eviction? seems more like a hazard
-            // than a clear win.
             return;
         }
 
@@ -708,6 +736,7 @@ impl LayerInner {
 
         LayerInner {
             conf,
+            debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
             path,
             desc,
             timeline: Arc::downgrade(timeline),
@@ -911,11 +940,20 @@ impl LayerInner {
             return Err(DownloadError::DownloadRequired);
         }
 
+        let download_ctx = ctx
+            .map(|ctx| ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download))
+            .unwrap_or(RequestContext::new(
+                TaskKind::LayerDownload,
+                DownloadBehavior::Download,
+            ));
+
         async move {
             tracing::info!(%reason, "downloading on-demand");
 
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-            let res = self.download_init_and_wait(timeline, permit).await?;
+            let res = self
+                .download_init_and_wait(timeline, permit, download_ctx)
+                .await?;
             scopeguard::ScopeGuard::into_inner(init_cancelled);
             Ok(res)
         }
@@ -954,6 +992,7 @@ impl LayerInner {
         self: &Arc<Self>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: RequestContext,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -983,7 +1022,7 @@ impl LayerInner {
                     .await
                     .unwrap();
 
-                let res = this.download_and_init(timeline, permit).await;
+                let res = this.download_and_init(timeline, permit, &ctx).await;
 
                 if let Err(res) = tx.send(res) {
                     match res {
@@ -1026,6 +1065,7 @@ impl LayerInner {
         self: &Arc<LayerInner>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Arc<DownloadedLayer>> {
         let client = timeline
             .remote_client
@@ -1033,7 +1073,12 @@ impl LayerInner {
             .expect("checked before download_init_and_wait");
 
         let result = client
-            .download_layer_file(&self.desc.filename(), &self.metadata(), &timeline.cancel)
+            .download_layer_file(
+                &self.desc.filename(),
+                &self.metadata(),
+                &timeline.cancel,
+                ctx,
+            )
             .await;
 
         match result {
@@ -1552,8 +1597,8 @@ impl Drop for DownloadedLayer {
         if let Some(owner) = self.owner.upgrade() {
             owner.on_downloaded_layer_drop(self.version);
         } else {
-            // no need to do anything, we are shutting down
-            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
+            // Layer::drop will handle cancelling the eviction; because of drop order and
+            // `DownloadedLayer` never leaking, we cannot know here if eviction was requested.
         }
     }
 }
@@ -1752,6 +1797,28 @@ impl ResidentLayer {
         }
     }
 
+    /// FIXME: truncate is bad name because we are not truncating anything, but copying the
+    /// filtered parts.
+    #[cfg(test)]
+    pub(super) async fn copy_delta_prefix(
+        &self,
+        writer: &mut super::delta_layer::DeltaLayerWriter,
+        truncate_at: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        use LayerKind::*;
+
+        let owner = &self.owner.0;
+
+        match self.downloaded.get(owner, ctx).await? {
+            Delta(ref d) => d
+                .copy_prefix(writer, truncate_at, ctx)
+                .await
+                .with_context(|| format!("truncate {self}")),
+            Image(_) => anyhow::bail!(format!("cannot truncate image layer {self}")),
+        }
+    }
+
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.owner.0.path
     }
@@ -1761,14 +1828,14 @@ impl ResidentLayer {
     }
 
     #[cfg(test)]
-    pub(crate) async fn get_inner_delta<'a>(
-        &'a self,
+    pub(crate) async fn as_delta(
+        &self,
         ctx: &RequestContext,
-    ) -> anyhow::Result<&'a delta_layer::DeltaLayerInner> {
-        let owner = &self.owner.0;
-        match self.downloaded.get(owner, ctx).await? {
-            LayerKind::Delta(d) => Ok(d),
-            LayerKind::Image(_) => Err(anyhow::anyhow!("Expected a delta layer")),
+    ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
+        use LayerKind::*;
+        match self.downloaded.get(&self.owner.0, ctx).await? {
+            Delta(ref d) => Ok(d),
+            Image(_) => Err(anyhow::anyhow!("image layer")),
         }
     }
 }

@@ -17,15 +17,16 @@ use anyhow::{anyhow, ensure, Result};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
 use std::cmp::Ordering;
-use std::fmt::Write as _;
+use std::fmt::Write;
 use std::ops::Range;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -53,6 +54,14 @@ pub struct InMemoryLayer {
     /// Writes are only allowed when this is `None`.
     end_lsn: OnceLock<Lsn>,
 
+    /// Used for traversal path. Cached representation of the in-memory layer before frozen.
+    local_path_str: Arc<str>,
+
+    /// Used for traversal path. Cached representation of the in-memory layer after frozen.
+    frozen_local_path_str: OnceLock<Arc<str>>,
+
+    opened_at: Instant,
+
     /// The above fields never change, except for `end_lsn`, which is only set once.
     /// All other changing parts are in `inner`, and protected by a mutex.
     inner: RwLock<InMemoryLayerInner>,
@@ -69,10 +78,10 @@ impl std::fmt::Debug for InMemoryLayer {
 }
 
 pub struct InMemoryLayerInner {
-    /// All versions of all pages in the layer are kept here.  Indexed
+    /// All versions of all pages in the layer are kept here. Indexed
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
-    index: HashMap<Key, VecMap<Lsn, u64>>,
+    index: BTreeMap<Key, VecMap<Lsn, u64>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
@@ -238,6 +247,12 @@ impl InMemoryLayer {
         self.start_lsn..self.end_lsn_or_max()
     }
 
+    pub(crate) fn local_path_str(&self) -> &Arc<str> {
+        self.frozen_local_path_str
+            .get()
+            .unwrap_or(&self.local_path_str)
+    }
+
     /// debugging function to print out the contents of the layer
     ///
     /// this is likely completly unused
@@ -369,29 +384,24 @@ impl InMemoryLayer {
         let mut planned_block_reads = BinaryHeap::new();
 
         for range in keyspace.ranges.iter() {
-            let mut key = range.start;
-            while key < range.end {
-                if let Some(vec_map) = inner.index.get(&key) {
-                    let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
-                        Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
-                        None => self.start_lsn..end_lsn,
-                    };
+            for (key, vec_map) in inner.index.range(range.start..range.end) {
+                let lsn_range = match reconstruct_state.get_cached_lsn(key) {
+                    Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
+                    None => self.start_lsn..end_lsn,
+                };
 
-                    let slice = vec_map.slice_range(lsn_range);
-                    for (entry_lsn, pos) in slice.iter().rev() {
-                        planned_block_reads.push(BlockRead {
-                            key,
-                            lsn: *entry_lsn,
-                            block_offset: *pos,
-                        });
-                    }
+                let slice = vec_map.slice_range(lsn_range);
+                for (entry_lsn, pos) in slice.iter().rev() {
+                    planned_block_reads.push(BlockRead {
+                        key: *key,
+                        lsn: *entry_lsn,
+                        block_offset: *pos,
+                    });
                 }
-
-                key = key.next();
             }
         }
 
-        let keyspace_size = keyspace.total_size();
+        let keyspace_size = keyspace.total_raw_size();
 
         let mut completed_keys = HashSet::new();
         while completed_keys.len() < keyspace_size && !planned_block_reads.is_empty() {
@@ -423,14 +433,30 @@ impl InMemoryLayer {
             }
         }
 
+        reconstruct_state.on_lsn_advanced(&keyspace, self.start_lsn);
+
         Ok(())
     }
+}
+
+fn inmem_layer_display(mut f: impl Write, start_lsn: Lsn, end_lsn: Lsn) -> std::fmt::Result {
+    write!(f, "inmem-{:016X}-{:016X}", start_lsn.0, end_lsn.0)
+}
+
+fn inmem_layer_log_display(
+    mut f: impl Write,
+    timeline: TimelineId,
+    start_lsn: Lsn,
+    end_lsn: Lsn,
+) -> std::fmt::Result {
+    write!(f, "timeline {} in-memory ", timeline)?;
+    inmem_layer_display(f, start_lsn, end_lsn)
 }
 
 impl std::fmt::Display for InMemoryLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let end_lsn = self.end_lsn_or_max();
-        write!(f, "inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
+        inmem_layer_display(f, self.start_lsn, end_lsn)
     }
 }
 
@@ -451,17 +477,24 @@ impl InMemoryLayer {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
         let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id).await?;
-        let key = InMemoryLayerFileId(file.id());
+        let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {
             file_id: key,
+            local_path_str: {
+                let mut buf = String::new();
+                inmem_layer_log_display(&mut buf, timeline_id, start_lsn, Lsn::MAX).unwrap();
+                buf.into()
+            },
+            frozen_local_path_str: OnceLock::new(),
             conf,
             timeline_id,
             tenant_shard_id,
             start_lsn,
             end_lsn: OnceLock::new(),
+            opened_at: Instant::now(),
             inner: RwLock::new(InMemoryLayerInner {
-                index: HashMap::new(),
+                index: BTreeMap::new(),
                 file,
                 resource_units: GlobalResourceUnits::new(),
             }),
@@ -520,6 +553,10 @@ impl InMemoryLayer {
         Ok(())
     }
 
+    pub(crate) fn get_opened_at(&self) -> Instant {
+        self.opened_at
+    }
+
     pub(crate) async fn tick(&self) -> Option<u64> {
         let mut inner = self.inner.write().await;
         let size = inner.file.len();
@@ -544,6 +581,15 @@ impl InMemoryLayer {
         );
         self.end_lsn.set(end_lsn).expect("end_lsn set only once");
 
+        self.frozen_local_path_str
+            .set({
+                let mut buf = String::new();
+                inmem_layer_log_display(&mut buf, self.get_timeline_id(), self.start_lsn, end_lsn)
+                    .unwrap();
+                buf.into()
+            })
+            .expect("frozen_local_path_str set only once");
+
         for vec_map in inner.index.values() {
             for (lsn, _pos) in vec_map.as_slice() {
                 assert!(*lsn < end_lsn);
@@ -551,14 +597,17 @@ impl InMemoryLayer {
         }
     }
 
-    /// Write this frozen in-memory layer to disk.
+    /// Write this frozen in-memory layer to disk. If `key_range` is set, the delta
+    /// layer will only contain the key range the user specifies, and may return `None`
+    /// if there are no matching keys.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
     pub(crate) async fn write_to_disk(
         &self,
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> Result<ResidentLayer> {
+        key_range: Option<Range<Key>>,
+    ) -> Result<Option<ResidentLayer>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -571,6 +620,21 @@ impl InMemoryLayer {
         let inner = self.inner.read().await;
 
         let end_lsn = *self.end_lsn.get().unwrap();
+
+        let keys: Vec<_> = if let Some(key_range) = key_range {
+            inner
+                .index
+                .iter()
+                .filter(|(k, _)| key_range.contains(k))
+                .map(|(k, m)| (k.to_i128(), m))
+                .collect()
+        } else {
+            inner.index.iter().map(|(k, m)| (k.to_i128(), m)).collect()
+        };
+
+        if keys.is_empty() {
+            return Ok(None);
+        }
 
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
@@ -585,33 +649,24 @@ impl InMemoryLayer {
 
         let cursor = inner.file.block_cursor();
 
-        // Sort the keys because delta layer writer expects them sorted.
-        //
-        // NOTE: this sort can take up significant time if the layer has millions of
-        //       keys. To speed up all the comparisons we convert the key to i128 and
-        //       keep the value as a reference.
-        let mut keys: Vec<_> = inner.index.iter().map(|(k, m)| (k.to_i128(), m)).collect();
-        keys.sort_unstable_by_key(|k| k.0);
-
         let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
             .build();
-        for (key, vec_map) in keys.iter() {
-            let key = Key::from_i128(*key);
+        for (key, vec_map) in inner.index.iter() {
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
                 let will_init = Value::des(&buf)?.will_init();
                 let res;
                 (buf, res) = delta_layer_writer
-                    .put_value_bytes(key, *lsn, buf, will_init)
+                    .put_value_bytes(*key, *lsn, buf, will_init, &ctx)
                     .await;
                 res?;
             }
         }
 
         // MAX is used here because we identify L0 layers by full key range
-        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline).await?;
-        Ok(delta_layer)
+        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline, &ctx).await?;
+        Ok(Some(delta_layer))
     }
 }

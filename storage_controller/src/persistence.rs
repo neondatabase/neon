@@ -2,6 +2,7 @@ pub(crate) mod split_state;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
+use std::time::Instant;
 
 use self::split_state::SplitState;
 use camino::Utf8Path;
@@ -79,7 +80,7 @@ pub(crate) enum DatabaseError {
     Logical(String),
 }
 
-#[derive(measured::FixedCardinalityLabel, Clone)]
+#[derive(measured::FixedCardinalityLabel, Copy, Clone)]
 pub(crate) enum DatabaseOperation {
     InsertNode,
     UpdateNode,
@@ -144,6 +145,31 @@ impl Persistence {
         }
     }
 
+    /// A helper for use during startup, where we would like to tolerate concurrent restarts of the
+    /// database and the storage controller, therefore the database might not be available right away
+    pub async fn await_connection(
+        database_url: &str,
+        timeout: Duration,
+    ) -> Result<(), diesel::ConnectionError> {
+        let started_at = Instant::now();
+        loop {
+            match PgConnection::establish(database_url) {
+                Ok(_) => {
+                    tracing::info!("Connected to database.");
+                    return Ok(());
+                }
+                Err(e) => {
+                    if started_at.elapsed() > timeout {
+                        return Err(e);
+                    } else {
+                        tracing::info!("Database not yet available, waiting... ({e})");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }
+    }
+
     /// Wraps `with_conn` in order to collect latency and error metrics
     async fn with_measured_conn<F, R>(&self, op: DatabaseOperation, func: F) -> DatabaseResult<R>
     where
@@ -153,9 +179,7 @@ impl Persistence {
         let latency = &METRICS_REGISTRY
             .metrics_group
             .storage_controller_database_query_latency;
-        let _timer = latency.start_timer(DatabaseQueryLatencyLabelGroup {
-            operation: op.clone(),
-        });
+        let _timer = latency.start_timer(DatabaseQueryLatencyLabelGroup { operation: op });
 
         let res = self.with_conn(func).await;
 

@@ -1,12 +1,12 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::service;
-use hyper::StatusCode;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
+use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -51,6 +51,10 @@ pub(super) struct Reconciler {
     /// so that we can set [`crate::tenant_shard::TenantShard::pending_compute_notification`] to ensure a later retry.
     pub(crate) compute_notify_failure: bool,
 
+    /// Reconciler is responsible for keeping alive semaphore units that limit concurrency on how many
+    /// we will spawn.
+    pub(crate) _resource_units: ReconcileUnits,
+
     /// A means to abort background reconciliation: it is essential to
     /// call this when something changes in the original TenantShard that
     /// will make this reconciliation impossible or unnecessary, for
@@ -64,6 +68,19 @@ pub(super) struct Reconciler {
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
+}
+
+/// RAII resource units granted to a Reconciler, which it should keep alive until it finishes doing I/O
+pub(crate) struct ReconcileUnits {
+    _sem_units: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl ReconcileUnits {
+    pub(crate) fn new(sem_units: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self {
+            _sem_units: sem_units,
+        }
+    }
 }
 
 /// This is a snapshot of [`crate::tenant_shard::IntentState`], but it does not do any
@@ -750,7 +767,10 @@ impl Reconciler {
                 // It is up to the caller whether they want to drop out on this error, but they don't have to:
                 // in general we should avoid letting unavailability of the cloud control plane stop us from
                 // making progress.
-                tracing::warn!("Failed to notify compute of attached pageserver {node}: {e}");
+                if !matches!(e, NotifyError::ShuttingDown) {
+                    tracing::warn!("Failed to notify compute of attached pageserver {node}: {e}");
+                }
+
                 // Set this flag so that in our ReconcileResult we will set the flag on the shard that it
                 // needs to retry at some point.
                 self.compute_notify_failure = true;

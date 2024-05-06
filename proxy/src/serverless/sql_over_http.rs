@@ -1,18 +1,22 @@
 use std::pin::pin;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::future::select;
 use futures::future::try_join;
 use futures::future::Either;
 use futures::StreamExt;
 use futures::TryFutureExt;
-use hyper::body::HttpBody;
-use hyper::header;
-use hyper::http::HeaderName;
-use hyper::http::HeaderValue;
-use hyper::Response;
-use hyper::StatusCode;
-use hyper::{Body, HeaderMap, Request};
+use http_body_util::BodyExt;
+use http_body_util::Full;
+use hyper1::body::Body;
+use hyper1::body::Incoming;
+use hyper1::header;
+use hyper1::http::HeaderName;
+use hyper1::http::HeaderValue;
+use hyper1::Response;
+use hyper1::StatusCode;
+use hyper1::{HeaderMap, Request};
 use serde_json::json;
 use serde_json::Value;
 use tokio::time;
@@ -29,7 +33,6 @@ use tracing::error;
 use tracing::info;
 use url::Url;
 use utils::http::error::ApiError;
-use utils::http::json::json_response;
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
@@ -40,8 +43,8 @@ use crate::context::RequestMonitoring;
 use crate::error::ErrorKind;
 use crate::error::ReportableError;
 use crate::error::UserFacingError;
-use crate::metrics::HTTP_CONTENT_LENGTH;
-use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
+use crate::metrics::HttpDirection;
+use crate::metrics::Metrics;
 use crate::proxy::run_until_cancelled;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
@@ -52,6 +55,7 @@ use crate::RoleName;
 use super::backend::PoolingBackend;
 use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
+use super::http_util::json_response;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
 use super::json::JsonConversionError;
@@ -218,10 +222,10 @@ fn get_conn_info(
 pub async fn handle(
     config: &'static ProxyConfig,
     mut ctx: RequestMonitoring,
-    request: Request<Body>,
+    request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
+) -> Result<Response<Full<Bytes>>, ApiError> {
     let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
 
     let mut response = match result {
@@ -332,10 +336,9 @@ pub async fn handle(
         }
     };
 
-    response.headers_mut().insert(
-        "Access-Control-Allow-Origin",
-        hyper::http::HeaderValue::from_static("*"),
-    );
+    response
+        .headers_mut()
+        .insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
     Ok(response)
 }
 
@@ -396,7 +399,7 @@ impl UserFacingError for SqlOverHttpError {
 #[derive(Debug, thiserror::Error)]
 pub enum ReadPayloadError {
     #[error("could not read the HTTP request body: {0}")]
-    Read(#[from] hyper::Error),
+    Read(#[from] hyper1::Error),
     #[error("could not parse the HTTP request body: {0}")]
     Parse(#[from] serde_json::Error),
 }
@@ -437,7 +440,7 @@ struct HttpHeaders {
 }
 
 impl HttpHeaders {
-    fn try_parse(headers: &hyper::http::HeaderMap) -> Result<Self, SqlOverHttpError> {
+    fn try_parse(headers: &hyper1::http::HeaderMap) -> Result<Self, SqlOverHttpError> {
         // Determine the output options. Default behaviour is 'false'. Anything that is not
         // strictly 'true' assumed to be false.
         let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
@@ -488,13 +491,14 @@ async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
-    request: Request<Body>,
+    request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<Body>, SqlOverHttpError> {
-    let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
-        .with_label_values(&[ctx.protocol])
-        .guard();
-    info!("handling interactive connection from client");
+) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
+    let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
+    info!(
+        protocol = %ctx.protocol,
+        "handling interactive connection from client"
+    );
 
     //
     // Determine the destination and connection params
@@ -517,9 +521,10 @@ async fn handle_inner(
         None => MAX_REQUEST_SIZE + 1,
     };
     info!(request_content_length, "request size in bytes");
-    HTTP_CONTENT_LENGTH
-        .with_label_values(&["request"])
-        .observe(request_content_length as f64);
+    Metrics::get()
+        .proxy
+        .http_conn_content_length_bytes
+        .observe(HttpDirection::Request, request_content_length as f64);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
@@ -528,7 +533,7 @@ async fn handle_inner(
     }
 
     let fetch_and_process_request = async {
-        let body = hyper::body::to_bytes(request.into_body()).await?;
+        let body = request.into_body().collect().await?.to_bytes();
         info!(length = body.len(), "request payload read");
         let payload: Payload = serde_json::from_slice(&body)?;
         Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
@@ -536,7 +541,9 @@ async fn handle_inner(
     .map_err(SqlOverHttpError::from);
 
     let authenticate_and_connect = async {
-        let keys = backend.authenticate(ctx, &conn_info).await?;
+        let keys = backend
+            .authenticate(ctx, &config.authentication_config, &conn_info)
+            .await?;
         let client = backend
             .connect_to_compute(ctx, conn_info, keys, !allow_pool)
             .await?;
@@ -596,7 +603,7 @@ async fn handle_inner(
     let body = serde_json::to_string(&result).expect("json serialization should not fail");
     let len = body.len();
     let response = response
-        .body(Body::from(body))
+        .body(Full::new(Bytes::from(body)))
         // only fails if invalid status code or invalid header/values are given.
         // these are not user configurable so it cannot fail dynamically
         .expect("building response payload should not fail");
@@ -604,9 +611,10 @@ async fn handle_inner(
     // count the egress bytes - we miss the TLS and header overhead but oh well...
     // moving this later in the stack is going to be a lot of effort and ehhhh
     metrics.record_egress(len as u64);
-    HTTP_CONTENT_LENGTH
-        .with_label_values(&["response"])
-        .observe(len as f64);
+    Metrics::get()
+        .proxy
+        .http_conn_content_length_bytes
+        .observe(HttpDirection::Response, len as f64);
 
     Ok(response)
 }
@@ -639,6 +647,7 @@ impl QueryData {
             }
             // The query was cancelled.
             Either::Right((_cancelled, query)) => {
+                tracing::info!("cancelling query");
                 if let Err(err) = cancel_token.cancel_query(NoTls).await {
                     tracing::error!(?err, "could not cancel query");
                 }

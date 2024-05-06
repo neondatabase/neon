@@ -167,7 +167,7 @@ pub(crate) async fn time_travel_recover_tenant(
     let warn_after = 3;
     let max_attempts = 10;
     let mut prefixes = Vec::with_capacity(2);
-    if tenant_shard_id.is_zero() {
+    if tenant_shard_id.is_shard_zero() {
         // Also recover the unsharded prefix for a shard of zero:
         // - if the tenant is totally unsharded, the unsharded prefix contains all the data
         // - if the tenant is sharded, we still want to recover the initdb data, but we only

@@ -1,13 +1,14 @@
 use pageserver_api::{
     models::{
         LocationConfig, LocationConfigListResponse, PageserverUtilization, SecondaryProgress,
-        TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
+        TenantScanRemoteStorageResponse, TenantShardSplitRequest, TenantShardSplitResponse,
+        TimelineCreateRequest, TimelineInfo,
     },
     shard::TenantShardId,
 };
 use pageserver_client::mgmt_api::{Client, Result};
 use reqwest::StatusCode;
-use utils::id::{NodeId, TimelineId};
+use utils::id::{NodeId, TenantId, TimelineId};
 
 /// Thin wrapper around [`pageserver_client::mgmt_api::Client`]. It allows the storage
 /// controller to collect metrics in a non-intrusive manner.
@@ -88,6 +89,18 @@ impl PageserverClient {
         )
     }
 
+    pub(crate) async fn tenant_scan_remote_storage(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantScanRemoteStorageResponse> {
+        measured_request!(
+            "tenant_scan_remote_storage",
+            crate::metrics::Method::Get,
+            &self.node_id_label,
+            self.inner.tenant_scan_remote_storage(tenant_id).await
+        )
+    }
+
     pub(crate) async fn tenant_secondary_download(
         &self,
         tenant_id: TenantShardId,
@@ -98,6 +111,27 @@ impl PageserverClient {
             crate::metrics::Method::Post,
             &self.node_id_label,
             self.inner.tenant_secondary_download(tenant_id, wait).await
+        )
+    }
+
+    pub(crate) async fn tenant_secondary_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<SecondaryProgress> {
+        measured_request!(
+            "tenant_secondary_status",
+            crate::metrics::Method::Get,
+            &self.node_id_label,
+            self.inner.tenant_secondary_status(tenant_shard_id).await
+        )
+    }
+
+    pub(crate) async fn tenant_heatmap_upload(&self, tenant_id: TenantShardId) -> Result<()> {
+        measured_request!(
+            "tenant_heatmap_upload",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner.tenant_heatmap_upload(tenant_id).await
         )
     }
 

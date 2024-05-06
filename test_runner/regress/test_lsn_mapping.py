@@ -1,3 +1,4 @@
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -109,6 +110,8 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
 # Test pageserver get_timestamp_of_lsn API
 def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
+    key_not_found_error = r".*could not find data for key.*"
+
     env = neon_env_builder.init_start()
 
     new_timeline_id = env.neon_cli.create_branch("test_ts_of_lsn_api")
@@ -177,8 +180,8 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
             raise RuntimeError("there should have been an 'could not find data for key' error")
         except PageserverApiException as error:
             assert error.status_code == 500
-            assert str(error).startswith("could not find data for key")
-            env.pageserver.allowed_errors.append(".*could not find data for key.*")
+            assert re.match(key_not_found_error, str(error))
+            env.pageserver.allowed_errors.append(key_not_found_error)
 
         # Probe a bunch of timestamps in the valid range
         step_size = 100

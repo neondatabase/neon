@@ -293,7 +293,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         lazy: Optional[bool] = None,
     ):
         body = location_conf.copy()
-        body["tenant_id"] = str(tenant_id)
 
         params = {}
         if flush_ms is not None:

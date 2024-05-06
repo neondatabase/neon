@@ -4,10 +4,12 @@ use crate::metrics::{
 };
 use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use anyhow::Context;
 use futures::Future;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
+use metrics::{BuildInfo, NeonMetrics};
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
@@ -44,15 +46,19 @@ use control_plane::storage_controller::{AttachHookRequest, InspectRequest};
 use routerify::Middleware;
 
 /// State available to HTTP request handlers
-#[derive(Clone)]
 pub struct HttpState {
     service: Arc<crate::service::Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
+    neon_metrics: NeonMetrics,
     allowlist_routes: Vec<Uri>,
 }
 
 impl HttpState {
-    pub fn new(service: Arc<crate::service::Service>, auth: Option<Arc<SwappableJwtAuth>>) -> Self {
+    pub fn new(
+        service: Arc<crate::service::Service>,
+        auth: Option<Arc<SwappableJwtAuth>>,
+        build_info: BuildInfo,
+    ) -> Self {
         let allowlist_routes = ["/status", "/ready", "/metrics"]
             .iter()
             .map(|v| v.parse().unwrap())
@@ -60,6 +66,7 @@ impl HttpState {
         Self {
             service,
             auth,
+            neon_metrics: NeonMetrics::new(build_info),
             allowlist_routes,
         }
     }
@@ -252,6 +259,12 @@ async fn handle_tenant_time_travel_remote_storage(
     json_response(StatusCode::OK, ())
 }
 
+fn map_reqwest_hyper_status(status: reqwest::StatusCode) -> Result<hyper::StatusCode, ApiError> {
+    hyper::StatusCode::from_u16(status.as_u16())
+        .context("invalid status code")
+        .map_err(ApiError::InternalServerError)
+}
+
 async fn handle_tenant_secondary_download(
     service: Arc<Service>,
     req: Request<Body>,
@@ -260,7 +273,7 @@ async fn handle_tenant_secondary_download(
     let wait = parse_query_param(&req, "wait_ms")?.map(Duration::from_millis);
 
     let (status, progress) = service.tenant_secondary_download(tenant_id, wait).await?;
-    json_response(status, progress)
+    json_response(map_reqwest_hyper_status(status)?, progress)
 }
 
 async fn handle_tenant_delete(
@@ -271,7 +284,10 @@ async fn handle_tenant_delete(
     check_permissions(&req, Scope::PageServerApi)?;
 
     deletion_wrapper(service, move |service| async move {
-        service.tenant_delete(tenant_id).await
+        service
+            .tenant_delete(tenant_id)
+            .await
+            .and_then(map_reqwest_hyper_status)
     })
     .await
 }
@@ -302,7 +318,10 @@ async fn handle_tenant_timeline_delete(
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
 
     deletion_wrapper(service, move |service| async move {
-        service.tenant_timeline_delete(tenant_id, timeline_id).await
+        service
+            .tenant_timeline_delete(tenant_id, timeline_id)
+            .await
+            .and_then(map_reqwest_hyper_status)
     })
     .await
 }
@@ -365,11 +384,9 @@ async fn handle_tenant_timeline_passthrough(
     }
 
     // We have a reqest::Response, would like a http::Response
-    let mut builder = hyper::Response::builder()
-        .status(resp.status())
-        .version(resp.version());
+    let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp.status())?);
     for (k, v) in resp.headers() {
-        builder = builder.header(k, v);
+        builder = builder.header(k.as_str(), v.as_bytes());
     }
 
     let response = builder
@@ -514,6 +531,18 @@ async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiErr
     let state = get_state(&req);
 
     json_response(StatusCode::OK, state.service.tenant_drop(tenant_id).await?)
+}
+
+async fn handle_tenant_import(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state.service.tenant_import(tenant_id).await?,
+    )
 }
 
 async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -672,10 +701,11 @@ fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>
     })
 }
 
-pub async fn measured_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+pub async fn measured_metrics_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     pub const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
 
-    let payload = crate::metrics::METRICS_REGISTRY.encode();
+    let state = get_state(&req);
+    let payload = crate::metrics::METRICS_REGISTRY.encode(&state.neon_metrics);
     let response = Response::builder()
         .status(200)
         .header(CONTENT_TYPE, TEXT_FORMAT)
@@ -704,6 +734,7 @@ where
 pub fn make_router(
     service: Arc<Service>,
     auth: Option<Arc<SwappableJwtAuth>>,
+    build_info: BuildInfo,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router()
         .middleware(prologue_metrics_middleware())
@@ -720,7 +751,7 @@ pub fn make_router(
     }
 
     router
-        .data(Arc::new(HttpState::new(service, auth)))
+        .data(Arc::new(HttpState::new(service, auth, build_info)))
         .get("/metrics", |r| {
             named_request_span(r, measured_metrics_handler, RequestName("metrics"))
         })
@@ -750,6 +781,13 @@ pub fn make_router(
         })
         .post("/debug/v1/node/:node_id/drop", |r| {
             named_request_span(r, handle_node_drop, RequestName("debug_v1_node_drop"))
+        })
+        .post("/debug/v1/tenant/:tenant_id/import", |r| {
+            named_request_span(
+                r,
+                handle_tenant_import,
+                RequestName("debug_v1_tenant_import"),
+            )
         })
         .get("/debug/v1/tenant", |r| {
             named_request_span(r, handle_tenants_dump, RequestName("debug_v1_tenant"))
@@ -874,7 +912,7 @@ pub fn make_router(
                 RequestName("v1_tenant_timeline"),
             )
         })
-        // Tenant detail GET passthrough to shard zero
+        // Tenant detail GET passthrough to shard zero:
         .get("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(
                 r,
@@ -882,13 +920,14 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
-        // Timeline GET passthrough to shard zero.  Note that the `*` in the URL is a wildcard: any future
-        // timeline GET APIs will be implicitly included.
-        .get("/v1/tenant/:tenant_id/timeline*", |r| {
+        // The `*` in the  URL is a wildcard: any tenant/timeline GET APIs on the pageserver
+        // are implicitly exposed here.  This must be last in the list to avoid
+        // taking precedence over other GET methods we might implement by hand.
+        .get("/v1/tenant/:tenant_id/*", |r| {
             tenant_service_handler(
                 r,
                 handle_tenant_timeline_passthrough,
-                RequestName("v1_tenant_timeline_passthrough"),
+                RequestName("v1_tenant_passthrough"),
             )
         })
 }

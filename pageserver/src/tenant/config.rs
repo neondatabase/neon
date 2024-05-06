@@ -369,6 +369,10 @@ pub struct TenantConf {
     // How much WAL must be ingested before checking again whether a new image layer is required.
     // Expresed in multiples of checkpoint distance.
     pub image_layer_creation_check_threshold: u8,
+
+    /// Switch to aux file v2. Switching this flag requires the user has not written any aux file into
+    /// the storage before, and this flag cannot be switched back. Otherwise there will be data corruptions.
+    pub switch_to_aux_file_v2: bool,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -464,6 +468,10 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_layer_creation_check_threshold: Option<u8>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub switch_to_aux_file_v2: Option<bool>,
 }
 
 impl TenantConfOpt {
@@ -521,6 +529,9 @@ impl TenantConfOpt {
             image_layer_creation_check_threshold: self
                 .image_layer_creation_check_threshold
                 .unwrap_or(global_conf.image_layer_creation_check_threshold),
+            switch_to_aux_file_v2: self
+                .switch_to_aux_file_v2
+                .unwrap_or(global_conf.switch_to_aux_file_v2),
         }
     }
 }
@@ -562,6 +573,7 @@ impl Default for TenantConf {
             lazy_slru_download: false,
             timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
+            switch_to_aux_file_v2: false,
         }
     }
 }
@@ -636,6 +648,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             lazy_slru_download: value.lazy_slru_download,
             timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
+            switch_to_aux_file_v2: value.switch_to_aux_file_v2,
         }
     }
 }

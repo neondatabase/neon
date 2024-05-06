@@ -5,6 +5,7 @@ use crate::interface::*;
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
+use pageserver_api::shard::ShardIdentity;
 use pin_project_lite::pin_project;
 use std::collections::BinaryHeap;
 use std::collections::VecDeque;
@@ -13,11 +14,17 @@ use std::ops::{DerefMut, Range};
 use std::pin::Pin;
 use std::task::{ready, Poll};
 
-pub fn keyspace_total_size<K>(keyspace: &CompactionKeySpace<K>) -> u64
+pub fn keyspace_total_size<K>(
+    keyspace: &CompactionKeySpace<K>,
+    shard_identity: &ShardIdentity,
+) -> u64
 where
     K: CompactionKey,
 {
-    keyspace.iter().map(|r| K::key_range_size(r) as u64).sum()
+    keyspace
+        .iter()
+        .map(|r| K::key_range_size(r, shard_identity) as u64)
+        .sum()
 }
 
 pub fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {

@@ -47,7 +47,7 @@ use chrono::Utc;
 use clap::Arg;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
@@ -62,6 +62,7 @@ use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
+use compute_tools::swap::resize_swap;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
@@ -110,6 +111,7 @@ fn main() -> Result<()> {
         .expect("Postgres connection string is required");
     let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
+    let resize_swap_on_bind = matches.get_flag("resize-swap-on-bind");
 
     // Extract OpenTelemetry context for the startup actions from the
     // TRACEPARENT and TRACESTATE env variables, and attach it to the current
@@ -226,14 +228,14 @@ fn main() -> Result<()> {
 
     // If this is a pooled VM, prewarm before starting HTTP server and becoming
     // available for binding. Prewarming helps Postgres start quicker later,
-    // because QEMU will already have it's memory allocated from the host, and
+    // because QEMU will already have its memory allocated from the host, and
     // the necessary binaries will already be cached.
     if !spec_set {
         compute.prewarm_postgres()?;
     }
 
-    // Launch http service first, so we were able to serve control-plane
-    // requests, while configuration is still in progress.
+    // Launch http service first, so that we can serve control-plane requests
+    // while configuration is still in progress.
     let _http_handle =
         launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
@@ -253,21 +255,22 @@ fn main() -> Result<()> {
                 break;
             }
         }
+
+        // Record for how long we slept waiting for the spec.
+        let now = Utc::now();
+        state.metrics.wait_for_spec_ms = now
+            .signed_duration_since(state.start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
+
+        // Reset start time, so that the total startup time that is calculated later will
+        // not include the time that we waited for the spec.
+        state.start_time = now;
     }
 
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
-
-    // Record for how long we slept waiting for the spec.
-    state.metrics.wait_for_spec_ms = Utc::now()
-        .signed_duration_since(state.start_time)
-        .to_std()
-        .unwrap()
-        .as_millis() as u64;
-    // Reset start time to the actual start of the configuration, so that
-    // total startup time was properly measured at the end.
-    state.start_time = Utc::now();
-
     state.status = ComputeStatus::Init;
     compute.state_changed.notify_all();
 
@@ -275,33 +278,72 @@ fn main() -> Result<()> {
         "running compute with features: {:?}",
         state.pspec.as_ref().unwrap().spec.features
     );
+    // before we release the mutex, fetch the swap size (if any) for later.
+    let swap_size_bytes = state.pspec.as_ref().unwrap().spec.swap_size_bytes;
     drop(state);
 
     // Launch remaining service threads
     let _monitor_handle = launch_monitor(&compute);
     let _configurator_handle = launch_configurator(&compute);
 
-    // Start Postgres
+    let mut prestartup_failed = false;
     let mut delay_exit = false;
-    let mut exit_code = None;
-    let pg = match compute.start_compute(extension_server_port) {
-        Ok(pg) => Some(pg),
-        Err(err) => {
-            error!("could not start the compute node: {:#}", err);
-            let mut state = compute.state.lock().unwrap();
-            state.error = Some(format!("{:?}", err));
-            state.status = ComputeStatus::Failed;
-            // Notify others that Postgres failed to start. In case of configuring the
-            // empty compute, it's likely that API handler is still waiting for compute
-            // state change. With this we will notify it that compute is in Failed state,
-            // so control plane will know about it earlier and record proper error instead
-            // of timeout.
-            compute.state_changed.notify_all();
-            drop(state); // unlock
-            delay_exit = true;
-            None
+
+    // Resize swap to the desired size if the compute spec says so
+    if let (Some(size_bytes), true) = (swap_size_bytes, resize_swap_on_bind) {
+        // To avoid 'swapoff' hitting postgres startup, we need to run resize-swap to completion
+        // *before* starting postgres.
+        //
+        // In theory, we could do this asynchronously if SkipSwapon was enabled for VMs, but this
+        // carries a risk of introducing hard-to-debug issues - e.g. if postgres sometimes gets
+        // OOM-killed during startup because swap wasn't available yet.
+        match resize_swap(size_bytes) {
+            Ok(()) => {
+                let size_gib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                info!(%size_bytes, %size_gib, "resized swap");
+            }
+            Err(err) => {
+                let err = err.context("failed to resize swap");
+                error!("{err:#}");
+
+                // Mark compute startup as failed; don't try to start postgres, and report this
+                // error to the control plane when it next asks.
+                prestartup_failed = true;
+                let mut state = compute.state.lock().unwrap();
+                state.error = Some(format!("{err:?}"));
+                state.status = ComputeStatus::Failed;
+                compute.state_changed.notify_all();
+                delay_exit = true;
+            }
         }
-    };
+    }
+
+    // Start Postgres
+    let mut pg = None;
+    let mut exit_code = None;
+
+    if !prestartup_failed {
+        pg = match compute.start_compute(extension_server_port) {
+            Ok(pg) => Some(pg),
+            Err(err) => {
+                error!("could not start the compute node: {:#}", err);
+                let mut state = compute.state.lock().unwrap();
+                state.error = Some(format!("{:?}", err));
+                state.status = ComputeStatus::Failed;
+                // Notify others that Postgres failed to start. In case of configuring the
+                // empty compute, it's likely that API handler is still waiting for compute
+                // state change. With this we will notify it that compute is in Failed state,
+                // so control plane will know about it earlier and record proper error instead
+                // of timeout.
+                compute.state_changed.notify_all();
+                drop(state); // unlock
+                delay_exit = true;
+                None
+            }
+        };
+    } else {
+        warn!("skipping postgres startup because pre-startup step failed");
+    }
 
     // Start the vm-monitor if directed to. The vm-monitor only runs on linux
     // because it requires cgroups.
@@ -525,6 +567,11 @@ fn cli() -> clap::Command {
                     "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable",
                 )
                 .value_name("FILECACHE_CONNSTR"),
+        )
+        .arg(
+            Arg::new("resize-swap-on-bind")
+                .long("resize-swap-on-bind")
+                .action(clap::ArgAction::SetTrue),
         )
 }
 

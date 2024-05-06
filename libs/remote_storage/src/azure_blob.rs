@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
+use std::io;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -20,6 +21,7 @@ use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use bytes::Bytes;
+use futures::future::Either;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -128,12 +130,12 @@ impl AzureBlobStorage {
         let kind = RequestKind::Get;
 
         let _permit = self.permit(kind, cancel).await?;
+        let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
+        let cancel_or_timeout_ = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
 
         let mut etag = None;
         let mut last_modified = None;
         let mut metadata = HashMap::new();
-        // TODO give proper streaming response instead of buffering into RAM
-        // https://github.com/neondatabase/neon/issues/5563
 
         let download = async {
             let response = builder
@@ -152,39 +154,46 @@ impl AzureBlobStorage {
                 Err(_elapsed) => Err(DownloadError::Timeout),
             });
 
-            let mut response = std::pin::pin!(response);
+            let mut response = Box::pin(response);
 
-            let mut bufs = Vec::new();
-            while let Some(part) = response.next().await {
-                let part = part?;
-                if etag.is_none() {
-                    etag = Some(part.blob.properties.etag);
-                }
-                if last_modified.is_none() {
-                    last_modified = Some(part.blob.properties.last_modified.into());
-                }
-                if let Some(blob_meta) = part.blob.metadata {
-                    metadata.extend(blob_meta.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
-                }
-                let data = part
-                    .data
-                    .collect()
-                    .await
-                    .map_err(|e| DownloadError::Other(e.into()))?;
-                bufs.push(data);
-            }
-
-            if bufs.is_empty() {
+            let Some(part) = response.next().await else {
                 return Err(DownloadError::Other(anyhow::anyhow!(
-                    "Azure GET response contained no buffers"
+                    "Azure GET response contained no response body"
                 )));
+            };
+            let part = part?;
+            if etag.is_none() {
+                etag = Some(part.blob.properties.etag);
             }
+            if last_modified.is_none() {
+                last_modified = Some(part.blob.properties.last_modified.into());
+            }
+            if let Some(blob_meta) = part.blob.metadata {
+                metadata.extend(blob_meta.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
+            }
+
             // unwrap safety: if these were None, bufs would be empty and we would have returned an error already
             let etag = etag.unwrap();
             let last_modified = last_modified.unwrap();
 
+            let tail_stream = response
+                .map(|part| match part {
+                    Ok(part) => Either::Left(part.data.map(|r| r.map_err(io::Error::other))),
+                    Err(e) => {
+                        Either::Right(futures::stream::once(async { Err(io::Error::other(e)) }))
+                    }
+                })
+                .flatten();
+            let stream = part
+                .data
+                .map(|r| r.map_err(io::Error::other))
+                .chain(sync_wrapper::SyncStream::new(tail_stream));
+            //.chain(SyncStream::from_pin(Box::pin(tail_stream)));
+
+            let download_stream = crate::support::DownloadStream::new(cancel_or_timeout_, stream);
+
             Ok(Download {
-                download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
+                download_stream: Box::pin(download_stream),
                 etag,
                 last_modified,
                 metadata: Some(StorageMetadata(metadata)),
@@ -193,7 +202,10 @@ impl AzureBlobStorage {
 
         tokio::select! {
             bufs = download => bufs,
-            _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+            cancel_or_timeout = cancel_or_timeout => match cancel_or_timeout {
+                TimeoutOrCancel::Timeout => Err(DownloadError::Timeout),
+                TimeoutOrCancel::Cancel => Err(DownloadError::Cancelled),
+            },
         }
     }
 

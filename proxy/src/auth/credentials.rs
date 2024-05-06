@@ -4,7 +4,7 @@ use crate::{
     auth::password_hack::parse_endpoint_param,
     context::RequestMonitoring,
     error::{ReportableError, UserFacingError},
-    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI,
+    metrics::{Metrics, SniKind},
     proxy::NeonOptions,
     serverless::SERVERLESS_DRIVER_SNI,
     EndpointId, RoleName,
@@ -144,21 +144,22 @@ impl ComputeUserInfoMaybeEndpoint {
             ctx.set_endpoint_id(ep.clone());
         }
 
+        let metrics = Metrics::get();
         info!(%user, "credentials");
         if sni.is_some() {
             info!("Connection with sni");
-            NUM_CONNECTION_ACCEPTED_BY_SNI
-                .with_label_values(&["sni"])
-                .inc();
+            metrics.proxy.accepted_connections_by_sni.inc(SniKind::Sni);
         } else if endpoint.is_some() {
-            NUM_CONNECTION_ACCEPTED_BY_SNI
-                .with_label_values(&["no_sni"])
-                .inc();
+            metrics
+                .proxy
+                .accepted_connections_by_sni
+                .inc(SniKind::NoSni);
             info!("Connection without sni");
         } else {
-            NUM_CONNECTION_ACCEPTED_BY_SNI
-                .with_label_values(&["password_hack"])
-                .inc();
+            metrics
+                .proxy
+                .accepted_connections_by_sni
+                .inc(SniKind::PasswordHack);
             info!("Connection with password hack");
         }
 

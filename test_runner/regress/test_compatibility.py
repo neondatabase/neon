@@ -192,9 +192,6 @@ def test_backward_compatibility(
     assert not breaking_changes_allowed, "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
 
 
-# Forward compatibility is broken due to https://github.com/neondatabase/neon/pull/6530
-# The test is disabled until the next release deployment
-@pytest.mark.xfail
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
@@ -229,6 +226,12 @@ def test_forward_compatibility(
     )
 
     try:
+        # Previous version neon_local and pageserver are not aware
+        # of the new config.
+        # TODO: remove these once the previous version of neon local supports them
+        neon_env_builder.pageserver_get_impl = None
+        neon_env_builder.pageserver_validate_vectored_get = None
+
         neon_env_builder.num_safekeepers = 3
         neon_local_binpath = neon_env_builder.neon_binpath
         env = neon_env_builder.from_repo_dir(

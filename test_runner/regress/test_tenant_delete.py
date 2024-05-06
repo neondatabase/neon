@@ -469,7 +469,8 @@ def test_tenant_delete_concurrent(
 ):
     """
     Validate that concurrent delete requests to the same tenant behave correctly:
-    exactly one should succeed.
+    exactly one should execute: the rest should give 202 responses but not start
+    another deletion.
 
     This is a reproducer for https://github.com/neondatabase/neon/issues/5936
     """
@@ -484,14 +485,10 @@ def test_tenant_delete_concurrent(
         run_pg_bench_small(pg_bin, endpoint.connstr())
         last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
 
-    CONFLICT_MESSAGE = "Precondition failed: Invalid state Stopping. Expected Active or Broken"
-
     env.pageserver.allowed_errors.extend(
         [
             # lucky race with stopping from flushing a layer we fail to schedule any uploads
             ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
-            # Errors logged from our 4xx requests
-            f".*{CONFLICT_MESSAGE}.*",
         ]
     )
 
@@ -507,7 +504,7 @@ def test_tenant_delete_concurrent(
         return ps_http.tenant_delete(tenant_id)
 
     def hit_remove_failpoint():
-        env.pageserver.assert_log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}")
+        return env.pageserver.assert_log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}")[1]
 
     def hit_run_failpoint():
         env.pageserver.assert_log_contains(f"at failpoint {BEFORE_RUN_FAILPOINT}")
@@ -518,11 +515,14 @@ def test_tenant_delete_concurrent(
 
         # Wait until the first request completes its work and is blocked on removing
         # the TenantSlot from tenant manager.
-        wait_until(100, 0.1, hit_remove_failpoint)
+        log_cursor = wait_until(100, 0.1, hit_remove_failpoint)
+        assert log_cursor is not None
 
-        # Start another request: this should fail when it sees a tenant in Stopping state
-        with pytest.raises(PageserverApiException, match=CONFLICT_MESSAGE):
-            ps_http.tenant_delete(tenant_id)
+        # Start another request: this should succeed without actually entering the deletion code
+        ps_http.tenant_delete(tenant_id)
+        assert not env.pageserver.log_contains(
+            f"at failpoint {BEFORE_RUN_FAILPOINT}", offset=log_cursor
+        )
 
         # Start another background request, which will pause after acquiring a TenantSlotGuard
         # but before completing.
@@ -539,8 +539,10 @@ def test_tenant_delete_concurrent(
 
         # Permit the duplicate background request to run to completion and fail.
         ps_http.configure_failpoints((BEFORE_RUN_FAILPOINT, "off"))
-        with pytest.raises(PageserverApiException, match=CONFLICT_MESSAGE):
-            background_4xx_req.result(timeout=10)
+        background_4xx_req.result(timeout=10)
+        assert not env.pageserver.log_contains(
+            f"at failpoint {BEFORE_RUN_FAILPOINT}", offset=log_cursor
+        )
 
     # Physical deletion should have happened
     assert_prefix_empty(

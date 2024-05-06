@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::str::FromStr;
 
 use anyhow::{anyhow, Context};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -17,6 +18,7 @@ use tracing::warn;
 use utils::backoff;
 
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerFileName;
@@ -25,13 +27,13 @@ use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode, RemotePath};
 use utils::crashsafe::path_with_suffix_extension;
-use utils::id::TimelineId;
+use utils::id::{TenantId, TimelineId};
 
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{
     parse_remote_index_path, remote_index_path, remote_initdb_archive_path,
-    remote_initdb_preserved_archive_path, FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES,
-    INITDB_PATH,
+    remote_initdb_preserved_archive_path, remote_tenant_path, FAILED_DOWNLOAD_WARN_THRESHOLD,
+    FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
 };
 
 ///
@@ -39,6 +41,7 @@ use super::{
 /// in the metadata. (In the future, we might do more cross-checks, like CRC validation)
 ///
 /// Returns the size of the downloaded file.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_layer_file<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
@@ -47,6 +50,7 @@ pub async fn download_layer_file<'a>(
     layer_file_name: &'a LayerFileName,
     layer_metadata: &'a LayerFileMetadata,
     cancel: &CancellationToken,
+    ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -74,7 +78,7 @@ pub async fn download_layer_file<'a>(
     let temp_file_path = path_with_suffix_extension(&local_path, TEMP_DOWNLOAD_EXTENSION);
 
     let bytes_amount = download_retry(
-        || async { download_object(storage, &remote_path, &temp_file_path, cancel).await },
+        || async { download_object(storage, &remote_path, &temp_file_path, cancel, ctx).await },
         &format!("download {remote_path:?}"),
         cancel,
     )
@@ -132,6 +136,7 @@ async fn download_object<'a>(
     src_path: &RemotePath,
     dst_path: &Utf8PathBuf,
     cancel: &CancellationToken,
+    #[cfg_attr(target_os = "macos", allow(unused_variables))] ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
     let res = match crate::virtual_file::io_engine::get() {
         crate::virtual_file::io_engine::IoEngine::NotSet => panic!("unset"),
@@ -182,6 +187,7 @@ async fn download_object<'a>(
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
             use crate::virtual_file::owned_buffers_io::{self, util::size_tracking_writer};
+            use bytes::BytesMut;
             async {
                 let destination_file = VirtualFile::create(dst_path)
                     .await
@@ -194,10 +200,10 @@ async fn download_object<'a>(
                 // There's chunks_vectored() on the stream.
                 let (bytes_amount, destination_file) = async {
                     let size_tracking = size_tracking_writer::Writer::new(destination_file);
-                    let mut buffered = owned_buffers_io::write::BufferedWriter::<
-                        { super::BUFFER_SIZE },
-                        _,
-                    >::new(size_tracking);
+                    let mut buffered = owned_buffers_io::write::BufferedWriter::<BytesMut, _>::new(
+                        size_tracking,
+                        BytesMut::with_capacity(super::BUFFER_SIZE),
+                    );
                     while let Some(res) =
                         futures::StreamExt::next(&mut download.download_stream).await
                     {
@@ -206,10 +212,10 @@ async fn download_object<'a>(
                             Err(e) => return Err(e),
                         };
                         buffered
-                            .write_buffered(tokio_epoll_uring::BoundedBuf::slice_full(chunk))
+                            .write_buffered(tokio_epoll_uring::BoundedBuf::slice_full(chunk), ctx)
                             .await?;
                     }
-                    let size_tracking = buffered.flush_and_into_inner().await?;
+                    let size_tracking = buffered.flush_and_into_inner(ctx).await?;
                     Ok(size_tracking.into_inner())
                 }
                 .await?;
@@ -252,42 +258,31 @@ pub(crate) fn is_temp_download_file(path: &Utf8Path) -> bool {
     }
 }
 
-/// List timelines of given tenant in remote storage
-pub async fn list_remote_timelines(
+async fn list_identifiers<T>(
     storage: &GenericRemoteStorage,
-    tenant_shard_id: TenantShardId,
+    prefix: RemotePath,
     cancel: CancellationToken,
-) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
-    let remote_path = remote_timelines_path(&tenant_shard_id);
-
-    fail::fail_point!("storage-sync-list-remote-timelines", |_| {
-        anyhow::bail!("storage-sync-list-remote-timelines");
-    });
-
+) -> anyhow::Result<(HashSet<T>, HashSet<String>)>
+where
+    T: FromStr + Eq + std::hash::Hash,
+{
     let listing = download_retry_forever(
-        || {
-            storage.list(
-                Some(&remote_path),
-                ListingMode::WithDelimiter,
-                None,
-                &cancel,
-            )
-        },
-        &format!("list timelines for {tenant_shard_id}"),
+        || storage.list(Some(&prefix), ListingMode::WithDelimiter, None, &cancel),
+        &format!("list identifiers in prefix {prefix}"),
         &cancel,
     )
     .await?;
 
-    let mut timeline_ids = HashSet::new();
+    let mut parsed_ids = HashSet::new();
     let mut other_prefixes = HashSet::new();
 
-    for timeline_remote_storage_key in listing.prefixes {
-        let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
-            anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_shard_id}")
+    for id_remote_storage_key in listing.prefixes {
+        let object_name = id_remote_storage_key.object_name().ok_or_else(|| {
+            anyhow::anyhow!("failed to get object name for key {id_remote_storage_key}")
         })?;
 
-        match object_name.parse::<TimelineId>() {
-            Ok(t) => timeline_ids.insert(t),
+        match object_name.parse::<T>() {
+            Ok(t) => parsed_ids.insert(t),
             Err(_) => other_prefixes.insert(object_name.to_string()),
         };
     }
@@ -299,7 +294,31 @@ pub async fn list_remote_timelines(
         other_prefixes.insert(object_name.to_string());
     }
 
-    Ok((timeline_ids, other_prefixes))
+    Ok((parsed_ids, other_prefixes))
+}
+
+/// List shards of given tenant in remote storage
+pub(crate) async fn list_remote_tenant_shards(
+    storage: &GenericRemoteStorage,
+    tenant_id: TenantId,
+    cancel: CancellationToken,
+) -> anyhow::Result<(HashSet<TenantShardId>, HashSet<String>)> {
+    let remote_path = remote_tenant_path(&TenantShardId::unsharded(tenant_id));
+    list_identifiers::<TenantShardId>(storage, remote_path, cancel).await
+}
+
+/// List timelines of given tenant shard in remote storage
+pub async fn list_remote_timelines(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: TenantShardId,
+    cancel: CancellationToken,
+) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
+    fail::fail_point!("storage-sync-list-remote-timelines", |_| {
+        anyhow::bail!("storage-sync-list-remote-timelines");
+    });
+
+    let remote_path = remote_timelines_path(&tenant_shard_id).add_trailing_slash();
+    list_identifiers::<TimelineId>(storage, remote_path, cancel).await
 }
 
 async fn do_download_index_part(
@@ -308,7 +327,7 @@ async fn do_download_index_part(
     timeline_id: &TimelineId,
     index_generation: Generation,
     cancel: &CancellationToken,
-) -> Result<IndexPart, DownloadError> {
+) -> Result<(IndexPart, Generation), DownloadError> {
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
     let index_part_bytes = download_retry_forever(
@@ -333,7 +352,7 @@ async fn do_download_index_part(
         .with_context(|| format!("deserialize index part file at {remote_path:?}"))
         .map_err(DownloadError::Other)?;
 
-    Ok(index_part)
+    Ok((index_part, index_generation))
 }
 
 /// index_part.json objects are suffixed with a generation number, so we cannot
@@ -342,13 +361,13 @@ async fn do_download_index_part(
 /// In this function we probe for the most recent index in a generation <= our current generation.
 /// See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
 #[tracing::instrument(skip_all, fields(generation=?my_generation))]
-pub(super) async fn download_index_part(
+pub(crate) async fn download_index_part(
     storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     my_generation: Generation,
     cancel: &CancellationToken,
-) -> Result<IndexPart, DownloadError> {
+) -> Result<(IndexPart, Generation), DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     if my_generation.is_none() {
@@ -417,11 +436,16 @@ pub(super) async fn download_index_part(
     let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
 
     let indices = download_retry(
-        || async { storage.list_files(Some(&index_prefix), None, cancel).await },
+        || async {
+            storage
+                .list(Some(&index_prefix), ListingMode::NoDelimiter, None, cancel)
+                .await
+        },
         "list index_part files",
         cancel,
     )
-    .await?;
+    .await?
+    .keys;
 
     // General case logic for which index to use: the latest index whose generation
     // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
