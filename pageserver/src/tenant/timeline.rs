@@ -1900,7 +1900,7 @@ impl Timeline {
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     pub(crate) async fn download_layer(
         &self,
-        layer_file_name: &str,
+        layer_file_name: &LayerFileName,
     ) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
@@ -1918,7 +1918,10 @@ impl Timeline {
     /// Evict just one layer.
     ///
     /// Returns `Ok(None)` in the case where the layer could not be found by its `layer_file_name`.
-    pub(crate) async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+    pub(crate) async fn evict_layer(
+        &self,
+        layer_file_name: &LayerFileName,
+    ) -> anyhow::Result<Option<bool>> {
         let _gate = self
             .gate
             .enter()
@@ -2990,11 +2993,11 @@ impl Timeline {
         }
     }
 
-    async fn find_layer(&self, layer_file_name: &str) -> Option<Layer> {
+    async fn find_layer(&self, layer_name: &LayerFileName) -> Option<Layer> {
         let guard = self.layers.read().await;
         for historic_layer in guard.layer_map().iter_historic_layers() {
-            let historic_layer_name = historic_layer.filename().file_name();
-            if layer_file_name == historic_layer_name {
+            let historic_layer_name = historic_layer.filename();
+            if layer_name == &historic_layer_name {
                 return Some(guard.get_from_desc(&historic_layer));
             }
         }

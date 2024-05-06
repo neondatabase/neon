@@ -63,6 +63,7 @@ use crate::tenant::remote_timeline_client::list_remote_timelines;
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
+use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::SpawnMode;
@@ -1228,13 +1229,15 @@ async fn layer_download_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let layer_name = LayerFileName::from_str(layer_file_name)
+        .map_err(|s| ApiError::BadRequest(anyhow::anyhow!(s)))?;
     let state = get_state(&request);
 
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
     let downloaded = timeline
-        .download_layer(layer_file_name)
+        .download_layer(&layer_name)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1258,11 +1261,14 @@ async fn evict_timeline_layer_handler(
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
     let state = get_state(&request);
 
+    let layer_name = LayerFileName::from_str(layer_file_name)
+        .map_err(|s| ApiError::BadRequest(anyhow::anyhow!(s)))?;
+
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
     let evicted = timeline
-        .evict_layer(layer_file_name)
+        .evict_layer(&layer_name)
         .await
         .map_err(ApiError::InternalServerError)?;
 
