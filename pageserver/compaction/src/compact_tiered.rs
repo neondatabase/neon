@@ -544,7 +544,8 @@ where
         let mut new_jobs = Vec::new();
 
         // Slide a window through the keyspace
-        let mut key_accum = std::pin::pin!(accum_key_values(key_value_stream));
+        let mut key_accum =
+            std::pin::pin!(accum_key_values(key_value_stream, self.target_file_size));
         let mut all_in_window: bool = false;
         let mut window = Window::new();
         loop {
