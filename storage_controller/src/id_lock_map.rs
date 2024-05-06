@@ -29,12 +29,43 @@ impl<T: Display> Drop for WrappedWriteGuard<T> {
         let duration = self.start.elapsed();
         if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
             tracing::warn!(
-                "Lock on {} was held for {:?}",
+                "Exclusive lock on {} was held for {:?}",
                 self.guard.as_ref().unwrap(),
                 duration
             );
         }
         *self.guard = None;
+    }
+}
+
+/// A wrapper around `OwnedRwLockReadGuard` that when dropped changes the
+/// current holding operation in lock.
+pub struct WrappedReadGuard<T: Display> {
+    _guard: tokio::sync::OwnedRwLockReadGuard<Option<T>>,
+    operation: T,
+    start: Instant,
+}
+
+impl<T: Display> WrappedReadGuard<T> {
+    pub fn new(guard: tokio::sync::OwnedRwLockReadGuard<Option<T>>, operation: T) -> Self {
+        Self {
+            _guard: guard,
+            operation,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl<T: Display> Drop for WrappedReadGuard<T> {
+    fn drop(&mut self) {
+        let duration = self.start.elapsed();
+        if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
+            tracing::warn!(
+                "Shared lock on {} was held for {:?}",
+                self.operation,
+                duration
+            );
+        }
     }
 }
 
@@ -58,10 +89,11 @@ where
     pub(crate) fn shared(
         &self,
         key: T,
-    ) -> impl std::future::Future<Output = tokio::sync::OwnedRwLockReadGuard<Option<I>>> {
+        operation: I,
+    ) -> impl std::future::Future<Output = WrappedReadGuard<I>> {
         let mut locked = self.entities.lock().unwrap();
-        let entry = locked.entry(key).or_default();
-        entry.clone().read_owned()
+        let entry = locked.entry(key).or_default().clone();
+        async move { WrappedReadGuard::new(entry.read_owned().await, operation) }
     }
 
     pub(crate) fn exclusive(
@@ -72,7 +104,7 @@ where
         let mut locked = self.entities.lock().unwrap();
         let entry = locked.entry(key).or_default().clone();
         async move {
-            let mut guard = WrappedWriteGuard::new(entry.clone().write_owned().await);
+            let mut guard = WrappedWriteGuard::new(entry.write_owned().await);
             *guard.guard = Some(operation);
             guard
         }
@@ -99,7 +131,7 @@ where
 
 pub async fn trace_exclusive_lock<
     T: Clone + Display + Eq + PartialEq + std::hash::Hash,
-    I: Display + Clone,
+    I: Clone + Display,
 >(
     op_locks: &IdLockMap<T, I>,
     key: T,
@@ -123,14 +155,14 @@ pub async fn trace_exclusive_lock<
 
 pub async fn trace_shared_lock<
     T: Clone + Display + Eq + PartialEq + std::hash::Hash,
-    I: Display,
+    I: Clone + Display,
 >(
     op_locks: &IdLockMap<T, I>,
     key: T,
     operation: I,
-) -> tokio::sync::OwnedRwLockReadGuard<Option<I>> {
+) -> WrappedReadGuard<I> {
     let start = Instant::now();
-    let guard = op_locks.shared(key.clone()).await;
+    let guard = op_locks.shared(key.clone(), operation.clone()).await;
 
     let duration = start.elapsed();
     if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
@@ -159,11 +191,11 @@ mod tests {
     async fn multiple_shared_locks() {
         let id_lock_map: IdLockMap<i32, Operations> = IdLockMap::default();
 
-        let shared_lock_1 = id_lock_map.shared(1).await;
-        let shared_lock_2 = id_lock_map.shared(1).await;
+        let shared_lock_1 = id_lock_map.shared(1, Operations::Op1).await;
+        let shared_lock_2 = id_lock_map.shared(1, Operations::Op2).await;
 
-        assert!(shared_lock_1.is_none());
-        assert!(shared_lock_2.is_none());
+        assert_eq!(shared_lock_1.operation, Operations::Op1);
+        assert_eq!(shared_lock_2.operation, Operations::Op2);
     }
 
     #[tokio::test]
@@ -183,7 +215,7 @@ mod tests {
             assert!(_ex_lock_2.is_err());
         }
 
-        let shared_lock_1 = id_lock_map.shared(resource_id).await;
-        assert!(shared_lock_1.is_none());
+        let shared_lock_1 = id_lock_map.shared(resource_id, Operations::Op1).await;
+        assert_eq!(shared_lock_1.operation, Operations::Op1);
     }
 }
