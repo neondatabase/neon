@@ -110,7 +110,6 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
 
 # Test pageserver get_timestamp_of_lsn API
-@pytest.mark.repeat(300)
 def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     key_not_found_error = r".*could not find data for key.*"
 
