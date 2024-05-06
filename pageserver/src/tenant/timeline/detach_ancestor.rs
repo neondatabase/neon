@@ -114,7 +114,7 @@ async fn copy_lsn_prefix(
         // highest key in the layer.
         let reused_highest_key = layer.layer_desc().key_range.end;
         let copied = writer
-            .finish(reused_highest_key, target_timeline)
+            .finish(reused_highest_key, target_timeline, ctx)
             .await
             .map_err(CopyDeltaPrefix)?;
 
