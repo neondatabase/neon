@@ -688,6 +688,8 @@ impl RemoteTimelineClient {
                     .insert(layer.layer_desc().filename(), layer.metadata());
             }
 
+            self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+
             let barrier = self.schedule_barrier0(upload_queue);
             self.launch_queued_tasks(upload_queue);
             barrier
