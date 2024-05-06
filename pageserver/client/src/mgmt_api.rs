@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use pageserver_api::{models::*, shard::TenantShardId};
 use reqwest::{IntoUrl, Method, StatusCode};
 use utils::{
@@ -537,6 +539,32 @@ impl Client {
             self.mgmt_api_endpoint, tenant_shard_id, timeline_id, layer_file_name
         );
         let resp = self.request_noerror(Method::GET, &uri, ()).await?;
+        match resp.status() {
+            StatusCode::OK => Ok(true),
+            StatusCode::NOT_MODIFIED => Ok(false),
+            // TODO: dedupe this pattern / introduce separate error variant?
+            status => Err(match resp.json::<HttpErrorBody>().await {
+                Ok(HttpErrorBody { msg }) => Error::ApiError(status, msg),
+                Err(_) => {
+                    Error::ReceiveErrorBody(format!("Http error ({}) at {}.", status.as_u16(), uri))
+                }
+            }),
+        }
+    }
+
+    pub async fn ingest_aux_files(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        aux_files: HashMap<String, String>,
+    ) -> Result<bool> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/ingest_aux_files",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id
+        );
+        let resp = self
+            .request_noerror(Method::POST, &uri, IngestAuxFilesRequest { aux_files })
+            .await?;
         match resp.status() {
             StatusCode::OK => Ok(true),
             StatusCode::NOT_MODIFIED => Ok(false),
