@@ -47,8 +47,9 @@ def test_min_resident_size_override_handling(
     if config_level_override is not None:
 
         def set_min_resident_size(config):
-            config["tenant_config"] = {"min_resident_size": config_level_override}
-            return True
+            tenant_config = config.get("tenant_config", {})
+            tenant_config["min_resident_size"] = config_level_override
+            config["tenant_config"] = tenant_config
 
         env.pageserver.edit_config_toml(set_min_resident_size)
     env.pageserver.stop()

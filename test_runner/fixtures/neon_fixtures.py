@@ -2427,20 +2427,16 @@ class NeonPageserver(PgProtocol, LogUtils):
     def config_toml_path(self) -> Path:
         return self.workdir / "pageserver.toml"
 
-    def edit_config_toml(self, edit_fn: Callable[[Dict[str, Any]], bool]):
+    def edit_config_toml(self, edit_fn: Callable[[Dict[str, Any]], None]):
         """
         Edit the pageserver's config toml file in place.
-
-        The `edit_fn` is to manipulate the dict, and if it returns True, the file will be written.
-        If it returns False, no changes are made to the file system.
         """
         path = self.config_toml_path
         with open(path, "r") as f:
             config = toml.load(f)
-        save = edit_fn(config)
-        if save:
-            with open(path, "w") as f:
-                toml.dump(config, f)
+        edit_fn(config)
+        with open(path, "w") as f:
+            toml.dump(config, f)
 
     def patch_config_toml_nonrecursive(self, patch: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -2451,13 +2447,12 @@ class NeonPageserver(PgProtocol, LogUtils):
         """
         replacements = {}
 
-        def doit(config: Dict[str, Any]) -> bool:
+        def doit(config: Dict[str, Any]):
             while len(patch) > 0:
                 key, new = patch.popitem()
                 old = config.get(key, None)
                 config[key] = new
                 replacements[key] = old
-            return True
 
         self.edit_config_toml(doit)
         return replacements
