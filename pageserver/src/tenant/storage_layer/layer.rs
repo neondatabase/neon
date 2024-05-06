@@ -129,14 +129,18 @@ pub(crate) fn local_layer_path(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     layer_file_name: &LayerFileName,
-    generation: &Generation,
+    _generation: &Generation,
 ) -> Utf8PathBuf {
     let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
-    timeline_path.join(format!(
-        "{}{}",
-        layer_file_name.file_name(),
-        generation.get_suffix()
-    ))
+
+    timeline_path.join(layer_file_name.file_name())
+
+    // TOOD: include generation in the name in now+1 releases.
+    // timeline_path.join(format!(
+    //     "{}{}",
+    //     layer_file_name.file_name(),
+    //     generation.get_suffix()
+    // ))
 }
 
 impl Layer {
