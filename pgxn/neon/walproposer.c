@@ -80,7 +80,7 @@ static int	CompareLsn(const void *a, const void *b);
 static char *FormatSafekeeperState(Safekeeper *sk);
 static void AssertEventsOkForState(uint32 events, Safekeeper *sk);
 static char *FormatEvents(WalProposer *wp, uint32 events);
-
+static void UpdateDonorShmem(WalProposer *wp);
 
 WalProposer *
 WalProposerCreate(WalProposerConfig *config, walproposer_api api)
@@ -922,7 +922,8 @@ static void
 DetermineEpochStartLsn(WalProposer *wp)
 {
 	TermHistory *dth;
-	int          n_ready = 0;
+	int			n_ready = 0;
+	WalproposerShmemState *walprop_shared;
 
 	wp->propEpochStartLsn = InvalidXLogRecPtr;
 	wp->donorEpoch = 0;
@@ -964,16 +965,18 @@ DetermineEpochStartLsn(WalProposer *wp)
 	if (n_ready < wp->quorum)
 	{
 		/*
-		 * This is a rare case that can be triggered if safekeeper has voted and disconnected.
-		 * In this case, its state will not be SS_IDLE and its vote cannot be used, because
-		 * we clean up `voteResponse` in `ShutdownConnection`.
+		 * This is a rare case that can be triggered if safekeeper has voted
+		 * and disconnected. In this case, its state will not be SS_IDLE and
+		 * its vote cannot be used, because we clean up `voteResponse` in
+		 * `ShutdownConnection`.
 		 */
 		wp_log(FATAL, "missing majority of votes, collected %d, expected %d, got %d", wp->n_votes, wp->quorum, n_ready);
 	}
 
 	/*
-	 * If propEpochStartLsn is 0, it means flushLsn is 0 everywhere, we are bootstrapping
-	 * and nothing was committed yet. Start streaming then from the basebackup LSN.
+	 * If propEpochStartLsn is 0, it means flushLsn is 0 everywhere, we are
+	 * bootstrapping and nothing was committed yet. Start streaming then from
+	 * the basebackup LSN.
 	 */
 	if (wp->propEpochStartLsn == InvalidXLogRecPtr && !wp->config->syncSafekeepers)
 	{
@@ -984,11 +987,12 @@ DetermineEpochStartLsn(WalProposer *wp)
 		}
 		wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propEpochStartLsn));
 	}
+	pg_atomic_write_u64(&wp->api.get_shmem_state(wp)->propEpochStartLsn, wp->propEpochStartLsn);
 
 	/*
-	 * Safekeepers are setting truncateLsn after timelineStartLsn is known, so it
-	 * should never be zero at this point, if we know timelineStartLsn.
-	 * 
+	 * Safekeepers are setting truncateLsn after timelineStartLsn is known, so
+	 * it should never be zero at this point, if we know timelineStartLsn.
+	 *
 	 * timelineStartLsn can be zero only on the first syncSafekeepers run.
 	 */
 	Assert((wp->truncateLsn != InvalidXLogRecPtr) ||
@@ -1022,10 +1026,9 @@ DetermineEpochStartLsn(WalProposer *wp)
 	 * since which we are going to write according to the consensus. If not,
 	 * we must bail out, as clog and other non rel data is inconsistent.
 	 */
+	walprop_shared = wp->api.get_shmem_state(wp);
 	if (!wp->config->syncSafekeepers)
 	{
-		WalproposerShmemState *walprop_shared = wp->api.get_shmem_state(wp);
-
 		/*
 		 * Basebackup LSN always points to the beginning of the record (not
 		 * the page), as StartupXLOG most probably wants it this way.
@@ -1040,7 +1043,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 			 * compute (who could generate WAL) is ok.
 			 */
 			if (!((dth->n_entries >= 1) && (dth->entries[dth->n_entries - 1].term ==
-											walprop_shared->mineLastElectedTerm)))
+											pg_atomic_read_u64(&walprop_shared->mineLastElectedTerm))))
 			{
 				/*
 				 * Panic to restart PG as we need to retake basebackup.
@@ -1054,8 +1057,8 @@ DetermineEpochStartLsn(WalProposer *wp)
 					   LSN_FORMAT_ARGS(wp->api.get_redo_start_lsn(wp)));
 			}
 		}
-		walprop_shared->mineLastElectedTerm = wp->propTerm;
 	}
+	pg_atomic_write_u64(&walprop_shared->mineLastElectedTerm, wp->propTerm);
 }
 
 /*
@@ -1105,9 +1108,13 @@ SendProposerElected(Safekeeper *sk)
 	{
 		/* safekeeper is empty or no common point, start from the beginning */
 		sk->startStreamingAt = wp->propTermHistory.entries[0].lsn;
-		wp_log(LOG, "no common point with sk %s:%s, streaming since first term at %X/%X, timelineStartLsn=%X/%X, termHistory.n_entries=%u" ,
-		 	 sk->host, sk->port, LSN_FORMAT_ARGS(sk->startStreamingAt), LSN_FORMAT_ARGS(wp->timelineStartLsn), wp->propTermHistory.n_entries);
-		/* wp->timelineStartLsn == InvalidXLogRecPtr can be only when timeline is created manually (test_s3_wal_replay) */
+		wp_log(LOG, "no common point with sk %s:%s, streaming since first term at %X/%X, timelineStartLsn=%X/%X, termHistory.n_entries=%u",
+			   sk->host, sk->port, LSN_FORMAT_ARGS(sk->startStreamingAt), LSN_FORMAT_ARGS(wp->timelineStartLsn), wp->propTermHistory.n_entries);
+
+		/*
+		 * wp->timelineStartLsn == InvalidXLogRecPtr can be only when timeline
+		 * is created manually (test_s3_wal_replay)
+		 */
 		Assert(sk->startStreamingAt == wp->timelineStartLsn || wp->timelineStartLsn == InvalidXLogRecPtr);
 	}
 	else
@@ -1176,6 +1183,12 @@ StartStreaming(Safekeeper *sk)
 	sk->state = SS_ACTIVE;
 	sk->active_state = SS_ACTIVE_SEND;
 	sk->streamingAt = sk->startStreamingAt;
+
+	/*
+	 * Donors can only be in SS_ACTIVE state, so we potentially update the
+	 * donor when we switch one to SS_ACTIVE.
+	 */
+	UpdateDonorShmem(sk->wp);
 
 	/* event set will be updated inside SendMessageToNode */
 	SendMessageToNode(sk);
@@ -1568,17 +1581,17 @@ GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
  * none if it doesn't exist. donor_lsn is set to end position of the donor to
  * the best of our knowledge.
  */
-Safekeeper *
-GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
+static void
+UpdateDonorShmem(WalProposer *wp)
 {
 	Safekeeper *donor = NULL;
 	int			i;
-	*donor_lsn = InvalidXLogRecPtr;
+	XLogRecPtr	donor_lsn = InvalidXLogRecPtr;
 
 	if (wp->n_votes < wp->quorum)
 	{
-		wp_log(WARNING, "GetDonor called before elections are won");
-		return NULL;
+		wp_log(WARNING, "UpdateDonorShmem called before elections are won");
+		return;
 	}
 
 	/*
@@ -1589,7 +1602,7 @@ GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 	if (wp->safekeeper[wp->donor].state >= SS_IDLE)
 	{
 		donor = &wp->safekeeper[wp->donor];
-		*donor_lsn = wp->propEpochStartLsn;
+		donor_lsn = wp->propEpochStartLsn;
 	}
 
 	/*
@@ -1601,13 +1614,19 @@ GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 	{
 		Safekeeper *sk = &wp->safekeeper[i];
 
-		if (sk->state == SS_ACTIVE && sk->appendResponse.flushLsn > *donor_lsn)
+		if (sk->state == SS_ACTIVE && sk->appendResponse.flushLsn > donor_lsn)
 		{
 			donor = sk;
-			*donor_lsn = sk->appendResponse.flushLsn;
+			donor_lsn = sk->appendResponse.flushLsn;
 		}
 	}
-	return donor;
+
+	if (donor == NULL)
+	{
+		wp_log(WARNING, "UpdateDonorShmem didn't find a suitable donor, skipping");
+		return;
+	}
+	wp->api.update_donor(wp, donor, donor_lsn);
 }
 
 /*
@@ -1617,7 +1636,7 @@ static void
 HandleSafekeeperResponse(WalProposer *wp, Safekeeper *sk)
 {
 	XLogRecPtr	candidateTruncateLsn;
-	XLogRecPtr  newCommitLsn;
+	XLogRecPtr	newCommitLsn;
 
 	newCommitLsn = GetAcknowledgedByQuorumWALPosition(wp);
 	if (newCommitLsn > wp->commitLsn)
@@ -1627,7 +1646,7 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *sk)
 		BroadcastAppendRequest(wp);
 	}
 
-	/* 
+	/*
 	 * Unlock syncrep waiters, update ps_feedback, CheckGracefulShutdown().
 	 * The last one will terminate the process if the shutdown is requested
 	 * and WAL is committed by the quorum. BroadcastAppendRequest() should be

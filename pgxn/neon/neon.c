@@ -34,6 +34,7 @@
 #include "walproposer.h"
 #include "pagestore_client.h"
 #include "control_plane_connector.h"
+#include "walsender_hooks.h"
 
 PG_MODULE_MAGIC;
 void		_PG_init(void);
@@ -265,7 +266,6 @@ LogicalSlotsMonitorMain(Datum main_arg)
 	}
 }
 
-
 void
 _PG_init(void)
 {
@@ -279,6 +279,7 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
+        WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitLogicalReplicationMonitor();
 
