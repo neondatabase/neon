@@ -665,49 +665,22 @@ impl RemoteTimelineClient {
         Self::wait_completion0(receiver).await
     }
 
-    /// Schedule an index part update as the last step of timeline detach.
-    ///
-    /// Metadata of adoption is added to the next index part recording the path for WAL based
-    /// disaster recovery.
-    ///
-    /// The returned future waits for the upload to complete, which means that remote storage is
-    /// now in sync, and the timeline can be separated from its ancestor. The next time the
-    /// timeline is loaded from remote storage, it will have no ancestor.
-    ///
-    /// Cancellation-safety: cancelling or not waiting for the returned future will not cancel the
-    /// upload.
-    pub(crate) async fn schedule_detaching_from_ancestor_and_wait(
-        self: &Arc<Self>,
-        adopted: (TimelineId, Lsn),
-    ) -> anyhow::Result<()> {
-        let receiver = {
-            let mut guard = self.upload_queue.lock().unwrap();
-            let upload_queue = guard.initialized_mut()?;
-
-            // TODO: update lineage in index_part once we have it
-            upload_queue
-                .latest_metadata
-                .detach_from_ancestor(&adopted.0, &adopted.1);
-
-            self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
-
-            self.schedule_barrier0(upload_queue)
-        };
-
-        Self::wait_completion0(receiver).await
-    }
-
-    /// Schedules uploading a new version of `index_part.json` with the given layers added and
-    /// waits for it to complete.
+    /// Schedules uploading a new version of `index_part.json` with the given layers added,
+    /// detaching from ancestor and waits for it to complete.
     ///
     /// This is used with `Timeline::detach_ancestor` functionality.
-    pub(crate) async fn schedule_adding_existing_layers_to_index_upload_and_wait(
+    pub(crate) async fn schedule_adding_existing_layers_to_index_detach_and_wait(
         self: &Arc<Self>,
         layers: &[Layer],
+        adopted: (TimelineId, Lsn),
     ) -> anyhow::Result<()> {
         let barrier = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
+
+            upload_queue
+                .latest_metadata
+                .detach_from_ancestor(&adopted.0, &adopted.1);
 
             for layer in layers {
                 upload_queue

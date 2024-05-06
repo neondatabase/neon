@@ -436,17 +436,27 @@ pub(super) async fn complete(
 
     let PreparedTimelineDetach { layers } = prepared;
 
-    // publish the prepared layers before we reparent any of the timelines, so that on restart
-    // reparented timelines find layers.
-    rtc.schedule_adding_existing_layers_to_index_upload_and_wait(&layers)
-        .await?;
-
-    let mut tasks = tokio::task::JoinSet::new();
-
     let ancestor = detached
         .get_ancestor_timeline()
         .expect("must still have a ancestor");
     let ancestor_lsn = detached.get_ancestor_lsn();
+
+    // publish the prepared layers before we reparent any of the timelines, so that on restart
+    // reparented timelines find layers. also do the actual detaching.
+    //
+    // if we crash after this operation, we will at least come up having detached a timeline, but
+    // we cannot go back and reparent the timelines which would had been reparented in normal
+    // execution.
+    //
+    // this is not perfect, but it avoids us a retry happening after a compaction or gc on restart
+    // which could give us a completely wrong layer combination.
+    rtc.schedule_adding_existing_layers_to_index_detach_and_wait(
+        &layers,
+        (ancestor.timeline_id, ancestor_lsn),
+    )
+    .await?;
+
+    let mut tasks = tokio::task::JoinSet::new();
 
     // because we are now keeping the slot in progress, it is unlikely that there will be any
     // timeline deletions during this time. if we raced one, then we'll just ignore it.
@@ -523,9 +533,10 @@ pub(super) async fn complete(
             Err(je) if je.is_cancelled() => unreachable!("not used"),
             Err(je) if je.is_panic() => {
                 // ignore; it's better to continue with a single reparenting failing (or even
-                // all of them) in order to get to the goal state... though, this would be
-                // exceptional, and we have already done N non-cancellable actions. hard to say
-                // which requires less manual repair.
+                // all of them) in order to get to the goal state.
+                //
+                // these timelines will never be reparentable, but they can be always detached as
+                // separate tree roots.
             }
             Err(je) => tracing::error!("unexpected join error: {je:?}"),
         }
@@ -534,9 +545,6 @@ pub(super) async fn complete(
     if reparenting_candidates != reparented.len() {
         tracing::info!("failed to reparent some candidates");
     }
-
-    rtc.schedule_detaching_from_ancestor_and_wait((ancestor.timeline_id, ancestor_lsn))
-        .await?;
 
     Ok(reparented)
 }
