@@ -4621,9 +4621,7 @@ impl Timeline {
                     return None;
                 }
 
-                let Some(tl_ancestor) = tl.ancestor_timeline.as_ref() else {
-                    return None;
-                };
+                let tl_ancestor = tl.ancestor_timeline.as_ref()?;
                 let is_same = Arc::ptr_eq(&ancestor, tl_ancestor);
                 let is_earlier = tl.get_ancestor_lsn() <= ancestor_lsn;
 
