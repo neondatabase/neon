@@ -47,7 +47,7 @@ def test_tenant_s3_restore(
     tenant_id = env.initial_tenant
 
     # Default tenant and the one we created
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
 
     # create two timelines one being the parent of another, both with non-trivial data
     parent = None
@@ -72,13 +72,13 @@ def test_tenant_s3_restore(
     time.sleep(4)
 
     assert (
-        ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+        ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
     ), "tenant removed before we deletion was issued"
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
     ps_http.deletion_queue_flush(execute=True)
     assert (
-        ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+        ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0
     ), "tenant removed before we deletion was issued"
     env.storage_controller.attach_hook_drop(tenant_id)
 
@@ -116,4 +116,4 @@ def test_tenant_s3_restore(
             # There might be some activity that advances the lsn so we can't use a strict equality check
             assert last_flush_lsn >= expected_last_flush_lsn, "last_flush_lsn too old"
 
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
