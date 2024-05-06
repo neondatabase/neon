@@ -1,6 +1,6 @@
 mod compaction;
 pub mod delete;
-mod detach_ancestor;
+pub(crate) mod detach_ancestor;
 mod eviction_task;
 mod init;
 pub mod layer_manager;
@@ -4358,10 +4358,15 @@ impl Timeline {
     pub(crate) async fn prepare_to_detach_from_ancestor(
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
-        options: AncestorDetachOptions,
+        options: detach_ancestor::Options,
         ctx: &RequestContext,
-    ) -> Result<(utils::completion::Completion, PreparedTimelineDetach), DetachFromAncestorError>
-    {
+    ) -> Result<
+        (
+            completion::Completion,
+            detach_ancestor::PreparedTimelineDetach,
+        ),
+        detach_ancestor::Error,
+    > {
         detach_ancestor::prepare(self, tenant, options, ctx).await
     }
 
@@ -4373,59 +4378,10 @@ impl Timeline {
     pub(crate) async fn complete_detaching_timeline_ancestor(
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
-        prepared: PreparedTimelineDetach,
+        prepared: detach_ancestor::PreparedTimelineDetach,
         ctx: &RequestContext,
     ) -> Result<Vec<TimelineId>, anyhow::Error> {
         detach_ancestor::complete(self, tenant, prepared, ctx).await
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum DetachFromAncestorError {
-    #[error("no ancestors")]
-    NoAncestor,
-    #[error("too many ancestors")]
-    TooManyAncestors,
-    #[error("shutting down, please retry later")]
-    ShuttingDown,
-    #[error("detached timeline must receive writes before the operation")]
-    DetachedTimelineNeedsWrites,
-    #[error("flushing failed")]
-    FlushAncestor(#[source] anyhow::Error),
-    #[error("layer download failed")]
-    RewrittenDeltaDownloadFailed(#[source] anyhow::Error),
-    #[error("copying LSN prefix locally failed")]
-    CopyDeltaPrefix(#[source] anyhow::Error),
-    #[error("upload rewritten layer")]
-    UploadRewritten(#[source] anyhow::Error),
-
-    #[error("ancestor is already being detached by: {}", .0)]
-    OtherTimelineDetachOngoing(TimelineId),
-
-    #[error("remote copying layer failed")]
-    CopyFailed(#[source] anyhow::Error),
-
-    #[error("unexpected error")]
-    Unexpected(#[source] anyhow::Error),
-}
-
-pub(crate) struct PreparedTimelineDetach {
-    layers: Vec<Layer>,
-}
-
-/// TODO: this should be part of PageserverConf because we cannot easily modify cplane arguments.
-#[derive(Debug)]
-pub(crate) struct AncestorDetachOptions {
-    pub(crate) rewrite_concurrency: std::num::NonZeroUsize,
-    pub(crate) copy_concurrency: std::num::NonZeroUsize,
-}
-
-impl Default for AncestorDetachOptions {
-    fn default() -> Self {
-        Self {
-            rewrite_concurrency: std::num::NonZeroUsize::new(2).unwrap(),
-            copy_concurrency: std::num::NonZeroUsize::new(10).unwrap(),
-        }
     }
 }
 

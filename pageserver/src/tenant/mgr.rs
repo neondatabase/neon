@@ -56,7 +56,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::delete::DeleteTenantError;
 use super::secondary::SecondaryTenant;
-use super::timeline::PreparedTimelineDetach;
+use super::timeline::detach_ancestor::PreparedTimelineDetach;
 use super::TenantSharedResources;
 
 /// For a tenant that appears in TenantsMap, it may either be

@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use super::{
-    layer_manager::LayerManager, AncestorDetachOptions, DetachFromAncestorError,
-    PreparedTimelineDetach, Timeline,
-};
+use super::{layer_manager::LayerManager, Timeline};
 use crate::{
     context::{DownloadBehavior, RequestContext},
     task_mgr::TaskKind,
@@ -17,13 +14,63 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::{completion, generation::Generation, id::TimelineId, lsn::Lsn};
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Error {
+    #[error("no ancestors")]
+    NoAncestor,
+    #[error("too many ancestors")]
+    TooManyAncestors,
+    #[error("shutting down, please retry later")]
+    ShuttingDown,
+    #[error("detached timeline must receive writes before the operation")]
+    DetachedTimelineNeedsWrites,
+    #[error("flushing failed")]
+    FlushAncestor(#[source] anyhow::Error),
+    #[error("layer download failed")]
+    RewrittenDeltaDownloadFailed(#[source] anyhow::Error),
+    #[error("copying LSN prefix locally failed")]
+    CopyDeltaPrefix(#[source] anyhow::Error),
+    #[error("upload rewritten layer")]
+    UploadRewritten(#[source] anyhow::Error),
+
+    #[error("ancestor is already being detached by: {}", .0)]
+    OtherTimelineDetachOngoing(TimelineId),
+
+    #[error("remote copying layer failed")]
+    CopyFailed(#[source] anyhow::Error),
+
+    #[error("unexpected error")]
+    Unexpected(#[source] anyhow::Error),
+}
+
+pub(crate) struct PreparedTimelineDetach {
+    layers: Vec<Layer>,
+}
+
+/// TODO: this should be part of PageserverConf because we cannot easily modify cplane arguments.
+#[derive(Debug)]
+pub(crate) struct Options {
+    pub(crate) rewrite_concurrency: std::num::NonZeroUsize,
+    pub(crate) copy_concurrency: std::num::NonZeroUsize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            rewrite_concurrency: std::num::NonZeroUsize::new(2).unwrap(),
+            copy_concurrency: std::num::NonZeroUsize::new(10).unwrap(),
+        }
+    }
+}
+
+/// See [`Timeline::prepare_to_detach_from_ancestor`]
 pub(super) async fn prepare(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
-    options: AncestorDetachOptions,
+    options: Options,
     ctx: &RequestContext,
-) -> Result<(completion::Completion, PreparedTimelineDetach), DetachFromAncestorError> {
-    use DetachFromAncestorError::*;
+) -> Result<(completion::Completion, PreparedTimelineDetach), Error> {
+    use Error::*;
 
     if detached.remote_client.as_ref().is_none() {
         unimplemented!("no new code for running without remote storage");
@@ -266,8 +313,8 @@ async fn upload_rewritten_layer(
     target: &Arc<Timeline>,
     cancel: &CancellationToken,
     ctx: &RequestContext,
-) -> Result<Option<Layer>, DetachFromAncestorError> {
-    use DetachFromAncestorError::UploadRewritten;
+) -> Result<Option<Layer>, Error> {
+    use Error::UploadRewritten;
     let copied = copy_lsn_prefix(end_lsn, layer, target, ctx).await?;
 
     let Some(copied) = copied else {
@@ -291,8 +338,8 @@ async fn copy_lsn_prefix(
     layer: &Layer,
     target_timeline: &Arc<Timeline>,
     ctx: &RequestContext,
-) -> Result<Option<ResidentLayer>, DetachFromAncestorError> {
-    use DetachFromAncestorError::{CopyDeltaPrefix, RewrittenDeltaDownloadFailed};
+) -> Result<Option<ResidentLayer>, Error> {
+    use Error::{CopyDeltaPrefix, RewrittenDeltaDownloadFailed};
 
     tracing::debug!(%layer, %end_lsn, "copying lsn prefix");
 
@@ -348,8 +395,8 @@ async fn remote_copy(
     adoptee: &Arc<Timeline>,
     generation: Generation,
     cancel: &CancellationToken,
-) -> Result<Layer, DetachFromAncestorError> {
-    use DetachFromAncestorError::CopyFailed;
+) -> Result<Layer, Error> {
+    use Error::CopyFailed;
 
     // depending if Layer::keep_resident we could hardlink
 
@@ -375,6 +422,7 @@ async fn remote_copy(
         .map_err(CopyFailed)
 }
 
+/// See [`Timeline::complete_detaching_timeline_ancestor`].
 pub(super) async fn complete(
     detached: &Arc<Timeline>,
     tenant: &Tenant,

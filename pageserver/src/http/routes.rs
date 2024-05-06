@@ -1831,7 +1831,7 @@ async fn timeline_detach_ancestor_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    use crate::tenant::timeline::AncestorDetachOptions;
+    use crate::tenant::timeline::detach_ancestor::Options;
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1839,7 +1839,7 @@ async fn timeline_detach_ancestor_handler(
     let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
 
     async move {
-        let mut options = AncestorDetachOptions::default();
+        let mut options = Options::default();
 
         let rewrite_concurrency =
             parse_query_param::<_, std::num::NonZeroUsize>(&request, "rewrite_concurrency")?;
