@@ -209,7 +209,7 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
         [
             ".*initial size calculation failed: downloading failed, possibly for shutdown",
             # after restart this is likely to happen if there is other load on the runner
-            "failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
         ]
     )
 
