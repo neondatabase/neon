@@ -548,13 +548,9 @@ where
             std::pin::pin!(accum_key_values(key_value_stream, self.target_file_size));
         let mut all_in_window: bool = false;
         let mut window = Window::new();
-        loop {
-            if all_in_window && window.elems.is_empty() {
-                // All done!
-                break;
-            }
-            if let Some(key_range) = window.choose_next_delta(self.target_file_size, !all_in_window)
-            {
+
+        let drain_window = |window: &mut Window<_>, new_jobs: &mut Vec<_>, has_more: bool| {
+            while let Some(key_range) = window.choose_next_delta(self.target_file_size, has_more) {
                 let batch_layers: Vec<LayerId> = job
                     .input_layers
                     .iter()
@@ -571,13 +567,69 @@ where
                     input_layers: batch_layers,
                     completed: false,
                 });
-            } else {
-                assert!(!all_in_window);
-                if let Some(next_key) = key_accum.next().await.transpose()? {
+            }
+        };
+        loop {
+            if all_in_window && window.elems.is_empty() {
+                // All done!
+                break;
+            }
+            drain_window(&mut window, &mut new_jobs, !all_in_window);
+            assert!(!all_in_window);
+            if let Some(next_key) = key_accum.next().await.transpose()? {
+                if next_key.partition_lsns.is_empty() {
+                    // Normal case: extend the window by the key
                     window.feed(next_key.key, next_key.size);
                 } else {
-                    all_in_window = true;
+                    // We have a key with too large size impact for a single delta layer.
+                    // Therefore, drain window with has_more = false to make a clean cut
+                    // before the key, and then make dedicated delta layers for the
+                    // single key.
+                    // We cannot cluster the key with the others, because
+                    // layer files are not allowed to overlap with each other in
+                    // the lsn,key space (no overlaps allowed for the rectangles).
+                    let key = next_key.key;
+                    if !window.is_empty() {
+                        let has_more = false;
+                        drain_window(&mut window, &mut new_jobs, has_more);
+                    }
+                    assert!(window.is_empty());
+
+                    // Not really required: but here for future resilience:
+                    // We make a "gap" here, so any structure the window holds should
+                    // probably be reset.
+                    window = Window::new();
+
+                    let mut prior_lsn = job.lsn_range.start;
+                    let mut lsn_ranges = Vec::new();
+                    for (lsn, _size) in next_key.partition_lsns {
+                        lsn_ranges.push(prior_lsn..lsn);
+                        prior_lsn = lsn;
+                    }
+                    lsn_ranges.push(prior_lsn..job.lsn_range.end);
+                    for lsn_range in lsn_ranges {
+                        let key_range = key..key.next();
+                        let batch_layers: Vec<LayerId> = job
+                            .input_layers
+                            .iter()
+                            .filter(|layer_id| {
+                                let layer = &self.layers[layer_id.0].layer;
+                                layer.key_range().contains(&key)
+                                    && overlaps_with(layer.lsn_range(), &lsn_range)
+                            })
+                            .cloned()
+                            .collect();
+                        new_jobs.push(CompactionJob {
+                            key_range,
+                            lsn_range: job.lsn_range.clone(),
+                            strategy: CompactionStrategy::CreateDelta,
+                            input_layers: batch_layers,
+                            completed: false,
+                        });
+                    }
                 }
+            } else {
+                all_in_window = true;
             }
         }
 
@@ -796,6 +848,10 @@ where
 
     fn peek_size(&self) -> u64 {
         self.elems.front().unwrap().accum_size - self.splitoff_size
+    }
+
+    fn is_empty(&self) -> bool {
+        self.elems.is_empty()
     }
 
     fn commit_upto(&mut self, mut upto: usize) {
