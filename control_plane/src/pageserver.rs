@@ -4,7 +4,6 @@
 //!
 //!   .neon/
 //!
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use std::io;
@@ -219,11 +218,18 @@ impl PageServerNode {
         let datadir_path_str = datadir.to_str().with_context(|| {
             format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
         })?;
-        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
-        args.push(Cow::Borrowed("--init"));
 
+        // `pageserver --init` merges the `--config-override`s into a built-in default config,
+        // then writes out the merged product to `pageserver.toml`.
+        // TODO: just write the full `pageserver.toml` and get rid of `--config-override`.
+        let mut args = vec!["--init", "--workdir", datadir_path_str];
+        let overrides = self.neon_local_overrides(config_overrides);
+        for piece in &overrides {
+            args.push("--config-override");
+            args.push(piece);
+        }
         let init_output = Command::new(self.env.pageserver_bin())
-            .args(args.iter().map(Cow::as_ref))
+            .args(args)
             .envs(self.pageserver_env_variables()?)
             .output()
             .with_context(|| format!("Failed to run pageserver init for node {node_id}"))?;
@@ -279,12 +285,16 @@ impl PageServerNode {
                 self.conf.id, datadir,
             )
         })?;
-        let args = self.pageserver_basic_args(config_overrides, datadir_path_str);
+        let mut args = vec!["-D", datadir_path_str];
+        for config_override in config_overrides {
+            args.push("--config-override");
+            args.push(*config_override);
+        }
         background_process::start_process(
             "pageserver",
             &datadir,
             &self.env.pageserver_bin(),
-            args.iter().map(Cow::as_ref),
+            args,
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
@@ -299,22 +309,6 @@ impl PageServerNode {
         .await?;
 
         Ok(())
-    }
-
-    fn pageserver_basic_args<'a>(
-        &self,
-        config_overrides: &'a [&'a str],
-        datadir_path_str: &'a str,
-    ) -> Vec<Cow<'a, str>> {
-        let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
-
-        let overrides = self.neon_local_overrides(config_overrides);
-        for config_override in overrides {
-            args.push(Cow::Borrowed("-c"));
-            args.push(Cow::Owned(config_override));
-        }
-
-        args
     }
 
     fn pageserver_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {

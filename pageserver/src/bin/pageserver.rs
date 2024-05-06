@@ -755,6 +755,7 @@ fn cli() -> Command {
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
             Arg::new("config-override")
+                .long("config-override")
                 .short('c')
                 .num_args(1)
                 .action(ArgAction::Append)
