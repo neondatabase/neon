@@ -83,7 +83,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SchemaObjects"
 
-  /schema/dump:
+  /schema/ddl:
     get:
       tags:
         - Info
@@ -106,6 +106,7 @@ paths:
               schema:
                 type: string
                 description: Schema dump in SQL format.
+
   /check_writability:
     post:
       tags:

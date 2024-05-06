@@ -148,17 +148,14 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
-        (&Method::GET, "/schema/dump") => {
+        (&Method::GET, "/schema/ddl") => {
             let db_name = match must_get_query_param(&req, "db_name") {
                 Err(e) => return e.into_response(),
                 Ok(db_name) => db_name,
             };
             info!("serving /schema/dump GET request with db_name: {db_name}",);
             match schema_dump(compute, &db_name).await {
-                Ok(res) => Response::builder()
-                    .header(CONTENT_TYPE, "text/plain")
-                    .body(Body::wrap_stream(res))
-                    .unwrap(),
+                Ok(res) => render_plain(Body::wrap_stream(res)),
                 Err(SchemaDumpError::DatabaseDoesNotExist) => {
                     render_json_error("database does not exist", StatusCode::NOT_FOUND)
                 }
@@ -347,6 +344,13 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
 fn render_json(body: Body) -> Response<Body> {
     Response::builder()
         .header(CONTENT_TYPE, "application/json")
+        .body(body)
+        .unwrap()
+}
+
+fn render_plain(body: Body) -> Response<Body> {
+    Response::builder()
+        .header(CONTENT_TYPE, "text/plain")
         .body(body)
         .unwrap()
 }
