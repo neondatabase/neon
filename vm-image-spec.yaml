@@ -258,13 +258,13 @@ files:
               else pg_current_wal_lsn()
             end as lsn;
 
-      - metric_name: replication_delay_seconds
+      - metric_name: replication_delay_bytes
         type: gauge
         help: 'Bytes between received and replayed LSN'
         key_labels:
         values: [replication_delay_bytes]
         query: |
-          SELECT abs(pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())) AS replication_delay_bytes;
+          SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()) AS replication_delay_bytes;
 
       - metric_name: replication_delay_seconds
         type: gauge
