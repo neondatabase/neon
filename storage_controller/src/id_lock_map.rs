@@ -8,14 +8,15 @@ use crate::service::RECONCILE_TIMEOUT;
 
 const LOCK_TIMEOUT_ALERT_THRESHOLD: Duration = RECONCILE_TIMEOUT;
 
-/// A wrapper around `OwnedRwLockWriteGuard` that when dropped changes the
-/// current holding operation in lock.
-pub struct WrappedWriteGuard<T: Display> {
+/// A wrapper around `OwnedRwLockWriteGuard` used for tracking the
+/// operation that holds the lock, and print a warning if it exceeds
+/// the LOCK_TIMEOUT_ALERT_THRESHOLD time
+pub struct TracingWriteGuard<T: Display> {
     guard: tokio::sync::OwnedRwLockWriteGuard<Option<T>>,
     start: Instant,
 }
 
-impl<T: Display> WrappedWriteGuard<T> {
+impl<T: Display> TracingWriteGuard<T> {
     pub fn new(guard: tokio::sync::OwnedRwLockWriteGuard<Option<T>>) -> Self {
         Self {
             guard,
@@ -24,12 +25,12 @@ impl<T: Display> WrappedWriteGuard<T> {
     }
 }
 
-impl<T: Display> Drop for WrappedWriteGuard<T> {
+impl<T: Display> Drop for TracingWriteGuard<T> {
     fn drop(&mut self) {
         let duration = self.start.elapsed();
         if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
             tracing::warn!(
-                "Exclusive lock on {} was held for {:?}",
+                "Exclusive lock by {} was held for {:?}",
                 self.guard.as_ref().unwrap(),
                 duration
             );
@@ -38,15 +39,16 @@ impl<T: Display> Drop for WrappedWriteGuard<T> {
     }
 }
 
-/// A wrapper around `OwnedRwLockReadGuard` that when dropped changes the
-/// current holding operation in lock.
-pub struct WrappedReadGuard<T: Display> {
+// A wrapper around `OwnedRwLockReadGuard` used for tracking the
+/// operation that holds the lock, and print a warning if it exceeds
+/// the LOCK_TIMEOUT_ALERT_THRESHOLD time
+pub struct TracingReadGuard<T: Display> {
     _guard: tokio::sync::OwnedRwLockReadGuard<Option<T>>,
     operation: T,
     start: Instant,
 }
 
-impl<T: Display> WrappedReadGuard<T> {
+impl<T: Display> TracingReadGuard<T> {
     pub fn new(guard: tokio::sync::OwnedRwLockReadGuard<Option<T>>, operation: T) -> Self {
         Self {
             _guard: guard,
@@ -56,12 +58,12 @@ impl<T: Display> WrappedReadGuard<T> {
     }
 }
 
-impl<T: Display> Drop for WrappedReadGuard<T> {
+impl<T: Display> Drop for TracingReadGuard<T> {
     fn drop(&mut self) {
         let duration = self.start.elapsed();
         if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
             tracing::warn!(
-                "Shared lock on {} was held for {:?}",
+                "Shared lock by {} was held for {:?}",
                 self.operation,
                 duration
             );
@@ -90,21 +92,21 @@ where
         &self,
         key: T,
         operation: I,
-    ) -> impl std::future::Future<Output = WrappedReadGuard<I>> {
+    ) -> impl std::future::Future<Output = TracingReadGuard<I>> {
         let mut locked = self.entities.lock().unwrap();
         let entry = locked.entry(key).or_default().clone();
-        async move { WrappedReadGuard::new(entry.read_owned().await, operation) }
+        async move { TracingReadGuard::new(entry.read_owned().await, operation) }
     }
 
     pub(crate) fn exclusive(
         &self,
         key: T,
         operation: I,
-    ) -> impl std::future::Future<Output = WrappedWriteGuard<I>> {
+    ) -> impl std::future::Future<Output = TracingWriteGuard<I>> {
         let mut locked = self.entities.lock().unwrap();
         let entry = locked.entry(key).or_default().clone();
         async move {
-            let mut guard = WrappedWriteGuard::new(entry.write_owned().await);
+            let mut guard = TracingWriteGuard::new(entry.write_owned().await);
             *guard.guard = Some(operation);
             guard
         }
@@ -136,7 +138,7 @@ pub async fn trace_exclusive_lock<
     op_locks: &IdLockMap<T, I>,
     key: T,
     operation: I,
-) -> WrappedWriteGuard<I> {
+) -> TracingWriteGuard<I> {
     let start = Instant::now();
     let guard = op_locks.exclusive(key.clone(), operation.clone()).await;
 
@@ -160,7 +162,7 @@ pub async fn trace_shared_lock<
     op_locks: &IdLockMap<T, I>,
     key: T,
     operation: I,
-) -> WrappedReadGuard<I> {
+) -> TracingReadGuard<I> {
     let start = Instant::now();
     let guard = op_locks.shared(key.clone(), operation.clone()).await;
 
