@@ -275,12 +275,11 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 	do
 	{
 		begin_update_counter = pg_atomic_read_u64(&pagestore_shared->begin_update_counter);
-		pg_read_barrier();
+		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
 		num_shards = shard_map->num_shards;
 		if (connstr_p && shard_no < MAX_SHARDS)
 			strlcpy(connstr_p, shard_map->connstring[shard_no], MAX_PAGESERVER_CONNSTRING_SIZE);
-		pg_read_barrier();
-		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
+		pg_memory_barrier();
 	}
 	while (begin_update_counter != end_update_counter
 		   || begin_update_counter != pg_atomic_read_u64(&pagestore_shared->begin_update_counter)
@@ -342,14 +341,15 @@ pageserver_connect(shardno_t shard_no, int elevel)
 {
 	PageServer *shard = &page_servers[shard_no];
 	PGconn	   *conn = shard->conn;
-	WaitEventSet *wes = shard->wes_read;
+	WaitEventSet *wes_read = shard->wes_read;
+	WaitEventSet *wes_write = shard->wes_write;
 	char		connstr[MAX_PAGESERVER_CONNSTRING_SIZE];
 	TimestampTz now;
 	uint64_t	us_since_last_connect;
 
 #define CLEANUP_AND_DISCONNECT(shard) \
 	do { \
-		Assert(conn != NULL && wes != NULL); \
+		Assert(conn != NULL && wes_read != NULL && wes_write != NULL); \
 		FreeWaitEventSet(shard->wes_read); \
 		shard->wes_read = NULL; \
 		FreeWaitEventSet(shard->wes_write); \
@@ -375,7 +375,23 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		const char *keywords[3];
 		const char *values[3];
 		int			n_pgsql_params;
-		Assert(shard->conn == NULL);
+
+		if (shard->conn != NULL)
+		{
+			/*
+			 * The connection _can_ be non-null here if we failed to allocate
+			 * either wes_read or wes_wait.
+			 * Here we clean up that mess if we need to.
+			 */
+			neon_shard_log(shard_no, LOG,
+						   "Cleaning up leaked connection from previous OOM error");
+			PQfinish(shard->conn);
+			if (shard->wes_read)
+				FreeWaitEventSet(shard->wes_read);
+			Assert(!shard->wes_write);
+		}
+
+		neon_shard_log(shard_no, LOG, "Disconnected");
 
 		now = GetCurrentTimestamp();
 		us_since_last_connect = now - shard->last_connect_time;
@@ -413,9 +429,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		keywords[n_pgsql_params] = NULL;
 		values[n_pgsql_params] = NULL;
 
-		/*
-		 * TODO: use async startup w/ PQconnectStartParams
-		 */
 		conn = shard->conn = PQconnectStartParams(keywords, values, 1);
 		if (!conn)
 		{
@@ -423,19 +436,21 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			return false;
 		}
 
-		wes = shard->wes_read = CreateWaitEventSet(TopMemoryContext, 3);
-		AddWaitEventToSet(wes, WL_LATCH_SET, PGINVALID_SOCKET,
+		wes_read = shard->wes_read = CreateWaitEventSet(TopMemoryContext, 3);
+		AddWaitEventToSet(wes_read, WL_LATCH_SET, PGINVALID_SOCKET,
 						  MyLatch, NULL);
-		AddWaitEventToSet(wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+		AddWaitEventToSet(wes_read, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
 						  NULL, NULL);
-		AddWaitEventToSet(wes, WL_SOCKET_READABLE, PQsocket(shard->conn), NULL, NULL);
+		AddWaitEventToSet(wes_read, WL_SOCKET_READABLE, PQsocket(shard->conn), NULL, NULL);
 
 		shard->wes_write = CreateWaitEventSet(TopMemoryContext, 3);
 		AddWaitEventToSet(shard->wes_write, WL_LATCH_SET, PGINVALID_SOCKET,
 						  MyLatch, NULL);
 		AddWaitEventToSet(shard->wes_write, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
 						  NULL, NULL);
-		AddWaitEventToSet(shard->wes_write, WL_SOCKET_READABLE, PQsocket(shard->conn), NULL, NULL);
+		AddWaitEventToSet(shard->wes_write, WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE,
+						  PQsocket(shard->conn),
+						  NULL, NULL);
 
 		shard->state = PS_Connecting_Startup;
 		/* fallthrough */
@@ -445,6 +460,9 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		char	   *pagestream_query;
 		int			ps_send_query_ret;
 		bool		connected = false;
+		int			connstatus;
+
+		neon_shard_log(shard_no, LOG, "Connecting_Startup");
 
 		do
 		{
@@ -458,7 +476,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 				{
 					char	   *pqerr = PQerrorMessage(conn);
 					char	   *msg = NULL;
-					
+					neon_shard_log(shard_no, DEBUG5, "POLLING_FAILED");
+
 					if (pqerr)
 						msg = pchomp(pqerr);
 
@@ -483,22 +502,11 @@ pageserver_connect(shardno_t shard_no, int elevel)
 										PG_WAIT_EXTENSION);
 				ResetLatch(MyLatch);
 
+				/* query cancellation, backend shutdown */
 				CHECK_FOR_INTERRUPTS();
 
-				/* Data available in socket? */
-				if (event.events & WL_SOCKET_READABLE)
-				{
-					if (!PQconsumeInput(conn))
-					{
-						char	   *msg = pchomp(PQerrorMessage(conn));
+				/* PQconnectPoll() handles the socket polling state updates */
 
-						CLEANUP_AND_DISCONNECT(shard);
-						neon_shard_log(shard_no, elevel, "could not connect to pageserver: %s",
-									   msg);
-						pfree(msg);
-						return false;
-					}
-				}
 				break;
 			case PGRES_POLLING_WRITING:
 				/* Sleep until there's something to do */
@@ -506,24 +514,14 @@ pageserver_connect(shardno_t shard_no, int elevel)
 										PG_WAIT_EXTENSION);
 				ResetLatch(MyLatch);
 
+				/* query cancellation, backend shutdown */
 				CHECK_FOR_INTERRUPTS();
 
-				/* Data available in socket? */
-				if (event.events & WL_SOCKET_WRITEABLE)
-				{
-					if (!PQconsumeInput(conn))
-					{
-						char	   *msg = pchomp(PQerrorMessage(conn));
+				/* PQconnectPoll() handles the socket polling state updates */
 
-						CLEANUP_AND_DISCONNECT(shard);
-						neon_shard_log(shard_no, elevel, "could not connect to pageserver: %s",
-									   msg);
-						pfree(msg);
-						return false;
-					}
-				}
 				break;
 			case PGRES_POLLING_OK:
+				neon_shard_log(shard_no, DEBUG5, "POLLING_OK");
 				connected = true;
 				break;
 			}
@@ -532,10 +530,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 		/* No more polling needed; connection succeeded */
 		shard->last_connect_time = GetCurrentTimestamp();
-
-		/*
-		 * TODO: Poll for connection establishment
-		 */
 
 		switch (neon_protocol_version)
 		{
@@ -595,7 +589,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			WaitEvent	event;
 
 			/* Sleep until there's something to do */
-			(void) WaitEventSetWait(wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+			(void) WaitEventSetWait(wes_read, -1L, &event, 1, PG_WAIT_EXTENSION);
 			ResetLatch(MyLatch);
 
 			CHECK_FOR_INTERRUPTS();
@@ -674,7 +668,8 @@ retry:
 
 /*
  * Reset prefetch and drop connection to the shard.
- * It also drops connection to all other shards involved in prefetch.
+ * It also drops connection to all other shards involved in prefetch, through
+ * prefetch_on_ps_disconnect().
  */
 static void
 pageserver_disconnect(shardno_t shard_no)
@@ -709,8 +704,7 @@ pageserver_disconnect_shard(shardno_t shard_no)
 	 */
 	if (shard->state != PS_Disconnected)
 	{
-		Assert(shard->conn);
-		Assert(shard->wes_read);
+		Assert(shard->wes_write);
 
 		FreeWaitEventSet(shard->wes_read);
 		FreeWaitEventSet(shard->wes_write);
@@ -723,8 +717,25 @@ pageserver_disconnect_shard(shardno_t shard_no)
 	}
 	else
 	{
-		Assert(!shard->conn);
-		Assert(!shard->wes_read);
+		/*
+		 * It's possible that we ERROR-ed out while allocating wes_write. 
+		 * Cleanup that mess first.
+		 */
+		if (shard->conn)
+		{
+			PQfinish(shard->conn);
+
+			if (shard->wes_read)
+				FreeWaitEventSet(shard->wes_read);
+
+			shard->conn = NULL;
+			shard->wes_read = NULL;
+		}
+		/*
+		 * We can't move past PS_DISCONNECTED without successfully allocating
+		 * and assigning wes_write.
+		 */
+		Assert(!shard->wes_write);
 	}
 }
 
@@ -773,6 +784,10 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	 * should use async mode and check for interrupts while waiting. In
 	 * practice, our requests are small enough to always fit in the output and
 	 * TCP buffer.
+	 *
+	 * Note that this also will fail when the connection is in the
+	 * PGRES_POLLING_WRITING state. It's kinda dirty to disconnect at this
+	 * point, but on the grand scheme of things it's only a small issue.
 	 */
 	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 	{
