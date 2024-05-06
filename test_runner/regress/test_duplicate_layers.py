@@ -1,7 +1,9 @@
 import time
 
 import pytest
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
+from fixtures.pageserver.types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload_queue_empty,
@@ -86,14 +88,7 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
 
     # path = env.remote_storage.timeline_path(tenant_id, timeline_id)
     l1_found = None
-    for path in env.pageserver.timeline_dir(tenant_id, timeline_id).iterdir():
-        if path.name == "metadata" or path.name.startswith("ephemeral-"):
-            continue
-
-        if len(path.suffixes) > 0:
-            # temp files
-            continue
-
+    for path in env.pageserver.list_layers(tenant_id, timeline_id):
         [key_range, lsn_range] = path.name.split("__", maxsplit=1)
 
         if "-" not in lsn_range:
@@ -108,19 +103,22 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
 
         if l1_found is not None:
             raise RuntimeError(f"found multiple L1: {l1_found.name} and {path.name}")
-        l1_found = path
+        log.info(f"Found L1: {path}")
+        l1_found = parse_layer_file_name(path.name)
 
     assert l1_found is not None, "failed to find L1 locally"
 
     uploaded = env.pageserver_remote_storage.remote_layer_path(
-        tenant_id, timeline_id, l1_found.name
+        tenant_id, timeline_id, l1_found.to_str()
     )
     assert not uploaded.exists(), "to-be-overwritten should not yet be uploaded"
 
     env.pageserver.start()
     wait_until_tenant_active(pageserver_http, tenant_id)
 
-    assert not l1_found.exists(), "partial compaction result should had been removed during startup"
+    assert not env.pageserver.layer_exists(
+        tenant_id, timeline_id, l1_found
+    ), "partial compaction result should had been removed during startup"
 
     # wait for us to catch up again
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)
@@ -130,18 +128,18 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
     # give time for log flush
     time.sleep(1)
 
-    message = f".*duplicated L1 layer layer={l1_found.name}"
+    message = f".*duplicated L1 layer layer={l1_found}"
     found_msg = env.pageserver.log_contains(message)
     # resident or evicted, it should not be overwritten, however it should had been non-existing at startup
     assert (
         found_msg is None
     ), "layer should had been removed during startup, did it live on as evicted?"
 
-    assert l1_found.exists(), "the L1 reappears"
+    assert env.pageserver.layer_exists(tenant_id, timeline_id, l1_found), "the L1 reappears"
 
     wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
 
     uploaded = env.pageserver_remote_storage.remote_layer_path(
-        tenant_id, timeline_id, l1_found.name
+        tenant_id, timeline_id, l1_found.to_str()
     )
     assert uploaded.exists(), "the L1 is uploaded"

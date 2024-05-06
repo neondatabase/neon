@@ -54,7 +54,7 @@ from fixtures.pageserver.allowed_errors import (
     DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.types import IndexPartDump
+from fixtures.pageserver.types import IndexPartDump, LayerFileName, parse_layer_file_name
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -2589,6 +2589,39 @@ class NeonPageserver(PgProtocol, LogUtils):
         return client.tenant_load(
             tenant_id, generation=self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         )
+
+    def list_layers(self, tenant_id: TenantId, timeline_id: TimelineId) -> list[Path]:
+        """
+        Inspect local storage on a pageserver to discover which layer files are present.
+
+        :return: list of relative paths to layers, from the timeline root.
+        """
+        timeline_path = self.timeline_dir(tenant_id, timeline_id)
+
+        def relative(p: Path) -> Path:
+            return p.relative_to(timeline_path)
+
+        return sorted(
+            list(
+                map(
+                    relative,
+                    filter(
+                        lambda path: path.name != "metadata"
+                        and "ephemeral" not in path.name
+                        and "temp" not in path.name,
+                        timeline_path.glob("*"),
+                    ),
+                )
+            )
+        )
+
+    def layer_exists(
+        self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: LayerFileName
+    ) -> bool:
+        layers = self.list_layers(tenant_id, timeline_id)
+        for layer in layers:
+            log.info(f"layer found: {layer}")
+        return layer_name in [parse_layer_file_name(p.name) for p in layers]
 
 
 def append_pageserver_param_overrides(
