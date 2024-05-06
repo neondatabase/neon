@@ -725,7 +725,6 @@ RecvAcceptorGreeting(Safekeeper *sk)
 			   sk->host, sk->port,
 			   sk->greetResponse.term, wp->propTerm);
 	}
-	pg_atomic_write_u64(&wp->api.get_shmem_state(wp)->mineLastElectedTerm, wp->propTerm);
 
 	/*
 	 * Check if we have quorum. If there aren't enough safekeepers, wait and
@@ -924,6 +923,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 {
 	TermHistory *dth;
 	int			n_ready = 0;
+	WalproposerShmemState *walprop_shared;
 
 	wp->propEpochStartLsn = InvalidXLogRecPtr;
 	wp->donorEpoch = 0;
@@ -1026,10 +1026,9 @@ DetermineEpochStartLsn(WalProposer *wp)
 	 * since which we are going to write according to the consensus. If not,
 	 * we must bail out, as clog and other non rel data is inconsistent.
 	 */
+	walprop_shared = wp->api.get_shmem_state(wp);
 	if (!wp->config->syncSafekeepers)
 	{
-		WalproposerShmemState *walprop_shared = wp->api.get_shmem_state(wp);
-
 		/*
 		 * Basebackup LSN always points to the beginning of the record (not
 		 * the page), as StartupXLOG most probably wants it this way.
@@ -1058,8 +1057,8 @@ DetermineEpochStartLsn(WalProposer *wp)
 					   LSN_FORMAT_ARGS(wp->api.get_redo_start_lsn(wp)));
 			}
 		}
-		pg_atomic_write_u64(&walprop_shared->mineLastElectedTerm, wp->propTerm);
 	}
+	pg_atomic_write_u64(&walprop_shared->mineLastElectedTerm, wp->propTerm);
 }
 
 /*

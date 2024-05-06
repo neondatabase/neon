@@ -445,6 +445,7 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         propEpochStartLsn: crate::bindings::pg_atomic_uint64 { value: 0 },
         donor_name: [0; 64],
         donor_conninfo: [0; 1024],
+        donor_lsn: 0,
         mutex: 0,
         mineLastElectedTerm: crate::bindings::pg_atomic_uint64 { value: 0 },
         backpressureThrottlingTime: crate::bindings::pg_atomic_uint64 { value: 0 },

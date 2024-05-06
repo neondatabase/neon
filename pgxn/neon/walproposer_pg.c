@@ -651,6 +651,7 @@ walprop_pg_update_donor(WalProposer *wp, Safekeeper *donor, XLogRecPtr donor_lsn
 	SpinLockAcquire(&wps->mutex);
 	memcpy(wps->donor_name, donor_name, sizeof(donor_name));
 	memcpy(wps->donor_conninfo, donor->conninfo, sizeof(donor->conninfo));
+	wps->donor_lsn = donor_lsn;
 	SpinLockRelease(&wps->mutex);
 }
 

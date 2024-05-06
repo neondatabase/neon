@@ -65,12 +65,11 @@ NeonWALPageRead(
 	/*
 	 * Sometimes walsender requests non-monotonic sequences of WAL. If that's
 	 * the case, we have to reset streaming from remote at the correct
-	 * position.
-	 * For example, walsender may try to verify the segment header when trying
-	 * to read in the middle of it.
+	 * position. For example, walsender may try to verify the segment header
+	 * when trying to read in the middle of it.
 	 */
 	rem_lsn = NeonWALReaderGetRemLsn(wal_reader);
-	if (rem_lsn != 0 && targetPagePtr != rem_lsn)
+	if (rem_lsn != InvalidXLogRecPtr && targetPagePtr != rem_lsn)
 	{
 		NeonWALReaderResetRemote(wal_reader);
 	}
@@ -87,18 +86,25 @@ NeonWALPageRead(
 		if (res == NEON_WALREAD_SUCCESS)
 		{
 			/*
-			 * We don't actually use these fields ever, but we set it to
-			 * conform to invariants outlined by XLogReaderRoutine.
+			 * Setting ws_tli is required by the XLogReaderRoutine, it is used
+			 * for segment name generation in error reports.
+			 *
+			 * ReadPageInternal updates ws_segno after calling cb on its own
+			 * and XLogReaderRoutine description doesn't require it, but
+			 * WALRead sets, let's follow it.
 			 */
-
 			xlogreader->seg.ws_tli = NeonWALReaderGetSegment(wal_reader)->ws_tli;
 			xlogreader->seg.ws_segno = NeonWALReaderGetSegment(wal_reader)->ws_segno;
-			xlogreader->seg.ws_file = NeonWALReaderGetSegment(wal_reader)->ws_file;
+
+			/*
+			 * ws_file doesn't exist in case of remote read, and isn't used by
+			 * xlogreader except by WALRead on which we don't rely anyway.
+			 */
 			return count;
 		}
 		if (res == NEON_WALREAD_ERROR)
 		{
-			elog(ERROR, "[walsender] Failed to read WAL (req_lsn=%X/%X, len=%zu): %s",
+			elog(ERROR, "[walsender] Failed to read WAL (req_lsn=%X/%X, len=%d): %s",
 				 LSN_FORMAT_ARGS(targetPagePtr),
 				 reqLen,
 				 NeonWALReaderErrMsg(wal_reader));
@@ -113,7 +119,6 @@ NeonWALPageRead(
 
 			pgsocket	sock = NeonWALReaderSocket(wal_reader);
 			uint32_t	reader_events = NeonWALReaderEvents(wal_reader);
-			WaitEvent	event;
 			long		timeout_ms = 1000;
 
 			ResetLatch(MyLatch);

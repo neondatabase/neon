@@ -287,6 +287,7 @@ typedef struct WalproposerShmemState
 	pg_atomic_uint64 propEpochStartLsn;
 	char		donor_name[64];
 	char		donor_conninfo[MAXCONNINFO];
+	XLogRecPtr	donor_lsn;
 
 	slock_t		mutex;
 	pg_atomic_uint64 mineLastElectedTerm;

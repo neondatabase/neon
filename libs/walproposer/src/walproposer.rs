@@ -346,6 +346,7 @@ mod tests {
             let mut shmem = unsafe { *self.get_shmem_state() };
             shmem.propEpochStartLsn.value = donor_lsn;
             shmem.donor_conninfo = donor.conninfo;
+            shmem.donor_lsn = donor_lsn;
         }
 
         fn conn_status(

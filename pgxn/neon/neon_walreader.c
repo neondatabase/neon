@@ -81,6 +81,7 @@ struct NeonWALReader
 	Size		req_progress;
 	char		donor_conninfo[MAXCONNINFO];
 	char		donor_name[64]; /* saved donor safekeeper name for logging */
+	XLogRecPtr	donor_lsn;
 	/* state of connection to safekeeper */
 	NeonWALReaderRemoteState rem_state;
 	WalProposerConn *wp_conn;
@@ -207,7 +208,7 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 
 		}
 		/* no connection yet; start one */
-		nwr_log(LOG, "establishing connection to %s to fetch WAL", state->donor_name);
+		nwr_log(LOG, "establishing connection to %s, lsn=%X/%X to fetch WAL", state->donor_name, LSN_FORMAT_ARGS(state->donor_lsn));
 		state->wp_conn = libpqwp_connect_start(state->donor_conninfo);
 		if (PQstatus(state->wp_conn->pg_conn) == CONNECTION_BAD)
 		{
@@ -241,10 +242,22 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 				{
 					/* connection successfully established */
 					char		start_repl_query[128];
+					term_t		term = pg_atomic_read_u64(&GetWalpropShmemState()->mineLastElectedTerm);
 
+					/*
+					 * Set elected walproposer's term to pull only data from
+					 * its history. Note: for logical walsender it means we
+					 * might stream WAL not yet committed by safekeepers. It
+					 * would be cleaner to fix this.
+					 *
+					 * mineLastElectedTerm shouldn't be 0 at this point
+					 * because we checked above that donor exists and it
+					 * appears only after successfull election.
+					 */
+					Assert(term > 0);
 					snprintf(start_repl_query, sizeof(start_repl_query),
 							 "START_REPLICATION PHYSICAL %X/%X (term='" UINT64_FORMAT "')",
-							 LSN_FORMAT_ARGS(startptr), pg_atomic_read_u64(&GetWalpropShmemState()->mineLastElectedTerm));
+							 LSN_FORMAT_ARGS(startptr), term);
 					nwr_log(LOG, "connection to %s to fetch WAL succeeded, running %s",
 							state->donor_name, start_repl_query);
 					if (!libpqwp_send_query(state->wp_conn, start_repl_query))
@@ -394,6 +407,10 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 			state->req_lsn = InvalidXLogRecPtr;
 			state->req_len = 0;
 			state->req_progress = 0;
+
+			/* Update the current segment info. */
+			state->seg.ws_tli = tli;
+
 			return NEON_WALREAD_SUCCESS;
 		}
 	}
@@ -754,6 +771,7 @@ NeonWALReaderUpdateDonor(NeonWALReader *state)
 	SpinLockAcquire(&wps->mutex);
 	memcpy(state->donor_name, wps->donor_name, sizeof(state->donor_name));
 	memcpy(state->donor_conninfo, wps->donor_conninfo, sizeof(state->donor_conninfo));
+	state->donor_lsn = wps->donor_lsn;
 	SpinLockRelease(&wps->mutex);
 	return state->donor_name[0] != '\0';
 }
