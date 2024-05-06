@@ -134,7 +134,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
         after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
         tbl.append([i, after_timestamp, after_lsn])
-        time.sleep(0.005)
+        time.sleep(0.02)
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions
