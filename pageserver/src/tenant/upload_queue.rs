@@ -296,7 +296,7 @@ pub(crate) enum UploadOp {
     UploadLayer(ResidentLayer, LayerFileMetadata),
 
     /// Upload the metadata file
-    UploadMetadata(IndexPart, Lsn),
+    UploadMetadata(Box<IndexPart>, Lsn),
 
     /// Delete layer files
     Delete(Delete),

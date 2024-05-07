@@ -641,7 +641,7 @@ impl RemoteTimelineClient {
         );
 
         let index_part = IndexPart::from(&*upload_queue);
-        let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
+        let op = UploadOp::UploadMetadata(Box::new(index_part), disk_consistent_lsn);
         self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
         upload_queue.latest_files_changes_since_metadata_upload_scheduled = 0;
