@@ -1447,6 +1447,9 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
+        if let AuxFilePolicy::V2 = self.tline.get_switch_aux_file_policy() {
+            return Ok(());
+        }
         let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
             files: HashMap::new(),
         })?;
