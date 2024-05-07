@@ -701,9 +701,9 @@ impl Timeline {
         let mut result = HashMap::new();
         for (_, v) in kv {
             let v = v.context("get value")?;
-            let v = aux_file::decode_file_value(&v).context("value decode")?;
+            let v = aux_file::decode_file_value_bytes(&v).context("value decode")?;
             for (fname, content) in v {
-                result.insert(fname.to_string(), content.to_vec().into());
+                result.insert(fname, content);
             }
         }
         Ok(result)
@@ -740,7 +740,7 @@ impl Timeline {
                         tracing::error!("aux file v2 returns Ok while aux file v1 returns an err");
                         Err(v1)
                     }
-                    (Err(v1), Err(_)) => Err(v1),
+                    (Err(_), Err(v2)) => Err(v2),
                 }
             }
         }

@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use pageserver_api::key::{Key, AUX_KEY_PREFIX, METADATA_KEY_SIZE};
 use tracing::warn;
 
@@ -85,6 +85,34 @@ pub fn decode_file_value(val: &[u8]) -> anyhow::Result<Vec<(&str, &[u8])>> {
         ptr.advance(val_len);
 
         let path = std::str::from_utf8(key)?;
+        files.push((path, content));
+    }
+    Ok(files)
+}
+
+/// Decode an aux file key-value pair into a list of files. The returned `Bytes` contains reference
+/// to the original value slice. Be cautious about memory consumption.
+pub fn decode_file_value_bytes(val: &Bytes) -> anyhow::Result<Vec<(String, Bytes)>> {
+    let mut ptr = val.clone();
+    if ptr.is_empty() {
+        // empty value = no files
+        return Ok(Vec::new());
+    }
+    assert_eq!(
+        ptr.get_u8(),
+        AUX_FILE_ENCODING_VERSION,
+        "unsupported aux file value"
+    );
+    let mut files = vec![];
+    while ptr.has_remaining() {
+        let key_len = ptr.get_u32() as usize;
+        let key = ptr.slice(..key_len);
+        ptr.advance(key_len);
+        let val_len = ptr.get_u32() as usize;
+        let content = ptr.slice(..val_len);
+        ptr.advance(val_len);
+
+        let path = std::str::from_utf8(&key)?.to_string();
         files.push((path, content));
     }
     Ok(files)
