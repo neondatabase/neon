@@ -2,7 +2,7 @@ use crate::{
     auth::{self, backend::AuthRateLimiter},
     console::locks::ApiLocks,
     rate_limiter::RateBucketInfo,
-    serverless::GlobalConnPoolOptions,
+    serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
     Host,
 };
 use anyhow::{bail, ensure, Context, Ok};
@@ -56,6 +56,7 @@ pub struct TlsConfig {
 pub struct HttpConfig {
     pub request_timeout: tokio::time::Duration,
     pub pool_options: GlobalConnPoolOptions,
+    pub cancel_set: CancelSet,
 }
 
 pub struct AuthenticationConfig {

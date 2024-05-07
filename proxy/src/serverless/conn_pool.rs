@@ -716,7 +716,7 @@ impl<C: ClientInnerExt> Drop for Client<C> {
 mod tests {
     use std::{mem, sync::atomic::AtomicBool};
 
-    use crate::{BranchId, EndpointId, ProjectId};
+    use crate::{serverless::cancel_set::CancelSet, BranchId, EndpointId, ProjectId};
 
     use super::*;
 
@@ -767,6 +767,7 @@ mod tests {
                 max_total_conns: 3,
             },
             request_timeout: Duration::from_secs(1),
+            cancel_set: CancelSet::new(0),
         }));
         let pool = GlobalConnPool::new(config);
         let conn_info = ConnInfo {

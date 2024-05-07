@@ -27,6 +27,7 @@ use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
 use proxy::redis::notifications;
+use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
 
@@ -599,6 +600,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             opt_in: args.sql_over_http.sql_over_http_pool_opt_in,
             max_total_conns: args.sql_over_http.sql_over_http_pool_max_total_conns,
         },
+        cancel_set: CancelSet::new(64),
     };
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,

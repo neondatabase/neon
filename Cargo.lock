@@ -4371,6 +4371,7 @@ dependencies = [
  "hyper 1.2.0",
  "hyper-tungstenite",
  "hyper-util",
+ "indexmap 2.0.1",
  "ipnet",
  "itertools",
  "lasso",

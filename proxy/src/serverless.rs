@@ -3,6 +3,7 @@
 //! Handles both SQL over HTTP and SQL over Websockets.
 
 mod backend;
+pub mod cancel_set;
 mod conn_pool;
 mod http_util;
 mod json;
@@ -109,20 +110,24 @@ pub async fn task_main(
         let conn_id = uuid::Uuid::new_v4();
         let http_conn_span = tracing::info_span!("http_conn", ?conn_id);
 
-        connections.spawn(
-            connection_handler(
-                config,
-                backend.clone(),
-                connections.clone(),
-                cancellation_handler.clone(),
-                cancellation_token.clone(),
-                server.clone(),
-                tls_acceptor.clone(),
-                conn,
-                peer_addr,
-            )
-            .instrument(http_conn_span),
-        );
+        let conn_token = cancellation_token.child_token();
+        let conn = connection_handler(
+            config,
+            backend.clone(),
+            connections.clone(),
+            cancellation_handler.clone(),
+            conn_token.clone(),
+            server.clone(),
+            tls_acceptor.clone(),
+            conn,
+            peer_addr,
+        )
+        .instrument(http_conn_span);
+
+        connections.spawn(async move {
+            let _cancel_guard = config.http_config.cancel_set.insert(conn_id, conn_token);
+            conn.await
+        });
     }
 
     connections.wait().await;
