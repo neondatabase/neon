@@ -1811,6 +1811,7 @@ impl RemoteTimelineClient {
                         latest_files: initialized.latest_files.clone(),
                         latest_files_changes_since_metadata_upload_scheduled: 0,
                         latest_metadata: initialized.latest_metadata.clone(),
+                        latest_lineage: initialized.latest_lineage.clone(),
                         projected_remote_consistent_lsn: None,
                         visible_remote_consistent_lsn: initialized
                             .visible_remote_consistent_lsn

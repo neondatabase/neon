@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
+use utils::id::TimelineId;
 
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
@@ -84,6 +85,52 @@ pub struct IndexPart {
 
     #[serde(rename = "metadata_bytes")]
     pub metadata: TimelineMetadata,
+
+    pub(crate) lineage: Lineage,
+}
+
+/// Limited history of earlier ancestors.
+///
+/// A timeline can have more than 1 earlier ancestor, in the rare case that it was repeatedly
+/// reparented by having an later timeline be detached from it's ancestor.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct Lineage {
+    /// Has the `reparenting_history` been truncated to `Lineage::REMEMBER_AT_MOST`.
+    reparented_overflown: bool,
+    /// Earlier ancestors, truncated when `reparented_overflown`
+    reparenting_history: Vec<TimelineId>,
+    /// The ancestor from which this timeline has been detached from and when.
+    original_ancestor: Option<(TimelineId, Lsn, NaiveDateTime)>,
+}
+
+impl Lineage {
+    const REMEMBER_AT_MOST: usize = 100;
+
+    fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) {
+        let drop_oldest = self.reparenting_history.len() + 1 > Self::REMEMBER_AT_MOST;
+
+        self.reparented_overflown |= drop_oldest;
+        if drop_oldest {
+            self.reparenting_history.remove(0);
+        }
+        self.reparenting_history.push(*old_ancestor);
+    }
+
+    fn record_detaching(&mut self, branchpoint: (TimelineId, Lsn)) {
+        assert!(self.original_ancestor.is_none());
+
+        self.original_ancestor =
+            Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
+    }
+
+    /// The queried lsn is most likely the basebackup lsn, and this answers question "is it allowed
+    /// to start a read/write primary at this lsn". The answer is true if the lsn would had been at
+    /// the branch point.
+    fn is_at_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
+        self.original_ancestor
+            .as_ref()
+            .is_some_and(|(_, ancestor_lsn, _)| lsn == *ancestor_lsn)
+    }
 }
 
 impl IndexPart {
@@ -96,10 +143,11 @@ impl IndexPart {
     /// - 3: no longer deserialize `timeline_layers` (serialized format is the same, but timeline_layers
     ///      is always generated from the keys of `layer_metadata`)
     /// - 4: timeline_layers is fully removed.
-    const LATEST_VERSION: usize = 4;
+    /// - 5: lineage was added
+    const LATEST_VERSION: usize = 5;
 
     // Versions we may see when reading from a bucket.
-    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4];
+    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5];
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
@@ -107,6 +155,7 @@ impl IndexPart {
         layers_and_metadata: &HashMap<LayerName, LayerFileMetadata>,
         disk_consistent_lsn: Lsn,
         metadata: TimelineMetadata,
+        lineage: Lineage,
     ) -> Self {
         let layer_metadata = layers_and_metadata
             .iter()
@@ -119,6 +168,7 @@ impl IndexPart {
             disk_consistent_lsn,
             metadata,
             deleted_at: None,
+            lineage,
         }
     }
 
@@ -147,6 +197,7 @@ impl IndexPart {
             &HashMap::new(),
             example_metadata.disk_consistent_lsn(),
             example_metadata,
+            Default::default(),
         )
     }
 }
@@ -155,8 +206,9 @@ impl From<&UploadQueueInitialized> for IndexPart {
     fn from(uq: &UploadQueueInitialized) -> Self {
         let disk_consistent_lsn = uq.latest_metadata.disk_consistent_lsn();
         let metadata = uq.latest_metadata.clone();
+        let lineage = uq.latest_lineage.clone();
 
-        Self::new(&uq.latest_files, disk_consistent_lsn, metadata)
+        Self::new(&uq.latest_files, disk_consistent_lsn, metadata, lineage)
     }
 }
 
@@ -221,6 +273,7 @@ mod tests {
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: None,
+            lineage: Lineage::default(),
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -261,6 +314,7 @@ mod tests {
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: None,
+            lineage: Lineage::default(),
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -302,7 +356,8 @@ mod tests {
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: Some(chrono::NaiveDateTime::parse_from_str(
-                "2023-07-31T09:00:00.123000000", "%Y-%m-%dT%H:%M:%S.%f").unwrap())
+                "2023-07-31T09:00:00.123000000", "%Y-%m-%dT%H:%M:%S.%f").unwrap()),
+            lineage: Lineage::default(),
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -347,6 +402,7 @@ mod tests {
             ])
             .unwrap(),
             deleted_at: None,
+            lineage: Lineage::default(),
         };
 
         let empty_layers_parsed = IndexPart::from_s3_bytes(empty_layers_json.as_bytes()).unwrap();
@@ -387,9 +443,15 @@ mod tests {
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: Some(chrono::NaiveDateTime::parse_from_str(
                 "2023-07-31T09:00:00.123000000", "%Y-%m-%dT%H:%M:%S.%f").unwrap()),
+            lineage: Lineage::default(),
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
+    }
+
+    #[test]
+    fn v5_indexpart_is_parsed() {
+        todo!()
     }
 }
