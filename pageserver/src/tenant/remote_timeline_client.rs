@@ -670,9 +670,7 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
-            upload_queue
-                .latest_metadata
-                .detach_from_ancestor(&adopted.0, &adopted.1);
+            upload_queue.latest_metadata.detach_from_ancestor(&adopted);
 
             for layer in layers {
                 upload_queue

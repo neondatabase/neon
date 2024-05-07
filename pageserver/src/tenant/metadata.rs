@@ -214,12 +214,12 @@ impl TimelineMetadata {
         self.body.ancestor_timeline = Some(*timeline);
     }
 
-    pub fn detach_from_ancestor(&mut self, timeline: &TimelineId, ancestor_lsn: &Lsn) {
+    pub fn detach_from_ancestor(&mut self, branchpoint: &(TimelineId, Lsn)) {
         if let Some(ancestor) = self.body.ancestor_timeline {
-            assert_eq!(ancestor, *timeline);
+            assert_eq!(ancestor, branchpoint.0);
         }
         if self.body.ancestor_lsn != Lsn(0) {
-            assert_eq!(self.body.ancestor_lsn, *ancestor_lsn);
+            assert_eq!(self.body.ancestor_lsn, branchpoint.1);
         }
         self.body.ancestor_timeline = None;
         self.body.ancestor_lsn = Lsn(0);
