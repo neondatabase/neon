@@ -1,5 +1,6 @@
 mod compaction;
 pub mod delete;
+pub(crate) mod detach_ancestor;
 mod eviction_task;
 mod init;
 pub mod layer_manager;
@@ -1494,6 +1495,12 @@ impl Timeline {
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub(crate) async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+        self.freeze_and_flush0().await
+    }
+
+    // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
+    // polluting the span hierarchy.
+    pub(crate) async fn freeze_and_flush0(&self) -> anyhow::Result<()> {
         let to_lsn = self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
@@ -3510,7 +3517,7 @@ impl Timeline {
         Ok(ancestor)
     }
 
-    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
+    pub(crate) fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
         let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
             format!(
                 "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
@@ -4326,6 +4333,49 @@ impl Timeline {
             _ = self.cancel.cancelled() => {}
         )
     }
+
+    /// Detach this timeline from its ancestor by copying all of ancestors layers as this
+    /// Timelines layers up to the ancestor_lsn.
+    ///
+    /// Requires a timeline that:
+    /// - has an ancestor to detach from
+    /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
+    /// a technical requirement
+    /// - has prev_lsn in remote storage (temporary restriction)
+    ///
+    /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
+    /// polled again until completion.
+    ///
+    /// During the operation all timelines sharing the data with this timeline will be reparented
+    /// from our ancestor to be branches of this timeline.
+    pub(crate) async fn prepare_to_detach_from_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        options: detach_ancestor::Options,
+        ctx: &RequestContext,
+    ) -> Result<
+        (
+            completion::Completion,
+            detach_ancestor::PreparedTimelineDetach,
+        ),
+        detach_ancestor::Error,
+    > {
+        detach_ancestor::prepare(self, tenant, options, ctx).await
+    }
+
+    /// Completes the ancestor detach. This method is to be called while holding the
+    /// TenantManager's tenant slot, so during this method we cannot be deleted nor can any
+    /// timeline be deleted. After this method returns successfully, tenant must be reloaded.
+    ///
+    /// Pageserver receiving a SIGKILL during this operation is not supported (yet).
+    pub(crate) async fn complete_detaching_timeline_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        prepared: detach_ancestor::PreparedTimelineDetach,
+        ctx: &RequestContext,
+    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+        detach_ancestor::complete(self, tenant, prepared, ctx).await
+    }
 }
 
 /// Top-level failure to compact.
@@ -4610,6 +4660,8 @@ impl Timeline {
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
     ) -> anyhow::Result<GcResult> {
+        // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
+
         let now = SystemTime::now();
         let mut result: GcResult = GcResult::default();
 

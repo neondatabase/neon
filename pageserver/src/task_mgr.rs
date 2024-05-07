@@ -370,6 +370,8 @@ pub enum TaskKind {
 
     #[cfg(test)]
     UnitTest,
+
+    DetachAncestor,
 }
 
 #[derive(Default)]

@@ -1797,25 +1797,23 @@ impl ResidentLayer {
         }
     }
 
-    /// FIXME: truncate is bad name because we are not truncating anything, but copying the
-    /// filtered parts.
-    #[cfg(test)]
-    pub(super) async fn copy_delta_prefix(
+    /// Returns the amount of keys and values written to the writer.
+    pub(crate) async fn copy_delta_prefix(
         &self,
         writer: &mut super::delta_layer::DeltaLayerWriter,
-        truncate_at: Lsn,
+        until: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         use LayerKind::*;
 
         let owner = &self.owner.0;
 
         match self.downloaded.get(owner, ctx).await? {
             Delta(ref d) => d
-                .copy_prefix(writer, truncate_at, ctx)
+                .copy_prefix(writer, until, ctx)
                 .await
-                .with_context(|| format!("truncate {self}")),
-            Image(_) => anyhow::bail!(format!("cannot truncate image layer {self}")),
+                .with_context(|| format!("copy_delta_prefix until {until} of {self}")),
+            Image(_) => anyhow::bail!(format!("cannot copy_lsn_prefix of image layer {self}")),
         }
     }
 
