@@ -274,6 +274,9 @@ impl From<DeltaFileName> for LayerFileName {
 impl FromStr for LayerFileName {
     type Err = String;
 
+    /// Conversion from either a physical layer filename, or the string-ization of
+    /// Self. When loading a physical layer filename, we drop any extra information
+    /// not needed to build Self.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let gen_suffix_regex = Regex::new("^(?<base>.+)-(?<gen>[0-9a-f]{8})$").unwrap();
         let file_name: Cow<str> = match gen_suffix_regex.captures(value) {

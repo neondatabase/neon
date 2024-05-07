@@ -14,7 +14,6 @@ use crate::{
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::ShardIndex;
-use regex::Regex;
 use std::{collections::HashMap, str::FromStr};
 use utils::lsn::Lsn;
 
@@ -40,22 +39,9 @@ pub(super) enum Discovered {
 pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovered>> {
     let mut ret = Vec::new();
 
-    let gen_suffix_regex = Regex::new("^(?<base>.+)-(?<gen>[0-9a-f]{8})$").unwrap();
-
     for direntry in path.read_dir_utf8()? {
         let direntry = direntry?;
         let file_name = direntry.file_name().to_string();
-
-        // If the local path has a generation suffix, trim that off before trying to parse
-        // it as a LayerFileName.
-        let file_name = match gen_suffix_regex.captures(&file_name) {
-            Some(captures) => captures
-                .name("base")
-                .expect("Non-optional group")
-                .as_str()
-                .to_owned(),
-            None => file_name,
-        };
 
         let discovered = match LayerFileName::from_str(&file_name) {
             Ok(file_name) => {
