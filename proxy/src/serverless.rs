@@ -110,6 +110,17 @@ pub async fn task_main(
         let conn_id = uuid::Uuid::new_v4();
         let http_conn_span = tracing::info_span!("http_conn", ?conn_id);
 
+        let n_connections = Metrics::get()
+            .proxy
+            .client_connections
+            .sample(crate::metrics::Protocol::Http);
+        if n_connections > 1000 {
+            if let Some(token) = config.http_config.cancel_set.take() {
+                tracing::debug!("cancelling a random connection");
+                token.cancel()
+            }
+        }
+
         let conn_token = cancellation_token.child_token();
         let conn = connection_handler(
             config,
@@ -248,6 +259,7 @@ async fn connection_handler(
     // On cancellation, trigger the HTTP connection handler to shut down.
     let res = match select(pin!(cancellation_token.cancelled()), pin!(conn)).await {
         Either::Left((_cancelled, mut conn)) => {
+            tracing::debug!(%peer_addr, "cancelling connection");
             conn.as_mut().graceful_shutdown();
             conn.await
         }
