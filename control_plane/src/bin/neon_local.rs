@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::local_env::{InitForceMode, LocalEnv};
+use control_plane::local_env::{InitForceMode, LocalEnv, PageServerConf};
 use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
@@ -52,8 +52,8 @@ const DEFAULT_PG_VERSION: &str = "15";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
-fn default_conf(num_pageservers: u16) -> String {
-    let mut template = format!(
+fn default_conf() -> String {
+    format!(
         r#"
 # Default built-in configuration, defined in main.rs
 control_plane_api = '{DEFAULT_PAGESERVER_CONTROL_PLANE_API}'
@@ -66,28 +66,11 @@ id = {DEFAULT_SAFEKEEPER_ID}
 pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
 http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
 
+# NB: pageservers do not have a representation in this file.
+# They are discovered by listing the directory.
+
 "#,
-    );
-
-    for i in 0..num_pageservers {
-        let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
-        let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
-        let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
-
-        template += &format!(
-            r#"
-[[pageservers]]
-id = {pageserver_id}
-listen_pg_addr = '127.0.0.1:{pg_port}'
-listen_http_addr = '127.0.0.1:{http_port}'
-pg_auth_type = '{trust_auth}'
-http_auth_type = '{trust_auth}'
-"#,
-            trust_auth = AuthType::Trust,
-        )
-    }
-
-    template
+    )
 }
 
 ///
@@ -355,15 +338,31 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
         })?
     } else {
         // Built-in default config
-        default_conf(*num_pageservers)
+        default_conf()
     };
 
-    let pageserver_config: toml_edit::Document =
+    let pageserver_config_cli_overrides: toml_edit::Document =
         if let Some(path) = init_match.get_one::<PathBuf>("pageserver-config") {
             std::fs::read_to_string(path)?.parse()?
         } else {
             toml_edit::Document::new()
         };
+
+    let neon_local_psconfs = (0..*num_pageservers)
+        .map(|i| {
+            let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
+            let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
+            let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+            // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
+            PageServerConf {
+                id: pageserver_id,
+                listen_pg_addr: format!("127.0.0.1:{pg_port}"),
+                listen_http_addr: format!("127.0.0.1:{http_port}"),
+                pg_auth_type: AuthType::Trust,
+                http_auth_type: AuthType::Trust,
+            }
+        })
+        .collect::<Vec<_>>();
 
     let pg_version = init_match
         .get_one::<u32>("pg-version")
@@ -380,9 +379,9 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
 
     // Initialize pageserver, create initial tenant and timeline.
-    for ps_conf in &env.pageservers {
+    for ps_conf in &neon_local_psconfs {
         PageServerNode::from_env(&env, ps_conf)
-            .initialize(pageserver_config.clone())
+            .initialize(pageserver_config_cli_overrides.clone())
             .unwrap_or_else(|e| {
                 eprintln!("pageserver init failed: {e:?}");
                 exit(1);
