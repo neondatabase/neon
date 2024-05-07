@@ -1385,6 +1385,10 @@ impl RemoteTimelineClient {
                 UploadOp::UploadLayer(ref layer, ref layer_metadata) => {
                     let local_path = layer.local_path();
 
+                    // We should only be uploading layers created by this `Tenant`'s lifetime, so
+                    // the metadata in the upload should always match our current generation.
+                    assert_eq!(layer_metadata.generation, self.generation);
+
                     let remote_path = remote_layer_path(
                         &self.tenant_shard_id.tenant_id,
                         &self.timeline_id,
