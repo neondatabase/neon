@@ -5,7 +5,7 @@ use utils::{id::TimelineId, lsn::Lsn};
 
 use crate::repository::Key;
 
-use super::{DeltaFileName, ImageFileName, LayerName};
+use super::{DeltaLayerName, ImageLayerName, LayerName};
 
 use serde::{Deserialize, Serialize};
 
@@ -135,9 +135,9 @@ impl PersistentLayerDesc {
     /// Get a delta file name for this layer.
     ///
     /// Panic: if this is not a delta layer.
-    pub fn delta_file_name(&self) -> DeltaFileName {
+    pub fn delta_file_name(&self) -> DeltaLayerName {
         assert!(self.is_delta);
-        DeltaFileName {
+        DeltaLayerName {
             key_range: self.key_range.clone(),
             lsn_range: self.lsn_range.clone(),
         }
@@ -146,10 +146,10 @@ impl PersistentLayerDesc {
     /// Get a delta file name for this layer.
     ///
     /// Panic: if this is not an image layer, or the lsn range is invalid
-    pub fn image_file_name(&self) -> ImageFileName {
+    pub fn image_file_name(&self) -> ImageLayerName {
         assert!(!self.is_delta);
         assert!(self.lsn_range.start + 1 == self.lsn_range.end);
-        ImageFileName {
+        ImageLayerName {
             key_range: self.key_range.clone(),
             lsn: self.lsn_range.start,
         }

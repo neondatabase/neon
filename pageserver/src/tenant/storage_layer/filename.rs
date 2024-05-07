@@ -15,29 +15,29 @@ use super::PersistentLayerDesc;
 
 // Note: Timeline::load_layer_map() relies on this sort order
 #[derive(PartialEq, Eq, Clone, Hash)]
-pub struct DeltaFileName {
+pub struct DeltaLayerName {
     pub key_range: Range<Key>,
     pub lsn_range: Range<Lsn>,
 }
 
-impl std::fmt::Debug for DeltaFileName {
+impl std::fmt::Debug for DeltaLayerName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use super::RangeDisplayDebug;
 
-        f.debug_struct("DeltaFileName")
+        f.debug_struct("DeltaLayerName")
             .field("key_range", &RangeDisplayDebug(&self.key_range))
             .field("lsn_range", &self.lsn_range)
             .finish()
     }
 }
 
-impl PartialOrd for DeltaFileName {
+impl PartialOrd for DeltaLayerName {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for DeltaFileName {
+impl Ord for DeltaLayerName {
     fn cmp(&self, other: &Self) -> Ordering {
         let mut cmp = self.key_range.start.cmp(&other.key_range.start);
         if cmp != Ordering::Equal {
@@ -62,7 +62,7 @@ impl Ord for DeltaFileName {
 /// ```text
 ///    <key start>-<key end>__<LSN start>-<LSN end>
 /// ```
-impl DeltaFileName {
+impl DeltaLayerName {
     ///
     /// Parse a string as a delta file name. Returns None if the filename does not
     /// match the expected pattern.
@@ -105,14 +105,14 @@ impl DeltaFileName {
             // or panic?
         }
 
-        Some(DeltaFileName {
+        Some(DeltaLayerName {
             key_range: key_start..key_end,
             lsn_range: start_lsn..end_lsn,
         })
     }
 }
 
-impl fmt::Display for DeltaFileName {
+impl fmt::Display for DeltaLayerName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -126,29 +126,29 @@ impl fmt::Display for DeltaFileName {
 }
 
 #[derive(PartialEq, Eq, Clone, Hash)]
-pub struct ImageFileName {
+pub struct ImageLayerName {
     pub key_range: Range<Key>,
     pub lsn: Lsn,
 }
 
-impl std::fmt::Debug for ImageFileName {
+impl std::fmt::Debug for ImageLayerName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use super::RangeDisplayDebug;
 
-        f.debug_struct("ImageFileName")
+        f.debug_struct("ImageLayerName")
             .field("key_range", &RangeDisplayDebug(&self.key_range))
             .field("lsn", &self.lsn)
             .finish()
     }
 }
 
-impl PartialOrd for ImageFileName {
+impl PartialOrd for ImageLayerName {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for ImageFileName {
+impl Ord for ImageLayerName {
     fn cmp(&self, other: &Self) -> Ordering {
         let mut cmp = self.key_range.start.cmp(&other.key_range.start);
         if cmp != Ordering::Equal {
@@ -164,7 +164,7 @@ impl Ord for ImageFileName {
     }
 }
 
-impl ImageFileName {
+impl ImageLayerName {
     pub fn lsn_as_range(&self) -> Range<Lsn> {
         // Saves from having to copypaste this all over
         PersistentLayerDesc::image_layer_lsn_range(self.lsn)
@@ -177,7 +177,7 @@ impl ImageFileName {
 /// ```text
 ///    <key start>-<key end>__<LSN>
 /// ```
-impl ImageFileName {
+impl ImageLayerName {
     ///
     /// Parse a string as an image file name. Returns None if the filename does not
     /// match the expected pattern.
@@ -202,14 +202,14 @@ impl ImageFileName {
 
         let lsn = Lsn::from_hex(lsn_str).ok()?;
 
-        Some(ImageFileName {
+        Some(ImageLayerName {
             key_range: key_start..key_end,
             lsn,
         })
     }
 }
 
-impl fmt::Display for ImageFileName {
+impl fmt::Display for ImageLayerName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -222,8 +222,8 @@ impl fmt::Display for ImageFileName {
 }
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum LayerName {
-    Image(ImageFileName),
-    Delta(DeltaFileName),
+    Image(ImageLayerName),
+    Delta(DeltaLayerName),
 }
 
 impl LayerName {
@@ -260,13 +260,13 @@ impl fmt::Display for LayerName {
     }
 }
 
-impl From<ImageFileName> for LayerName {
-    fn from(fname: ImageFileName) -> Self {
+impl From<ImageLayerName> for LayerName {
+    fn from(fname: ImageLayerName) -> Self {
         Self::Image(fname)
     }
 }
-impl From<DeltaFileName> for LayerName {
-    fn from(fname: DeltaFileName) -> Self {
+impl From<DeltaLayerName> for LayerName {
+    fn from(fname: DeltaLayerName) -> Self {
         Self::Delta(fname)
     }
 }
@@ -288,8 +288,8 @@ impl FromStr for LayerName {
             None => value.into(),
         };
 
-        let delta = DeltaFileName::parse_str(&file_name);
-        let image = ImageFileName::parse_str(&file_name);
+        let delta = DeltaLayerName::parse_str(&file_name);
+        let image = ImageLayerName::parse_str(&file_name);
         let ok = match (delta, image) {
             (None, None) => {
                 return Err(format!(
@@ -349,7 +349,7 @@ mod test {
     use super::*;
     #[test]
     fn image_layer_parse() -> anyhow::Result<()> {
-        let expected = LayerName::Image(ImageFileName {
+        let expected = LayerName::Image(ImageLayerName {
             key_range: Key::from_i128(0)
                 ..Key::from_hex("000000067F00000001000004DF0000000006").unwrap(),
             lsn: Lsn::from_hex("00000000014FED58").unwrap(),
@@ -366,7 +366,7 @@ mod test {
 
     #[test]
     fn delta_layer_parse() -> anyhow::Result<()> {
-        let expected = LayerName::Delta(DeltaFileName {
+        let expected = LayerName::Delta(DeltaLayerName {
             key_range: Key::from_i128(0)
                 ..Key::from_hex("000000067F00000001000004DF0000000006").unwrap(),
             lsn_range: Lsn::from_hex("00000000014FED58").unwrap()

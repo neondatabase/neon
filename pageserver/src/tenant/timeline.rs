@@ -2393,7 +2393,7 @@ impl Timeline {
 
         let timer = self.metrics.load_layer_map_histo.start_timer();
 
-        // Scan timeline directory and create ImageFileName and DeltaFilename
+        // Scan timeline directory and create ImageLayerName and DeltaFilename
         // structs representing all files on disk
         let timeline_path = self
             .conf

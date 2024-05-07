@@ -34,7 +34,7 @@ use utils::rate_limit::RateLimit;
 use utils::{id::TimelineId, lsn::Lsn};
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
-pub use filename::{DeltaFileName, ImageFileName, LayerName};
+pub use filename::{DeltaLayerName, ImageLayerName, LayerName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
@@ -646,8 +646,8 @@ pub mod tests {
 
     use super::*;
 
-    impl From<DeltaFileName> for PersistentLayerDesc {
-        fn from(value: DeltaFileName) -> Self {
+    impl From<DeltaLayerName> for PersistentLayerDesc {
+        fn from(value: DeltaLayerName) -> Self {
             PersistentLayerDesc::new_delta(
                 TenantShardId::from([0; 18]),
                 TimelineId::from_array([0; 16]),
@@ -658,8 +658,8 @@ pub mod tests {
         }
     }
 
-    impl From<ImageFileName> for PersistentLayerDesc {
-        fn from(value: ImageFileName) -> Self {
+    impl From<ImageLayerName> for PersistentLayerDesc {
+        fn from(value: ImageLayerName) -> Self {
             PersistentLayerDesc::new_img(
                 TenantShardId::from([0; 18]),
                 TimelineId::from_array([0; 16]),

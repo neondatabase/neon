@@ -734,20 +734,20 @@ mod test {
     use crate::{
         control_plane_client::RetryForeverError,
         repository::Key,
-        tenant::{harness::TenantHarness, storage_layer::DeltaFileName},
+        tenant::{harness::TenantHarness, storage_layer::DeltaLayerName},
     };
 
     use super::*;
     pub const TIMELINE_ID: TimelineId =
         TimelineId::from_array(hex!("11223344556677881122334455667788"));
 
-    pub const EXAMPLE_LAYER_NAME: LayerName = LayerName::Delta(DeltaFileName {
+    pub const EXAMPLE_LAYER_NAME: LayerName = LayerName::Delta(DeltaLayerName {
         key_range: Key::from_i128(0x0)..Key::from_i128(0xFFFFFFFFFFFFFFFF),
         lsn_range: Lsn(0x00000000016B59D8)..Lsn(0x00000000016B5A51),
     });
 
     // When you need a second layer in a test.
-    pub const EXAMPLE_LAYER_NAME_ALT: LayerName = LayerName::Delta(DeltaFileName {
+    pub const EXAMPLE_LAYER_NAME_ALT: LayerName = LayerName::Delta(DeltaLayerName {
         key_range: Key::from_i128(0x0)..Key::from_i128(0xFFFFFFFFFFFFFFFF),
         lsn_range: Lsn(0x00000000016B5A51)..Lsn(0x00000000016B5A61),
     });

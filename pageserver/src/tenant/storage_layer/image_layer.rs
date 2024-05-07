@@ -65,7 +65,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::ImageFileName;
+use super::filename::ImageLayerName;
 use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer, ValuesReconstructState};
 
 ///
@@ -231,7 +231,7 @@ impl ImageLayer {
         conf: &PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        fname: &ImageFileName,
+        fname: &ImageLayerName,
     ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -635,7 +635,7 @@ impl ImageLayerWriterInner {
             conf,
             timeline_id,
             tenant_shard_id,
-            &ImageFileName {
+            &ImageLayerName {
                 key_range: key_range.clone(),
                 lsn,
             },
