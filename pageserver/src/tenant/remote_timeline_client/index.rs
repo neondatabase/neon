@@ -115,7 +115,7 @@ impl Lineage {
     const REMEMBER_AT_MOST: usize = 100;
 
     pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) {
-        if self.reparenting_history.last() == Some(&old_ancestor) {
+        if self.reparenting_history.last() == Some(old_ancestor) {
             // do not re-record it
             return;
         }
