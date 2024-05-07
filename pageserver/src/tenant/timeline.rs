@@ -1,5 +1,6 @@
 mod compaction;
 pub mod delete;
+pub(crate) mod detach_ancestor;
 mod eviction_task;
 mod init;
 pub mod layer_manager;
@@ -1494,15 +1495,21 @@ impl Timeline {
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub(crate) async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+        self.freeze_and_flush0().await
+    }
+
+    // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
+    // polluting the span hierarchy.
+    pub(crate) async fn freeze_and_flush0(&self) -> anyhow::Result<()> {
         let to_lsn = self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
 
-    /// If there is no writer, and conditions for rolling the latest layer are met, then freeze it.
-    ///
-    /// This is for use in background housekeeping, to provide guarantees of layers closing eventually
-    /// even if there are no ongoing writes to drive that.
-    async fn maybe_freeze_ephemeral_layer(&self) {
+    // Check if an open ephemeral layer should be closed: this provides
+    // background enforcement of checkpoint interval if there is no active WAL receiver, to avoid keeping
+    // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
+    // ephemeral layer bytes has been breached.
+    pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
         let Ok(_write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
@@ -1529,13 +1536,11 @@ impl Timeline {
                 // we are a sharded tenant and have skipped some WAL
                 let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
                 if last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
-                    // This should be somewhat rare, so we log it at INFO level.
-                    //
-                    // We checked for checkpoint timeout so that a shard without any
-                    // data ingested (yet) doesn't write a remote index as soon as it
+                    // Only do this if have been layer-less longer than get_checkpoint_timeout, so that a shard
+                    // without any data ingested (yet) doesn't write a remote index as soon as it
                     // sees its LSN advance: we only do this if we've been layer-less
                     // for some time.
-                    tracing::info!(
+                    tracing::debug!(
                         "Advancing disk_consistent_lsn past WAL ingest gap {} -> {}",
                         disk_consistent_lsn,
                         last_record_lsn
@@ -1624,11 +1629,6 @@ impl Timeline {
 
             (guard, permit)
         };
-
-        // Prior to compaction, check if an open ephemeral layer should be closed: this provides
-        // background enforcement of checkpoint interval if there is no active WAL receiver, to avoid keeping
-        // an ephemeral layer open forever when idle.
-        self.maybe_freeze_ephemeral_layer().await;
 
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
@@ -3517,7 +3517,7 @@ impl Timeline {
         Ok(ancestor)
     }
 
-    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
+    pub(crate) fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
         let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
             format!(
                 "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
@@ -4333,6 +4333,49 @@ impl Timeline {
             _ = self.cancel.cancelled() => {}
         )
     }
+
+    /// Detach this timeline from its ancestor by copying all of ancestors layers as this
+    /// Timelines layers up to the ancestor_lsn.
+    ///
+    /// Requires a timeline that:
+    /// - has an ancestor to detach from
+    /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
+    /// a technical requirement
+    /// - has prev_lsn in remote storage (temporary restriction)
+    ///
+    /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
+    /// polled again until completion.
+    ///
+    /// During the operation all timelines sharing the data with this timeline will be reparented
+    /// from our ancestor to be branches of this timeline.
+    pub(crate) async fn prepare_to_detach_from_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        options: detach_ancestor::Options,
+        ctx: &RequestContext,
+    ) -> Result<
+        (
+            completion::Completion,
+            detach_ancestor::PreparedTimelineDetach,
+        ),
+        detach_ancestor::Error,
+    > {
+        detach_ancestor::prepare(self, tenant, options, ctx).await
+    }
+
+    /// Completes the ancestor detach. This method is to be called while holding the
+    /// TenantManager's tenant slot, so during this method we cannot be deleted nor can any
+    /// timeline be deleted. After this method returns successfully, tenant must be reloaded.
+    ///
+    /// Pageserver receiving a SIGKILL during this operation is not supported (yet).
+    pub(crate) async fn complete_detaching_timeline_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        prepared: detach_ancestor::PreparedTimelineDetach,
+        ctx: &RequestContext,
+    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+        detach_ancestor::complete(self, tenant, prepared, ctx).await
+    }
 }
 
 /// Top-level failure to compact.
@@ -4437,6 +4480,24 @@ impl Timeline {
         }
 
         drop_wlock(guard);
+
+        Ok(())
+    }
+
+    async fn rewrite_layers(
+        self: &Arc<Self>,
+        replace_layers: Vec<(Layer, ResidentLayer)>,
+        drop_layers: Vec<Layer>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.layers.write().await;
+
+        guard.rewrite_layers(&replace_layers, &drop_layers, &self.metrics);
+
+        let upload_layers: Vec<_> = replace_layers.into_iter().map(|r| r.1).collect();
+
+        if let Some(remote_client) = self.remote_client.as_ref() {
+            remote_client.schedule_compaction_update(&drop_layers, &upload_layers)?;
+        }
 
         Ok(())
     }
@@ -4599,6 +4660,8 @@ impl Timeline {
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
     ) -> anyhow::Result<GcResult> {
+        // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
+
         let now = SystemTime::now();
         let mut result: GcResult = GcResult::default();
 

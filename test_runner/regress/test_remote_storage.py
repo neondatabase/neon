@@ -1,6 +1,3 @@
-# It's possible to run any regular test with the local fs remote storage via
-# env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
-
 import os
 import queue
 import shutil

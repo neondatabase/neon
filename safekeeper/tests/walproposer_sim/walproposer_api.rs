@@ -17,8 +17,7 @@ use utils::lsn::Lsn;
 use walproposer::{
     api_bindings::Level,
     bindings::{
-        pg_atomic_uint64, NeonWALReadResult, PageserverFeedback, SafekeeperStateDesiredEvents,
-        WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE,
+        NeonWALReadResult, SafekeeperStateDesiredEvents, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE,
     },
     walproposer::{ApiImpl, Config},
 };
@@ -224,31 +223,13 @@ impl SimulationApi {
             })
             .collect::<Vec<_>>();
 
-        let empty_feedback = PageserverFeedback {
-            present: false,
-            currentClusterSize: 0,
-            last_received_lsn: 0,
-            disk_consistent_lsn: 0,
-            remote_consistent_lsn: 0,
-            replytime: 0,
-            shard_number: 0,
-        };
-
         Self {
             os: args.os,
             safekeepers: RefCell::new(sk_conns),
             disk: args.disk,
             redo_start_lsn: args.redo_start_lsn,
             last_logged_commit_lsn: 0,
-            shmem: UnsafeCell::new(walproposer::bindings::WalproposerShmemState {
-                mutex: 0,
-                mineLastElectedTerm: 0,
-                backpressureThrottlingTime: pg_atomic_uint64 { value: 0 },
-                currentClusterSize: pg_atomic_uint64 { value: 0 },
-                shard_ps_feedback: [empty_feedback; 128],
-                num_shards: 0,
-                min_ps_feedback: empty_feedback,
-            }),
+            shmem: UnsafeCell::new(walproposer::api_bindings::empty_shmem()),
             config: args.config,
             event_set: RefCell::new(None),
         }
@@ -272,6 +253,12 @@ impl ApiImpl for SimulationApi {
         // PG TimestampTZ is microseconds, but simulation unit is assumed to be
         // milliseconds, so add 10^3
         self.os.now() as i64 * 1000
+    }
+
+    fn update_donor(&self, donor: &mut walproposer::bindings::Safekeeper, donor_lsn: u64) {
+        let mut shmem = unsafe { *self.get_shmem_state() };
+        shmem.propEpochStartLsn.value = donor_lsn;
+        shmem.donor_conninfo = donor.conninfo;
     }
 
     fn conn_status(
