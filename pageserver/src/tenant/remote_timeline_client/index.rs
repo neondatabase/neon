@@ -86,6 +86,7 @@ pub struct IndexPart {
     #[serde(rename = "metadata_bytes")]
     pub metadata: TimelineMetadata,
 
+    #[serde(default)]
     pub(crate) lineage: Lineage,
 }
 
@@ -96,11 +97,18 @@ pub struct IndexPart {
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct Lineage {
     /// Has the `reparenting_history` been truncated to `Lineage::REMEMBER_AT_MOST`.
-    reparented_overflown: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    reparenting_history_truncated: bool,
     /// Earlier ancestors, truncated when `reparented_overflown`
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     reparenting_history: Vec<TimelineId>,
     /// The ancestor from which this timeline has been detached from and when.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     original_ancestor: Option<(TimelineId, Lsn, NaiveDateTime)>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 impl Lineage {
@@ -114,7 +122,7 @@ impl Lineage {
 
         let drop_oldest = self.reparenting_history.len() + 1 > Self::REMEMBER_AT_MOST;
 
-        self.reparented_overflown |= drop_oldest;
+        self.reparenting_history_truncated |= drop_oldest;
         if drop_oldest {
             self.reparenting_history.remove(0);
         }
