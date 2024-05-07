@@ -72,8 +72,6 @@ pub async fn download_layer_file<'a>(
         layer_metadata.generation,
     );
 
-    tracing::info!("download_layer_file: {remote_path} -> {local_path}");
-
     // Perform a rename inspired by durable_rename from file_utils.c.
     // The sequence:
     //     write(tmp)
