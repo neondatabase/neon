@@ -69,7 +69,6 @@ from fixtures.remote_storage import (
     S3Storage,
     default_remote_storage,
     remote_storage_to_toml_dict,
-    remote_storage_to_toml_inline_table,
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
