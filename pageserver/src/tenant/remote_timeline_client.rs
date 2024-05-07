@@ -570,7 +570,7 @@ impl RemoteTimelineClient {
         // ahead of what's _actually_ on the remote during index upload.
         upload_queue.latest_metadata = metadata.clone();
 
-        self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+        self.schedule_index_upload(upload_queue);
 
         Ok(())
     }
@@ -591,7 +591,7 @@ impl RemoteTimelineClient {
 
         upload_queue.latest_metadata.apply(update);
 
-        self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+        self.schedule_index_upload(upload_queue);
 
         Ok(())
     }
@@ -611,18 +611,14 @@ impl RemoteTimelineClient {
         let upload_queue = guard.initialized_mut()?;
 
         if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-            self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+            self.schedule_index_upload(upload_queue);
         }
 
         Ok(())
     }
 
     /// Launch an index-file upload operation in the background (internal function)
-    fn schedule_index_upload(
-        self: &Arc<Self>,
-        upload_queue: &mut UploadQueueInitialized,
-        metadata: TimelineMetadata,
-    ) {
+    fn schedule_index_upload(self: &Arc<Self>, upload_queue: &mut UploadQueueInitialized) {
         let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
 
         info!(
@@ -631,11 +627,7 @@ impl RemoteTimelineClient {
             upload_queue.latest_files_changes_since_metadata_upload_scheduled,
         );
 
-        let index_part = IndexPart::new(
-            upload_queue.latest_files.clone(),
-            disk_consistent_lsn,
-            metadata,
-        );
+        let index_part = IndexPart::from(&*upload_queue);
         let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
         self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
@@ -657,7 +649,7 @@ impl RemoteTimelineClient {
 
             upload_queue.latest_metadata.reparent(new_parent);
 
-            self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+            self.schedule_index_upload(upload_queue);
 
             self.schedule_barrier0(upload_queue)
         };
@@ -688,7 +680,7 @@ impl RemoteTimelineClient {
                     .insert(layer.layer_desc().filename(), layer.metadata());
             }
 
-            self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+            self.schedule_index_upload(upload_queue);
 
             let barrier = self.schedule_barrier0(upload_queue);
             self.launch_queued_tasks(upload_queue);
@@ -792,10 +784,6 @@ impl RemoteTimelineClient {
     where
         I: IntoIterator<Item = LayerFileName>,
     {
-        // Deleting layers doesn't affect the values stored in TimelineMetadata,
-        // so we don't need update it. Just serialize it.
-        let metadata = upload_queue.latest_metadata.clone();
-
         // Decorate our list of names with each name's metadata, dropping
         // names that are unexpectedly missing from our metadata.  This metadata
         // is later used when physically deleting layers, to construct key paths.
@@ -834,7 +822,7 @@ impl RemoteTimelineClient {
         // index_part update, because that needs to be uploaded before we can actually delete the
         // files.
         if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-            self.schedule_index_upload(upload_queue, metadata);
+            self.schedule_index_upload(upload_queue);
         }
 
         with_metadata
@@ -1063,8 +1051,7 @@ impl RemoteTimelineClient {
             let deleted_at = Utc::now().naive_utc();
             stopped.deleted_at = SetDeletedFlagProgress::InProgress(deleted_at);
 
-            let mut index_part = IndexPart::try_from(&stopped.upload_queue_for_deletion)
-                .context("IndexPart serialize")?;
+            let mut index_part = IndexPart::from(&stopped.upload_queue_for_deletion);
             index_part.deleted_at = Some(deleted_at);
             index_part
         };
@@ -2378,12 +2365,7 @@ mod tests {
 
     async fn inject_index_part(test_state: &TestSetup, generation: Generation) -> IndexPart {
         // An empty IndexPart, just sufficient to ensure deserialization will succeed
-        let example_metadata = TimelineMetadata::example();
-        let example_index_part = IndexPart::new(
-            HashMap::new(),
-            example_metadata.disk_consistent_lsn(),
-            example_metadata,
-        );
+        let example_index_part = IndexPart::example();
 
         let index_part_bytes = serde_json::to_vec(&example_index_part).unwrap();
 

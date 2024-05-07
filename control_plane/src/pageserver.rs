@@ -17,7 +17,8 @@ use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
 use pageserver_api::models::{
-    self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
+    self, AuxFilePolicy, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo,
+    TimelineInfo,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -394,11 +395,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
-            switch_to_aux_file_v2: settings
-                .remove("switch_to_aux_file_v2")
-                .map(|x| x.parse::<bool>())
+            switch_aux_file_policy: settings
+                .remove("switch_aux_file_policy")
+                .map(|x| x.parse::<AuxFilePolicy>())
                 .transpose()
-                .context("Failed to parse 'switch_to_aux_file_v2' as bool")?,
+                .context("Failed to parse 'switch_aux_file_policy'")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -517,11 +518,11 @@ impl PageServerNode {
                     .map(serde_json::from_str)
                     .transpose()
                     .context("parse `timeline_get_throttle` from json")?,
-                switch_to_aux_file_v2: settings
-                    .remove("switch_to_aux_file_v2")
-                    .map(|x| x.parse::<bool>())
+                switch_aux_file_policy: settings
+                    .remove("switch_aux_file_policy")
+                    .map(|x| x.parse::<AuxFilePolicy>())
                     .transpose()
-                    .context("Failed to parse 'switch_to_aux_file_v2' as bool")?,
+                    .context("Failed to parse 'switch_aux_file_policy'")?,
             }
         };
 

@@ -5,6 +5,7 @@ import pytest
 from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
+from fixtures.utils import AuxFileStore
 
 """
 Dynamically parametrize tests by different parameters
@@ -29,6 +30,11 @@ def platform() -> Optional[str]:
 @pytest.fixture(scope="function", autouse=True)
 def pageserver_virtual_file_io_engine() -> Optional[str]:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE")
+
+
+@pytest.fixture(scope="function", autouse=True)
+def pageserver_aux_file_policy() -> Optional[AuxFileStore]:
+    return None
 
 
 def pytest_generate_tests(metafunc: Metafunc):

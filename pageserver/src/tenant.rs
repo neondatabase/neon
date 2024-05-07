@@ -3758,7 +3758,7 @@ pub(crate) mod harness {
                 image_layer_creation_check_threshold: Some(
                     tenant_conf.image_layer_creation_check_threshold,
                 ),
-                switch_to_aux_file_v2: Some(tenant_conf.switch_to_aux_file_v2),
+                switch_aux_file_policy: Some(tenant_conf.switch_aux_file_policy),
             }
         }
     }
