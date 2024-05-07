@@ -56,15 +56,16 @@ SHUTDOWN_ALLOWED_ERRORS = [
 
 @pytest.mark.parametrize("branchpoint", Branchpoint.all())
 @pytest.mark.parametrize("restart_after", [True, False])
+@pytest.mark.parametrize("write_to_branch_first", [True, False])
 def test_ancestor_detach_branched_from(
-    neon_env_builder: NeonEnvBuilder, branchpoint: Branchpoint, restart_after: bool
+    neon_env_builder: NeonEnvBuilder,
+    branchpoint: Branchpoint,
+    restart_after: bool,
+    write_to_branch_first: bool,
 ):
     """
     Creates a branch relative to L0 lsn boundary according to Branchpoint. Later the timeline is detached.
     """
-    # TODO: parametrize; currently unimplemented over at pageserver
-    write_to_branch_first = True
-
     env = neon_env_builder.init_start()
 
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
@@ -175,7 +176,10 @@ def test_ancestor_detach_branched_from(
 
 
 @pytest.mark.parametrize("restart_after", [True, False])
-def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, restart_after: bool):
+@pytest.mark.parametrize("write_to_branch_first", [True, False])
+def test_ancestor_detach_reparents_earlier(
+    neon_env_builder: NeonEnvBuilder, restart_after: bool, write_to_branch_first: bool
+):
     """
     The case from RFC:
 
@@ -203,9 +207,6 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
 
     We confirm the end result by being able to delete "old main" after deleting "after".
     """
-
-    # TODO: support not yet implemented for these
-    write_to_branch_first = True
 
     env = neon_env_builder.init_start()
 
@@ -244,12 +245,14 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
 
     after = env.neon_cli.create_branch("after", "main", env.initial_tenant, ancestor_start_lsn=None)
 
+    detached_starts = 1
     if write_to_branch_first:
         with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
             assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 8192
             with ep.cursor() as cur:
                 cur.execute("UPDATE audit SET starts = starts + 1")
                 assert cur.rowcount == 1
+                detached_starts += 1
             wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
 
         client.timeline_checkpoint(env.initial_tenant, timeline_id)
@@ -267,7 +270,7 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
     expected_result = [
         ("main", env.initial_timeline, None, 16384, 1),
         ("after", after, env.initial_timeline, 16384, 1),
-        ("new main", timeline_id, None, 8192, 2),
+        ("new main", timeline_id, None, 8192, detached_starts),
         ("same_branchpoint", same_branchpoint, timeline_id, 8192, 1),
         ("reparented", reparented, timeline_id, 0, 1),
     ]
@@ -294,13 +297,13 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
 
 
 @pytest.mark.parametrize("restart_after", [True, False])
+@pytest.mark.parametrize("write_to_branch_first", [True, False])
 def test_detached_receives_flushes_while_being_detached(
-    neon_env_builder: NeonEnvBuilder, restart_after: bool
+    neon_env_builder: NeonEnvBuilder, restart_after: bool, write_to_branch_first: bool
 ):
     """
     Makes sure that the timeline is able to receive writes through-out the detach process.
     """
-    write_to_branch_first = True
 
     env = neon_env_builder.init_start()
 
