@@ -704,9 +704,9 @@ impl Timeline {
             let v = v.context("get value")?;
             let v = aux_file::decode_file_value_bytes(&v).context("value decode")?;
             for (fname, content) in v {
-                result.insert(fname, content);
                 sz += fname.len();
                 sz += content.len();
+                result.insert(fname, content);
             }
         }
         self.aux_file_size_estimator.on_base_backup(sz);

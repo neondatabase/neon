@@ -1,8 +1,6 @@
-use std::sync::{
-    atomic::{AtomicIsize, AtomicUsize},
-    Arc,
-};
+use std::sync::Arc;
 
+use ::metrics::IntGauge;
 use bytes::{Buf, BufMut, Bytes};
 use pageserver_api::key::{Key, AUX_KEY_PREFIX, METADATA_KEY_SIZE};
 use tracing::warn;
@@ -147,12 +145,14 @@ pub fn encode_file_value(files: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
 
 /// An estimation of the size of aux files.
 pub struct AuxFileSizeEstimator {
+    aux_file_size_gauge: IntGauge,
     size: Arc<std::sync::Mutex<Option<isize>>>,
 }
 
 impl AuxFileSizeEstimator {
-    pub fn new() -> Self {
+    pub fn new(aux_file_size_gauge: IntGauge) -> Self {
         Self {
+            aux_file_size_gauge,
             size: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -160,12 +160,14 @@ impl AuxFileSizeEstimator {
     pub fn on_base_backup(&self, new_size: usize) {
         let mut guard = self.size.lock().unwrap();
         *guard = Some(new_size as isize);
+        self.report(new_size as isize);
     }
 
     pub fn on_add(&self, file_size: usize) {
         let mut guard = self.size.lock().unwrap();
         if let Some(size) = &mut *guard {
             *size += file_size as isize;
+            self.report(*size);
         }
     }
 
@@ -173,6 +175,7 @@ impl AuxFileSizeEstimator {
         let mut guard = self.size.lock().unwrap();
         if let Some(size) = &mut *guard {
             *size -= file_size as isize;
+            self.report(*size);
         }
     }
 
@@ -180,10 +183,13 @@ impl AuxFileSizeEstimator {
         let mut guard = self.size.lock().unwrap();
         if let Some(size) = &mut *guard {
             *size += new_size as isize - old_size as isize;
+            self.report(*size);
         }
     }
 
-    pub fn report(&self) {}
+    pub fn report(&self, size: isize) {
+        self.aux_file_size_gauge.set(size as i64);
+    }
 }
 
 #[cfg(test)]
