@@ -378,7 +378,8 @@ struct WaitSpecResult {
 }
 
 fn start_postgres(
-    matches: &clap::ArgMatches,
+    // need to allow unused because `matches` is only used if target_os = "linux"
+    #[allow(unused_variables)] matches: &clap::ArgMatches,
     WaitSpecResult {
         compute,
         http_port,
