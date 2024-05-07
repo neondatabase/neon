@@ -74,8 +74,13 @@ pub struct LocalEnv {
     pub storage_controller: NeonStorageControllerConf,
 
     /// This Vec must always contain at least one pageserver
-    /// NB: filled in by [`Self::load_config`].
-    #[serde(skip)]
+    /// Populdated by [`Self::load_config`] from the individual `pageserver.toml`s.
+    /// NB: not used anymore except for informing users that they need to change their `.neon/config`.
+    #[serde(
+        skip_serializing,
+        deserialize_with = "warn_users_if_pageservers_field_is_defined",
+        default
+    )]
     pub pageservers: Vec<PageServerConf>,
 
     #[serde(default)]
@@ -97,6 +102,16 @@ pub struct LocalEnv {
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
     branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+}
+
+fn warn_users_if_pageservers_field_is_defined<'de, D>(_: D) -> Result<Vec<PageServerConf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Err(serde::de::Error::custom(
+        "The 'pageservers' field is no longer used; pageserver.toml is now authoritative; \
+         Please remove the `pageservers` from your .neon/config.",
+    ))
 }
 
 /// Broker config for cluster internal communication.
