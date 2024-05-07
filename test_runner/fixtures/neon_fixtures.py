@@ -488,6 +488,7 @@ class NeonEnvBuilder:
         self.env: Optional[NeonEnv] = None
         self.keep_remote_storage_contents: bool = True
         self.neon_binpath = neon_binpath
+        self.neon_local_binpath = neon_binpath
         self.pg_distrib_dir = pg_distrib_dir
         self.pg_version = pg_version
         self.preserve_database_files = preserve_database_files
@@ -632,16 +633,10 @@ class NeonEnvBuilder:
     def from_repo_dir(
         self,
         repo_dir: Path,
-        neon_binpath: Optional[Path] = None,
-        pg_distrib_dir: Optional[Path] = None,
     ) -> NeonEnv:
         """
         A simple method to import data into the current NeonEnvBuilder from a snapshot of a repo dir.
         """
-
-        # Setting custom `neon_binpath` and `pg_distrib_dir` is useful for compatibility tests
-        self.neon_binpath = neon_binpath or self.neon_binpath
-        self.pg_distrib_dir = pg_distrib_dir or self.pg_distrib_dir
 
         # Get the initial tenant and timeline from the snapshot config
         snapshot_config_toml = repo_dir / "config"
@@ -1017,9 +1012,10 @@ class NeonEnv:
         self.pg_version = config.pg_version
         # Binary path for pageserver, safekeeper, etc
         self.neon_binpath = config.neon_binpath
-        # Binary path for neon_local test-specific binaries: may be overridden
-        # after construction for compat testing
-        self.neon_local_binpath = config.neon_binpath
+        # Binary path for neon_local test-specific binaries
+        self.neon_local_binpath = config.neon_local_binpath
+        if self.neon_local_binpath is None:
+            self.neon_local_binpath = self.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
         self.storage_controller_config = config.storage_controller_config
