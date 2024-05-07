@@ -47,6 +47,7 @@ use crate::metrics::HttpDirection;
 use crate::metrics::Metrics;
 use crate::proxy::run_until_cancelled;
 use crate::proxy::NeonOptions;
+use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::HttpConnError;
 use crate::usage_metrics::MetricCounterRecorder;
 use crate::DbName;
@@ -225,8 +226,17 @@ pub async fn handle(
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
-    let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
+    let result = handle_inner(
+        cancel,
+        config,
+        &mut ctx,
+        request,
+        backend,
+        endpoint_rate_limiter,
+    )
+    .await;
 
     let mut response = match result {
         Ok(r) => {
@@ -493,6 +503,7 @@ async fn handle_inner(
     ctx: &mut RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
     let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
     info!(
@@ -508,6 +519,9 @@ async fn handle_inner(
     // TLS config should be there.
     let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
     info!(user = conn_info.user_info.user.as_str(), "credentials");
+    if !endpoint_rate_limiter.check(conn_info.user_info.endpoint.clone().into(), 1) {
+        return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Connect));
+    }
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
