@@ -352,7 +352,7 @@ impl Cache for ProjectInfoCacheImpl {
 
     type LookupInfo<Key> = CachedLookupInfo;
 
-    fn invalidate(&self, key: &Self::LookupInfo<SmolStr>) {
+    async fn invalidate(&self, key: &Self::LookupInfo<SmolStr>) {
         match &key.lookup_type {
             LookupType::RoleSecret(role_name) => {
                 if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {
@@ -489,7 +489,7 @@ mod tests {
         assert!(!cached.cached());
         assert_eq!(cached.value, secret1);
 
-        cached.invalidate(); // Shouldn't do anything.
+        cached.invalidate().await; // Shouldn't do anything.
         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
         assert_eq!(cached.value, secret1);
 

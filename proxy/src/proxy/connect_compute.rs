@@ -23,7 +23,7 @@ const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 /// (e.g. the compute node's address might've changed at the wrong time).
 /// Invalidate the cache entry (if any) to prevent subsequent errors.
 #[tracing::instrument(name = "invalidate_cache", skip_all)]
-pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
+pub async fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
     let is_cached = node_info.cached();
     if is_cached {
         warn!("invalidating stalled compute node info cache entry");
@@ -34,7 +34,7 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
     };
     Metrics::get().proxy.connection_failures_total.inc(label);
 
-    node_info.invalidate()
+    node_info.invalidate().await
 }
 
 #[async_trait]
@@ -156,7 +156,7 @@ where
     } else {
         // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
         info!("compute node's state has likely changed; requesting a wake-up");
-        let old_node_info = invalidate_cache(node_info);
+        let old_node_info = invalidate_cache(node_info).await;
         let mut node_info =
             wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
         node_info.reuse_settings(old_node_info);

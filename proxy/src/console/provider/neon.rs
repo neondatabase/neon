@@ -275,10 +275,13 @@ impl super::Api for Api {
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(&key) {
+        if let Some(cached) = self.caches.node_info.get(&key).await {
             info!(key = &*key, "found cached compute node info");
             ctx.set_project(cached.aux.clone());
-            return Ok(cached);
+            return Ok(CachedNodeInfo {
+                token: Some((&self.caches.node_info, key)),
+                value: cached,
+            });
         }
 
         // check rate limit
@@ -294,10 +297,13 @@ impl super::Api for Api {
         // after getting back a permit - it's possible the cache was filled
         // double check
         if permit.should_check_cache() {
-            if let Some(cached) = self.caches.node_info.get(&key) {
+            if let Some(cached) = self.caches.node_info.get(&key).await {
                 info!(key = &*key, "found cached compute node info");
                 ctx.set_project(cached.aux.clone());
-                return Ok(cached);
+                return Ok(CachedNodeInfo {
+                    token: Some((&self.caches.node_info, key)),
+                    value: cached,
+                });
             }
         }
 
@@ -308,12 +314,18 @@ impl super::Api for Api {
 
         // store the cached node as 'warm'
         node.aux.cold_start_info = ColdStartInfo::WarmCached;
-        let (_, mut cached) = self.caches.node_info.insert(key.clone(), node);
-        cached.aux.cold_start_info = cold_start_info;
+        self.caches
+            .node_info
+            .insert(key.clone(), node.clone())
+            .await;
+        node.aux.cold_start_info = cold_start_info;
 
         info!(key = &*key, "created a cache entry for compute node info");
 
-        Ok(cached)
+        Ok(CachedNodeInfo {
+            token: Some((&self.caches.node_info, key)),
+            value: node,
+        })
     }
 }
 

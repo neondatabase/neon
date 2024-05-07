@@ -101,6 +101,7 @@ postgres-protocol.workspace = true
 redis.workspace = true
 
 workspace_hack.workspace = true
+moka = { version = "0.12.7", features = ["future"] }
 
 [dev-dependencies]
 camino-tempfile.workspace = true

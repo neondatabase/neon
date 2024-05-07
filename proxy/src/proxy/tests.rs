@@ -405,12 +405,13 @@ impl TestConnectMechanism {
         Self {
             counter: Arc::new(std::sync::Mutex::new(0)),
             sequence,
-            cache: Box::leak(Box::new(NodeInfoCache::new(
-                "test",
-                1,
-                Duration::from_secs(100),
-                false,
-            ))),
+            cache: Box::leak(Box::new(
+                NodeInfoCache::builder()
+                    .name("test")
+                    .max_capacity(1)
+                    .time_to_live(Duration::from_secs(100))
+                    .build(),
+            )),
         }
     }
 }
@@ -476,13 +477,17 @@ impl ConnectMechanism for TestConnectMechanism {
     fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
 }
 
+#[async_trait]
 impl TestBackend for TestConnectMechanism {
-    fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
-        let mut counter = self.counter.lock().unwrap();
-        let action = self.sequence[*counter];
-        *counter += 1;
+    async fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
+        let action = {
+            let mut counter = self.counter.lock().unwrap();
+            let action = self.sequence[*counter];
+            *counter += 1;
+            action
+        };
         match action {
-            ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
+            ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache).await),
             ConnectAction::WakeFail => {
                 let err = console::errors::ApiError::Console {
                     status: http::StatusCode::FORBIDDEN,
@@ -514,7 +519,7 @@ impl TestBackend for TestConnectMechanism {
     }
 }
 
-fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
+async fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
         config: compute::ConnCfg::new(),
         aux: MetricsAuxInfo {
@@ -525,8 +530,11 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
         },
         allow_self_signed_compute: false,
     };
-    let (_, node) = cache.insert("key".into(), node);
-    node
+    cache.insert("key".into(), node.clone()).await;
+    CachedNodeInfo {
+        token: Some((cache, "key".into())),
+        value: node,
+    }
 }
 
 fn helper_create_connect_info(

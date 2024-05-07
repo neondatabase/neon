@@ -69,8 +69,10 @@ pub enum BackendType<'a, T, D> {
     Link(MaybeOwned<'a, url::ApiUrl>, D),
 }
 
+#[cfg(test)]
+#[async_trait::async_trait]
 pub trait TestBackend: Send + Sync + 'static {
-    fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
+    async fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
     fn get_allowed_ips_and_secret(
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
@@ -343,7 +345,7 @@ async fn auth_quirks(
         Err(e) => {
             if e.is_auth_failed() {
                 // The password could have been changed, so we invalidate the cache.
-                cached_entry.invalidate();
+                cached_entry.invalidate().await;
             }
             Err(e)
         }

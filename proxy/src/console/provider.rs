@@ -8,7 +8,7 @@ use crate::{
         backend::{ComputeCredentialKeys, ComputeUserInfo},
         IpPattern,
     },
-    cache::{endpoints::EndpointsCache, project_info::ProjectInfoCacheImpl, Cached, TimedLru},
+    cache::{endpoints::EndpointsCache, project_info::ProjectInfoCacheImpl, Cached},
     compute,
     config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
     context::RequestMonitoring,
@@ -326,7 +326,7 @@ impl NodeInfo {
     }
 }
 
-pub type NodeInfoCache = TimedLru<EndpointCacheKey, NodeInfo>;
+pub type NodeInfoCache = moka::future::Cache<EndpointCacheKey, NodeInfo>;
 pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
 pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
 pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
@@ -412,7 +412,7 @@ impl Api for ConsoleBackend {
             #[cfg(any(test, feature = "testing"))]
             Postgres(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(test)]
-            Test(api) => api.wake_compute(),
+            Test(api) => api.wake_compute().await,
         }
     }
 }
@@ -434,12 +434,11 @@ impl ApiCaches {
         endpoint_cache_config: EndpointCacheConfig,
     ) -> Self {
         Self {
-            node_info: NodeInfoCache::new(
-                "node_info_cache",
-                wake_compute_cache_config.size,
-                wake_compute_cache_config.ttl,
-                true,
-            ),
+            node_info: moka::future::Cache::builder()
+                .max_capacity(wake_compute_cache_config.size)
+                .time_to_idle(wake_compute_cache_config.ttl)
+                .name("node_info_cache")
+                .build(),
             project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
             endpoints_cache: Arc::new(EndpointsCache::new(endpoint_cache_config)),
         }
