@@ -114,7 +114,7 @@ pub async fn task_main(
             .proxy
             .client_connections
             .sample(crate::metrics::Protocol::Http);
-        if n_connections > 1000 {
+        if n_connections > config.http_config.client_conn_threshold {
             if let Some(token) = config.http_config.cancel_set.take() {
                 tracing::debug!("cancelling a random connection");
                 token.cancel()
