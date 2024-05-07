@@ -111,12 +111,9 @@ pub(super) async fn upload_timeline_layer<'a>(
 }
 
 pub(super) async fn copy_timeline_layer(
-    conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
-    source_path: &Utf8Path,
-    source_metadata: &LayerFileMetadata,
-    target_path: &Utf8Path,
-    target_metadata: &LayerFileMetadata,
+    source_path: &RemotePath,
+    target_path: &RemotePath,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     fail_point!("before-copy-layer", |_| {
@@ -125,11 +122,8 @@ pub(super) async fn copy_timeline_layer(
 
     pausable_failpoint!("before-copy-layer-pausable");
 
-    let source_path = remote_path(conf, source_path, source_metadata.generation)?;
-    let target_path = remote_path(conf, target_path, target_metadata.generation)?;
-
     storage
-        .copy_object(&source_path, &target_path, cancel)
+        .copy_object(source_path, target_path, cancel)
         .await
         .with_context(|| format!("copy layer {source_path} to {target_path}"))
 }

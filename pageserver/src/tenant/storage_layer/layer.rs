@@ -451,6 +451,13 @@ impl Layer {
         self.0.metadata()
     }
 
+    pub(crate) fn get_timeline_id(&self) -> Option<TimelineId> {
+        self.0
+            .timeline
+            .upgrade()
+            .map(|timeline| timeline.timeline_id)
+    }
+
     /// Traditional debug dumping facility
     #[allow(unused)]
     pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> anyhow::Result<()> {

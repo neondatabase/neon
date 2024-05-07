@@ -1153,15 +1153,21 @@ impl RemoteTimelineClient {
         uploaded: &ResidentLayer,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
+        let remote_path = remote_layer_path(
+            &self.tenant_shard_id.tenant_id,
+            &self.timeline_id,
+            self.tenant_shard_id.to_index(),
+            &uploaded.layer_desc().filename(),
+            uploaded.metadata().generation,
+        );
+
         backoff::retry(
             || async {
-                let m = uploaded.metadata();
                 upload::upload_timeline_layer(
-                    self.conf,
                     &self.storage_impl,
                     uploaded.local_path(),
-                    &uploaded.metadata(),
-                    m.generation,
+                    &remote_path,
+                    uploaded.metadata().file_size(),
                     cancel,
                 )
                 .await
@@ -1186,15 +1192,30 @@ impl RemoteTimelineClient {
         adopted_as: &Layer,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
+        let source_remote_path = remote_layer_path(
+            &self.tenant_shard_id.tenant_id,
+            &adopted
+                .get_timeline_id()
+                .expect("Source timeline should be alive"),
+            self.tenant_shard_id.to_index(),
+            &adopted.layer_desc().filename(),
+            adopted.metadata().generation,
+        );
+
+        let target_remote_path = remote_layer_path(
+            &self.tenant_shard_id.tenant_id,
+            &self.timeline_id,
+            self.tenant_shard_id.to_index(),
+            &adopted_as.layer_desc().filename(),
+            adopted_as.metadata().generation,
+        );
+
         backoff::retry(
             || async {
                 upload::copy_timeline_layer(
-                    self.conf,
                     &self.storage_impl,
-                    adopted.local_path(),
-                    &adopted.metadata(),
-                    adopted_as.local_path(),
-                    &adopted_as.metadata(),
+                    &source_remote_path,
+                    &target_remote_path,
                     cancel,
                 )
                 .await
