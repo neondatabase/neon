@@ -3015,7 +3015,7 @@ impl Timeline {
 
             HeatMapLayer::new(
                 layer.layer_desc().filename(),
-                layer.metadata().into(),
+                (&layer.metadata()).into(),
                 last_activity_ts,
             )
         });
