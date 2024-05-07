@@ -10,7 +10,7 @@ use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::{InitForceMode, LocalEnv, PageServerConf};
-use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
+use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
 use control_plane::{broker, local_env};
@@ -30,7 +30,8 @@ use safekeeper_api::{
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::env;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::str::FromStr;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
@@ -327,19 +328,6 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     let num_pageservers = init_match
         .get_one::<u16>("num-pageservers")
         .expect("num-pageservers arg has a default");
-    // Create config file
-    let toml_file: String = if let Some(config_path) = init_match.get_one::<PathBuf>("config") {
-        // load and parse the file
-        std::fs::read_to_string(config_path).with_context(|| {
-            format!(
-                "Could not read configuration file '{}'",
-                config_path.display()
-            )
-        })?
-    } else {
-        // Built-in default config
-        default_conf()
-    };
 
     let pageserver_config_cli_overrides: toml_edit::Document =
         if let Some(path) = init_match.get_one::<PathBuf>("pageserver-config") {
@@ -348,47 +336,74 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
             toml_edit::Document::new()
         };
 
-    let neon_local_psconfs = (0..*num_pageservers)
-        .map(|i| {
-            let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
-            let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
-            let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
-            // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
-            PageServerConf {
-                id: pageserver_id,
-                listen_pg_addr: format!("127.0.0.1:{pg_port}"),
-                listen_http_addr: format!("127.0.0.1:{http_port}"),
-                pg_auth_type: AuthType::Trust,
-                http_auth_type: AuthType::Trust,
-            }
-        })
-        .collect::<Vec<_>>();
-
     let pg_version = init_match
         .get_one::<u32>("pg-version")
         .copied()
         .context("Failed to parse postgres version from the argument string")?;
 
-    let mut env =
-        LocalEnv::parse_config(&toml_file).context("Failed to create neon configuration")?;
     let force = init_match.get_one("force").expect("we set a default value");
-    env.init(pg_version, force)
-        .context("Failed to initialize neon repository")?;
 
-    // Create remote storage location for default LocalFs remote storage
-    std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
+    // Create the in-memory `LocalEnv` that we'd normally load from disk in `load_config`.
+    let env: LocalEnv = {
+        let toml_file: String = if let Some(config_path) = init_match.get_one::<PathBuf>("config") {
+            // load and parse the file
+            std::fs::read_to_string(config_path).with_context(|| {
+                format!(
+                    "Could not read configuration file '{}'",
+                    config_path.display()
+                )
+            })?
+        } else {
+            // Built-in default config
+            default_conf()
+        };
+        let mut env: LocalEnv = toml::from_str(&toml_file)?;
 
-    // Initialize pageserver, create initial tenant and timeline.
-    for ps_conf in &neon_local_psconfs {
-        PageServerNode::from_env(&env, ps_conf)
-            .initialize(pageserver_config_cli_overrides.clone())
-            .unwrap_or_else(|e| {
-                eprintln!("pageserver init failed: {e:?}");
-                exit(1);
-            });
-    }
+        env.pageservers = (0..*num_pageservers)
+            .map(|i| {
+                let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
+                let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
+                let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+                // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
+                PageServerConf {
+                    id: pageserver_id,
+                    listen_pg_addr: format!("127.0.0.1:{pg_port}"),
+                    listen_http_addr: format!("127.0.0.1:{http_port}"),
+                    pg_auth_type: AuthType::Trust,
+                    http_auth_type: AuthType::Trust,
+                }
+            })
+            .collect();
 
-    Ok(env)
+        // Find postgres binaries.
+        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install".
+        // Note that later in the code we assume, that distrib dirs follow the same pattern
+        // for all postgres versions.
+        if env.pg_distrib_dir == Path::new("") {
+            if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
+                env.pg_distrib_dir = postgres_bin.into();
+            } else {
+                let cwd = env::current_dir()?;
+                env.pg_distrib_dir = cwd.join("pg_install")
+            }
+        }
+
+        // Find neon binaries.
+        if env.neon_distrib_dir == Path::new("") {
+            env::current_exe()?
+                .parent()
+                .unwrap()
+                .clone_into(&mut env.neon_distrib_dir);
+        }
+
+        env.base_data_dir = local_env::base_path();
+        env
+    };
+
+    env.init_on_disk(pg_version, force, &pageserver_config_cli_overrides)
+        .context("materialize initial neon_local environment on disk")?;
+
+    Ok(LocalEnv::load_config().expect("freshly initialized on-disk state should be loadable"))
 }
 
 /// The default pageserver is the one where CLI tenant/timeline operations are sent by default.

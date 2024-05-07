@@ -23,6 +23,8 @@ use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
 };
 
+use crate::pageserver::PageServerNode;
+use crate::pageserver::PAGESERVER_REMOTE_STORAGE_DIR;
 use crate::safekeeper::SafekeeperNode;
 
 pub const DEFAULT_PG_VERSION: u32 = 15;
@@ -72,7 +74,7 @@ pub struct LocalEnv {
     pub storage_controller: NeonStorageControllerConf,
 
     /// This Vec must always contain at least one pageserver
-    /// NB: filled in  by [`Self::load_config`].
+    /// NB: filled in by [`Self::load_config`].
     #[serde(skip)]
     pub pageservers: Vec<PageServerConf>,
 
@@ -380,16 +382,12 @@ impl LocalEnv {
                 .clone_into(&mut env.neon_distrib_dir);
         }
 
-        if env.pageservers.is_empty() {
-            anyhow::bail!("Configuration must contain at least one pageserver");
-        }
-
         env.base_data_dir = base_path();
 
         Ok(env)
     }
 
-    /// Locate and load config
+    ///  Construct `Self` from on-disk state.
     pub fn load_config() -> anyhow::Result<Self> {
         let repopath = base_path();
 
@@ -406,11 +404,11 @@ impl LocalEnv {
         let config = fs::read_to_string(repopath.join("config"))?;
         let mut env: LocalEnv = toml::from_str(config.as_str())?;
 
-        env.base_data_dir = repopath.clone();
+        env.base_data_dir.clone_from(&repopath);
 
         // The source of truth for pageserver configuration is the pageserver.toml.
         env.pageservers = {
-            let iter = std::fs::read_dir(repopath).context("open dir")?;
+            let iter = std::fs::read_dir(&repopath).context("open dir")?;
             let mut pageservers = Vec::new();
             for res in iter {
                 let dentry = res?;
@@ -432,7 +430,7 @@ impl LocalEnv {
                     .with_context(|| format!("parse id from {:?}", dentry.path()))?;
                 // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
                 #[derive(serde::Serialize, serde::Deserialize)]
-                // (allow unknown fields)
+                // (allow unknown fields, unlike PageServerConf)
                 struct PageserverConfigTomlSubset {
                     id: NodeId,
                     listen_pg_addr: String,
@@ -522,10 +520,13 @@ impl LocalEnv {
         }
     }
 
-    //
-    // Initialize a new Neon repository
-    //
-    pub fn init(&mut self, pg_version: u32, force: &InitForceMode) -> anyhow::Result<()> {
+    /// Materialize the in-memory [`LocalEnv`] on disk. Called during [`neon_local init`].
+    pub fn init_on_disk(
+        mut self,
+        pg_version: u32,
+        force: &InitForceMode,
+        pageserver_config_cli_overrides: &toml_edit::Document,
+    ) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
         ensure!(
@@ -614,12 +615,18 @@ impl LocalEnv {
         fs::create_dir_all(self.endpoints_path())?;
 
         for safekeeper in &self.safekeepers {
-            fs::create_dir_all(SafekeeperNode::datadir_path_by_id(self, safekeeper.id))?;
+            fs::create_dir_all(SafekeeperNode::datadir_path_by_id(&self, safekeeper.id))?;
         }
 
         for ps in &self.pageservers {
             fs::create_dir(self.pageserver_data_dir(ps.id))?;
+            PageServerNode::from_env(&self, ps)
+                .initialize(pageserver_config_cli_overrides.clone())
+                .context("pageserver init failed")?;
         }
+
+        // Create remote storage location for default LocalFs remote storage
+        std::fs::create_dir_all(self.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
 
         self.persist_config(base_path)
     }
@@ -631,7 +638,7 @@ impl LocalEnv {
     }
 }
 
-fn base_path() -> PathBuf {
+pub fn base_path() -> PathBuf {
     match std::env::var_os("NEON_REPO_DIR") {
         Some(val) => PathBuf::from(val),
         None => PathBuf::from(".neon"),
@@ -673,32 +680,4 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn simple_conf_parsing() {
-        let simple_conf_toml = include_str!("../simple.conf");
-        let simple_conf_parse_result = LocalEnv::parse_config(simple_conf_toml);
-        assert!(
-            simple_conf_parse_result.is_ok(),
-            "failed to parse simple config {simple_conf_toml}, reason: {simple_conf_parse_result:?}"
-        );
-
-        let string_to_replace = "listen_addr = '127.0.0.1:50051'";
-        let spoiled_url_str = "listen_addr = '!@$XOXO%^&'";
-        let spoiled_url_toml = simple_conf_toml.replace(string_to_replace, spoiled_url_str);
-        assert!(
-            spoiled_url_toml.contains(spoiled_url_str),
-            "Failed to replace string {string_to_replace} in the toml file {simple_conf_toml}"
-        );
-        let spoiled_url_parse_result = LocalEnv::parse_config(&spoiled_url_toml);
-        assert!(
-            spoiled_url_parse_result.is_err(),
-            "expected toml with invalid Url {spoiled_url_toml} to fail the parsing, but got {spoiled_url_parse_result:?}"
-        );
-    }
 }
