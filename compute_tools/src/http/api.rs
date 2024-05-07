@@ -154,6 +154,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Ok(db_name) => db_name,
             };
             info!("serving /schema/dump GET request with db_name: {db_name}",);
+            info!("serving /schema/ddl GET request with db_name: {db_name}",);
             match schema_dump(compute, &db_name).await {
                 Ok(res) => render_plain(Body::wrap_stream(res)),
                 Err(SchemaDumpError::DatabaseDoesNotExist) => {
