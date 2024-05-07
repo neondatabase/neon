@@ -354,39 +354,6 @@ impl LocalEnv {
             .collect()
     }
 
-    /// Create a LocalEnv from a config file.
-    ///
-    /// Unlike 'load_config', this function fills in any defaults that are missing
-    /// from the config file.
-    pub fn parse_config(toml: &str) -> anyhow::Result<Self> {
-        let mut env: LocalEnv = toml::from_str(toml)?;
-
-        // Find postgres binaries.
-        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install".
-        // Note that later in the code we assume, that distrib dirs follow the same pattern
-        // for all postgres versions.
-        if env.pg_distrib_dir == Path::new("") {
-            if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
-                env.pg_distrib_dir = postgres_bin.into();
-            } else {
-                let cwd = env::current_dir()?;
-                env.pg_distrib_dir = cwd.join("pg_install")
-            }
-        }
-
-        // Find neon binaries.
-        if env.neon_distrib_dir == Path::new("") {
-            env::current_exe()?
-                .parent()
-                .unwrap()
-                .clone_into(&mut env.neon_distrib_dir);
-        }
-
-        env.base_data_dir = base_path();
-
-        Ok(env)
-    }
-
     ///  Construct `Self` from on-disk state.
     pub fn load_config() -> anyhow::Result<Self> {
         let repopath = base_path();
