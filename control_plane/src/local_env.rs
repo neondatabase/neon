@@ -141,24 +141,18 @@ impl NeonBroker {
     }
 }
 
+// neon_local needs to know this subset of pageserver configuration.
+// For legacy reasons, this information is duplicated from `pageserver.toml` into `.neon/config`.
+// It can get stale if `pageserver.toml` is changed.
+// TODO(christian): don't store this at all in `.neon/config`, always load it from `pageserver.toml`
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct PageServerConf {
-    // node id
     pub id: NodeId,
-
-    // Pageserver connection settings
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
-
-    // auth type used for the PG and HTTP ports
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
-
-    pub(crate) virtual_file_io_engine: Option<String>,
-    pub(crate) get_vectored_impl: Option<String>,
-    pub(crate) get_impl: Option<String>,
-    pub(crate) validate_vectored_get: Option<bool>,
 }
 
 impl Default for PageServerConf {
@@ -169,10 +163,6 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
-            virtual_file_io_engine: None,
-            get_vectored_impl: None,
-            get_impl: None,
-            validate_vectored_get: None,
         }
     }
 }
