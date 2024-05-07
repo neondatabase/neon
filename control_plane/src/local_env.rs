@@ -72,6 +72,8 @@ pub struct LocalEnv {
     pub storage_controller: NeonStorageControllerConf,
 
     /// This Vec must always contain at least one pageserver
+    /// NB: filled in  by [`Self::load_config`].
+    #[serde(skip)]
     pub pageservers: Vec<PageServerConf>,
 
     #[serde(default)]
@@ -404,7 +406,70 @@ impl LocalEnv {
         let config = fs::read_to_string(repopath.join("config"))?;
         let mut env: LocalEnv = toml::from_str(config.as_str())?;
 
-        env.base_data_dir = repopath;
+        env.base_data_dir = repopath.clone();
+
+        // The source of truth for pageserver configuration is the pageserver.toml.
+        env.pageservers = {
+            let iter = std::fs::read_dir(repopath).context("open dir")?;
+            let mut pageservers = Vec::new();
+            for res in iter {
+                let dentry = res?;
+                const PREFIX: &str = "pageserver_";
+                let dentry_name = dentry
+                    .file_name()
+                    .into_string()
+                    .ok()
+                    .with_context(|| format!("non-utf8 dentry: {:?}", dentry.path()))
+                    .unwrap();
+                if !dentry_name.starts_with(PREFIX) {
+                    continue;
+                }
+                if !dentry.file_type().context("determine file type")?.is_dir() {
+                    anyhow::bail!("expected a directory, got {:?}", dentry.path());
+                }
+                let id = dentry_name[PREFIX.len()..]
+                    .parse::<NodeId>()
+                    .with_context(|| format!("parse id from {:?}", dentry.path()))?;
+                // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
+                #[derive(serde::Serialize, serde::Deserialize)]
+                // (allow unknown fields)
+                struct PageserverConfigTomlSubset {
+                    id: NodeId,
+                    listen_pg_addr: String,
+                    listen_http_addr: String,
+                    pg_auth_type: AuthType,
+                    http_auth_type: AuthType,
+                }
+                let config_toml_path = dentry.path().join("pageserver.toml");
+                let config_toml: PageserverConfigTomlSubset = toml_edit::de::from_str(
+                    &std::fs::read_to_string(&config_toml_path)
+                        .with_context(|| format!("read {:?}", config_toml_path))?,
+                )
+                .context("parse pageserver.toml")?;
+                let PageserverConfigTomlSubset {
+                    id: config_toml_id,
+                    listen_pg_addr,
+                    listen_http_addr,
+                    pg_auth_type,
+                    http_auth_type,
+                } = config_toml;
+                let conf = PageServerConf {
+                    id: {
+                        anyhow::ensure!(
+                            config_toml_id == id,
+                            "id mismatch: config_toml.id={config_toml_id} id={id}",
+                        );
+                        id
+                    },
+                    listen_pg_addr,
+                    listen_http_addr,
+                    pg_auth_type,
+                    http_auth_type,
+                };
+                pageservers.push(conf);
+            }
+            pageservers
+        };
 
         Ok(env)
     }
