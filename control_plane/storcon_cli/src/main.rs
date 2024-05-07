@@ -132,6 +132,10 @@ enum Command {
         #[arg(long)]
         tenant_id: TenantId,
     },
+    PageserverEnableHeatmaps {
+        #[arg(long)]
+        tenant_id: TenantId,
+    },
 }
 
 #[derive(Parser)]
@@ -688,6 +692,36 @@ async fn main() -> anyhow::Result<()> {
                     format!("debug/v1/tenant/{tenant_id}/drop"),
                     None,
                 )
+                .await?;
+        }
+        Command::PageserverEnableHeatmaps { tenant_id } => {
+            vps_client
+                .tenant_config(&TenantConfigRequest {
+                    tenant_id,
+                    config: TenantConfig {
+                        checkpoint_distance: None,
+                        checkpoint_timeout: None,
+                        compaction_target_size: None,
+                        compaction_period: None,
+                        compaction_threshold: None,
+                        compaction_algorithm: None,
+                        gc_horizon: None,
+                        gc_period: None,
+                        image_creation_threshold: None,
+                        pitr_interval: None,
+                        walreceiver_connect_timeout: None,
+                        lagging_wal_timeout: None,
+                        max_lsn_wal_lag: None,
+                        trace_read_requests: None,
+                        eviction_policy: None,
+                        min_resident_size_override: None,
+                        evictions_low_residence_duration_metric_threshold: None,
+                        heatmap_period: Some("60s".to_string()),
+                        lazy_slru_download: None,
+                        timeline_get_throttle: None,
+                        image_layer_creation_check_threshold: None,
+                    },
+                })
                 .await?;
         }
     }
