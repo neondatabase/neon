@@ -1,11 +1,11 @@
 //! Common traits and structs for layers
 
 pub mod delta_layer;
-mod filename;
 pub mod image_layer;
 pub(crate) mod inmemory_layer;
 pub(crate) mod layer;
 mod layer_desc;
+mod layer_name;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Value;
@@ -34,10 +34,10 @@ use utils::rate_limit::RateLimit;
 use utils::{id::TimelineId, lsn::Lsn};
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
-pub use filename::{DeltaLayerName, ImageLayerName, LayerName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
+pub use layer_name::{DeltaLayerName, ImageLayerName, LayerName};
 
 pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 

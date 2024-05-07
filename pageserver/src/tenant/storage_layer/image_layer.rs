@@ -65,7 +65,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::ImageLayerName;
+use super::layer_name::ImageLayerName;
 use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer, ValuesReconstructState};
 
 ///
