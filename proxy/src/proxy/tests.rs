@@ -16,8 +16,9 @@ use crate::console::messages::MetricsAuxInfo;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
+use crate::intern::EndpointIdInt;
 use crate::proxy::retry::retry_after;
-use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
+use crate::{http, sasl, scram, BranchId, EndpointCacheKey, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use rstest::rstest;
@@ -530,9 +531,12 @@ async fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> Cached
         },
         allow_self_signed_compute: false,
     };
-    cache.insert("key".into(), node.clone()).await;
+    let ep: EndpointId = "key".into();
+    let ep = EndpointIdInt::from(ep);
+    let key = EndpointCacheKey::from(ep);
+    cache.insert(key.clone(), node.clone()).await;
     CachedNodeInfo {
-        token: Some((cache, "key".into())),
+        token: Some((cache, key)),
         value: node,
     }
 }

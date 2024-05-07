@@ -20,7 +20,6 @@ use crate::{
     protocol2::read_proxy_protocol,
     proxy::handshake::{handshake, HandshakeData},
     stream::{PqStream, Stream},
-    EndpointCacheKey,
 };
 use futures::TryFutureExt;
 use itertools::Itertools;
@@ -391,13 +390,8 @@ impl NeonOptions {
         Self(options)
     }
 
-    pub fn get_cache_key(&self, prefix: &str) -> EndpointCacheKey {
-        // prefix + format!(" {k}:{v}")
-        // kinda jank because SmolStr is immutable
-        std::iter::once(prefix)
-            .chain(self.0.iter().flat_map(|(k, v)| [" ", &**k, ":", &**v]))
-            .collect::<SmolStr>()
-            .into()
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// <https://swagger.io/docs/specification/serialization/> DeepObject format
@@ -417,4 +411,21 @@ pub fn neon_option(bytes: &str) -> Option<(&str, &str)> {
     let cap = re.captures(bytes)?;
     let (_, [k, v]) = cap.extract();
     Some((k, v))
+}
+
+impl std::fmt::Display for NeonOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut space = false;
+        for (k, v) in &self.0 {
+            if space {
+                f.write_str(" ")?;
+            } else {
+                space = true;
+            }
+            f.write_str(k)?;
+            f.write_str(":")?;
+            f.write_str(v)?;
+        }
+        Ok(())
+    }
 }

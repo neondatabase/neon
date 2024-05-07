@@ -155,7 +155,13 @@ pub struct ComputeUserInfo {
 
 impl ComputeUserInfo {
     pub fn endpoint_cache_key(&self) -> EndpointCacheKey {
-        self.options.get_cache_key(&self.endpoint)
+        let id = EndpointIdInt::from(&self.endpoint);
+        let key = EndpointCacheKey::from(id);
+        if self.options.is_empty() {
+            key
+        } else {
+            key.with_options(self.options.to_string())
+        }
     }
 }
 

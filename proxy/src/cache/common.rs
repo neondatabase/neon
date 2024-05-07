@@ -5,34 +5,26 @@ use std::ops::{Deref, DerefMut};
 /// This is useful for [`Cached`].
 #[allow(async_fn_in_trait)]
 pub trait Cache {
-    /// Entry's key.
-    type Key;
-
-    /// Entry's value.
-    type Value;
-
     /// Used for entry invalidation.
-    type LookupInfo<Key>;
+    type LookupInfo;
 
     /// Invalidate an entry using a lookup info.
     /// We don't have an empty default impl because it's error-prone.
-    async fn invalidate(&self, _: &Self::LookupInfo<Self::Key>);
+    async fn invalidate(&self, _: &Self::LookupInfo);
 }
 
 impl<C: Cache> Cache for &C {
-    type Key = C::Key;
-    type Value = C::Value;
-    type LookupInfo<Key> = C::LookupInfo<Key>;
+    type LookupInfo = C::LookupInfo;
 
-    async fn invalidate(&self, info: &Self::LookupInfo<Self::Key>) {
+    async fn invalidate(&self, info: &Self::LookupInfo) {
         C::invalidate(self, info).await
     }
 }
 
 /// Wrapper for convenient entry invalidation.
-pub struct Cached<C: Cache, V = <C as Cache>::Value> {
+pub struct Cached<C: Cache, V> {
     /// Cache + lookup info.
-    pub token: Option<(C, C::LookupInfo<C::Key>)>,
+    pub token: Option<(C, C::LookupInfo)>,
 
     /// The value itself.
     pub value: V,
@@ -88,11 +80,9 @@ where
     V: Clone + Send + Sync + 'static,
     S: std::hash::BuildHasher + Clone + Send + Sync + 'static,
 {
-    type Key = K;
-    type Value = V;
-    type LookupInfo<Key> = Key;
+    type LookupInfo = K;
 
-    async fn invalidate(&self, key: &Self::LookupInfo<Self::Key>) {
+    async fn invalidate(&self, key: &Self::LookupInfo) {
         moka::future::Cache::invalidate(self, key).await
     }
 }

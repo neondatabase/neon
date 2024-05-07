@@ -276,7 +276,7 @@ impl super::Api for Api {
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
         if let Some(cached) = self.caches.node_info.get(&key).await {
-            info!(key = &*key, "found cached compute node info");
+            info!(key = %key, "found cached compute node info");
             ctx.set_project(cached.aux.clone());
             return Ok(CachedNodeInfo {
                 token: Some((&self.caches.node_info, key)),
@@ -298,7 +298,7 @@ impl super::Api for Api {
         // double check
         if permit.should_check_cache() {
             if let Some(cached) = self.caches.node_info.get(&key).await {
-                info!(key = &*key, "found cached compute node info");
+                info!(key = %key, "found cached compute node info");
                 ctx.set_project(cached.aux.clone());
                 return Ok(CachedNodeInfo {
                     token: Some((&self.caches.node_info, key)),
@@ -320,7 +320,7 @@ impl super::Api for Api {
             .await;
         node.aux.cold_start_info = cold_start_info;
 
-        info!(key = &*key, "created a cache entry for compute node info");
+        info!(key = %key, "created a cache entry for compute node info");
 
         Ok(CachedNodeInfo {
             token: Some((&self.caches.node_info, key)),

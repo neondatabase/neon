@@ -8,7 +8,6 @@ use std::{
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rand::{thread_rng, Rng};
-use smol_str::SmolStr;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::{debug, info};
@@ -346,13 +345,9 @@ enum LookupType {
 }
 
 impl Cache for ProjectInfoCacheImpl {
-    type Key = SmolStr;
-    // Value is not really used here, but we need to specify it.
-    type Value = SmolStr;
+    type LookupInfo = CachedLookupInfo;
 
-    type LookupInfo<Key> = CachedLookupInfo;
-
-    async fn invalidate(&self, key: &Self::LookupInfo<SmolStr>) {
+    async fn invalidate(&self, key: &Self::LookupInfo) {
         match &key.lookup_type {
             LookupType::RoleSecret(role_name) => {
                 if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {

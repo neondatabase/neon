@@ -292,7 +292,7 @@ mod tests {
             ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("foo"));
-        assert_eq!(user_info.options.get_cache_key("foo"), "foo");
+        assert_eq!(user_info.options.to_string(), "");
 
         Ok(())
     }
@@ -451,8 +451,8 @@ mod tests {
             ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("project"));
         assert_eq!(
-            user_info.options.get_cache_key("project"),
-            "project endpoint_type:read_write lsn:0/2"
+            user_info.options.to_string(),
+            "endpoint_type:read_write lsn:0/2"
         );
 
         Ok(())

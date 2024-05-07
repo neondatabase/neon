@@ -327,7 +327,7 @@ impl NodeInfo {
 }
 
 pub type NodeInfoCache = moka::future::Cache<EndpointCacheKey, NodeInfo>;
-pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
+pub type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
 pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
 pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 

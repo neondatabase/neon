@@ -154,9 +154,6 @@ smol_str_wrapper!(BranchId);
 // 90% of project strings are 23 characters or less.
 smol_str_wrapper!(ProjectId);
 
-// will usually equal endpoint ID
-smol_str_wrapper!(EndpointCacheKey);
-
 smol_str_wrapper!(DbName);
 
 // postgres hostname, will likely be a port:ip addr
@@ -178,5 +175,34 @@ impl EndpointId {
     }
     pub fn as_project(&self) -> ProjectId {
         ProjectId(self.0.clone())
+    }
+}
+
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct EndpointCacheKey {
+    endpoint: intern::EndpointIdInt,
+    options: Option<String>,
+}
+
+impl std::fmt::Display for EndpointCacheKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.endpoint.as_str())?;
+        if let Some(options) = &self.options {
+            f.write_str(" ")?;
+            f.write_str(options)?;
+        }
+        Ok(())
+    }
+}
+
+impl From<intern::EndpointIdInt> for EndpointCacheKey {
+    fn from(value: intern::EndpointIdInt) -> Self {
+        Self { endpoint: value, options: None }
+    }
+}
+impl EndpointCacheKey {
+    pub fn with_options(mut self, options: String) -> Self {
+        self.options = Some(options);
+        self
     }
 }
