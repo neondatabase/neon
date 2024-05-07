@@ -240,7 +240,7 @@ impl<'a> ShardedRange<'a> {
     /// pages that would not actually be stored on this node.
     ///
     /// Don't use this function in code that works with physical entities like layer files.
-    fn raw_size(range: &Range<Key>) -> u32 {
+    pub fn raw_size(range: &Range<Key>) -> u32 {
         if is_contiguous_range(range) {
             contiguous_range_len(range)
         } else {
