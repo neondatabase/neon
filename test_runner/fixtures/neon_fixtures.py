@@ -977,7 +977,7 @@ class NeonEnv:
 
     Some notable functions and fields in NeonEnv:
 
-    postgres - A factory object for creating postgres compute nodes.
+    endpoints - A factory object for creating postgres compute nodes.
 
     pageservers - An array containing objects representing the pageservers
 
