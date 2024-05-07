@@ -3037,6 +3037,11 @@ impl Timeline {
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
+
+    /// Returns true if the given lsn is or was an ancestor branchpoint.
+    pub(crate) fn is_ancestor_lsn(&self, lsn: Lsn) -> bool {
+        self.ancestor_lsn == lsn
+    }
 }
 
 type TraversalId = Arc<str>;
