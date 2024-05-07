@@ -1401,7 +1401,7 @@ impl RemoteTimelineClient {
                         &self.storage_impl,
                         local_path,
                         &remote_path,
-                        layer_metadata,
+                        layer_metadata.file_size(),
                         &self.cancel,
                     )
                     .measure_remote_op(

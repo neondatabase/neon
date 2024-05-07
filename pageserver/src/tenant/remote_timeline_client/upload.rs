@@ -19,8 +19,6 @@ use crate::tenant::remote_timeline_client::{
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeTravelError};
 use utils::id::{TenantId, TimelineId};
 
-use super::index::LayerFileMetadata;
-
 use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
@@ -65,7 +63,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     storage: &'a GenericRemoteStorage,
     local_path: &'a Utf8Path,
     remote_path: &'a RemotePath,
-    known_metadata: &'a LayerFileMetadata,
+    metadata_size: u64,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
@@ -97,7 +95,6 @@ pub(super) async fn upload_timeline_layer<'a>(
         .with_context(|| format!("get the source file metadata for layer {local_path:?}"))?
         .len();
 
-    let metadata_size = known_metadata.file_size();
     if metadata_size != fs_size {
         bail!("File {local_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
     }
