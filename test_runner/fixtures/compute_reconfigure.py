@@ -14,9 +14,17 @@ class ComputeReconfigure:
         self.server = server
         self.control_plane_compute_hook_api = f"http://{server.host}:{server.port}/notify-attach"
         self.workloads = {}
+        self.on_notify = None
 
     def register_workload(self, workload):
         self.workloads[workload.tenant_id] = workload
+
+    def register_on_notify(self, fn):
+        """
+        Add some extra work during a notification, like sleeping to slow things down, or
+        logging what was notified.
+        """
+        self.on_notify = fn
 
 
 @pytest.fixture(scope="function")
@@ -42,6 +50,9 @@ def compute_reconfigure_listener(make_httpserver):
         assert request.json is not None
         body: dict[str, Any] = request.json
         log.info(f"notify-attach request: {body}")
+
+        if self.on_notify is not None:
+            self.on_notify(body)
 
         try:
             workload = self.workloads[TenantId(body["tenant_id"])]

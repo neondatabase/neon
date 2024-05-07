@@ -210,6 +210,7 @@ use tracing::{debug, error, info, instrument, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
+use crate::context::RequestContext;
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
 use crate::metrics::{
     MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
@@ -243,7 +244,9 @@ use super::storage_layer::{Layer, LayerFileName, ResidentLayer};
 use super::upload_queue::SetDeletedFlagProgress;
 use super::Generation;
 
-pub(crate) use download::{is_temp_download_file, list_remote_timelines};
+pub(crate) use download::{
+    download_index_part, is_temp_download_file, list_remote_tenant_shards, list_remote_timelines,
+};
 pub(crate) use index::LayerFileMetadata;
 
 // Occasional network issues and such can cause remote operations to fail, and
@@ -472,7 +475,7 @@ impl RemoteTimelineClient {
             },
         );
 
-        let index_part = download::download_index_part(
+        let (index_part, _index_generation) = download::download_index_part(
             &self.storage_impl,
             &self.tenant_shard_id,
             &self.timeline_id,
@@ -503,6 +506,7 @@ impl RemoteTimelineClient {
         layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
         cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) -> anyhow::Result<u64> {
         let downloaded_size = {
             let _unfinished_gauge_guard = self.metrics.call_begin(
@@ -520,6 +524,7 @@ impl RemoteTimelineClient {
                 layer_file_name,
                 layer_metadata,
                 cancel,
+                ctx,
             )
             .measure_remote_op(
                 RemoteOpFileKind::Layer,
@@ -1714,6 +1719,11 @@ impl RemoteTimelineClient {
             }
         }
     }
+}
+
+pub fn remote_tenant_path(tenant_shard_id: &TenantShardId) -> RemotePath {
+    let path = format!("tenants/{tenant_shard_id}");
+    RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
 pub fn remote_timelines_path(tenant_shard_id: &TenantShardId) -> RemotePath {

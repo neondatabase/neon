@@ -7,6 +7,7 @@ use std::{sync::Arc, time::SystemTime};
 
 use crate::{
     config::PageServerConf,
+    context::RequestContext,
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     virtual_file::MaybeFatalIo,
@@ -316,9 +317,13 @@ pub fn spawn_tasks(
     let (upload_req_tx, upload_req_rx) =
         tokio::sync::mpsc::channel::<CommandRequest<UploadCommand>>(16);
 
+    let downloader_task_ctx = RequestContext::new(
+        TaskKind::SecondaryDownloads,
+        crate::context::DownloadBehavior::Download,
+    );
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
-        TaskKind::SecondaryDownloads,
+        downloader_task_ctx.task_kind(),
         None,
         None,
         "secondary tenant downloads",
@@ -330,6 +335,7 @@ pub fn spawn_tasks(
                 download_req_rx,
                 bg_jobs_clone,
                 cancel_clone,
+                downloader_task_ctx,
             )
             .await;
 

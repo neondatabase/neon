@@ -430,8 +430,6 @@ pub struct StatusResponse {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantLocationConfigRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tenant_id: Option<TenantShardId>,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -780,6 +778,17 @@ pub struct SecondaryProgress {
     pub bytes_downloaded: u64,
     /// The number of layer bytes in the most recently seen heatmap
     pub bytes_total: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantScanRemoteStorageShard {
+    pub tenant_shard_id: TenantShardId,
+    pub generation: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct TenantScanRemoteStorageResponse {
+    pub shards: Vec<TenantScanRemoteStorageShard>,
 }
 
 pub mod virtual_file {

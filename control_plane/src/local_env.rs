@@ -17,6 +17,7 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use utils::{
     auth::{encode_from_key_file, Claims},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -66,6 +67,10 @@ pub struct LocalEnv {
 
     pub broker: NeonBroker,
 
+    // Configuration for the storage controller (1 per neon_local environment)
+    #[serde(default)]
+    pub storage_controller: NeonStorageControllerConf,
+
     /// This Vec must always contain at least one pageserver
     pub pageservers: Vec<PageServerConf>,
 
@@ -96,6 +101,29 @@ pub struct LocalEnv {
 pub struct NeonBroker {
     /// Broker listen address for storage nodes coordination, e.g. '127.0.0.1:50051'.
     pub listen_addr: SocketAddr,
+}
+
+/// Broker config for cluster internal communication.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[serde(default)]
+pub struct NeonStorageControllerConf {
+    /// Heartbeat timeout before marking a node offline
+    #[serde(with = "humantime_serde")]
+    pub max_unavailable: Duration,
+}
+
+impl NeonStorageControllerConf {
+    // Use a shorter pageserver unavailability interval than the default to speed up tests.
+    const DEFAULT_MAX_UNAVAILABLE_INTERVAL: std::time::Duration =
+        std::time::Duration::from_secs(10);
+}
+
+impl Default for NeonStorageControllerConf {
+    fn default() -> Self {
+        Self {
+            max_unavailable: Self::DEFAULT_MAX_UNAVAILABLE_INTERVAL,
+        }
+    }
 }
 
 // Dummy Default impl to satisfy Deserialize derive.
@@ -130,6 +158,7 @@ pub struct PageServerConf {
     pub(crate) virtual_file_io_engine: Option<String>,
     pub(crate) get_vectored_impl: Option<String>,
     pub(crate) get_impl: Option<String>,
+    pub(crate) validate_vectored_get: Option<bool>,
 }
 
 impl Default for PageServerConf {
@@ -143,6 +172,7 @@ impl Default for PageServerConf {
             virtual_file_io_engine: None,
             get_vectored_impl: None,
             get_impl: None,
+            validate_vectored_get: None,
         }
     }
 }
@@ -352,7 +382,10 @@ impl LocalEnv {
 
         // Find neon binaries.
         if env.neon_distrib_dir == Path::new("") {
-            env.neon_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
+            env::current_exe()?
+                .parent()
+                .unwrap()
+                .clone_into(&mut env.neon_distrib_dir);
         }
 
         if env.pageservers.is_empty() {

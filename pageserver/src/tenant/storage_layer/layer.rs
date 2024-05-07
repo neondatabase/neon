@@ -14,9 +14,10 @@ use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::repository::Key;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
@@ -401,8 +402,8 @@ impl Layer {
         &self.0.path
     }
 
-    pub(crate) fn local_path_str(&self) -> &Arc<str> {
-        &self.0.path_str
+    pub(crate) fn debug_str(&self) -> &Arc<str> {
+        &self.0.debug_str
     }
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
@@ -527,8 +528,8 @@ struct LayerInner {
     /// Full path to the file; unclear if this should exist anymore.
     path: Utf8PathBuf,
 
-    /// String representation of the full path, used for traversal id.
-    path_str: Arc<str>,
+    /// String representation of the layer, used for traversal id.
+    debug_str: Arc<str>,
 
     desc: PersistentLayerDesc,
 
@@ -735,7 +736,7 @@ impl LayerInner {
 
         LayerInner {
             conf,
-            path_str: path.to_string().into(),
+            debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
             path,
             desc,
             timeline: Arc::downgrade(timeline),
@@ -939,11 +940,20 @@ impl LayerInner {
             return Err(DownloadError::DownloadRequired);
         }
 
+        let download_ctx = ctx
+            .map(|ctx| ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download))
+            .unwrap_or(RequestContext::new(
+                TaskKind::LayerDownload,
+                DownloadBehavior::Download,
+            ));
+
         async move {
             tracing::info!(%reason, "downloading on-demand");
 
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-            let res = self.download_init_and_wait(timeline, permit).await?;
+            let res = self
+                .download_init_and_wait(timeline, permit, download_ctx)
+                .await?;
             scopeguard::ScopeGuard::into_inner(init_cancelled);
             Ok(res)
         }
@@ -982,6 +992,7 @@ impl LayerInner {
         self: &Arc<Self>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: RequestContext,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -1011,7 +1022,7 @@ impl LayerInner {
                     .await
                     .unwrap();
 
-                let res = this.download_and_init(timeline, permit).await;
+                let res = this.download_and_init(timeline, permit, &ctx).await;
 
                 if let Err(res) = tx.send(res) {
                     match res {
@@ -1054,6 +1065,7 @@ impl LayerInner {
         self: &Arc<LayerInner>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Arc<DownloadedLayer>> {
         let client = timeline
             .remote_client
@@ -1061,7 +1073,12 @@ impl LayerInner {
             .expect("checked before download_init_and_wait");
 
         let result = client
-            .download_layer_file(&self.desc.filename(), &self.metadata(), &timeline.cancel)
+            .download_layer_file(
+                &self.desc.filename(),
+                &self.metadata(),
+                &timeline.cancel,
+                ctx,
+            )
             .await;
 
         match result {

@@ -177,6 +177,10 @@ struct Args {
     /// Controls how long backup will wait until uploading the partial segment.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_PARTIAL_BACKUP_TIMEOUT, verbatim_doc_comment)]
     partial_backup_timeout: Duration,
+    /// Disable task to push messages to broker every second. Supposed to
+    /// be used in tests.
+    #[arg(long)]
+    disable_periodic_broker_push: bool,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -309,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
         walsenders_keep_horizon: args.walsenders_keep_horizon,
         partial_backup_enabled: args.partial_backup_enabled,
         partial_backup_timeout: args.partial_backup_timeout,
+        disable_periodic_broker_push: args.disable_periodic_broker_push,
     };
 
     // initialize sentry if SENTRY_DSN is provided

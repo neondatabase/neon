@@ -2,7 +2,7 @@ use crate::{
     auth::backend::ComputeCredentialKeys,
     compute::{self, PostgresConnection},
     config::RetryConfig,
-    console::{self, errors::WakeComputeError, CachedNodeInfo, NodeInfo},
+    console::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
     context::RequestMonitoring,
     error::ReportableError,
     metrics::{ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType},
@@ -10,6 +10,7 @@ use crate::{
         retry::{retry_after, ShouldRetry},
         wake_compute::wake_compute,
     },
+    Host,
 };
 use async_trait::async_trait;
 use pq_proto::StartupMessageParams;
@@ -64,6 +65,9 @@ pub trait ComputeConnectBackend {
 pub struct TcpMechanism<'a> {
     /// KV-dictionary with PostgreSQL connection params.
     pub params: &'a StartupMessageParams,
+
+    /// connect_to_compute concurrency lock
+    pub locks: &'static ApiLocks<Host>,
 }
 
 #[async_trait]
@@ -79,6 +83,8 @@ impl ConnectMechanism for TcpMechanism<'_> {
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
+        let host = node_info.config.get_host()?;
+        let _permit = self.locks.get_permit(&host).await?;
         node_info.connect(ctx, timeout).await
     }
 
@@ -133,10 +139,17 @@ where
 
     error!(error = ?err, "could not connect to compute node");
 
-    let node_info = if !node_info.cached() {
+    let node_info = if !node_info.cached() || !err.should_retry_database_address() {
         // If we just recieved this from cplane and dodn't get it from cache, we shouldn't retry.
         // Do not need to retrieve a new node_info, just return the old one.
         if !err.should_retry(num_retries, connect_to_compute_retry_config) {
+            Metrics::get().proxy.retries_metric.observe(
+                RetriesMetricGroup {
+                    outcome: ConnectOutcome::Failed,
+                    retry_type,
+                },
+                num_retries.into(),
+            );
             return Err(err.into());
         }
         node_info
@@ -194,6 +207,10 @@ where
         let wait_duration = retry_after(num_retries, connect_to_compute_retry_config);
         num_retries += 1;
 
+        let pause = ctx
+            .latency_timer
+            .pause(crate::metrics::Waiting::RetryTimeout);
         time::sleep(wait_duration).await;
+        drop(pause);
     }
 }

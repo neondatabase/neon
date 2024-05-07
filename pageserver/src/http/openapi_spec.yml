@@ -782,9 +782,6 @@ components:
       required:
         - mode
       properties:
-        tenant_id:
-          type: string
-          description: Not used, scheduled for removal.
         mode:
           type: string
           enum: ["AttachedSingle", "AttachedMulti", "AttachedStale", "Secondary", "Detached"]

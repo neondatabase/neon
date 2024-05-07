@@ -13,7 +13,7 @@ use crate::{
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::EndpointRateLimiter,
-    scram, Normalize,
+    scram, EndpointCacheKey, Normalize,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
@@ -25,7 +25,7 @@ use tracing::{error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
-    pub locks: &'static ApiLocks,
+    pub locks: &'static ApiLocks<EndpointCacheKey>,
     pub endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     jwt: String,
 }
@@ -35,7 +35,7 @@ impl Api {
     pub fn new(
         endpoint: http::Endpoint,
         caches: &'static ApiCaches,
-        locks: &'static ApiLocks,
+        locks: &'static ApiLocks<EndpointCacheKey>,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> Self {
         let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
@@ -289,7 +289,7 @@ impl super::Api for Api {
             return Err(WakeComputeError::TooManyConnections);
         }
 
-        let permit = self.locks.get_wake_compute_permit(&key).await?;
+        let permit = self.locks.get_permit(&key).await?;
 
         // after getting back a permit - it's possible the cache was filled
         // double check

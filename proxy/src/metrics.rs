@@ -123,6 +123,12 @@ pub struct ProxyMetrics {
     /// Number of retries (per outcome, per retry_type).
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]))]
     pub retries_metric: HistogramVec<RetriesMetricSet, 9>,
+
+    /// Number of events consumed from redis (per event type).
+    pub redis_events_count: CounterVec<StaticLabelSet<RedisEventsCount>>,
+
+    #[metric(namespace = "connect_compute_lock")]
+    pub connect_compute_lock: ApiLockMetrics,
 }
 
 #[derive(MetricGroup)]
@@ -141,6 +147,12 @@ pub struct ApiLockMetrics {
 }
 
 impl Default for ProxyMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for ApiLockMetrics {
     fn default() -> Self {
         Self::new()
     }
@@ -284,6 +296,8 @@ pub struct ComputeConnectionLatencyGroup {
 pub enum LatencyExclusions {
     Client,
     ClientAndCplane,
+    ClientCplaneCompute,
+    ClientCplaneComputeRetry,
 }
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]
@@ -352,6 +366,7 @@ pub enum Waiting {
     Cplane,
     Client,
     Compute,
+    RetryTimeout,
 }
 
 #[derive(Default)]
@@ -359,6 +374,7 @@ struct Accumulated {
     cplane: time::Duration,
     client: time::Duration,
     compute: time::Duration,
+    retry: time::Duration,
 }
 
 pub struct LatencyTimer {
@@ -421,6 +437,7 @@ impl Drop for LatencyTimerPause<'_> {
             Waiting::Cplane => self.timer.accumulated.cplane += dur,
             Waiting::Client => self.timer.accumulated.client += dur,
             Waiting::Compute => self.timer.accumulated.compute += dur,
+            Waiting::RetryTimeout => self.timer.accumulated.retry += dur,
         }
     }
 }
@@ -464,6 +481,34 @@ impl Drop for LatencyTimer {
             },
             duration.saturating_sub(accumulated_total).as_secs_f64(),
         );
+
+        // Exclude client cplane, compue communication from the accumulated time.
+        let accumulated_total =
+            self.accumulated.client + self.accumulated.cplane + self.accumulated.compute;
+        metric.observe(
+            ComputeConnectionLatencyGroup {
+                protocol: self.protocol,
+                cold_start_info: self.cold_start_info,
+                outcome: self.outcome,
+                excluded: LatencyExclusions::ClientCplaneCompute,
+            },
+            duration.saturating_sub(accumulated_total).as_secs_f64(),
+        );
+
+        // Exclude client cplane, compue, retry communication from the accumulated time.
+        let accumulated_total = self.accumulated.client
+            + self.accumulated.cplane
+            + self.accumulated.compute
+            + self.accumulated.retry;
+        metric.observe(
+            ComputeConnectionLatencyGroup {
+                protocol: self.protocol,
+                cold_start_info: self.cold_start_info,
+                outcome: self.outcome,
+                excluded: LatencyExclusions::ClientCplaneComputeRetry,
+            },
+            duration.saturating_sub(accumulated_total).as_secs_f64(),
+        );
     }
 }
 
@@ -496,4 +541,15 @@ pub struct RetriesMetricGroup {
 pub enum RetryType {
     WakeCompute,
     ConnectToCompute,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+#[label(singleton = "event")]
+pub enum RedisEventsCount {
+    EndpointCreated,
+    BranchCreated,
+    ProjectCreated,
+    CancelSession,
+    PasswordUpdate,
+    AllowedIpsUpdate,
 }

@@ -6,7 +6,7 @@ use crate::metrics::{
     WakeupFailureKind,
 };
 use crate::proxy::retry::retry_after;
-use hyper::StatusCode;
+use hyper1::StatusCode;
 use std::ops::ControlFlow;
 use tracing::{error, info, warn};
 
@@ -54,7 +54,11 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
 
         let wait_duration = retry_after(*num_retries, config);
         *num_retries += 1;
+        let pause = ctx
+            .latency_timer
+            .pause(crate::metrics::Waiting::RetryTimeout);
         tokio::time::sleep(wait_duration).await;
+        drop(pause);
     }
 }
 

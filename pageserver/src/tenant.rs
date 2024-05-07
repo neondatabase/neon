@@ -64,6 +64,7 @@ use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use self::timeline::TimelineResources;
 use self::timeline::WaitLsnError;
+use self::timeline::{GcCutoffs, GcInfo};
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -86,7 +87,6 @@ use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
-use std::cmp::min;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -888,7 +888,7 @@ impl Tenant {
 
     #[instrument(skip_all)]
     pub(crate) async fn preload(
-        self: &Arc<Tenant>,
+        self: &Arc<Self>,
         remote_storage: &GenericRemoteStorage,
         cancel: CancellationToken,
     ) -> anyhow::Result<TenantPreload> {
@@ -918,9 +918,13 @@ impl Tenant {
 
         Ok(TenantPreload {
             deleting,
-            timelines: self
-                .load_timeline_metadata(remote_timeline_ids, remote_storage, cancel)
-                .await?,
+            timelines: Self::load_timeline_metadata(
+                self,
+                remote_timeline_ids,
+                remote_storage,
+                cancel,
+            )
+            .await?,
         })
     }
 
@@ -2808,7 +2812,48 @@ impl Tenant {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
-        // grab mutex to prevent new timelines from being created here.
+        // before taking the gc_cs lock, do the heavier weight finding of gc_cutoff points for
+        // currently visible timelines.
+        let timelines = self
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|tl| match target_timeline_id.as_ref() {
+                Some(target) => &tl.timeline_id == target,
+                None => true,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut gc_cutoffs: HashMap<TimelineId, GcCutoffs> =
+            HashMap::with_capacity(timelines.len());
+
+        for timeline in timelines.iter() {
+            let cutoff = timeline
+                .get_last_record_lsn()
+                .checked_sub(horizon)
+                .unwrap_or(Lsn(0));
+
+            let res = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await;
+
+            match res {
+                Ok(cutoffs) => {
+                    let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
+                    assert!(old.is_none());
+                }
+                Err(e) => {
+                    tracing::warn!(timeline_id = %timeline.timeline_id, "ignoring failure to find gc cutoffs: {e:#}");
+                }
+            }
+        }
+
+        if !self.is_active() {
+            anyhow::bail!("shutting down");
+        }
+
+        // grab mutex to prevent new timelines from being created here; avoid doing long operations
+        // because that will stall branch creation.
         let gc_cs = self.gc_cs.lock().await;
 
         // Scan all timelines. For each timeline, remember the timeline ID and
@@ -2870,11 +2915,6 @@ impl Tenant {
                 }
             }
 
-            let cutoff = timeline
-                .get_last_record_lsn()
-                .checked_sub(horizon)
-                .unwrap_or(Lsn(0));
-
             let branchpoints: Vec<Lsn> = all_branchpoints
                 .range((
                     Included((timeline_id, Lsn(0))),
@@ -2882,9 +2922,27 @@ impl Tenant {
                 ))
                 .map(|&x| x.1)
                 .collect();
-            timeline
-                .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
-                .await?;
+
+            {
+                let mut target = timeline.gc_info.write().unwrap();
+
+                match gc_cutoffs.remove(&timeline_id) {
+                    Some(cutoffs) => {
+                        *target = GcInfo {
+                            retain_lsns: branchpoints,
+                            cutoffs,
+                        };
+                    }
+                    None => {
+                        // reasons for this being unavailable:
+                        // - this timeline was created while we were finding cutoffs
+                        // - lsn for timestamp search fails for this timeline repeatedly
+                        //
+                        // in both cases, refreshing the branchpoints is correct.
+                        target.retain_lsns = branchpoints;
+                    }
+                };
+            }
 
             gc_timelines.push(timeline);
         }
@@ -2973,7 +3031,7 @@ impl Tenant {
         // and then the planned GC cutoff
         {
             let gc_info = src_timeline.gc_info.read().unwrap();
-            let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
+            let cutoff = gc_info.min_cutoff();
             if start_lsn < cutoff {
                 return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
                     "invalid branch start lsn: less than planned GC cutoff {cutoff}"
@@ -3867,8 +3925,9 @@ mod tests {
     use crate::DEFAULT_PG_VERSION;
     use bytes::BytesMut;
     use hex_literal::hex;
-    use pageserver_api::key::NON_INHERITED_RANGE;
+    use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
+    use pageserver_api::models::CompactionAlgorithm;
     use rand::{thread_rng, Rng};
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
@@ -4508,17 +4567,33 @@ mod tests {
     }
 
     async fn bulk_insert_compact_gc(
-        timeline: Arc<Timeline>,
+        tenant: &Tenant,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+        lsn: Lsn,
+        repeat: usize,
+        key_count: usize,
+    ) -> anyhow::Result<()> {
+        let compact = true;
+        bulk_insert_maybe_compact_gc(tenant, timeline, ctx, lsn, repeat, key_count, compact).await
+    }
+
+    async fn bulk_insert_maybe_compact_gc(
+        tenant: &Tenant,
+        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         mut lsn: Lsn,
         repeat: usize,
         key_count: usize,
+        compact: bool,
     ) -> anyhow::Result<()> {
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let mut blknum = 0;
 
         // Enforce that key range is monotonously increasing
         let mut keyspace = KeySpaceAccum::new();
+
+        let cancel = CancellationToken::new();
 
         for _ in 0..repeat {
             for _ in 0..key_count {
@@ -4541,22 +4616,19 @@ mod tests {
                 blknum += 1;
             }
 
-            let cutoff = timeline.get_last_record_lsn();
-
-            timeline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    ctx,
-                )
-                .await?;
             timeline.freeze_and_flush().await?;
-            timeline
-                .compact(&CancellationToken::new(), EnumSet::empty(), ctx)
+            if compact {
+                // this requires timeline to be &Arc<Timeline>
+                timeline.compact(&cancel, EnumSet::empty(), ctx).await?;
+            }
+
+            // this doesn't really need to use the timeline_id target, but it is closer to what it
+            // originally was.
+            let res = tenant
+                .gc_iteration(Some(timeline.timeline_id), 0, Duration::ZERO, &cancel, ctx)
                 .await?;
-            timeline.gc().await?;
+
+            assert_eq!(res.layers_removed, 0, "this never removes anything");
         }
 
         Ok(())
@@ -4575,7 +4647,7 @@ mod tests {
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+        bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         Ok(())
     }
@@ -4606,7 +4678,7 @@ mod tests {
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+        bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         let guard = tline.layers.read().await;
         guard.layer_map().dump(true, &ctx).await?;
@@ -4719,15 +4791,7 @@ mod tests {
             .await;
 
         let images = vectored_res?;
-        let mut key = NON_INHERITED_RANGE.start;
-        while key < NON_INHERITED_RANGE.end {
-            assert!(matches!(
-                images[&key],
-                Err(PageReconstructError::MissingKey(_))
-            ));
-            key = key.next();
-        }
-
+        assert!(images.is_empty());
         Ok(())
     }
 
@@ -5038,13 +5102,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_random_updates")?;
+        let names_algorithms = [
+            ("test_random_updates_legacy", CompactionAlgorithm::Legacy),
+            ("test_random_updates_tiered", CompactionAlgorithm::Tiered),
+        ];
+        for (name, algorithm) in names_algorithms {
+            test_random_updates_algorithm(name, algorithm).await?;
+        }
+        Ok(())
+    }
+
+    async fn test_random_updates_algorithm(
+        name: &'static str,
+        compaction_algorithm: CompactionAlgorithm,
+    ) -> anyhow::Result<()> {
+        let mut harness = TenantHarness::create(name)?;
+        harness.tenant_conf.compaction_algorithm = compaction_algorithm;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
         const NUM_KEYS: usize = 1000;
+        let cancel = CancellationToken::new();
 
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
@@ -5103,22 +5183,11 @@ mod tests {
                 );
             }
 
-            // Perform a cycle of flush, compact, and GC
-            let cutoff = tline.get_last_record_lsn();
-            tline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    &ctx,
-                )
-                .await?;
+            // Perform a cycle of flush, and GC
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            tenant
+                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
-            tline.gc().await?;
         }
 
         Ok(())
@@ -5138,6 +5207,8 @@ mod tests {
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let mut keyspace = KeySpaceAccum::new();
+
+        let cancel = CancellationToken::new();
 
         // Track when each page was last modified. Used to assert that
         // a read sees the latest page version.
@@ -5202,21 +5273,11 @@ mod tests {
             }
 
             // Perform a cycle of flush, compact, and GC
-            let cutoff = tline.get_last_record_lsn();
-            tline
-                .update_gc_info(
-                    Vec::new(),
-                    cutoff,
-                    Duration::ZERO,
-                    &CancellationToken::new(),
-                    &ctx,
-                )
-                .await?;
             tline.freeze_and_flush().await?;
-            tline
-                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+            tenant
+                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
-            tline.gc().await?;
         }
 
         Ok(())
@@ -5398,19 +5459,140 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_at_max_lsn() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_read_at_max_lsn")?;
+        let names_algorithms = [
+            ("test_read_at_max_lsn_legacy", CompactionAlgorithm::Legacy),
+            ("test_read_at_max_lsn_tiered", CompactionAlgorithm::Tiered),
+        ];
+        for (name, algorithm) in names_algorithms {
+            test_read_at_max_lsn_algorithm(name, algorithm).await?;
+        }
+        Ok(())
+    }
+
+    async fn test_read_at_max_lsn_algorithm(
+        name: &'static str,
+        compaction_algorithm: CompactionAlgorithm,
+    ) -> anyhow::Result<()> {
+        let mut harness = TenantHarness::create(name)?;
+        harness.tenant_conf.compaction_algorithm = compaction_algorithm;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(tline.clone(), &ctx, lsn, 50, 10000).await?;
+        let compact = false;
+        bulk_insert_maybe_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000, compact).await?;
 
         let test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let read_lsn = Lsn(u64::MAX - 1);
 
-        assert!(tline.get(test_key, read_lsn, &ctx).await.is_ok());
+        let result = tline.get(test_key, read_lsn, &ctx).await;
+        assert!(result.is_ok(), "result is not Ok: {}", result.unwrap_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_scan() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_scan")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        const NUM_KEYS: usize = 1000;
+        const STEP: usize = 100; // random update + scan base_key + idx * STEP
+
+        let cancel = CancellationToken::new();
+
+        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        base_key.field1 = AUX_KEY_PREFIX;
+        let mut test_key = base_key;
+
+        // Track when each page was last modified. Used to assert that
+        // a read sees the latest page version.
+        let mut updated = [Lsn(0); NUM_KEYS];
+
+        let mut lsn = Lsn(0x10);
+        #[allow(clippy::needless_range_loop)]
+        for blknum in 0..NUM_KEYS {
+            lsn = Lsn(lsn.0 + 0x10);
+            test_key.field6 = (blknum * STEP) as u32;
+            let mut writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            updated[blknum] = lsn;
+            drop(writer);
+        }
+
+        let keyspace = KeySpace::single(base_key..base_key.add((NUM_KEYS * STEP) as u32));
+
+        for _ in 0..10 {
+            // Read all the blocks
+            for (blknum, last_lsn) in updated.iter().enumerate() {
+                test_key.field6 = (blknum * STEP) as u32;
+                assert_eq!(
+                    tline.get(test_key, lsn, &ctx).await?,
+                    test_img(&format!("{} at {}", blknum, last_lsn))
+                );
+            }
+
+            let mut cnt = 0;
+            for (key, value) in tline
+                .get_vectored_impl(
+                    keyspace.clone(),
+                    lsn,
+                    ValuesReconstructState::default(),
+                    &ctx,
+                )
+                .await?
+            {
+                let blknum = key.field6 as usize;
+                let value = value?;
+                assert!(blknum % STEP == 0);
+                let blknum = blknum / STEP;
+                assert_eq!(
+                    value,
+                    test_img(&format!("{} at {}", blknum, updated[blknum]))
+                );
+                cnt += 1;
+            }
+
+            assert_eq!(cnt, NUM_KEYS);
+
+            for _ in 0..NUM_KEYS {
+                lsn = Lsn(lsn.0 + 0x10);
+                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                test_key.field6 = (blknum * STEP) as u32;
+                let mut writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
+                    )
+                    .await?;
+                writer.finish_write(lsn);
+                drop(writer);
+                updated[blknum] = lsn;
+            }
+
+            // Perform a cycle of flush, compact, and GC
+            tline.freeze_and_flush().await?;
+            tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+            tenant
+                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .await?;
+        }
 
         Ok(())
     }

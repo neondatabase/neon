@@ -132,16 +132,14 @@ pub async fn task_main(
                 Err(e) => {
                     // todo: log and push to ctx the error kind
                     ctx.set_error_kind(e.get_error_kind());
-                    ctx.log();
                     error!(parent: &span, "per-client task finished with an error: {e:#}");
                 }
                 Ok(None) => {
                     ctx.set_success();
-                    ctx.log();
                 }
                 Ok(Some(p)) => {
                     ctx.set_success();
-                    ctx.log();
+                    ctx.log_connect();
                     match p.proxy_pass().instrument(span.clone()).await {
                         Ok(()) => {}
                         Err(e) => {
@@ -303,7 +301,10 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let mut node = connect_to_compute(
         ctx,
-        &TcpMechanism { params: &params },
+        &TcpMechanism {
+            params: &params,
+            locks: &config.connect_compute_locks,
+        },
         &user_info,
         mode.allow_self_signed_compute(config),
         config.wake_compute_retry_config,

@@ -93,6 +93,7 @@ impl PageServerNode {
             virtual_file_io_engine,
             get_vectored_impl,
             get_impl,
+            validate_vectored_get,
         } = &self.conf;
 
         let id = format!("id={}", id);
@@ -117,6 +118,11 @@ impl PageServerNode {
         } else {
             String::new()
         };
+        let validate_vectored_get = if let Some(validate_vectored_get) = validate_vectored_get {
+            format!("validate_vectored_get={validate_vectored_get}")
+        } else {
+            String::new()
+        };
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
@@ -131,6 +137,7 @@ impl PageServerNode {
             virtual_file_io_engine,
             get_vectored_impl,
             get_impl,
+            validate_vectored_get,
         ];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
@@ -241,12 +248,13 @@ impl PageServerNode {
         // situation: the metadata is written by some other script.
         std::fs::write(
             metadata_path,
-            serde_json::to_vec(&serde_json::json!({
-                "host": "localhost",
-                "port": self.pg_connection_config.port(),
-                "http_host": "localhost",
-                "http_port": http_port,
-            }))
+            serde_json::to_vec(&pageserver_api::config::NodeMetadata {
+                postgres_host: "localhost".to_string(),
+                postgres_port: self.pg_connection_config.port(),
+                http_host: "localhost".to_string(),
+                http_port,
+                other: HashMap::new(),
+            })
             .unwrap(),
         )
         .expect("Failed to write metadata file");

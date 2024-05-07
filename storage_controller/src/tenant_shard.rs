@@ -325,16 +325,26 @@ pub(crate) struct ReplaceSecondary {
 
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) struct MigrateAttachment {
-    old_attached_node_id: NodeId,
-    new_attached_node_id: NodeId,
+    pub(crate) old_attached_node_id: NodeId,
+    pub(crate) new_attached_node_id: NodeId,
 }
 
 #[derive(Eq, PartialEq, Debug)]
-pub(crate) enum ScheduleOptimization {
+pub(crate) enum ScheduleOptimizationAction {
     // Replace one of our secondary locations with a different node
     ReplaceSecondary(ReplaceSecondary),
     // Migrate attachment to an existing secondary location
     MigrateAttachment(MigrateAttachment),
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub(crate) struct ScheduleOptimization {
+    // What was the reconcile sequence when we generated this optimization?  The optimization
+    // should only be applied if the shard's sequence is still at this value, in case other changes
+    // happened between planning the optimization and applying it.
+    sequence: Sequence,
+
+    pub(crate) action: ScheduleOptimizationAction,
 }
 
 impl ReconcilerWaiter {
@@ -675,10 +685,13 @@ impl TenantShard {
                         "Identified optimization: migrate attachment {attached}->{preferred_node} (secondaries {:?})",
                         self.intent.get_secondary()
                     );
-                    return Some(ScheduleOptimization::MigrateAttachment(MigrateAttachment {
-                        old_attached_node_id: attached,
-                        new_attached_node_id: *preferred_node,
-                    }));
+                    return Some(ScheduleOptimization {
+                        sequence: self.sequence,
+                        action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                            old_attached_node_id: attached,
+                            new_attached_node_id: *preferred_node,
+                        }),
+                    });
                 }
             } else {
                 tracing::debug!(
@@ -736,28 +749,37 @@ impl TenantShard {
                     "Identified optimization: replace secondary {secondary}->{candidate_node} (current secondaries {:?})",
                     self.intent.get_secondary()
                 );
-                return Some(ScheduleOptimization::ReplaceSecondary(ReplaceSecondary {
-                    old_node_id: *secondary,
-                    new_node_id: candidate_node,
-                }));
+                return Some(ScheduleOptimization {
+                    sequence: self.sequence,
+                    action: ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
+                        old_node_id: *secondary,
+                        new_node_id: candidate_node,
+                    }),
+                });
             }
         }
 
         None
     }
 
+    /// Return true if the optimization was really applied: it will not be applied if the optimization's
+    /// sequence is behind this tenant shard's
     pub(crate) fn apply_optimization(
         &mut self,
         scheduler: &mut Scheduler,
         optimization: ScheduleOptimization,
-    ) {
+    ) -> bool {
+        if optimization.sequence != self.sequence {
+            return false;
+        }
+
         metrics::METRICS_REGISTRY
             .metrics_group
             .storage_controller_schedule_optimization
             .inc();
 
-        match optimization {
-            ScheduleOptimization::MigrateAttachment(MigrateAttachment {
+        match optimization.action {
+            ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
                 old_attached_node_id,
                 new_attached_node_id,
             }) => {
@@ -765,7 +787,7 @@ impl TenantShard {
                 self.intent
                     .promote_attached(scheduler, new_attached_node_id);
             }
-            ScheduleOptimization::ReplaceSecondary(ReplaceSecondary {
+            ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
                 old_node_id,
                 new_node_id,
             }) => {
@@ -773,6 +795,8 @@ impl TenantShard {
                 self.intent.push_secondary(scheduler, new_node_id);
             }
         }
+
+        true
     }
 
     /// Query whether the tenant's observed state for attached node matches its intent state, and if so,
@@ -952,8 +976,8 @@ impl TenantShard {
 
     /// Create a waiter that will wait for some future Reconciler that hasn't been spawned yet.
     ///
-    /// This is appropriate when you can't spawn a recociler (e.g. due to resource limits), but
-    /// you would like to wait until one gets spawned in the background.
+    /// This is appropriate when you can't spawn a reconciler (e.g. due to resource limits), but
+    /// you would like to wait on the next reconciler that gets spawned in the background.
     pub(crate) fn future_reconcile_waiter(&mut self) -> ReconcilerWaiter {
         self.ensure_sequence_ahead();
 
@@ -1428,10 +1452,13 @@ pub(crate) mod tests {
         // would be no other shards from the same tenant, and request to do so.
         assert_eq!(
             optimization_a,
-            Some(ScheduleOptimization::MigrateAttachment(MigrateAttachment {
-                old_attached_node_id: NodeId(1),
-                new_attached_node_id: NodeId(2)
-            }))
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                    old_attached_node_id: NodeId(1),
+                    new_attached_node_id: NodeId(2)
+                })
+            })
         );
 
         // Note that these optimizing two shards in the same tenant with the same ScheduleContext is
@@ -1442,10 +1469,13 @@ pub(crate) mod tests {
         let optimization_b = shard_b.optimize_attachment(&nodes, &schedule_context);
         assert_eq!(
             optimization_b,
-            Some(ScheduleOptimization::MigrateAttachment(MigrateAttachment {
-                old_attached_node_id: NodeId(1),
-                new_attached_node_id: NodeId(3)
-            }))
+            Some(ScheduleOptimization {
+                sequence: shard_b.sequence,
+                action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                    old_attached_node_id: NodeId(1),
+                    new_attached_node_id: NodeId(3)
+                })
+            })
         );
 
         // Applying these optimizations should result in the end state proposed
@@ -1489,10 +1519,13 @@ pub(crate) mod tests {
         // same tenant should generate an optimization to move one away
         assert_eq!(
             optimization_a,
-            Some(ScheduleOptimization::ReplaceSecondary(ReplaceSecondary {
-                old_node_id: NodeId(3),
-                new_node_id: NodeId(4)
-            }))
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
+                    old_node_id: NodeId(3),
+                    new_node_id: NodeId(4)
+                })
+            })
         );
 
         shard_a.apply_optimization(&mut scheduler, optimization_a.unwrap());

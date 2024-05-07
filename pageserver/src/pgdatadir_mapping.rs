@@ -23,6 +23,7 @@ use pageserver_api::key::{
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
+use pageserver_api::keyspace::SparseKeySpace;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -278,7 +279,7 @@ impl Timeline {
 
         match RelDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
-                let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
+                let exists = dir.rels.contains(&(tag.relnode, tag.forknum));
                 Ok(exists)
             }
             Err(e) => Err(PageReconstructError::from(e)),
@@ -378,7 +379,7 @@ impl Timeline {
 
         match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
-                let exists = dir.segments.get(&segno).is_some();
+                let exists = dir.segments.contains(&segno);
                 Ok(exists)
             }
             Err(e) => Err(PageReconstructError::from(e)),
@@ -730,11 +731,13 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
+    ///
+    /// The return value is (dense keyspace, sparse keyspace).
     pub(crate) async fn collect_keyspace(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<KeySpace, CollectKeySpaceError> {
+    ) -> Result<(KeySpace, SparseKeySpace), CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -806,7 +809,12 @@ impl Timeline {
         if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
             result.add_key(AUX_FILES_KEY);
         }
-        Ok(result.to_keyspace())
+
+        Ok((
+            result.to_keyspace(),
+            /* AUX sparse key space */
+            SparseKeySpace(KeySpace::single(Key::metadata_aux_key_range())),
+        ))
     }
 
     /// Get cached size of relation if it not updated after specified LSN
@@ -1135,21 +1143,22 @@ impl<'a> DatadirModification<'a> {
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
             .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
-            // Didn't exist. Update dbdir
-            dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
-            let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
-            self.pending_directory_entries
-                .push((DirectoryKind::Db, dbdir.dbdirs.len()));
-            self.put(DBDIR_KEY, Value::Image(buf.into()));
+        let mut rel_dir =
+            if let hash_map::Entry::Vacant(e) = dbdir.dbdirs.entry((rel.spcnode, rel.dbnode)) {
+                // Didn't exist. Update dbdir
+                e.insert(false);
+                let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
+                self.pending_directory_entries
+                    .push((DirectoryKind::Db, dbdir.dbdirs.len()));
+                self.put(DBDIR_KEY, Value::Image(buf.into()));
 
-            // and create the RelDirectory
-            RelDirectory::default()
-        } else {
-            // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
-                .context("deserialize db")?
-        };
+                // and create the RelDirectory
+                RelDirectory::default()
+            } else {
+                // reldir already exists, fetch it
+                RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
+                    .context("deserialize db")?
+            };
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {

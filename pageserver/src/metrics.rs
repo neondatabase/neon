@@ -51,8 +51,8 @@ pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "gc")]
     Gc,
 
-    #[strum(serialize = "update gc info")]
-    UpdateGcInfo,
+    #[strum(serialize = "find gc cutoffs")]
+    FindGcCutoffs,
 
     #[strum(serialize = "create tenant")]
     CreateTenant,
@@ -194,6 +194,11 @@ pub(crate) struct GetVectoredLatency {
     map: EnumMap<TaskKind, Option<Histogram>>,
 }
 
+#[allow(dead_code)]
+pub(crate) struct ScanLatency {
+    map: EnumMap<TaskKind, Option<Histogram>>,
+}
+
 impl GetVectoredLatency {
     // Only these task types perform vectored gets. Filter all other tasks out to reduce total
     // cardinality of the metric.
@@ -201,6 +206,48 @@ impl GetVectoredLatency {
 
     pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
         self.map[task_kind].as_ref()
+    }
+}
+
+impl ScanLatency {
+    // Only these task types perform vectored gets. Filter all other tasks out to reduce total
+    // cardinality of the metric.
+    const TRACKED_TASK_KINDS: [TaskKind; 1] = [TaskKind::PageRequestHandler];
+
+    pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
+        self.map[task_kind].as_ref()
+    }
+}
+
+pub(crate) struct ScanLatencyOngoingRecording<'a> {
+    parent: &'a Histogram,
+    start: std::time::Instant,
+}
+
+impl<'a> ScanLatencyOngoingRecording<'a> {
+    pub(crate) fn start_recording(parent: &'a Histogram) -> ScanLatencyOngoingRecording<'a> {
+        let start = Instant::now();
+        ScanLatencyOngoingRecording { parent, start }
+    }
+
+    pub(crate) fn observe(self, throttled: Option<Duration>) {
+        let elapsed = self.start.elapsed();
+        let ex_throttled = if let Some(throttled) = throttled {
+            elapsed.checked_sub(throttled)
+        } else {
+            Some(elapsed)
+        };
+        if let Some(ex_throttled) = ex_throttled {
+            self.parent.observe(ex_throttled.as_secs_f64());
+        } else {
+            use utils::rate_limit::RateLimit;
+            static LOGGED: Lazy<Mutex<RateLimit>> =
+                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+            let mut rate_limit = LOGGED.lock().unwrap();
+            rate_limit.call(|| {
+                warn!("error deducting time spent throttled; this message is logged at a global rate limit");
+            });
+        }
     }
 }
 
@@ -218,6 +265,29 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
             let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
 
             if GetVectoredLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
+                let task_kind = task_kind.into();
+                Some(inner.with_label_values(&[task_kind]))
+            } else {
+                None
+            }
+        })),
+    }
+});
+
+pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
+    let inner = register_histogram_vec!(
+        "pageserver_scan_seconds",
+        "Time spent in scan, excluding time spent in timeline_get_throttle.",
+        &["task_kind"],
+        CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric");
+
+    ScanLatency {
+        map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
+            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+
+            if ScanLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
                 let task_kind = task_kind.into();
                 Some(inner.with_label_values(&[task_kind]))
             } else {
@@ -1989,7 +2059,7 @@ pub(crate) struct TimelineMetrics {
     pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
-    pub update_gc_info_histo: StorageTimeMetrics,
+    pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -2050,8 +2120,8 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
-        let update_gc_info_histo = StorageTimeMetrics::new(
-            StorageTimeOperation::UpdateGcInfo,
+        let find_gc_cutoffs_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::FindGcCutoffs,
             &tenant_id,
             &shard_id,
             &timeline_id,
@@ -2098,7 +2168,7 @@ impl TimelineMetrics {
             logical_size_histo,
             imitate_logical_size_histo,
             garbage_collect_histo,
-            update_gc_info_histo,
+            find_gc_cutoffs_histo,
             load_layer_map_histo,
             last_record_gauge,
             resident_physical_size_gauge,

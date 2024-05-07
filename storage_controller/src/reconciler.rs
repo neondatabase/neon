@@ -1,12 +1,12 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::service;
-use hyper::StatusCode;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use pageserver_client::mgmt_api;
+use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

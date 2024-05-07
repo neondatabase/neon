@@ -287,6 +287,11 @@ def test_sharding_split_smoke(
         == shard_count
     )
 
+    # Make secondary downloads slow: this exercises the storage controller logic for not migrating an attachment
+    # during post-split optimization until the secondary is ready
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "return(1000)")])
+
     env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
 
     post_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
@@ -300,7 +305,7 @@ def test_sharding_split_smoke(
 
     # Enough background reconciliations should result in the shards being properly distributed.
     # Run this before the workload, because its LSN-waiting code presumes stable locations.
-    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.reconcile_until_idle(timeout_secs=60)
 
     workload.validate()
 
@@ -341,6 +346,10 @@ def test_sharding_split_smoke(
     )
     assert cancelled_reconciles is not None and int(cancelled_reconciles) == 0
     assert errored_reconciles is not None and int(errored_reconciles) == 0
+
+    # We should see that the migration of shards after the split waited for secondaries to warm up
+    # before happening
+    assert env.storage_controller.log_contains(".*Skipping.*because secondary isn't ready.*")
 
     env.storage_controller.consistency_check()
 
@@ -928,6 +937,8 @@ def test_sharding_split_failures(
             ".*Reconcile error: receive body: error sending request for url.*",
             # Node offline cases will fail inside reconciler when detaching secondaries
             ".*Reconcile error on shard.*: receive body: error sending request for url.*",
+            # Node offline cases may eventually cancel reconcilers when the heartbeater realizes nodes are offline
+            ".*Reconcile error.*Cancelled.*",
             # While parent shard's client is stopped during split, flush loop updating LSNs will emit this warning
             ".*Failed to schedule metadata upload after updating disk_consistent_lsn.*",
         ]
@@ -1068,6 +1079,17 @@ def test_sharding_split_failures(
         # Splitting again should work, since we cleared the failure
         finish_split()
         assert_split_done()
+
+    if isinstance(failure, StorageControllerFailpoint) and "post-complete" in failure.failpoint:
+        # On a post-complete failure, the controller will recover the post-split state
+        # after restart, but it will have missed the optimization part of the split function
+        # where secondary downloads are kicked off.  This means that reconcile_until_idle
+        # will take a very long time if we wait for all optimizations to complete, because
+        # those optimizations will wait for secondary downloads.
+        #
+        # Avoid that by configuring the tenant into Essential scheduling mode, so that it will
+        # skip optimizations when we're exercising this particular failpoint.
+        env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Essential"})
 
     # Having completed the split, pump the background reconciles to ensure that
     # the scheduler reaches an idle state
