@@ -61,7 +61,6 @@ async fn test_simple_updates() {
         executor.ingest_uniform(1000, 50, &(0..100_000)).unwrap();
     }
 
-    // Check that all the layers are smaller than the target size (with some slop)
     for l in executor.live_layers.iter() {
         println!("layer {}: {}", l.short_id(), l.file_size());
     }
