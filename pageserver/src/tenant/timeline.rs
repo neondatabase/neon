@@ -3041,6 +3041,11 @@ impl Timeline {
     /// Returns true if the given lsn is or was an ancestor branchpoint.
     pub(crate) fn is_ancestor_lsn(&self, lsn: Lsn) -> bool {
         self.ancestor_lsn == lsn
+            || (self.ancestor_lsn == Lsn::INVALID
+                && self
+                    .remote_client
+                    .as_ref()
+                    .is_some_and(|rtc| rtc.is_previous_ancestor_lsn(lsn)))
     }
 }
 

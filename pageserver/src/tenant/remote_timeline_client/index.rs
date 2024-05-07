@@ -129,9 +129,10 @@ impl Lineage {
     }
 
     /// The queried lsn is most likely the basebackup lsn, and this answers question "is it allowed
-    /// to start a read/write primary at this lsn". The answer is true if the lsn would had been at
-    /// the branch point.
-    fn is_at_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
+    /// to start a read/write primary at this lsn".
+    ///
+    /// Returns true if the Lsn was previously a branch point.
+    pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
         self.original_ancestor
             .as_ref()
             .is_some_and(|(_, ancestor_lsn, _)| lsn == *ancestor_lsn)

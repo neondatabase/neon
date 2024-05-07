@@ -437,6 +437,19 @@ impl RemoteTimelineClient {
         }
     }
 
+    /// Returns true if this timeline was previously detached at this Lsn and the remote timeline
+    /// client is currently initialized.
+    pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
+        // technically this is a dirty read, but given how timeline detach ancestor is implemented
+        // via tenant restart, the lineage has always been uploaded.
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .initialized_mut()
+            .map(|uq| uq.latest_lineage.is_previous_ancestor_lsn(lsn))
+            .unwrap_or(false)
+    }
+
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
         let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
             current_remote_index_part
