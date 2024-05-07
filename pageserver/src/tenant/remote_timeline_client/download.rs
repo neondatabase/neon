@@ -21,6 +21,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
+use crate::tenant::storage_layer::layer::local_layer_path;
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::Generation;
 use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
@@ -55,7 +56,13 @@ pub async fn download_layer_file<'a>(
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     let timeline_path = conf.timeline_path(&tenant_shard_id, &timeline_id);
-    let local_path = timeline_path.join(layer_file_name.file_name());
+    let local_path = local_layer_path(
+        conf,
+        &tenant_shard_id,
+        &timeline_id,
+        layer_file_name,
+        &layer_metadata.generation,
+    );
 
     let remote_path = remote_layer_path(
         &tenant_shard_id.tenant_id,

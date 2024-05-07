@@ -1140,15 +1140,21 @@ impl RemoteTimelineClient {
         uploaded: &ResidentLayer,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
+        let remote_path = remote_layer_path(
+            &self.tenant_shard_id.tenant_id,
+            &self.timeline_id,
+            self.tenant_shard_id.to_index(),
+            &uploaded.layer_desc().filename(),
+            uploaded.metadata().generation,
+        );
+
         backoff::retry(
             || async {
-                let m = uploaded.metadata();
                 upload::upload_timeline_layer(
-                    self.conf,
                     &self.storage_impl,
                     uploaded.local_path(),
-                    &uploaded.metadata(),
-                    m.generation,
+                    &remote_path,
+                    uploaded.metadata().file_size(),
                     cancel,
                 )
                 .await
@@ -1173,15 +1179,30 @@ impl RemoteTimelineClient {
         adopted_as: &Layer,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
+        let source_remote_path = remote_layer_path(
+            &self.tenant_shard_id.tenant_id,
+            &adopted
+                .get_timeline_id()
+                .expect("Source timeline should be alive"),
+            self.tenant_shard_id.to_index(),
+            &adopted.layer_desc().filename(),
+            adopted.metadata().generation,
+        );
+
+        let target_remote_path = remote_layer_path(
+            &self.tenant_shard_id.tenant_id,
+            &self.timeline_id,
+            self.tenant_shard_id.to_index(),
+            &adopted_as.layer_desc().filename(),
+            adopted_as.metadata().generation,
+        );
+
         backoff::retry(
             || async {
                 upload::copy_timeline_layer(
-                    self.conf,
                     &self.storage_impl,
-                    adopted.local_path(),
-                    &adopted.metadata(),
-                    adopted_as.local_path(),
-                    &adopted_as.metadata(),
+                    &source_remote_path,
+                    &target_remote_path,
                     cancel,
                 )
                 .await
@@ -1496,13 +1517,25 @@ impl RemoteTimelineClient {
 
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref layer, ref layer_metadata) => {
-                    let path = layer.local_path();
+                    let local_path = layer.local_path();
+
+                    // We should only be uploading layers created by this `Tenant`'s lifetime, so
+                    // the metadata in the upload should always match our current generation.
+                    assert_eq!(layer_metadata.generation, self.generation);
+
+                    let remote_path = remote_layer_path(
+                        &self.tenant_shard_id.tenant_id,
+                        &self.timeline_id,
+                        layer_metadata.shard,
+                        &layer.layer_desc().filename(),
+                        layer_metadata.generation,
+                    );
+
                     upload::upload_timeline_layer(
-                        self.conf,
                         &self.storage_impl,
-                        path,
-                        layer_metadata,
-                        self.generation,
+                        local_path,
+                        &remote_path,
+                        layer_metadata.file_size(),
                         &self.cancel,
                     )
                     .measure_remote_op(
@@ -1931,29 +1964,6 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
     }
 }
 
-/// Files on the remote storage are stored with paths, relative to the workdir.
-/// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
-///
-/// Errors if the path provided does not start from pageserver's workdir.
-pub(crate) fn remote_path(
-    conf: &PageServerConf,
-    local_path: &Utf8Path,
-    generation: Generation,
-) -> anyhow::Result<RemotePath> {
-    let stripped = local_path
-        .strip_prefix(&conf.workdir)
-        .context("Failed to strip workdir prefix")?;
-
-    let suffixed = format!("{0}{1}", stripped, generation.get_suffix());
-
-    RemotePath::new(Utf8Path::new(&suffixed)).with_context(|| {
-        format!(
-            "to resolve remote part of path {:?} for base {:?}",
-            local_path, conf.workdir
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1961,6 +1971,7 @@ mod tests {
         context::RequestContext,
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
+            storage_layer::layer::local_layer_path,
             Tenant, Timeline,
         },
         DEFAULT_PG_VERSION,
@@ -2143,11 +2154,20 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, contents): (LayerFileName, Vec<u8>)| {
-            std::fs::write(timeline_path.join(name.file_name()), &contents).unwrap();
+
+            let local_path = local_layer_path(
+                harness.conf,
+                &timeline.tenant_shard_id,
+                &timeline.timeline_id,
+                &name,
+                &generation,
+            );
+            std::fs::write(&local_path, &contents).unwrap();
 
             Layer::for_resident(
                 harness.conf,
                 &timeline,
+                local_path,
                 name,
                 LayerFileMetadata::new(contents.len() as u64, generation, shard),
             )
@@ -2284,19 +2304,22 @@ mod tests {
             ..
         } = TestSetup::new("metrics").await.unwrap();
         let client = timeline.remote_client.as_ref().unwrap();
-        let timeline_path = harness.timeline_path(&TIMELINE_ID);
 
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
+        let local_path = local_layer_path(
+            harness.conf,
+            &timeline.tenant_shard_id,
+            &timeline.timeline_id,
+            &layer_file_name_1,
+            &harness.generation,
+        );
         let content_1 = dummy_contents("foo");
-        std::fs::write(
-            timeline_path.join(layer_file_name_1.file_name()),
-            &content_1,
-        )
-        .unwrap();
+        std::fs::write(&local_path, &content_1).unwrap();
 
         let layer_file_1 = Layer::for_resident(
             harness.conf,
             &timeline,
+            local_path,
             layer_file_name_1.clone(),
             LayerFileMetadata::new(content_1.len() as u64, harness.generation, harness.shard),
         );
