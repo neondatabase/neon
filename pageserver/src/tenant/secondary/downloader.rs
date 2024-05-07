@@ -22,7 +22,7 @@ use crate::{
             FAILED_REMOTE_OP_RETRIES,
         },
         span::debug_assert_current_span_has_tenant_id,
-        storage_layer::LayerFileName,
+        storage_layer::{layer::local_layer_path, LayerFileName},
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
     },
     virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
@@ -621,12 +621,12 @@ impl<'a> TenantDownloader<'a> {
                 let layers_in_heatmap = heatmap_timeline
                     .layers
                     .iter()
-                    .map(|l| &l.name)
+                    .map(|l| (&l.name, l.metadata.generation))
                     .collect::<HashSet<_>>();
                 let layers_on_disk = timeline_state
                     .on_disk_layers
                     .iter()
-                    .map(|l| l.0)
+                    .map(|l| (l.0, l.1.metadata.generation))
                     .collect::<HashSet<_>>();
 
                 let mut layer_count = layers_on_disk.len();
@@ -637,16 +637,24 @@ impl<'a> TenantDownloader<'a> {
                     .sum();
 
                 // Remove on-disk layers that are no longer present in heatmap
-                for layer in layers_on_disk.difference(&layers_in_heatmap) {
+                for (layer_file_name, generation) in layers_on_disk.difference(&layers_in_heatmap) {
                     layer_count -= 1;
                     layer_byte_count -= timeline_state
                         .on_disk_layers
-                        .get(layer)
+                        .get(layer_file_name)
                         .unwrap()
                         .metadata
                         .file_size();
 
-                    delete_layers.push((*timeline_id, (*layer).clone()));
+                    let local_path = local_layer_path(
+                        self.conf,
+                        self.secondary_state.get_tenant_shard_id(),
+                        timeline_id,
+                        layer_file_name,
+                        generation,
+                    );
+
+                    delete_layers.push((*timeline_id, (*layer_file_name).clone(), local_path));
                 }
 
                 progress.bytes_downloaded += layer_byte_count;
@@ -661,11 +669,7 @@ impl<'a> TenantDownloader<'a> {
         }
 
         // Execute accumulated deletions
-        for (timeline_id, layer_name) in delete_layers {
-            let timeline_path = self
-                .conf
-                .timeline_path(self.secondary_state.get_tenant_shard_id(), &timeline_id);
-            let local_path = timeline_path.join(layer_name.to_string());
+        for (timeline_id, layer_name, local_path) in delete_layers {
             tracing::info!(timeline_id=%timeline_id, "Removing secondary local layer {layer_name} because it's absent in heatmap",);
 
             tokio::fs::remove_file(&local_path)
@@ -754,9 +758,6 @@ impl<'a> TenantDownloader<'a> {
     ) -> Result<(), UpdateError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
-        let timeline_path = self
-            .conf
-            .timeline_path(tenant_shard_id, &timeline.timeline_id);
 
         // Accumulate updates to the state
         let mut touched = Vec::new();
@@ -806,10 +807,14 @@ impl<'a> TenantDownloader<'a> {
                 if cfg!(debug_assertions) {
                     // Debug for https://github.com/neondatabase/neon/issues/6966: check that the files we think
                     // are already present on disk are really there.
-                    let local_path = self
-                        .conf
-                        .timeline_path(tenant_shard_id, &timeline.timeline_id)
-                        .join(layer.name.file_name());
+                    let local_path = local_layer_path(
+                        self.conf,
+                        tenant_shard_id,
+                        &timeline.timeline_id,
+                        &layer.name,
+                        &layer.metadata.generation,
+                    );
+
                     match tokio::fs::metadata(&local_path).await {
                         Ok(meta) => {
                             tracing::debug!(
@@ -903,7 +908,13 @@ impl<'a> TenantDownloader<'a> {
             };
 
             if downloaded_bytes != layer.metadata.file_size {
-                let local_path = timeline_path.join(layer.name.to_string());
+                let local_path = local_layer_path(
+                    self.conf,
+                    tenant_shard_id,
+                    &timeline.timeline_id,
+                    &layer.name,
+                    &layer.metadata.generation,
+                );
 
                 tracing::warn!(
                     "Downloaded layer {} with unexpected size {} != {}.  Removing download.",

@@ -12,7 +12,7 @@ use crate::{
     METADATA_FILE_NAME,
 };
 use anyhow::Context;
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::ShardIndex;
 use std::{collections::HashMap, str::FromStr};
 use utils::lsn::Lsn;
@@ -20,7 +20,7 @@ use utils::lsn::Lsn;
 /// Identified files in the timeline directory.
 pub(super) enum Discovered {
     /// The only one we care about
-    Layer(LayerFileName, u64),
+    Layer(LayerFileName, Utf8PathBuf, u64),
     /// Old ephmeral files from previous launches, should be removed
     Ephemeral(String),
     /// Old temporary timeline files, unsure what these really are, should be removed
@@ -46,7 +46,7 @@ pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovere
         let discovered = match LayerFileName::from_str(&file_name) {
             Ok(file_name) => {
                 let file_size = direntry.metadata()?.len();
-                Discovered::Layer(file_name, file_size)
+                Discovered::Layer(file_name, direntry.path().to_owned(), file_size)
             }
             Err(_) => {
                 if file_name == METADATA_FILE_NAME {
@@ -104,26 +104,38 @@ pub(super) enum DismissedLayer {
 
 /// Merges local discoveries and remote [`IndexPart`] to a collection of decisions.
 pub(super) fn reconcile(
-    discovered: Vec<(LayerFileName, u64)>,
+    discovered: Vec<(LayerFileName, Utf8PathBuf, u64)>,
     index_part: Option<&IndexPart>,
     disk_consistent_lsn: Lsn,
     generation: Generation,
     shard: ShardIndex,
-) -> Vec<(LayerFileName, Result<Decision, DismissedLayer>)> {
+) -> Vec<(
+    LayerFileName,
+    Option<Utf8PathBuf>,
+    Result<Decision, DismissedLayer>,
+)> {
     use Decision::*;
 
-    // name => (local, remote)
-    type Collected = HashMap<LayerFileName, (Option<LayerFileMetadata>, Option<LayerFileMetadata>)>;
+    // name => (local_path, local_metadata, remote_metadata)
+    type Collected = HashMap<
+        LayerFileName,
+        (
+            Option<Utf8PathBuf>,
+            Option<LayerFileMetadata>,
+            Option<LayerFileMetadata>,
+        ),
+    >;
 
     let mut discovered = discovered
         .into_iter()
-        .map(|(name, file_size)| {
+        .map(|(layer_name, local_path, file_size)| {
             (
-                name,
+                layer_name,
                 // The generation and shard here will be corrected to match IndexPart in the merge below, unless
                 // it is not in IndexPart, in which case using our current generation makes sense
                 // because it will be uploaded in this generation.
                 (
+                    Some(local_path),
                     Some(LayerFileMetadata::new(file_size, generation, shard)),
                     None,
                 ),
@@ -140,15 +152,15 @@ pub(super) fn reconcile(
         .map(|(name, metadata)| (name, LayerFileMetadata::from(metadata)))
         .for_each(|(name, metadata)| {
             if let Some(existing) = discovered.get_mut(name) {
-                existing.1 = Some(metadata);
+                existing.2 = Some(metadata);
             } else {
-                discovered.insert(name.to_owned(), (None, Some(metadata)));
+                discovered.insert(name.to_owned(), (None, None, Some(metadata)));
             }
         });
 
     discovered
         .into_iter()
-        .map(|(name, (local, remote))| {
+        .map(|(name, (local_path, local, remote))| {
             let decision = if name.is_in_future(disk_consistent_lsn) {
                 Err(DismissedLayer::Future { local })
             } else {
@@ -165,7 +177,7 @@ pub(super) fn reconcile(
                 }
             };
 
-            (name, decision)
+            (name, local_path, decision)
         })
         .collect::<Vec<_>>()
 }

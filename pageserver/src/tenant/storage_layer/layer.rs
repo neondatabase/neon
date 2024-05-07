@@ -4,12 +4,13 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::ShardIndex;
+use pageserver_api::shard::{ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 use tracing::Instrument;
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
@@ -123,6 +124,25 @@ impl PartialEq for Layer {
     }
 }
 
+pub(crate) fn local_layer_path(
+    conf: &PageServerConf,
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+    layer_file_name: &LayerFileName,
+    _generation: &Generation,
+) -> Utf8PathBuf {
+    let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
+
+    timeline_path.join(layer_file_name.file_name())
+
+    // TOOD: include generation in the name in now+1 releases.
+    // timeline_path.join(format!(
+    //     "{}{}",
+    //     layer_file_name.file_name(),
+    //     generation.get_suffix()
+    // ))
+}
+
 impl Layer {
     /// Creates a layer value for a file we know to not be resident.
     pub(crate) fn for_evicted(
@@ -131,6 +151,14 @@ impl Layer {
         file_name: LayerFileName,
         metadata: LayerFileMetadata,
     ) -> Self {
+        let local_path = local_layer_path(
+            conf,
+            &timeline.tenant_shard_id,
+            &timeline.timeline_id,
+            &file_name,
+            &metadata.generation,
+        );
+
         let desc = PersistentLayerDesc::from_filename(
             timeline.tenant_shard_id,
             timeline.timeline_id,
@@ -143,6 +171,7 @@ impl Layer {
         let owner = Layer(Arc::new(LayerInner::new(
             conf,
             timeline,
+            local_path,
             access_stats,
             desc,
             None,
@@ -159,6 +188,7 @@ impl Layer {
     pub(crate) fn for_resident(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
+        local_path: Utf8PathBuf,
         file_name: LayerFileName,
         metadata: LayerFileMetadata,
     ) -> ResidentLayer {
@@ -184,6 +214,7 @@ impl Layer {
             LayerInner::new(
                 conf,
                 timeline,
+                local_path,
                 access_stats,
                 desc,
                 Some(inner),
@@ -225,9 +256,19 @@ impl Layer {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
+
+            let local_path = local_layer_path(
+                conf,
+                &timeline.tenant_shard_id,
+                &timeline.timeline_id,
+                &desc.filename(),
+                &timeline.generation,
+            );
+
             LayerInner::new(
                 conf,
                 timeline,
+                local_path,
                 access_stats,
                 desc,
                 Some(inner),
@@ -408,6 +449,13 @@ impl Layer {
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.0.metadata()
+    }
+
+    pub(crate) fn get_timeline_id(&self) -> Option<TimelineId> {
+        self.0
+            .timeline
+            .upgrade()
+            .map(|timeline| timeline.timeline_id)
     }
 
     /// Traditional debug dumping facility
@@ -709,19 +757,17 @@ impl Drop for LayerInner {
 }
 
 impl LayerInner {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
+        local_path: Utf8PathBuf,
         access_stats: LayerAccessStats,
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
         shard: ShardIndex,
     ) -> Self {
-        let path = conf
-            .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id)
-            .join(desc.filename().to_string());
-
         let (inner, version, init_status) = if let Some(inner) = downloaded {
             let version = inner.version;
             let resident = ResidentOrWantedEvicted::Resident(inner);
@@ -737,7 +783,7 @@ impl LayerInner {
         LayerInner {
             conf,
             debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
-            path,
+            path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
             have_remote_client: timeline.remote_client.is_some(),
