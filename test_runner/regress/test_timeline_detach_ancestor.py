@@ -48,6 +48,12 @@ class Branchpoint(str, enum.Enum):
         ]
 
 
+SHUTDOWN_ALLOWED_ERRORS = [
+    ".*initial size calculation failed: downloading failed, possibly for shutdown",
+    ".*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+]
+
+
 @pytest.mark.parametrize("branchpoint", Branchpoint.all())
 @pytest.mark.parametrize("restart_after", [True, False])
 def test_ancestor_detach_branched_from(
@@ -61,12 +67,7 @@ def test_ancestor_detach_branched_from(
 
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.extend(
-        [
-            ".*initial size calculation failed: downloading failed, possibly for shutdown",
-            ".*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
-        ]
-    )
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
     client = env.pageserver.http_client()
 
@@ -208,13 +209,7 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
 
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.extend(
-        [
-            ".*initial size calculation failed: downloading failed, possibly for shutdown",
-            # after restart this is likely to happen if there is other load on the runner
-            ".*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
-        ]
-    )
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
     client = env.pageserver.http_client()
 
@@ -396,9 +391,7 @@ def test_detached_receives_flushes_while_being_detached(
     with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
 
-    env.pageserver.allowed_errors.append(
-        "initial size calculation failed: downloading failed, possibly for shutdown"
-    )
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
 
 # TODO:
