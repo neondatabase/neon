@@ -647,7 +647,14 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
+            let Some(prev) = upload_queue.latest_metadata.ancestor_timeline() else {
+                return Err(anyhow::anyhow!(
+                    "cannot reparent without a current ancestor"
+                ));
+            };
+
             upload_queue.latest_metadata.reparent(new_parent);
+            upload_queue.latest_lineage.record_previous_ancestor(&prev);
 
             self.schedule_index_upload(upload_queue);
 
@@ -671,6 +678,7 @@ impl RemoteTimelineClient {
             let upload_queue = guard.initialized_mut()?;
 
             upload_queue.latest_metadata.detach_from_ancestor(&adopted);
+            upload_queue.latest_lineage.record_detaching(&adopted);
 
             for layer in layers {
                 upload_queue

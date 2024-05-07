@@ -106,7 +106,12 @@ pub(crate) struct Lineage {
 impl Lineage {
     const REMEMBER_AT_MOST: usize = 100;
 
-    fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) {
+    pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) {
+        if self.reparenting_history.last() == Some(&old_ancestor) {
+            // do not re-record it
+            return;
+        }
+
         let drop_oldest = self.reparenting_history.len() + 1 > Self::REMEMBER_AT_MOST;
 
         self.reparented_overflown |= drop_oldest;
@@ -116,7 +121,7 @@ impl Lineage {
         self.reparenting_history.push(*old_ancestor);
     }
 
-    fn record_detaching(&mut self, branchpoint: (TimelineId, Lsn)) {
+    pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) {
         assert!(self.original_ancestor.is_none());
 
         self.original_ancestor =
