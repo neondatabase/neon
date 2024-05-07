@@ -1,3 +1,4 @@
+import datetime
 import enum
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
@@ -12,6 +13,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import HistoricLayerInfo
 from fixtures.pageserver.utils import wait_timeline_detail_404
+from fixtures.remote_storage import LocalFsStorage
 from fixtures.types import Lsn, TimelineId
 
 
@@ -275,13 +277,42 @@ def test_ancestor_detach_reparents_earlier(
         ("reparented", reparented, timeline_id, 0, 1),
     ]
 
-    for _, timeline_id, expected_ancestor, _, _ in expected_result:
-        details = client.timeline_detail(env.initial_tenant, timeline_id)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    for _, queried_timeline, expected_ancestor, _, _ in expected_result:
+        details = client.timeline_detail(env.initial_tenant, queried_timeline)
         ancestor_timeline_id = details["ancestor_timeline_id"]
         if expected_ancestor is None:
             assert ancestor_timeline_id is None
         else:
             assert TimelineId(ancestor_timeline_id) == expected_ancestor
+
+        index_part = env.pageserver_remote_storage.index_content(
+            env.initial_tenant, queried_timeline
+        )
+        lineage = index_part["lineage"]
+        assert lineage is not None
+
+        assert lineage.get("reparenting_history_overflown", "false") == "false"
+
+        if queried_timeline == timeline_id:
+            original_ancestor = lineage["original_ancestor"]
+            assert original_ancestor is not None
+            assert original_ancestor[0] == str(env.initial_timeline)
+            assert original_ancestor[1] == str(branchpoint_x)
+
+            # this does not contain Z in the end, so fromisoformat accepts it
+            # it is to be in line with the deletion timestamp.. well, almost.
+            when = original_ancestor[2][:26]
+            when_ts = datetime.datetime.fromisoformat(when)
+            assert when_ts < datetime.datetime.now()
+            assert len(lineage.get("reparenting_history", [])) == 0
+        elif expected_ancestor == timeline_id:
+            assert len(lineage.get("original_ancestor", [])) == 0
+            assert lineage["reparenting_history"] == [str(env.initial_timeline)]
+        else:
+            assert len(lineage.get("original_ancestor", [])) == 0
+            assert len(lineage.get("reparenting_history", [])) == 0
 
     for name, _, _, rows, starts in expected_result:
         with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
