@@ -1676,6 +1676,34 @@ impl Tenant {
         Ok(())
     }
 
+    // Call through to all timelines to freeze ephemeral layers if needed.  Usually
+    // this happens during ingest: this background housekeeping is for freezing layers
+    // that are open but haven't been written to for some time.
+    async fn ingest_housekeeping(&self) {
+        // Scan through the hashmap and collect a list of all the timelines,
+        // while holding the lock. Then drop the lock and actually perform the
+        // compactions.  We don't want to block everything else while the
+        // compaction runs.
+        let timelines = {
+            self.timelines
+                .lock()
+                .unwrap()
+                .values()
+                .filter_map(|timeline| {
+                    if timeline.is_active() {
+                        Some(timeline.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for timeline in &timelines {
+            timeline.maybe_freeze_ephemeral_layer().await;
+        }
+    }
+
     pub fn current_state(&self) -> TenantState {
         self.state.borrow().clone()
     }
