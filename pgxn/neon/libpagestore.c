@@ -105,7 +105,8 @@ typedef enum PSConnectionState {
 /* This backend's per-shard connections */
 typedef struct
 {
-	TimestampTz		last_connect_time;
+	TimestampTz		last_connect_time; /* read-only debug value */
+	TimestampTz		last_reconnect_time;
 	uint32			delay_us;
 	int				n_reconnect_attempts;
 
@@ -376,6 +377,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		int			n_pgsql_params;
 		TimestampTz	now;
 		uint64_t	us_since_last_connect;
+		int64		us_since_last_attempt;
 
 		if (shard->conn != NULL)
 		{
@@ -395,16 +397,20 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Disconnected");
 
 		now = GetCurrentTimestamp();
-		us_since_last_connect = now - shard->last_connect_time;
-		if (us_since_last_connect < MAX_RECONNECT_INTERVAL_USEC)
+		us_since_last_attempt = (int64) (now - shard->last_reconnect_time);
+		shard->last_reconnect_time = now;
+
+		/*
+		 * If we did other tasks between reconnect attempts, then we won't
+		 * need to wait as long as a full delay.
+		 */
+		if (us_since_last_attempt < shard->delay_us)
 		{
-			pg_usleep(shard->delay_us);
-			shard->delay_us = shard->delay_us * 2;
+			pg_usleep(shard->delay_us - us_since_last_attempt);
 		}
-		else
-		{
-			shard->delay_us = MAX_RECONNECT_INTERVAL_USEC;
-		}
+
+		/* update the delay metric */
+		shard->delay_us = Min(shard->delay_us * 2, MAX_RECONNECT_INTERVAL_USEC);
 
 		/*
 		 * Connect using the connection string we got from the
@@ -616,6 +622,12 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		/* fallthrough */
 	}
 	case PS_Connected:
+		/*
+		 * We successfully connected. Future connections to this PageServer
+		 * will do fast retries again, with exponential backoff.
+		 */
+		shard->delay_us = MIN_RECONNECT_INTERVAL_USEC;
+
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connected");
 		neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
 		return true;
@@ -1098,6 +1110,8 @@ pg_init_libpagestore(void)
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
 	}
+
+	memset(page_servers, 0, sizeof(page_servers));
 
 	lfc_init();
 }
