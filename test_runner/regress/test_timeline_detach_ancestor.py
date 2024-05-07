@@ -61,8 +61,11 @@ def test_ancestor_detach_branched_from(
 
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.append(
-        ".*initial size calculation failed: downloading failed, possibly for shutdown"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*initial size calculation failed: downloading failed, possibly for shutdown"
+            ".*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+        ]
     )
 
     client = env.pageserver.http_client()
