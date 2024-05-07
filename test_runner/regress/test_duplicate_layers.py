@@ -1,7 +1,6 @@
 import time
 
 import pytest
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.pageserver.types import parse_layer_file_name
 from fixtures.pageserver.utils import (
@@ -103,7 +102,6 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
 
         if l1_found is not None:
             raise RuntimeError(f"found multiple L1: {l1_found.name} and {path.name}")
-        log.info(f"Found L1: {path}")
         l1_found = parse_layer_file_name(path.name)
 
     assert l1_found is not None, "failed to find L1 locally"

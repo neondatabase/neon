@@ -2622,8 +2622,6 @@ class NeonPageserver(PgProtocol, LogUtils):
         self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: LayerFileName
     ) -> bool:
         layers = self.list_layers(tenant_id, timeline_id)
-        for layer in layers:
-            log.info(f"layer found: {layer}")
         return layer_name in [parse_layer_file_name(p.name) for p in layers]
 
 
