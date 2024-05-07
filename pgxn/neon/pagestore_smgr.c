@@ -605,11 +605,12 @@ prefetch_read(PrefetchRequest *slot)
 	}
 	else
 	{
-		neon_shard_log(slot->shard_no, ERROR,
-					   "No response from reading prefetch entry %llu: %u/%u/%u.%u block %u",
+		neon_shard_log(slot->shard_no, WARNING,
+					   "No response from reading prefetch entry %llu: %u/%u/%u.%u block %u. This can be caused by a concurrent disconnect",
 					   slot->my_ring_index,
 					   RelFileInfoFmt(BufTagGetNRelFileInfo(slot->buftag)),
 					   slot->buftag.forkNum, slot->buftag.blockNum);
+		return false;
 	}
 }
 

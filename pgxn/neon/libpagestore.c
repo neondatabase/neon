@@ -276,6 +276,7 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 	{
 		begin_update_counter = pg_atomic_read_u64(&pagestore_shared->begin_update_counter);
 		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
+
 		num_shards = shard_map->num_shards;
 		if (connstr_p && shard_no < MAX_SHARDS)
 			strlcpy(connstr_p, shard_map->connstring[shard_no], MAX_PAGESERVER_CONNSTRING_SIZE);
@@ -344,8 +345,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	WaitEventSet *wes_read = shard->wes_read;
 	WaitEventSet *wes_write = shard->wes_write;
 	char		connstr[MAX_PAGESERVER_CONNSTRING_SIZE];
-	TimestampTz now;
-	uint64_t	us_since_last_connect;
 
 #define CLEANUP_AND_DISCONNECT(shard) \
 	do { \
@@ -375,6 +374,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		const char *keywords[3];
 		const char *values[3];
 		int			n_pgsql_params;
+		TimestampTz	now;
+		uint64_t	us_since_last_connect;
 
 		if (shard->conn != NULL)
 		{
@@ -383,7 +384,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			 * either wes_read or wes_wait.
 			 * Here we clean up that mess if we need to.
 			 */
-			neon_shard_log(shard_no, LOG,
+			neon_shard_log(shard_no, DEBUG1,
 						   "Cleaning up leaked connection from previous OOM error");
 			PQfinish(shard->conn);
 			if (shard->wes_read)
@@ -391,7 +392,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			Assert(!shard->wes_write);
 		}
 
-		neon_shard_log(shard_no, LOG, "Disconnected");
+		neon_shard_log(shard_no, DEBUG5, "Connection state: Disconnected");
 
 		now = GetCurrentTimestamp();
 		us_since_last_connect = now - shard->last_connect_time;
@@ -402,7 +403,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 		else
 		{
-			shard->delay_us = MIN_RECONNECT_INTERVAL_USEC;
+			shard->delay_us = MAX_RECONNECT_INTERVAL_USEC;
 		}
 
 		/*
@@ -443,7 +444,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 						  NULL, NULL);
 		AddWaitEventToSet(wes_read, WL_SOCKET_READABLE, PQsocket(shard->conn), NULL, NULL);
 
-		shard->wes_write = CreateWaitEventSet(TopMemoryContext, 3);
+		wes_write = shard->wes_write = CreateWaitEventSet(TopMemoryContext, 3);
 		AddWaitEventToSet(shard->wes_write, WL_LATCH_SET, PGINVALID_SOCKET,
 						  MyLatch, NULL);
 		AddWaitEventToSet(shard->wes_write, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
@@ -460,9 +461,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		char	   *pagestream_query;
 		int			ps_send_query_ret;
 		bool		connected = false;
-		int			connstatus;
 
-		neon_shard_log(shard_no, LOG, "Connecting_Startup");
+		neon_shard_log(shard_no, DEBUG5, "Connection state: Connecting_Startup");
 
 		do
 		{
@@ -572,6 +572,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	}
 	case PS_Connecting_PageStream:
 	{
+		neon_shard_log(shard_no, DEBUG5, "Connection state: Connecting_PageStream");
+
 		if (PQstatus(conn) == CONNECTION_BAD)
 		{
 			char	   *msg = pchomp(PQerrorMessage(conn));
@@ -614,15 +616,14 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		/* fallthrough */
 	}
 	case PS_Connected:
+		neon_shard_log(shard_no, DEBUG5, "Connection state: Connected");
 		neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
 		return true;
 	default:
 		neon_shard_log(shard_no, ERROR, "libpagestore: invalid connection state %d", shard->state);
 	}
-
-	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
-
-	return true;
+	/* This shouldn't be hit */
+	Assert(false);
 }
 
 /*
@@ -679,9 +680,6 @@ pageserver_disconnect(shardno_t shard_no)
 	 * whole prefetch queue, even for other pageservers. It should not
 	 * cause big problems, because connection loss is supposed to be a
 	 * rare event.
-	 *
-	 * Prefetch state should be reset even if page_servers[shard_no].conn == NULL,
-	 * because prefetch request may be registered before connection is established.
 	 */
 	prefetch_on_ps_disconnect();
 
@@ -794,7 +792,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect(shard_no);
-		neon_shard_log(shard_no, LOG, "pageserver_send disconnect because failed to send page request (try to reconnect): %s", msg);
+		neon_shard_log(shard_no, LOG, "pageserver_send disconnected: failed to send page request (try to reconnect): %s", msg);
 		pfree(msg);
 		pfree(req_buff.data);
 		return false;
@@ -809,6 +807,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 		neon_shard_log(shard_no, PageStoreTrace, "sent request: %s", msg);
 		pfree(msg);
 	}
+
 	return true;
 }
 
@@ -823,7 +822,12 @@ pageserver_receive(shardno_t shard_no)
 	int			rc;
 
 	if (shard->state != PS_Connected)
+	{
+		neon_shard_log(shard_no, LOG,
+					   "pageserver_receive: returning NULL for non-connected pageserver connection: 0x%02x",
+					   shard->state);
 		return NULL;
+	}
 
 	Assert(pageserver_conn);
 
@@ -900,6 +904,7 @@ pageserver_flush(shardno_t shard_no)
 			return false;
 		}
 	}
+
 	return true;
 }
 
