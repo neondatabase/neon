@@ -197,7 +197,10 @@ impl std::fmt::Display for EndpointCacheKey {
 
 impl From<intern::EndpointIdInt> for EndpointCacheKey {
     fn from(value: intern::EndpointIdInt) -> Self {
-        Self { endpoint: value, options: None }
+        Self {
+            endpoint: value,
+            options: None,
+        }
     }
 }
 impl EndpointCacheKey {

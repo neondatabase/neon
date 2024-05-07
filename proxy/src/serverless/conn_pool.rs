@@ -58,10 +58,7 @@ impl fmt::Display for ConnInfo {
         write!(
             f,
             "{}@{}/{}?{}",
-            self.user_info.user,
-            self.user_info.endpoint,
-            self.dbname,
-            self.user_info.options
+            self.user_info.user, self.user_info.endpoint, self.dbname, self.user_info.options
         )
     }
 }
