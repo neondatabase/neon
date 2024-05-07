@@ -33,3 +33,31 @@ async fn test_many_updates_for_single_key() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_many_updates() {
+    let mut executor = MockTimeline::new();
+    executor.target_file_size = 500_000; // 500 KB
+
+    // Ingest some traffic.
+    for _ in 1..1000 {
+        executor.ingest_uniform(1000, 50, &(0..100_000)).unwrap();
+    }
+
+    // Check that all the layers are smaller than the target size (with some slop)
+    for l in executor.live_layers.iter() {
+        println!("layer {}: {}", l.short_id(), l.file_size());
+    }
+    executor.compact().await.unwrap();
+    for l in executor.live_layers.iter() {
+        println!("layer {}: {}", l.short_id(), l.file_size());
+    }
+    for l in executor.live_layers.iter() {
+        assert!(l.file_size() < executor.target_file_size * 2);
+        // sanity check that none of the delta layers are stupidly small either
+        if l.is_delta() {
+            assert!(l.file_size() > executor.target_file_size / 2);
+        }
+    }
+    panic!();
+}
