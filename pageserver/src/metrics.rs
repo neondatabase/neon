@@ -2929,6 +2929,8 @@ pub fn preinitialize_metrics() {
         &WALRECEIVER_CANDIDATES_REMOVED,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_FAILURES,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_SUCCESSES,
+        &REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
+        &REMOTE_ONDEMAND_DOWNLOADED_BYTES,
     ]
     .into_iter()
     .for_each(|c| {

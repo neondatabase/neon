@@ -40,6 +40,7 @@ hyper.workspace = true
 hyper1 = { package = "hyper", version = "1.2", features = ["server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = { version = "0.1" }
+indexmap.workspace = true
 ipnet.workspace = true
 itertools.workspace = true
 lasso = { workspace = true, features = ["multi-threaded"] }

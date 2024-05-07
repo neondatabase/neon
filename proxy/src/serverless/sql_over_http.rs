@@ -424,8 +424,8 @@ pub enum SqlOverHttpCancel {
 impl ReportableError for SqlOverHttpCancel {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
-            SqlOverHttpCancel::Postgres => ErrorKind::RateLimit,
-            SqlOverHttpCancel::Connect => ErrorKind::ServiceRateLimit,
+            SqlOverHttpCancel::Postgres => ErrorKind::ClientDisconnect,
+            SqlOverHttpCancel::Connect => ErrorKind::ClientDisconnect,
         }
     }
 }

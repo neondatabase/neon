@@ -2,11 +2,13 @@
 //! Helper functions for dealing with filenames of the image and delta layer files.
 //!
 use crate::repository::Key;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Range;
 use std::str::FromStr;
 
+use regex::Regex;
 use utils::lsn::Lsn;
 
 use super::PersistentLayerDesc;
@@ -74,7 +76,16 @@ impl DeltaFileName {
         let key_end_str = key_parts.next()?;
         let lsn_start_str = lsn_parts.next()?;
         let lsn_end_str = lsn_parts.next()?;
+
         if parts.next().is_some() || key_parts.next().is_some() || key_parts.next().is_some() {
+            return None;
+        }
+
+        if key_start_str.len() != 36
+            || key_end_str.len() != 36
+            || lsn_start_str.len() != 16
+            || lsn_end_str.len() != 16
+        {
             return None;
         }
 
@@ -182,6 +193,10 @@ impl ImageFileName {
             return None;
         }
 
+        if key_start_str.len() != 36 || key_end_str.len() != 36 || lsn_str.len() != 16 {
+            return None;
+        }
+
         let key_start = Key::from_hex(key_start_str).ok()?;
         let key_end = Key::from_hex(key_end_str).ok()?;
 
@@ -259,9 +274,22 @@ impl From<DeltaFileName> for LayerFileName {
 impl FromStr for LayerFileName {
     type Err = String;
 
+    /// Conversion from either a physical layer filename, or the string-ization of
+    /// Self. When loading a physical layer filename, we drop any extra information
+    /// not needed to build Self.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let delta = DeltaFileName::parse_str(value);
-        let image = ImageFileName::parse_str(value);
+        let gen_suffix_regex = Regex::new("^(?<base>.+)-(?<gen>[0-9a-f]{8})$").unwrap();
+        let file_name: Cow<str> = match gen_suffix_regex.captures(value) {
+            Some(captures) => captures
+                .name("base")
+                .expect("Non-optional group")
+                .as_str()
+                .into(),
+            None => value.into(),
+        };
+
+        let delta = DeltaFileName::parse_str(&file_name);
+        let image = ImageFileName::parse_str(&file_name);
         let ok = match (delta, image) {
             (None, None) => {
                 return Err(format!(
@@ -313,5 +341,44 @@ impl<'de> serde::de::Visitor<'de> for LayerFileNameVisitor {
         E: serde::de::Error,
     {
         v.parse().map_err(|e| E::custom(e))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn image_layer_parse() -> anyhow::Result<()> {
+        let expected = LayerFileName::Image(ImageFileName {
+            key_range: Key::from_i128(0)
+                ..Key::from_hex("000000067F00000001000004DF0000000006").unwrap(),
+            lsn: Lsn::from_hex("00000000014FED58").unwrap(),
+        });
+        let parsed = LayerFileName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-00000001").map_err(|s| anyhow::anyhow!(s))?;
+        assert_eq!(parsed, expected,);
+
+        // Omitting generation suffix is valid
+        let parsed = LayerFileName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58").map_err(|s| anyhow::anyhow!(s))?;
+        assert_eq!(parsed, expected,);
+
+        Ok(())
+    }
+
+    #[test]
+    fn delta_layer_parse() -> anyhow::Result<()> {
+        let expected = LayerFileName::Delta(DeltaFileName {
+            key_range: Key::from_i128(0)
+                ..Key::from_hex("000000067F00000001000004DF0000000006").unwrap(),
+            lsn_range: Lsn::from_hex("00000000014FED58").unwrap()
+                ..Lsn::from_hex("000000000154C481").unwrap(),
+        });
+        let parsed = LayerFileName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481-00000001").map_err(|s| anyhow::anyhow!(s))?;
+        assert_eq!(parsed, expected);
+
+        // Omitting generation suffix is valid
+        let parsed = LayerFileName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481").map_err(|s| anyhow::anyhow!(s))?;
+        assert_eq!(parsed, expected);
+
+        Ok(())
     }
 }
