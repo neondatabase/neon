@@ -57,6 +57,7 @@ pub struct HttpConfig {
     pub request_timeout: tokio::time::Duration,
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
+    pub client_conn_threshold: u64,
 }
 
 pub struct AuthenticationConfig {

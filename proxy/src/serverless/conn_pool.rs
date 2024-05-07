@@ -768,6 +768,7 @@ mod tests {
             },
             request_timeout: Duration::from_secs(1),
             cancel_set: CancelSet::new(0),
+            client_conn_threshold: u64::MAX,
         }));
         let pool = GlobalConnPool::new(config);
         let conn_info = ConnInfo {

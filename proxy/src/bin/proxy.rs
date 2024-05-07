@@ -244,6 +244,12 @@ struct SqlOverHttpArgs {
     /// increase memory used by the pool
     #[clap(long, default_value_t = 128)]
     sql_over_http_pool_shards: usize,
+
+    #[clap(long, default_value_t = 10000)]
+    sql_over_http_client_conn_threshold: u64,
+
+    #[clap(long, default_value_t = 64)]
+    sql_over_http_cancel_set_shards: usize,
 }
 
 #[tokio::main]
@@ -600,7 +606,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             opt_in: args.sql_over_http.sql_over_http_pool_opt_in,
             max_total_conns: args.sql_over_http.sql_over_http_pool_max_total_conns,
         },
-        cancel_set: CancelSet::new(64),
+        cancel_set: CancelSet::new(args.sql_over_http.sql_over_http_cancel_set_shards),
+        client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
     };
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
