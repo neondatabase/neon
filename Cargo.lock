@@ -1348,6 +1348,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-util",
  "toml",
+ "toml_edit",
  "tracing",
  "url",
  "utils",

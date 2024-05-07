@@ -14,7 +14,7 @@ import textwrap
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -68,7 +68,7 @@ from fixtures.remote_storage import (
     RemoteStorageUser,
     S3Storage,
     default_remote_storage,
-    remote_storage_to_toml_inline_table,
+    remote_storage_to_toml_dict,
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
@@ -1705,36 +1705,44 @@ class NeonCli(AbstractNeonCli):
         force: Optional[str] = None,
         pageserver_config_override: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
-        with tempfile.NamedTemporaryFile(mode="w+") as tmp:
-            tmp.write(toml.dumps(config))
-            tmp.flush()
+        remote_storage = self.env.pageserver_remote_storage
 
-            cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
+        ps_config = {}
+        if remote_storage is not None:
+            ps_config["remote_storage"] = remote_storage_to_toml_dict(remote_storage)
+
+        if pageserver_config_override is not None:
+            for o in pageserver_config_override.split(";"):
+                override = toml.loads(o)
+                for key, value in override.items():
+                    ps_config[key] = value
+
+        with ExitStack() as stack:
+            ps_config_file = stack.enter_context(tempfile.NamedTemporaryFile(mode="w+"))
+            ps_config_file.write(toml.dumps(ps_config))
+            ps_config_file.flush()
+
+            neon_local_config = stack.enter_context(tempfile.NamedTemporaryFile(mode="w+"))
+            neon_local_config.write(toml.dumps(config))
+            neon_local_config.flush()
+
+            cmd = [
+                "init",
+                f"--config={neon_local_config.name}",
+                "--pg-version",
+                self.env.pg_version,
+                f"--pageserver-config={ps_config_file.name}",
+            ]
 
             if force is not None:
                 cmd.extend(["--force", force])
-
-            remote_storage = self.env.pageserver_remote_storage
-
-            if remote_storage is not None:
-                remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
-
-                cmd.append(
-                    f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
-                )
-
-            if pageserver_config_override is not None:
-                cmd += [
-                    f"--pageserver-config-override={o.strip()}"
-                    for o in pageserver_config_override.split(";")
-                ]
 
             s3_env_vars = None
             if isinstance(remote_storage, S3Storage):
                 s3_env_vars = remote_storage.access_env_vars()
             res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
-            return res
+        return res
 
     def storage_controller_start(self):
         cmd = ["storage_controller", "start"]
@@ -1749,10 +1757,9 @@ class NeonCli(AbstractNeonCli):
     def pageserver_start(
         self,
         id: int,
-        overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
     ) -> "subprocess.CompletedProcess[str]":
-        start_args = ["pageserver", "start", f"--id={id}", *overrides]
+        start_args = ["pageserver", "start", f"--id={id}"]
         storage = self.env.pageserver_remote_storage
 
         if isinstance(storage, S3Storage):
@@ -2417,9 +2424,42 @@ class NeonPageserver(PgProtocol, LogUtils):
             return self.workdir / "tenants"
         return self.workdir / "tenants" / str(tenant_shard_id)
 
+    @property
+    def config_toml_path(self) -> Path:
+        return self.workdir / "pageserver.toml"
+
+    def edit_config_toml(self, edit_fn: Callable[[Dict[str, Any]], None]):
+        """
+        Edit the pageserver's config toml file in place.
+        """
+        path = self.config_toml_path
+        with open(path, "r") as f:
+            config = toml.load(f)
+        edit_fn(config)
+        with open(path, "w") as f:
+            toml.dump(config, f)
+
+    def patch_config_toml_nonrecursive(self, patch: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Non-recursively merge the given `patch` dict into the existing config toml, using `dict.update()`.
+        Returns the replaced values.
+        If there was no previous value, the key is mapped to None.
+        This allows to restore the original value by calling this method with the returned dict.
+        """
+        replacements = {}
+
+        def doit(config: Dict[str, Any]):
+            while len(patch) > 0:
+                key, new = patch.popitem()
+                old = config.get(key, None)
+                config[key] = new
+                replacements[key] = old
+
+        self.edit_config_toml(doit)
+        return replacements
+
     def start(
         self,
-        overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
     ) -> "NeonPageserver":
         """
@@ -2429,9 +2469,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         """
         assert self.running is False
 
-        self.env.neon_cli.pageserver_start(
-            self.id, overrides=overrides, extra_env_vars=extra_env_vars
-        )
+        self.env.neon_cli.pageserver_start(self.id, extra_env_vars=extra_env_vars)
         self.running = True
         return self
 

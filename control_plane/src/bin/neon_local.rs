@@ -133,7 +133,7 @@ fn main() -> Result<()> {
         let subcommand_result = match sub_name {
             "tenant" => rt.block_on(handle_tenant(sub_args, &mut env)),
             "timeline" => rt.block_on(handle_timeline(sub_args, &mut env)),
-            "start" => rt.block_on(handle_start_all(sub_args, &env)),
+            "start" => rt.block_on(handle_start_all(&env)),
             "stop" => rt.block_on(handle_stop_all(sub_args, &env)),
             "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
             "storage_controller" => rt.block_on(handle_storage_controller(sub_args, &env)),
@@ -358,6 +358,13 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
         default_conf(*num_pageservers)
     };
 
+    let pageserver_config: toml_edit::Document =
+        if let Some(path) = init_match.get_one::<PathBuf>("pageserver-config") {
+            std::fs::read_to_string(path)?.parse()?
+        } else {
+            toml_edit::Document::new()
+        };
+
     let pg_version = init_match
         .get_one::<u32>("pg-version")
         .copied()
@@ -375,7 +382,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     // Initialize pageserver, create initial tenant and timeline.
     for ps_conf in &env.pageservers {
         PageServerNode::from_env(&env, ps_conf)
-            .initialize(&pageserver_config_overrides(init_match))
+            .initialize(&pageserver_config)
             .unwrap_or_else(|e| {
                 eprintln!("pageserver init failed: {e:?}");
                 exit(1);
@@ -395,15 +402,6 @@ fn get_default_pageserver(env: &local_env::LocalEnv) -> PageServerNode {
         .first()
         .expect("Config is validated to contain at least one pageserver");
     PageServerNode::from_env(env, ps_conf)
-}
-
-fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
-    init_match
-        .get_many::<String>("pageserver-config-override")
-        .into_iter()
-        .flatten()
-        .map(String::as_str)
-        .collect()
 }
 
 async fn handle_tenant(
@@ -1076,10 +1074,7 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
-            if let Err(e) = get_pageserver(env, subcommand_args)?
-                .start(&pageserver_config_overrides(subcommand_args))
-                .await
-            {
+            if let Err(e) = get_pageserver(env, subcommand_args)?.start().await {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1105,10 +1100,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
                 exit(1);
             }
 
-            if let Err(e) = pageserver
-                .start(&pageserver_config_overrides(subcommand_args))
-                .await
-            {
+            if let Err(e) = pageserver.start().await {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1235,7 +1227,7 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
-async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
+async fn handle_start_all(env: &local_env::LocalEnv) -> anyhow::Result<()> {
     // Endpoints are not started automatically
 
     broker::start_broker_process(env).await?;
@@ -1252,10 +1244,7 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
-        if let Err(e) = pageserver
-            .start(&pageserver_config_overrides(sub_match))
-            .await
-        {
+        if let Err(e) = pageserver.start().await {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1396,13 +1385,6 @@ fn cli() -> Command {
         .required(false)
         .value_name("stop-mode");
 
-    let pageserver_config_args = Arg::new("pageserver-config-override")
-        .long("pageserver-config-override")
-        .num_args(1)
-        .action(ArgAction::Append)
-        .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'config-override' CLI parameter docs for more")
-        .required(false);
-
     let remote_ext_config_args = Arg::new("remote-ext-config")
         .long("remote-ext-config")
         .num_args(1)
@@ -1464,14 +1446,21 @@ fn cli() -> Command {
         .subcommand(
             Command::new("init")
                 .about("Initialize a new Neon repository, preparing configs for services to start with")
-                .arg(pageserver_config_args.clone())
                 .arg(num_pageservers_arg.clone())
                 .arg(
                     Arg::new("config")
                         .long("config")
                         .required(false)
                         .value_parser(value_parser!(PathBuf))
-                        .value_name("config"),
+                        .value_name("config")
+                )
+                .arg(
+                    Arg::new("pageserver-config")
+                        .long("pageserver-config")
+                        .required(false)
+                        .value_parser(value_parser!(PathBuf))
+                        .value_name("pageserver-config")
+                        .help("Merge the provided pageserver config into the one generated by neon_local."),
                 )
                 .arg(pg_version_arg.clone())
                 .arg(force_arg)
@@ -1553,7 +1542,6 @@ fn cli() -> Command {
                 .subcommand(Command::new("status"))
                 .subcommand(Command::new("start")
                     .about("Start local pageserver")
-                    .arg(pageserver_config_args.clone())
                 )
                 .subcommand(Command::new("stop")
                     .about("Stop local pageserver")
@@ -1561,7 +1549,6 @@ fn cli() -> Command {
                 )
                 .subcommand(Command::new("restart")
                     .about("Restart local pageserver")
-                    .arg(pageserver_config_args.clone())
                 )
         )
         .subcommand(
@@ -1676,7 +1663,6 @@ fn cli() -> Command {
         .subcommand(
             Command::new("start")
                 .about("Start page server and safekeepers")
-                .arg(pageserver_config_args)
         )
         .subcommand(
             Command::new("stop")
