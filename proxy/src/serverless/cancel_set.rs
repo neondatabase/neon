@@ -3,12 +3,14 @@
 use std::{
     hash::{BuildHasher, BuildHasherDefault},
     num::NonZeroUsize,
+    time::Duration,
 };
 
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 use rustc_hash::FxHasher;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -21,7 +23,7 @@ pub struct CancelSet {
 }
 
 pub struct CancelShard {
-    tokens: IndexMap<uuid::Uuid, CancellationToken, Hasher>,
+    tokens: IndexMap<uuid::Uuid, (Instant, CancellationToken), Hasher>,
 }
 
 impl CancelSet {
@@ -39,7 +41,12 @@ impl CancelSet {
     }
 
     pub fn take(&self) -> Option<CancellationToken> {
-        self.take_raw(thread_rng().gen())
+        for _ in 0..4 {
+            if let Some(token) = self.take_raw(thread_rng().gen()) {
+                return Some(token);
+            }
+        }
+        None
     }
 
     pub fn take_raw(&self, rng: usize) -> Option<CancellationToken> {
@@ -60,9 +67,15 @@ impl CancelSet {
 
 impl CancelShard {
     fn take(&mut self, rng: usize) -> Option<CancellationToken> {
-        NonZeroUsize::new(self.tokens.len())
-            .and_then(|len| self.tokens.swap_remove_index(rng % len))
-            .map(|(_, v)| v)
+        NonZeroUsize::new(self.tokens.len()).and_then(|len| {
+            // 10 second grace period so we don't cancel new connections
+            if self.tokens.get_index(rng % len)?.1 .0.elapsed() < Duration::from_secs(10) {
+                return None;
+            }
+
+            let (_key, (_insert, token)) = self.tokens.swap_remove_index(rng % len)?;
+            Some(token)
+        })
     }
 
     fn remove(&mut self, id: uuid::Uuid) {
@@ -70,7 +83,7 @@ impl CancelShard {
     }
 
     fn insert(&mut self, id: uuid::Uuid, token: CancellationToken) {
-        self.tokens.insert(id, token);
+        self.tokens.insert(id, (Instant::now(), token));
     }
 }
 
