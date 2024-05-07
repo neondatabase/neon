@@ -68,6 +68,7 @@ from fixtures.remote_storage import (
     RemoteStorageUser,
     S3Storage,
     default_remote_storage,
+    remote_storage_to_toml_dict,
     remote_storage_to_toml_inline_table,
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
@@ -1713,8 +1714,7 @@ class NeonCli(AbstractNeonCli):
 
         ps_config = {}
         if remote_storage is not None:
-            remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
-            ps_config["remote_storage"] = remote_storage_toml_table
+            ps_config["remote_storage"] = remote_storage_to_toml_dict(remote_storage)
 
         if pageserver_config_override is not None:
             for o in pageserver_config_override.split(";"):
