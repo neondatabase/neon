@@ -23,8 +23,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
-        CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-        EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
+        AuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
+        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
+        TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -863,9 +864,13 @@ impl Timeline {
                 // Initialise the reconstruct state for the key with the cache
                 // entry returned above.
                 let mut reconstruct_state = ValuesReconstructState::new();
-                let mut key_state = VectoredValueReconstructState::default();
-                key_state.img = cached_page_img;
-                reconstruct_state.keys.insert(key, Ok(key_state));
+
+                // Only add the cached image to the reconstruct state when it exists.
+                if cached_page_img.is_some() {
+                    let mut key_state = VectoredValueReconstructState::default();
+                    key_state.img = cached_page_img;
+                    reconstruct_state.keys.insert(key, Ok(key_state));
+                }
 
                 let vectored_res = self
                     .get_vectored_impl(keyspace.clone(), lsn, reconstruct_state, ctx)
@@ -1077,7 +1082,7 @@ impl Timeline {
         // We should generalize this into Keyspace::contains in the future.
         for range in &keyspace.ranges {
             if range.start.field1 < METADATA_KEY_BEGIN_PREFIX
-                || range.end.field1 >= METADATA_KEY_END_PREFIX
+                || range.end.field1 > METADATA_KEY_END_PREFIX
             {
                 return Err(GetVectoredError::Other(anyhow::anyhow!(
                     "only metadata keyspace can be scanned"
@@ -1991,13 +1996,12 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
-    #[allow(dead_code)]
-    pub(crate) fn get_switch_to_aux_file_v2(&self) -> bool {
+    pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
             .tenant_conf
-            .switch_to_aux_file_v2
-            .unwrap_or(self.conf.default_tenant_conf.switch_to_aux_file_v2)
+            .switch_aux_file_policy
+            .unwrap_or(self.conf.default_tenant_conf.switch_aux_file_policy)
     }
 
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
@@ -3015,7 +3019,7 @@ impl Timeline {
 
             HeatMapLayer::new(
                 layer.layer_desc().filename(),
-                layer.metadata().into(),
+                (&layer.metadata()).into(),
                 last_activity_ts,
             )
         });

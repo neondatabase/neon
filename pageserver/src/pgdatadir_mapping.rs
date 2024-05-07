@@ -10,9 +10,9 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::WAL_INGEST;
-use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
+use crate::{aux_file, repository::*};
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
@@ -24,6 +24,7 @@ use pageserver_api::key::{
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -670,7 +671,7 @@ impl Timeline {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
 
-    pub(crate) async fn list_aux_files(
+    async fn list_aux_files_v1(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -684,6 +685,63 @@ impl Timeline {
                 // This is expected: historical databases do not have the key.
                 debug!("Failed to get info about AUX files: {}", e);
                 Ok(HashMap::new())
+            }
+        }
+    }
+
+    async fn list_aux_files_v2(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        let kv = self
+            .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
+            .await
+            .context("scan")?;
+        let mut result = HashMap::new();
+        for (_, v) in kv {
+            let v = v.context("get value")?;
+            let v = aux_file::decode_file_value_bytes(&v).context("value decode")?;
+            for (fname, content) in v {
+                result.insert(fname, content);
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn list_aux_files(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        match self.get_switch_aux_file_policy() {
+            AuxFilePolicy::V1 => self.list_aux_files_v1(lsn, ctx).await,
+            AuxFilePolicy::V2 => self.list_aux_files_v2(lsn, ctx).await,
+            AuxFilePolicy::CrossValidation => {
+                let v1_result = self.list_aux_files_v1(lsn, ctx).await;
+                let v2_result = self.list_aux_files_v2(lsn, ctx).await;
+                match (v1_result, v2_result) {
+                    (Ok(v1), Ok(v2)) => {
+                        if v1 != v2 {
+                            tracing::error!(
+                                "unmatched aux file v1 v2 result:\nv1 {v1:?}\nv2 {v2:?}"
+                            );
+                            return Err(PageReconstructError::Other(anyhow::anyhow!(
+                                "unmatched aux file v1 v2 result"
+                            )));
+                        }
+                        Ok(v1)
+                    }
+                    (Ok(_), Err(v2)) => {
+                        tracing::error!("aux file v1 returns Ok while aux file v2 returns an err");
+                        Err(v2)
+                    }
+                    (Err(v1), Ok(_)) => {
+                        tracing::error!("aux file v2 returns Ok while aux file v1 returns an err");
+                        Err(v1)
+                    }
+                    (Err(_), Err(v2)) => Err(v2),
+                }
             }
         }
     }
@@ -1389,6 +1447,9 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
+        if let AuxFilePolicy::V2 = self.tline.get_switch_aux_file_policy() {
+            return Ok(());
+        }
         let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
             files: HashMap::new(),
         })?;
@@ -1404,89 +1465,121 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let file_path = path.to_string();
-        let content = if content.is_empty() {
-            None
-        } else {
-            Some(Bytes::copy_from_slice(content))
-        };
-
-        let n_files;
-        let mut aux_files = self.tline.aux_files.lock().await;
-        if let Some(mut dir) = aux_files.dir.take() {
-            // We already updated aux files in `self`: emit a delta and update our latest value.
-            dir.upsert(file_path.clone(), content.clone());
-            n_files = dir.files.len();
-            if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
-                self.put(
-                    AUX_FILES_KEY,
-                    Value::Image(Bytes::from(
-                        AuxFilesDirectory::ser(&dir).context("serialize")?,
-                    )),
-                );
-                aux_files.n_deltas = 0;
+        let policy = self.tline.get_switch_aux_file_policy();
+        if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
+            let key = aux_file::encode_aux_file_key(path);
+            // retrieve the key from the engine
+            let old_val = match self.get(key, ctx).await {
+                Ok(val) => Some(val),
+                Err(PageReconstructError::MissingKey(_)) => None,
+                Err(e) => return Err(e.into()),
+            };
+            let files = if let Some(ref old_val) = old_val {
+                aux_file::decode_file_value(old_val)?
             } else {
-                self.put(
-                    AUX_FILES_KEY,
-                    Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
-                );
-                aux_files.n_deltas += 1;
-            }
-            aux_files.dir = Some(dir);
-        } else {
-            // Check if the AUX_FILES_KEY is initialized
-            match self.get(AUX_FILES_KEY, ctx).await {
-                Ok(dir_bytes) => {
-                    let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
-                    // Key is already set, we may append a delta
-                    self.put(
-                        AUX_FILES_KEY,
-                        Value::WalRecord(NeonWalRecord::AuxFile {
-                            file_path: file_path.clone(),
-                            content: content.clone(),
-                        }),
-                    );
-                    dir.upsert(file_path, content);
-                    n_files = dir.files.len();
-                    aux_files.dir = Some(dir);
-                }
-                Err(
-                    e @ (PageReconstructError::AncestorStopping(_)
-                    | PageReconstructError::Cancelled
-                    | PageReconstructError::AncestorLsnTimeout(_)),
-                ) => {
-                    // Important that we do not interpret a shutdown error as "not found" and thereby
-                    // reset the map.
-                    return Err(e.into());
-                }
-                // Note: we added missing key error variant in https://github.com/neondatabase/neon/pull/7393 but
-                // the original code assumes all other errors are missing keys. Therefore, we keep the code path
-                // the same for now, though in theory, we should only match the `MissingKey` variant.
-                Err(
-                    PageReconstructError::Other(_)
-                    | PageReconstructError::WalRedo(_)
-                    | PageReconstructError::MissingKey { .. },
-                ) => {
-                    // Key is missing, we must insert an image as the basis for subsequent deltas.
+                Vec::new()
+            };
+            let new_files = if content.is_empty() {
+                files
+                    .into_iter()
+                    .filter(|(p, _)| &path != p)
+                    .collect::<Vec<_>>()
+            } else {
+                files
+                    .into_iter()
+                    .filter(|(p, _)| &path != p)
+                    .chain(std::iter::once((path, content)))
+                    .collect::<Vec<_>>()
+            };
+            let new_val = aux_file::encode_file_value(&new_files)?;
+            self.put(key, Value::Image(new_val.into()));
+        }
 
-                    let mut dir = AuxFilesDirectory {
-                        files: HashMap::new(),
-                    };
-                    dir.upsert(file_path, content);
+        if let AuxFilePolicy::V1 | AuxFilePolicy::CrossValidation = policy {
+            let file_path = path.to_string();
+            let content = if content.is_empty() {
+                None
+            } else {
+                Some(Bytes::copy_from_slice(content))
+            };
+
+            let n_files;
+            let mut aux_files = self.tline.aux_files.lock().await;
+            if let Some(mut dir) = aux_files.dir.take() {
+                // We already updated aux files in `self`: emit a delta and update our latest value.
+                dir.upsert(file_path.clone(), content.clone());
+                n_files = dir.files.len();
+                if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
                     self.put(
                         AUX_FILES_KEY,
                         Value::Image(Bytes::from(
                             AuxFilesDirectory::ser(&dir).context("serialize")?,
                         )),
                     );
-                    n_files = 1;
-                    aux_files.dir = Some(dir);
+                    aux_files.n_deltas = 0;
+                } else {
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                    );
+                    aux_files.n_deltas += 1;
+                }
+                aux_files.dir = Some(dir);
+            } else {
+                // Check if the AUX_FILES_KEY is initialized
+                match self.get(AUX_FILES_KEY, ctx).await {
+                    Ok(dir_bytes) => {
+                        let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
+                        // Key is already set, we may append a delta
+                        self.put(
+                            AUX_FILES_KEY,
+                            Value::WalRecord(NeonWalRecord::AuxFile {
+                                file_path: file_path.clone(),
+                                content: content.clone(),
+                            }),
+                        );
+                        dir.upsert(file_path, content);
+                        n_files = dir.files.len();
+                        aux_files.dir = Some(dir);
+                    }
+                    Err(
+                        e @ (PageReconstructError::AncestorStopping(_)
+                        | PageReconstructError::Cancelled
+                        | PageReconstructError::AncestorLsnTimeout(_)),
+                    ) => {
+                        // Important that we do not interpret a shutdown error as "not found" and thereby
+                        // reset the map.
+                        return Err(e.into());
+                    }
+                    // Note: we added missing key error variant in https://github.com/neondatabase/neon/pull/7393 but
+                    // the original code assumes all other errors are missing keys. Therefore, we keep the code path
+                    // the same for now, though in theory, we should only match the `MissingKey` variant.
+                    Err(
+                        PageReconstructError::Other(_)
+                        | PageReconstructError::WalRedo(_)
+                        | PageReconstructError::MissingKey { .. },
+                    ) => {
+                        // Key is missing, we must insert an image as the basis for subsequent deltas.
+
+                        let mut dir = AuxFilesDirectory {
+                            files: HashMap::new(),
+                        };
+                        dir.upsert(file_path, content);
+                        self.put(
+                            AUX_FILES_KEY,
+                            Value::Image(Bytes::from(
+                                AuxFilesDirectory::ser(&dir).context("serialize")?,
+                            )),
+                        );
+                        n_files = 1;
+                        aux_files.dir = Some(dir);
+                    }
                 }
             }
-        }
 
-        self.pending_directory_entries
-            .push((DirectoryKind::AuxFiles, n_files));
+            self.pending_directory_entries
+                .push((DirectoryKind::AuxFiles, n_files));
+        }
 
         Ok(())
     }
