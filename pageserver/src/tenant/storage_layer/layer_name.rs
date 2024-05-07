@@ -354,7 +354,7 @@ mod test {
                 ..Key::from_hex("000000067F00000001000004DF0000000006").unwrap(),
             lsn: Lsn::from_hex("00000000014FED58").unwrap(),
         });
-        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-00000001").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-v1-00000001").map_err(|s| anyhow::anyhow!(s))?;
         assert_eq!(parsed, expected,);
 
         // Omitting generation suffix is valid
@@ -372,7 +372,7 @@ mod test {
             lsn_range: Lsn::from_hex("00000000014FED58").unwrap()
                 ..Lsn::from_hex("000000000154C481").unwrap(),
         });
-        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481-00000001").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481-v1-00000001").map_err(|s| anyhow::anyhow!(s))?;
         assert_eq!(parsed, expected);
 
         // Omitting generation suffix is valid
