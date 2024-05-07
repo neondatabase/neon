@@ -703,7 +703,6 @@ def test_multi_attach(
     workload.validate(pageservers[2].id)
 
 
-@pytest.mark.skip(reason="To be enabled after release with new local path style")
 def test_upgrade_generationless_local_file_paths(
     neon_env_builder: NeonEnvBuilder,
 ):
