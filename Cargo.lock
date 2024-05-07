@@ -3692,6 +3692,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_with",
+ "sha2",
  "signal-hook",
  "smallvec",
  "storage_broker",

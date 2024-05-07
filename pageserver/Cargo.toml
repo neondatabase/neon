@@ -88,6 +88,7 @@ reqwest.workspace = true
 rpds.workspace = true
 enum-map.workspace = true
 enumset = { workspace = true, features = ["serde"]}
+sha2.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 

@@ -1,11 +1,18 @@
 use bytes::{Buf, BufMut, Bytes};
 use pageserver_api::key::{Key, AUX_KEY_PREFIX, METADATA_KEY_SIZE};
+use sha2::Digest;
 use tracing::warn;
+
+fn hash256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
 
 /// Create a metadata key from a hash, encoded as [AUX_KEY_PREFIX, 2B directory prefix, first 13B of 128b xxhash].
 fn aux_hash_to_metadata_key(dir_level1: u8, dir_level2: u8, data: &[u8]) -> Key {
     let mut key = [0; METADATA_KEY_SIZE];
-    let hash = twox_hash::xxh3::hash128(data).to_be_bytes();
+    let hash = hash256(data);
     key[0] = AUX_KEY_PREFIX;
     key[1] = dir_level1;
     key[2] = dir_level2;
@@ -149,14 +156,17 @@ mod tests {
         // AUX file encoding requires the hash to be portable across all platforms. This test case checks
         // if the algorithm produces the same hash across different environments.
         assert_eq!(
-            305317690835051308206966631765527126151,
-            twox_hash::xxh3::hash128("test1".as_bytes())
+            "1b4f0e9851971998e732078544c96b36c3d01cedf7caa332359d6f1d83567014",
+            hex::encode(hash256("test1".as_bytes()))
         );
         assert_eq!(
-            85104974691013376326742244813280798847,
-            twox_hash::xxh3::hash128("test/test2".as_bytes())
+            "3dfc364fd121aaa081cec54ef9ef6f69a4756df50cf3c52f1abd2b451829c4c0",
+            hex::encode(hash256("test/test2".as_bytes()))
         );
-        assert_eq!(0, twox_hash::xxh3::hash128("".as_bytes()));
+        assert_eq!(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            hex::encode(hash256("".as_bytes()))
+        );
     }
 
     #[test]
@@ -164,27 +174,27 @@ mod tests {
         // To correct retrieve AUX files, the generated keys for the same file must be the same for all versions
         // of the page server.
         assert_eq!(
-            "6200000101E5B20C5F8DD5AA3289D6D9EAFA",
+            "62000001011B4F0E9851971998E732078544",
             encode_aux_file_key("pg_logical/mappings/test1").to_string()
         );
         assert_eq!(
-            "620000010239AAC544893139B26F501B97E6",
+            "620000010260303AE22B998861BCE3B28F33",
             encode_aux_file_key("pg_logical/snapshots/test2").to_string()
         );
         assert_eq!(
-            "620000010300000000000000000000000000",
+            "6200000103E3B0C44298FC1C149AFBF4C899",
             encode_aux_file_key("pg_logical/replorigin_checkpoint").to_string()
         );
         assert_eq!(
-            "62000001FF8635AF2134B7266EC5B4189FD6",
+            "62000001FF60945D49535300BE8E42108658",
             encode_aux_file_key("pg_logical/unsupported").to_string()
         );
         assert_eq!(
-            "6200000201772D0E5D71DE14DA86142A1619",
+            "6200000201FD61A03AF4F77D870FC21E05E7",
             encode_aux_file_key("pg_replslot/test3").to_string()
         );
         assert_eq!(
-            "620000FFFF1866EBEB53B807B26A2416F317",
+            "620000FFFF7F75AD39B73CD2A1FE41680550",
             encode_aux_file_key("other_file_not_supported").to_string()
         );
     }
