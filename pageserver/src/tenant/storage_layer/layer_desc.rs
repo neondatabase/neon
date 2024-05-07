@@ -5,7 +5,7 @@ use utils::{id::TimelineId, lsn::Lsn};
 
 use crate::repository::Key;
 
-use super::{DeltaFileName, ImageFileName, LayerFileName};
+use super::{DeltaFileName, ImageFileName, LayerName};
 
 use serde::{Deserialize, Serialize};
 
@@ -103,14 +103,14 @@ impl PersistentLayerDesc {
     pub fn from_filename(
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-        filename: LayerFileName,
+        filename: LayerName,
         file_size: u64,
     ) -> Self {
         match filename {
-            LayerFileName::Image(i) => {
+            LayerName::Image(i) => {
                 Self::new_img(tenant_shard_id, timeline_id, i.key_range, i.lsn, file_size)
             }
-            LayerFileName::Delta(d) => Self::new_delta(
+            LayerName::Delta(d) => Self::new_delta(
                 tenant_shard_id,
                 timeline_id,
                 d.key_range,
@@ -155,7 +155,7 @@ impl PersistentLayerDesc {
         }
     }
 
-    pub fn filename(&self) -> LayerFileName {
+    pub fn filename(&self) -> LayerName {
         if self.is_delta {
             self.delta_file_name().into()
         } else {

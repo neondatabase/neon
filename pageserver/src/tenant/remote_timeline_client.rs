@@ -240,7 +240,7 @@ use utils::id::{TenantId, TimelineId};
 use self::index::IndexPart;
 
 use super::metadata::MetadataUpdate;
-use super::storage_layer::{Layer, LayerFileName, ResidentLayer};
+use super::storage_layer::{Layer, LayerName, ResidentLayer};
 use super::upload_queue::SetDeletedFlagProgress;
 use super::Generation;
 
@@ -503,7 +503,7 @@ impl RemoteTimelineClient {
     /// On success, returns the size of the downloaded file.
     pub async fn download_layer_file(
         &self,
-        layer_file_name: &LayerFileName,
+        layer_file_name: &LayerName,
         layer_metadata: &LayerFileMetadata,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -737,7 +737,7 @@ impl RemoteTimelineClient {
     /// successfully.
     pub fn schedule_layer_file_deletion(
         self: &Arc<Self>,
-        names: &[LayerFileName],
+        names: &[LayerName],
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
@@ -780,9 +780,9 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
         names: I,
-    ) -> Vec<(LayerFileName, LayerFileMetadata)>
+    ) -> Vec<(LayerName, LayerFileMetadata)>
     where
-        I: IntoIterator<Item = LayerFileName>,
+        I: IntoIterator<Item = LayerName>,
     {
         // Decorate our list of names with each name's metadata, dropping
         // names that are unexpectedly missing from our metadata.  This metadata
@@ -832,7 +832,7 @@ impl RemoteTimelineClient {
     /// `index_part.json` with [`Self::schedule_gc_update`] or [`Self::schedule_compaction_update`].
     pub(crate) fn schedule_deletion_of_unlinked(
         self: &Arc<Self>,
-        layers: Vec<(LayerFileName, LayerFileMetadata)>,
+        layers: Vec<(LayerName, LayerFileMetadata)>,
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
@@ -845,7 +845,7 @@ impl RemoteTimelineClient {
     fn schedule_deletion_of_unlinked0(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-        mut with_metadata: Vec<(LayerFileName, LayerFileMetadata)>,
+        mut with_metadata: Vec<(LayerName, LayerFileMetadata)>,
     ) {
         // Filter out any layers which were not created by this tenant shard.  These are
         // layers that originate from some ancestor shard after a split, and may still
@@ -1896,7 +1896,7 @@ pub fn remote_layer_path(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
     shard: ShardIndex,
-    layer_file_name: &LayerFileName,
+    layer_file_name: &LayerName,
     generation: Generation,
 ) -> RemotePath {
     // Generation-aware key format
@@ -2000,7 +2000,7 @@ mod tests {
         TimelineMetadata::from_bytes(&metadata.to_bytes().unwrap()).unwrap()
     }
 
-    fn assert_file_list(a: &HashSet<LayerFileName>, b: &[&str]) {
+    fn assert_file_list(a: &HashSet<LayerName>, b: &[&str]) {
         let mut avec: Vec<String> = a.iter().map(|x| x.file_name()).collect();
         avec.sort();
 
@@ -2127,7 +2127,7 @@ mod tests {
             .layer_metadata
             .keys()
             .map(|f| f.to_owned())
-            .collect::<HashSet<LayerFileName>>();
+            .collect::<HashSet<LayerName>>();
         let initial_layer = {
             assert!(initial_layers.len() == 1);
             initial_layers.into_iter().next().unwrap()
@@ -2153,7 +2153,7 @@ mod tests {
             ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59DA-00000000016B5A53".parse().unwrap(), dummy_contents("baz"))
         ]
         .into_iter()
-        .map(|(name, contents): (LayerFileName, Vec<u8>)| {
+        .map(|(name, contents): (LayerName, Vec<u8>)| {
 
             let local_path = local_layer_path(
                 harness.conf,
@@ -2305,7 +2305,7 @@ mod tests {
         } = TestSetup::new("metrics").await.unwrap();
         let client = timeline.remote_client.as_ref().unwrap();
 
-        let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
+        let layer_file_name_1: LayerName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
         let local_path = local_layer_path(
             harness.conf,
             &timeline.tenant_shard_id,

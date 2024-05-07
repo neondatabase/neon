@@ -6,7 +6,7 @@ use crate::{
             self,
             index::{IndexPart, LayerFileMetadata},
         },
-        storage_layer::LayerFileName,
+        storage_layer::LayerName,
         Generation,
     },
     METADATA_FILE_NAME,
@@ -20,7 +20,7 @@ use utils::lsn::Lsn;
 /// Identified files in the timeline directory.
 pub(super) enum Discovered {
     /// The only one we care about
-    Layer(LayerFileName, Utf8PathBuf, u64),
+    Layer(LayerName, Utf8PathBuf, u64),
     /// Old ephmeral files from previous launches, should be removed
     Ephemeral(String),
     /// Old temporary timeline files, unsure what these really are, should be removed
@@ -43,7 +43,7 @@ pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovere
         let direntry = direntry?;
         let file_name = direntry.file_name().to_string();
 
-        let discovered = match LayerFileName::from_str(&file_name) {
+        let discovered = match LayerName::from_str(&file_name) {
             Ok(file_name) => {
                 let file_size = direntry.metadata()?.len();
                 Discovered::Layer(file_name, direntry.path().to_owned(), file_size)
@@ -104,13 +104,13 @@ pub(super) enum DismissedLayer {
 
 /// Merges local discoveries and remote [`IndexPart`] to a collection of decisions.
 pub(super) fn reconcile(
-    discovered: Vec<(LayerFileName, Utf8PathBuf, u64)>,
+    discovered: Vec<(LayerName, Utf8PathBuf, u64)>,
     index_part: Option<&IndexPart>,
     disk_consistent_lsn: Lsn,
     generation: Generation,
     shard: ShardIndex,
 ) -> Vec<(
-    LayerFileName,
+    LayerName,
     Option<Utf8PathBuf>,
     Result<Decision, DismissedLayer>,
 )> {
@@ -118,7 +118,7 @@ pub(super) fn reconcile(
 
     // name => (local_path, local_metadata, remote_metadata)
     type Collected = HashMap<
-        LayerFileName,
+        LayerName,
         (
             Option<Utf8PathBuf>,
             Option<LayerFileMetadata>,
@@ -211,7 +211,7 @@ pub(super) fn cleanup_local_file_for_remote(
 
 pub(super) fn cleanup_future_layer(
     path: &Utf8Path,
-    name: &LayerFileName,
+    name: &LayerName,
     disk_consistent_lsn: Lsn,
 ) -> anyhow::Result<()> {
     // future image layers are allowed to be produced always for not yet flushed to disk
@@ -224,7 +224,7 @@ pub(super) fn cleanup_future_layer(
 
 pub(super) fn cleanup_local_only_file(
     path: &Utf8Path,
-    name: &LayerFileName,
+    name: &LayerName,
     local: &LayerFileMetadata,
 ) -> anyhow::Result<()> {
     let kind = name.kind();

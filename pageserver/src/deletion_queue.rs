@@ -38,7 +38,7 @@ use deleter::DeleterMessage;
 use list_writer::ListWriterQueueMessage;
 use validator::ValidatorQueueMessage;
 
-use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
+use crate::{config::PageServerConf, tenant::storage_layer::LayerName};
 
 // TODO: configurable for how long to wait before executing deletions
 
@@ -479,7 +479,7 @@ impl DeletionQueueClient {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
-        layers: Vec<(LayerFileName, LayerFileMetadata)>,
+        layers: Vec<(LayerName, LayerFileMetadata)>,
     ) -> Result<(), DeletionQueueError> {
         if current_generation.is_none() {
             debug!("Enqueuing deletions in legacy mode, skipping queue");
@@ -511,7 +511,7 @@ impl DeletionQueueClient {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
-        layers: Vec<(LayerFileName, LayerFileMetadata)>,
+        layers: Vec<(LayerName, LayerFileMetadata)>,
     ) -> Result<(), DeletionQueueError> {
         metrics::DELETION_QUEUE
             .keys_submitted
@@ -741,13 +741,13 @@ mod test {
     pub const TIMELINE_ID: TimelineId =
         TimelineId::from_array(hex!("11223344556677881122334455667788"));
 
-    pub const EXAMPLE_LAYER_NAME: LayerFileName = LayerFileName::Delta(DeltaFileName {
+    pub const EXAMPLE_LAYER_NAME: LayerName = LayerName::Delta(DeltaFileName {
         key_range: Key::from_i128(0x0)..Key::from_i128(0xFFFFFFFFFFFFFFFF),
         lsn_range: Lsn(0x00000000016B59D8)..Lsn(0x00000000016B5A51),
     });
 
     // When you need a second layer in a test.
-    pub const EXAMPLE_LAYER_NAME_ALT: LayerFileName = LayerFileName::Delta(DeltaFileName {
+    pub const EXAMPLE_LAYER_NAME_ALT: LayerName = LayerName::Delta(DeltaFileName {
         key_range: Key::from_i128(0x0)..Key::from_i128(0xFFFFFFFFFFFFFFFF),
         lsn_range: Lsn(0x00000000016B5A51)..Lsn(0x00000000016B5A61),
     });
@@ -797,7 +797,7 @@ mod test {
         /// Returns remote layer file name, suitable for use in assert_remote_files
         fn write_remote_layer(
             &self,
-            file_name: LayerFileName,
+            file_name: LayerName,
             gen: Generation,
         ) -> anyhow::Result<String> {
             let tenant_shard_id = self.harness.tenant_shard_id;
@@ -952,7 +952,7 @@ mod test {
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 
-        let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
+        let layer_file_name_1: LayerName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
         let tenant_shard_id = ctx.harness.tenant_shard_id;
 
         let content: Vec<u8> = "victim1 contents".into();

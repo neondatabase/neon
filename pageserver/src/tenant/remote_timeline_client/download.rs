@@ -22,7 +22,7 @@ use crate::context::RequestContext;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::layer::local_layer_path;
-use crate::tenant::storage_layer::LayerFileName;
+use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
 use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
@@ -48,7 +48,7 @@ pub async fn download_layer_file<'a>(
     storage: &'a GenericRemoteStorage,
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
-    layer_file_name: &'a LayerFileName,
+    layer_file_name: &'a LayerName,
     layer_metadata: &'a LayerFileMetadata,
     cancel: &CancellationToken,
     ctx: &RequestContext,

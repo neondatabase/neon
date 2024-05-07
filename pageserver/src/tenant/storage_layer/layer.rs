@@ -25,7 +25,7 @@ use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 use super::delta_layer::{self, DeltaEntry};
 use super::image_layer;
 use super::{
-    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerFileName, PersistentLayerDesc,
+    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerName, PersistentLayerDesc,
     ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
 };
 
@@ -128,7 +128,7 @@ pub(crate) fn local_layer_path(
     conf: &PageServerConf,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
-    layer_file_name: &LayerFileName,
+    layer_file_name: &LayerName,
     _generation: &Generation,
 ) -> Utf8PathBuf {
     let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
@@ -152,7 +152,7 @@ impl Layer {
     pub(crate) fn for_evicted(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
-        file_name: LayerFileName,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> Self {
         let local_path = local_layer_path(
@@ -193,7 +193,7 @@ impl Layer {
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
         local_path: Utf8PathBuf,
-        file_name: LayerFileName,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> ResidentLayer {
         let desc = PersistentLayerDesc::from_filename(

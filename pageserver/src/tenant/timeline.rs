@@ -75,7 +75,7 @@ use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
         AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
-        LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
+        LayerAccessStatsReset, LayerName, ResidentLayer, ValueReconstructResult,
         ValueReconstructState, ValuesReconstructState,
     },
 };
@@ -1905,7 +1905,7 @@ impl Timeline {
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     pub(crate) async fn download_layer(
         &self,
-        layer_file_name: &LayerFileName,
+        layer_file_name: &LayerName,
     ) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
@@ -1925,7 +1925,7 @@ impl Timeline {
     /// Returns `Ok(None)` in the case where the layer could not be found by its `layer_file_name`.
     pub(crate) async fn evict_layer(
         &self,
-        layer_file_name: &LayerFileName,
+        layer_file_name: &LayerName,
     ) -> anyhow::Result<Option<bool>> {
         let _gate = self
             .gate
@@ -2387,7 +2387,7 @@ impl Timeline {
         index_part: Option<IndexPart>,
     ) -> anyhow::Result<()> {
         use init::{Decision::*, Discovered, DismissedLayer};
-        use LayerFileName::*;
+        use LayerName::*;
 
         let mut guard = self.layers.write().await;
 
@@ -2997,7 +2997,7 @@ impl Timeline {
         }
     }
 
-    async fn find_layer(&self, layer_name: &LayerFileName) -> Option<Layer> {
+    async fn find_layer(&self, layer_name: &LayerName) -> Option<Layer> {
         let guard = self.layers.read().await;
         for historic_layer in guard.layer_map().iter_historic_layers() {
             let historic_layer_name = historic_layer.filename();

@@ -221,12 +221,12 @@ impl fmt::Display for ImageFileName {
     }
 }
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub enum LayerFileName {
+pub enum LayerName {
     Image(ImageFileName),
     Delta(DeltaFileName),
 }
 
-impl LayerFileName {
+impl LayerName {
     pub fn file_name(&self) -> String {
         self.to_string()
     }
@@ -234,7 +234,7 @@ impl LayerFileName {
     /// Determines if this layer file is considered to be in future meaning we will discard these
     /// layers during timeline initialization from the given disk_consistent_lsn.
     pub(crate) fn is_in_future(&self, disk_consistent_lsn: Lsn) -> bool {
-        use LayerFileName::*;
+        use LayerName::*;
         match self {
             Image(file_name) if file_name.lsn > disk_consistent_lsn => true,
             Delta(file_name) if file_name.lsn_range.end > disk_consistent_lsn + 1 => true,
@@ -243,7 +243,7 @@ impl LayerFileName {
     }
 
     pub(crate) fn kind(&self) -> &'static str {
-        use LayerFileName::*;
+        use LayerName::*;
         match self {
             Delta(_) => "delta",
             Image(_) => "image",
@@ -251,7 +251,7 @@ impl LayerFileName {
     }
 }
 
-impl fmt::Display for LayerFileName {
+impl fmt::Display for LayerName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Image(fname) => write!(f, "{fname}"),
@@ -260,18 +260,18 @@ impl fmt::Display for LayerFileName {
     }
 }
 
-impl From<ImageFileName> for LayerFileName {
+impl From<ImageFileName> for LayerName {
     fn from(fname: ImageFileName) -> Self {
         Self::Image(fname)
     }
 }
-impl From<DeltaFileName> for LayerFileName {
+impl From<DeltaFileName> for LayerName {
     fn from(fname: DeltaFileName) -> Self {
         Self::Delta(fname)
     }
 }
 
-impl FromStr for LayerFileName {
+impl FromStr for LayerName {
     type Err = String;
 
     /// Conversion from either a physical layer filename, or the string-ization of
@@ -304,7 +304,7 @@ impl FromStr for LayerFileName {
     }
 }
 
-impl serde::Serialize for LayerFileName {
+impl serde::Serialize for LayerName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -316,19 +316,19 @@ impl serde::Serialize for LayerFileName {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for LayerFileName {
+impl<'de> serde::Deserialize<'de> for LayerName {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_string(LayerFileNameVisitor)
+        deserializer.deserialize_string(LayerNameVisitor)
     }
 }
 
-struct LayerFileNameVisitor;
+struct LayerNameVisitor;
 
-impl<'de> serde::de::Visitor<'de> for LayerFileNameVisitor {
-    type Value = LayerFileName;
+impl<'de> serde::de::Visitor<'de> for LayerNameVisitor {
+    type Value = LayerName;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         write!(
@@ -349,16 +349,16 @@ mod test {
     use super::*;
     #[test]
     fn image_layer_parse() -> anyhow::Result<()> {
-        let expected = LayerFileName::Image(ImageFileName {
+        let expected = LayerName::Image(ImageFileName {
             key_range: Key::from_i128(0)
                 ..Key::from_hex("000000067F00000001000004DF0000000006").unwrap(),
             lsn: Lsn::from_hex("00000000014FED58").unwrap(),
         });
-        let parsed = LayerFileName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-00000001").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-00000001").map_err(|s| anyhow::anyhow!(s))?;
         assert_eq!(parsed, expected,);
 
         // Omitting generation suffix is valid
-        let parsed = LayerFileName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58").map_err(|s| anyhow::anyhow!(s))?;
         assert_eq!(parsed, expected,);
 
         Ok(())
@@ -366,17 +366,17 @@ mod test {
 
     #[test]
     fn delta_layer_parse() -> anyhow::Result<()> {
-        let expected = LayerFileName::Delta(DeltaFileName {
+        let expected = LayerName::Delta(DeltaFileName {
             key_range: Key::from_i128(0)
                 ..Key::from_hex("000000067F00000001000004DF0000000006").unwrap(),
             lsn_range: Lsn::from_hex("00000000014FED58").unwrap()
                 ..Lsn::from_hex("000000000154C481").unwrap(),
         });
-        let parsed = LayerFileName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481-00000001").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481-00000001").map_err(|s| anyhow::anyhow!(s))?;
         assert_eq!(parsed, expected);
 
         // Omitting generation suffix is valid
-        let parsed = LayerFileName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481").map_err(|s| anyhow::anyhow!(s))?;
         assert_eq!(parsed, expected);
 
         Ok(())

@@ -34,7 +34,7 @@ use utils::rate_limit::RateLimit;
 use utils::{id::TimelineId, lsn::Lsn};
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
-pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
+pub use filename::{DeltaFileName, ImageFileName, LayerName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
@@ -670,11 +670,11 @@ pub mod tests {
         }
     }
 
-    impl From<LayerFileName> for PersistentLayerDesc {
-        fn from(value: LayerFileName) -> Self {
+    impl From<LayerName> for PersistentLayerDesc {
+        fn from(value: LayerName) -> Self {
             match value {
-                LayerFileName::Delta(d) => Self::from(d),
-                LayerFileName::Image(i) => Self::from(i),
+                LayerName::Delta(d) => Self::from(d),
+                LayerName::Image(i) => Self::from(i),
             }
         }
     }
