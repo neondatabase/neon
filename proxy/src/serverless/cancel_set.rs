@@ -45,13 +45,14 @@ impl CancelSet {
             if let Some(token) = self.take_raw(thread_rng().gen()) {
                 return Some(token);
             }
+            tracing::trace!("failed to get cancel token");
         }
         None
     }
 
     pub fn take_raw(&self, rng: usize) -> Option<CancellationToken> {
         NonZeroUsize::new(self.shards.len())
-            .and_then(|len| self.shards[(rng >> 16) % len].lock().take(rng))
+            .and_then(|len| self.shards[rng % len].lock().take(rng / len))
     }
 
     pub fn insert(&self, id: uuid::Uuid, token: CancellationToken) -> CancelGuard<'_> {
