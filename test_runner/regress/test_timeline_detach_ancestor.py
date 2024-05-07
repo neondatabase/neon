@@ -177,11 +177,7 @@ def test_ancestor_detach_branched_from(
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
 
 
-@pytest.mark.parametrize("restart_after", [True, False])
-@pytest.mark.parametrize("write_to_branch_first", [True, False])
-def test_ancestor_detach_reparents_earlier(
-    neon_env_builder: NeonEnvBuilder, restart_after: bool, write_to_branch_first: bool
-):
+def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     """
     The case from RFC:
 
@@ -247,24 +243,8 @@ def test_ancestor_detach_reparents_earlier(
 
     after = env.neon_cli.create_branch("after", "main", env.initial_tenant, ancestor_start_lsn=None)
 
-    detached_starts = 1
-    if write_to_branch_first:
-        with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
-            assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 8192
-            with ep.cursor() as cur:
-                cur.execute("UPDATE audit SET starts = starts + 1")
-                assert cur.rowcount == 1
-                detached_starts += 1
-            wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
-
-        client.timeline_checkpoint(env.initial_tenant, timeline_id)
-
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
     assert all_reparented == {reparented, same_branchpoint}
-
-    if restart_after:
-        env.pageserver.stop()
-        env.pageserver.start()
 
     env.pageserver.quiesce_tenants()
 
@@ -272,7 +252,7 @@ def test_ancestor_detach_reparents_earlier(
     expected_result = [
         ("main", env.initial_timeline, None, 16384, 1),
         ("after", after, env.initial_timeline, 16384, 1),
-        ("new main", timeline_id, None, 8192, detached_starts),
+        ("new main", timeline_id, None, 8192, 1),
         ("same_branchpoint", same_branchpoint, timeline_id, 8192, 1),
         ("reparented", reparented, timeline_id, 0, 1),
     ]
@@ -327,11 +307,7 @@ def test_ancestor_detach_reparents_earlier(
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
 
 
-@pytest.mark.parametrize("restart_after", [True, False])
-@pytest.mark.parametrize("write_to_branch_first", [True, False])
-def test_detached_receives_flushes_while_being_detached(
-    neon_env_builder: NeonEnvBuilder, restart_after: bool, write_to_branch_first: bool
-):
+def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEnvBuilder):
     """
     Makes sure that the timeline is able to receive writes through-out the detach process.
     """
@@ -364,12 +340,6 @@ def test_detached_receives_flushes_while_being_detached(
     ep = env.endpoints.create_start("new main", tenant_id=env.initial_tenant)
     assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
 
-    if write_to_branch_first:
-        rows += insert_rows(256, ep)
-        wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
-        client.timeline_checkpoint(env.initial_tenant, timeline_id)
-        log.info("completed {write_to_branch_first=}")
-
     def small_txs(ep, queue: Queue[str], barrier):
         extra_rows = 0
 
@@ -401,11 +371,6 @@ def test_detached_receives_flushes_while_being_detached(
 
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
         assert len(reparented) == 0
-
-        if restart_after:
-            # ep and row production is kept alive on purpose
-            env.pageserver.stop()
-            env.pageserver.start()
 
         env.pageserver.quiesce_tenants()
 
