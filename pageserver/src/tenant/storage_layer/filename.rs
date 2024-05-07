@@ -278,7 +278,7 @@ impl FromStr for LayerFileName {
     /// Self. When loading a physical layer filename, we drop any extra information
     /// not needed to build Self.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let gen_suffix_regex = Regex::new("^(?<base>.+)-(?<gen>[0-9a-f]{8})$").unwrap();
+        let gen_suffix_regex = Regex::new("^(?<base>.+)(?<gen>-v1-[0-9a-f]{8})$").unwrap();
         let file_name: Cow<str> = match gen_suffix_regex.captures(value) {
             Some(captures) => captures
                 .name("base")

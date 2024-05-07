@@ -48,7 +48,9 @@ class InvalidFileName(Exception):
     pass
 
 
-IMAGE_LAYER_FILE_NAME = re.compile("^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})(-[a-f0-9]{8})?$")
+IMAGE_LAYER_FILE_NAME = re.compile(
+    "^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})(-v1-[a-f0-9]{8})?$"
+)
 
 
 def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
@@ -62,7 +64,7 @@ def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
 
 
 DELTA_LAYER_FILE_NAME = re.compile(
-    "^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})-([A-F0-9]{16})(-[a-f0-9]{8})?$"
+    "^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})-([A-F0-9]{16})(-v1-[a-f0-9]{8})?$"
 )
 
 
