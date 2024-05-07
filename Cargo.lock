@@ -7542,6 +7542,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_builder",
+ "crossbeam-epoch",
  "crossbeam-utils",
  "either",
  "fail",
