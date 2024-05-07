@@ -56,6 +56,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::delete::DeleteTenantError;
 use super::secondary::SecondaryTenant;
+use super::timeline::detach_ancestor::PreparedTimelineDetach;
 use super::TenantSharedResources;
 
 /// For a tenant that appears in TenantsMap, it may either be
@@ -246,6 +247,7 @@ impl TenantsMap {
         }
     }
 
+    #[cfg(all(debug_assertions, not(test)))]
     pub(crate) fn len(&self) -> usize {
         match self {
             TenantsMap::Initializing => 0,
@@ -746,6 +748,7 @@ pub async fn init_tenant_mgr(
             }
         };
 
+        METRICS.slot_inserted(&slot);
         tenants.insert(tenant_shard_id, slot);
     }
 
@@ -753,7 +756,7 @@ pub async fn init_tenant_mgr(
 
     let mut tenants_map = TENANTS.write().unwrap();
     assert!(matches!(&*tenants_map, &TenantsMap::Initializing));
-    METRICS.tenant_slots.set(tenants.len() as u64);
+
     *tenants_map = TenantsMap::Open(tenants);
 
     Ok(TenantManager {
@@ -823,6 +826,14 @@ fn tenant_spawn(
 
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
     let mut join_set = JoinSet::new();
+
+    #[cfg(all(debug_assertions, not(test)))]
+    {
+        // Check that our metrics properly tracked the size of the tenants map.  This is a convenient location to check,
+        // as it happens implicitly at the end of tests etc.
+        let m = tenants.read().unwrap();
+        debug_assert_eq!(METRICS.slots_total(), m.len() as u64);
+    }
 
     // Atomically, 1. create the shutdown tasks and 2. prevent creation of new tenants.
     let (total_in_progress, total_attached) = {
@@ -1997,6 +2008,101 @@ impl TenantManager {
             })
             .collect())
     }
+
+    /// Completes an earlier prepared timeline detach ancestor.
+    pub(crate) async fn complete_detaching_timeline_ancestor(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        prepared: PreparedTimelineDetach,
+        ctx: &RequestContext,
+    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+        struct RevertOnDropSlot(Option<SlotGuard>);
+
+        impl Drop for RevertOnDropSlot {
+            fn drop(&mut self) {
+                if let Some(taken) = self.0.take() {
+                    taken.revert();
+                }
+            }
+        }
+
+        impl RevertOnDropSlot {
+            fn into_inner(mut self) -> SlotGuard {
+                self.0.take().unwrap()
+            }
+        }
+
+        impl std::ops::Deref for RevertOnDropSlot {
+            type Target = SlotGuard;
+
+            fn deref(&self) -> &Self::Target {
+                self.0.as_ref().unwrap()
+            }
+        }
+
+        let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        let slot_guard = RevertOnDropSlot(Some(slot_guard));
+
+        let tenant = {
+            let Some(old_slot) = slot_guard.get_old_value() else {
+                anyhow::bail!(
+                    "Tenant not found when trying to complete detaching timeline ancestor"
+                );
+            };
+
+            let Some(tenant) = old_slot.get_attached() else {
+                anyhow::bail!("Tenant is not in attached state");
+            };
+
+            if !tenant.is_active() {
+                anyhow::bail!("Tenant is not active");
+            }
+
+            tenant.clone()
+        };
+
+        let timeline = tenant.get_timeline(timeline_id, true)?;
+
+        let reparented = timeline
+            .complete_detaching_timeline_ancestor(&tenant, prepared, ctx)
+            .await?;
+
+        let mut slot_guard = slot_guard.into_inner();
+
+        let (_guard, progress) = utils::completion::channel();
+        match tenant.shutdown(progress, ShutdownMode::Hard).await {
+            Ok(()) => {
+                slot_guard.drop_old_value()?;
+            }
+            Err(_barrier) => {
+                slot_guard.revert();
+                // this really should not happen, at all, unless shutdown was already going?
+                anyhow::bail!("Cannot restart Tenant, already shutting down");
+            }
+        }
+
+        let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+
+        let shard_identity = config.shard;
+        let tenant = tenant_spawn(
+            self.conf,
+            tenant_shard_id,
+            &tenant_path,
+            self.resources.clone(),
+            AttachedTenantConf::try_from(config)?,
+            shard_identity,
+            None,
+            self.tenants,
+            SpawnMode::Eager,
+            ctx,
+        )?;
+
+        slot_guard.upsert(TenantSlot::Attached(tenant))?;
+
+        Ok(reparented)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2428,10 +2534,13 @@ impl SlotGuard {
                 TenantsMap::Open(m) => m,
             };
 
+            METRICS.slot_inserted(&new_value);
+
             let replaced = m.insert(self.tenant_shard_id, new_value);
             self.upserted = true;
-
-            METRICS.tenant_slots.set(m.len() as u64);
+            if let Some(replaced) = replaced.as_ref() {
+                METRICS.slot_removed(replaced);
+            }
 
             replaced
         };
@@ -2541,9 +2650,13 @@ impl Drop for SlotGuard {
                 }
 
                 if self.old_value_is_shutdown() {
+                    METRICS.slot_removed(entry.get());
                     entry.remove();
                 } else {
-                    entry.insert(self.old_value.take().unwrap());
+                    let inserting = self.old_value.take().unwrap();
+                    METRICS.slot_inserted(&inserting);
+                    let replaced = entry.insert(inserting);
+                    METRICS.slot_removed(&replaced);
                 }
             }
             Entry::Vacant(_) => {
@@ -2554,8 +2667,6 @@ impl Drop for SlotGuard {
                 );
             }
         }
-
-        METRICS.tenant_slots.set(m.len() as u64);
     }
 }
 
@@ -2635,7 +2746,9 @@ fn tenant_map_acquire_slot_impl(
             }
             _ => {
                 let (completion, barrier) = utils::completion::channel();
-                v.insert(TenantSlot::InProgress(barrier));
+                let inserting = TenantSlot::InProgress(barrier);
+                METRICS.slot_inserted(&inserting);
+                v.insert(inserting);
                 tracing::debug!("Vacant, inserted InProgress");
                 Ok(SlotGuard::new(*tenant_shard_id, None, completion))
             }
@@ -2671,7 +2784,10 @@ fn tenant_map_acquire_slot_impl(
                 _ => {
                     // Happy case: the slot was not in any state that violated our mode
                     let (completion, barrier) = utils::completion::channel();
-                    let old_value = o.insert(TenantSlot::InProgress(barrier));
+                    let in_progress = TenantSlot::InProgress(barrier);
+                    METRICS.slot_inserted(&in_progress);
+                    let old_value = o.insert(in_progress);
+                    METRICS.slot_removed(&old_value);
                     tracing::debug!("Occupied, replaced with InProgress");
                     Ok(SlotGuard::new(
                         *tenant_shard_id,

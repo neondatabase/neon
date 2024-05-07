@@ -450,6 +450,7 @@ class NeonEnvBuilder:
         test_output_dir: Path,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
+        # toml that will be decomposed into `--config-override` flags during `pageserver --init`
         pageserver_config_override: Optional[str] = None,
         num_safekeepers: int = 1,
         num_pageservers: int = 1,
@@ -1021,7 +1022,6 @@ class NeonEnv:
         self.neon_local_binpath = config.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
-        self.pageserver_config_override = config.pageserver_config_override
         self.storage_controller_config = config.storage_controller_config
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
@@ -1131,7 +1131,11 @@ class NeonEnv:
             cfg["safekeepers"].append(sk_cfg)
 
         log.info(f"Config: {cfg}")
-        self.neon_cli.init(cfg, force=config.config_init_force)
+        self.neon_cli.init(
+            cfg,
+            force=config.config_init_force,
+            pageserver_config_override=config.pageserver_config_override,
+        )
 
     def start(self):
         # Storage controller starts first, so that pageserver /re-attach calls don't
@@ -1703,6 +1707,7 @@ class NeonCli(AbstractNeonCli):
         self,
         config: Dict[str, Any],
         force: Optional[str] = None,
+        pageserver_config_override: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(toml.dumps(config))
@@ -1713,17 +1718,24 @@ class NeonCli(AbstractNeonCli):
             if force is not None:
                 cmd.extend(["--force", force])
 
-            storage = self.env.pageserver_remote_storage
+            remote_storage = self.env.pageserver_remote_storage
 
-            append_pageserver_param_overrides(
-                params_to_update=cmd,
-                remote_storage=storage,
-                pageserver_config_override=self.env.pageserver_config_override,
-            )
+            if remote_storage is not None:
+                remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
+
+                cmd.append(
+                    f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
+                )
+
+            if pageserver_config_override is not None:
+                cmd += [
+                    f"--pageserver-config-override={o.strip()}"
+                    for o in pageserver_config_override.split(";")
+                ]
 
             s3_env_vars = None
-            if isinstance(storage, S3Storage):
-                s3_env_vars = storage.access_env_vars()
+            if isinstance(remote_storage, S3Storage):
+                s3_env_vars = remote_storage.access_env_vars()
             res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
             res.check_returncode()
             return res
@@ -1746,11 +1758,6 @@ class NeonCli(AbstractNeonCli):
     ) -> "subprocess.CompletedProcess[str]":
         start_args = ["pageserver", "start", f"--id={id}", *overrides]
         storage = self.env.pageserver_remote_storage
-        append_pageserver_param_overrides(
-            params_to_update=start_args,
-            remote_storage=storage,
-            pageserver_config_override=self.env.pageserver_config_override,
-        )
 
         if isinstance(storage, S3Storage):
             s3_env_vars = storage.access_env_vars()
@@ -2622,33 +2629,6 @@ class NeonPageserver(PgProtocol, LogUtils):
         for layer in layers:
             log.info(f"layer found: {layer}")
         return layer_name in [parse_layer_file_name(p.name) for p in layers]
-
-
-def append_pageserver_param_overrides(
-    params_to_update: List[str],
-    remote_storage: Optional[RemoteStorage],
-    pageserver_config_override: Optional[str] = None,
-):
-    if remote_storage is not None:
-        remote_storage_toml_table = remote_storage_to_toml_inline_table(remote_storage)
-
-        params_to_update.append(
-            f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
-        )
-    else:
-        params_to_update.append('--pageserver-config-override=remote_storage=""')
-
-    env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
-    if env_overrides is not None:
-        params_to_update += [
-            f"--pageserver-config-override={o.strip()}" for o in env_overrides.split(";")
-        ]
-
-    if pageserver_config_override is not None:
-        params_to_update += [
-            f"--pageserver-config-override={o.strip()}"
-            for o in pageserver_config_override.split(";")
-        ]
 
 
 class PgBin:

@@ -645,9 +645,61 @@ impl RemoteTimelineClient {
         self.launch_queued_tasks(upload_queue);
     }
 
+    pub(crate) async fn schedule_reparenting_and_wait(
+        self: &Arc<Self>,
+        new_parent: &TimelineId,
+    ) -> anyhow::Result<()> {
+        // FIXME: because of how Timeline::schedule_uploads works when called from layer flushing
+        // and reads the in-memory part we cannot do the detaching like this
+        let receiver = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
+
+            upload_queue.latest_metadata.reparent(new_parent);
+
+            self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+
+            self.schedule_barrier0(upload_queue)
+        };
+
+        Self::wait_completion0(receiver).await
+    }
+
+    /// Schedules uploading a new version of `index_part.json` with the given layers added,
+    /// detaching from ancestor and waits for it to complete.
     ///
-    /// Launch an upload operation in the background.
-    ///
+    /// This is used with `Timeline::detach_ancestor` functionality.
+    pub(crate) async fn schedule_adding_existing_layers_to_index_detach_and_wait(
+        self: &Arc<Self>,
+        layers: &[Layer],
+        adopted: (TimelineId, Lsn),
+    ) -> anyhow::Result<()> {
+        let barrier = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
+
+            upload_queue
+                .latest_metadata
+                .detach_from_ancestor(&adopted.0, &adopted.1);
+
+            for layer in layers {
+                upload_queue
+                    .latest_files
+                    .insert(layer.layer_desc().filename(), layer.metadata());
+            }
+
+            self.schedule_index_upload(upload_queue, upload_queue.latest_metadata.clone());
+
+            let barrier = self.schedule_barrier0(upload_queue);
+            self.launch_queued_tasks(upload_queue);
+            barrier
+        };
+
+        Self::wait_completion0(barrier).await
+    }
+
+    /// Launch an upload operation in the background; the file is added to be included in next
+    /// `index_part.json` upload.
     pub(crate) fn schedule_layer_file_upload(
         self: &Arc<Self>,
         layer: ResidentLayer,
@@ -673,9 +725,11 @@ impl RemoteTimelineClient {
         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
 
         info!(
-            "scheduled layer file upload {layer} gen={:?} shard={:?}",
-            metadata.generation, metadata.shard
+            gen=?metadata.generation,
+            shard=?metadata.shard,
+            "scheduled layer file upload {layer}",
         );
+
         let op = UploadOp::UploadLayer(layer, metadata);
         self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
@@ -882,12 +936,18 @@ impl RemoteTimelineClient {
 
     /// Wait for all previously scheduled uploads/deletions to complete
     pub(crate) async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
-        let mut receiver = {
+        let receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
             self.schedule_barrier0(upload_queue)
         };
 
+        Self::wait_completion0(receiver).await
+    }
+
+    async fn wait_completion0(
+        mut receiver: tokio::sync::watch::Receiver<()>,
+    ) -> anyhow::Result<()> {
         if receiver.changed().await.is_err() {
             anyhow::bail!("wait_completion aborted because upload queue was stopped");
         }
@@ -1085,6 +1145,72 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Uploads the given layer **without** adding it to be part of a future `index_part.json` upload.
+    ///
+    /// This is not normally needed.
+    pub(crate) async fn upload_layer_file(
+        self: &Arc<Self>,
+        uploaded: &ResidentLayer,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        backoff::retry(
+            || async {
+                let m = uploaded.metadata();
+                upload::upload_timeline_layer(
+                    self.conf,
+                    &self.storage_impl,
+                    uploaded.local_path(),
+                    &uploaded.metadata(),
+                    m.generation,
+                    cancel,
+                )
+                .await
+            },
+            TimeoutOrCancel::caused_by_cancel,
+            FAILED_UPLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "upload a layer without adding it to latest files",
+            cancel,
+        )
+        .await
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
+        .and_then(|x| x)
+        .context("upload a layer without adding it to latest files")
+    }
+
+    /// Copies the `adopted` remote existing layer to the remote path of `adopted_as`. The layer is
+    /// not added to be part of a future `index_part.json` upload.
+    pub(crate) async fn copy_timeline_layer(
+        self: &Arc<Self>,
+        adopted: &Layer,
+        adopted_as: &Layer,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        backoff::retry(
+            || async {
+                upload::copy_timeline_layer(
+                    self.conf,
+                    &self.storage_impl,
+                    adopted.local_path(),
+                    &adopted.metadata(),
+                    adopted_as.local_path(),
+                    &adopted_as.metadata(),
+                    cancel,
+                )
+                .await
+            },
+            TimeoutOrCancel::caused_by_cancel,
+            FAILED_UPLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "copy timeline layer",
+            cancel,
+        )
+        .await
+        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
+        .and_then(|x| x)
+        .context("remote copy timeline layer")
+    }
+
     async fn flush_deletion_queue(&self) -> Result<(), DeletionQueueError> {
         match tokio::time::timeout(
             DELETION_QUEUE_FLUSH_TIMEOUT,
@@ -1256,7 +1382,7 @@ impl RemoteTimelineClient {
         while let Some(next_op) = upload_queue.queued_operations.front() {
             // Can we run this task now?
             let can_run_now = match next_op {
-                UploadOp::UploadLayer(_, _) => {
+                UploadOp::UploadLayer(..) => {
                     // Can always be scheduled.
                     true
                 }
