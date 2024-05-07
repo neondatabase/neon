@@ -54,7 +54,7 @@ from fixtures.pageserver.allowed_errors import (
     DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.types import IndexPartDump, LayerFileName, parse_layer_file_name
+from fixtures.pageserver.types import IndexPartDump, LayerName, parse_layer_file_name
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -2678,7 +2678,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         )
 
     def layer_exists(
-        self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: LayerFileName
+        self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: LayerName
     ) -> bool:
         layers = self.list_layers(tenant_id, timeline_id)
         return layer_name in [parse_layer_file_name(p.name) for p in layers]
