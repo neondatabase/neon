@@ -11,7 +11,7 @@ use std::collections::BinaryHeap;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::future::Future;
-use std::ops::{DerefMut, Range};
+use std::ops::Range;
 use std::pin::Pin;
 use std::task::{ready, Poll};
 use utils::lsn::Lsn;
@@ -178,8 +178,8 @@ where
                 match ready!(load_future.as_mut().poll(cx)) {
                     Ok(entries) => {
                         this.load_future.set(None);
-                        *this.heap.peek_mut().unwrap() =
-                            LazyLoadLayer::Loaded(VecDeque::from(entries));
+                        this.heap
+                            .push(LazyLoadLayer::Loaded(VecDeque::from(entries)));
                     }
                     Err(e) => {
                         return Poll::Ready(Some(Err(e)));
@@ -191,23 +191,25 @@ where
             // loading it. Otherwise return the next entry from it and update
             // the layer's position in the heap (this decreaseKey operation is
             // performed implicitly when `top` is dropped).
-            if let Some(mut top) = this.heap.peek_mut() {
-                match top.deref_mut() {
-                    LazyLoadLayer::Unloaded(ref mut l) => {
-                        let fut = l.load_keys(this.ctx);
-                        this.load_future.set(Some(Box::pin(fut)));
-                        continue;
-                    }
-                    LazyLoadLayer::Loaded(ref mut entries) => {
-                        let result = entries.pop_front().unwrap();
-                        if entries.is_empty() {
-                            std::collections::binary_heap::PeekMut::pop(top);
-                        }
-                        return Poll::Ready(Some(Ok(result)));
-                    }
-                }
-            } else {
+            // We have to remove the layer from the heap and then re-add it,
+            // because loading it (or just removing a key from it) can change
+            // its ordering relative to the other layers in the heap.
+            let Some(mut top) = this.heap.pop() else {
                 return Poll::Ready(None);
+            };
+            match top {
+                LazyLoadLayer::Unloaded(ref mut l) => {
+                    let fut = l.load_keys(this.ctx);
+                    this.load_future.set(Some(Box::pin(fut)));
+                    continue;
+                }
+                LazyLoadLayer::Loaded(ref mut entries) => {
+                    let result = entries.pop_front().unwrap();
+                    if !entries.is_empty() {
+                        this.heap.push(top);
+                    }
+                    return Poll::Ready(Some(Ok(result)));
+                }
             }
         }
     }
