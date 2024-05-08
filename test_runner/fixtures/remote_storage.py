@@ -50,7 +50,7 @@ class MockS3Server:
         # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
         # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
         # if a process is started from the shell process.
-        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", "s3", f"-p{port}"])
+        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", f"-p{port}"])
         error = None
         try:
             return_code = self.subprocess.poll()
