@@ -30,7 +30,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::local_env::PageServerConf;
+use crate::local_env::{NeonLocalInitPageserverConf, PageServerConf};
 use crate::{background_process, local_env::LocalEnv};
 
 /// Directory within .neon which will be used by default for LocalFs remote storage.
@@ -76,9 +76,11 @@ impl PageServerNode {
 
     fn pageserver_init_make_toml(
         &self,
-        cli_overrides: toml_edit::Document,
+        conf: NeonLocalInitPageserverConf,
     ) -> anyhow::Result<toml_edit::Document> {
-        // TODO: this is a legacy code, it should be refactored to use toml_edit directly.
+        assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
+
+        // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml (PR #7656)
 
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
@@ -86,61 +88,9 @@ impl PageServerNode {
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let PageServerConf {
-            id,
-            listen_pg_addr,
-            listen_http_addr,
-            pg_auth_type,
-            http_auth_type,
-            virtual_file_io_engine,
-            get_vectored_impl,
-            get_impl,
-            validate_vectored_get,
-        } = &self.conf;
-
-        let id = format!("id={}", id);
-
-        let http_auth_type_param = format!("http_auth_type='{}'", http_auth_type);
-        let listen_http_addr_param = format!("listen_http_addr='{}'", listen_http_addr);
-
-        let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
-        let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
-        let virtual_file_io_engine = if let Some(virtual_file_io_engine) = virtual_file_io_engine {
-            format!("virtual_file_io_engine='{virtual_file_io_engine}'")
-        } else {
-            String::new()
-        };
-        let get_vectored_impl = if let Some(get_vectored_impl) = get_vectored_impl {
-            format!("get_vectored_impl='{get_vectored_impl}'")
-        } else {
-            String::new()
-        };
-        let get_impl = if let Some(get_impl) = get_impl {
-            format!("get_impl='{get_impl}'")
-        } else {
-            String::new()
-        };
-        let validate_vectored_get = if let Some(validate_vectored_get) = validate_vectored_get {
-            format!("validate_vectored_get={validate_vectored_get}")
-        } else {
-            String::new()
-        };
-
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
-        let mut overrides = vec![
-            id,
-            pg_distrib_dir_param,
-            http_auth_type_param,
-            pg_auth_type_param,
-            listen_http_addr_param,
-            listen_pg_addr_param,
-            broker_endpoint_param,
-            virtual_file_io_engine,
-            get_vectored_impl,
-            get_impl,
-            validate_vectored_get,
-        ];
+        let mut overrides = vec![pg_distrib_dir_param, broker_endpoint_param];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
             overrides.push(format!(
@@ -150,7 +100,7 @@ impl PageServerNode {
 
             // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
-            if matches!(http_auth_type, AuthType::NeonJWT) {
+            if matches!(conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
                     .env
                     .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
@@ -159,20 +109,23 @@ impl PageServerNode {
             }
         }
 
-        if !cli_overrides.contains_key("remote_storage") {
+        if !conf.other.contains_key("remote_storage") {
             overrides.push(format!(
                 "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
             ));
         }
 
-        if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
+        if conf.http_auth_type != AuthType::Trust || conf.pg_auth_type != AuthType::Trust {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
         }
 
         // Apply the user-provided overrides
-        overrides.push(cli_overrides.to_string());
+        overrides.push(
+            toml_edit::ser::to_string_pretty(&conf)
+                .expect("we deserialized this from toml earlier"),
+        );
 
         // Turn `overrides` into a toml document.
         // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
@@ -188,8 +141,8 @@ impl PageServerNode {
     }
 
     /// Initializes a pageserver node by creating its config with the overrides provided.
-    pub fn initialize(&self, config_overrides: toml_edit::Document) -> anyhow::Result<()> {
-        self.pageserver_init(config_overrides)
+    pub fn initialize(&self, conf: NeonLocalInitPageserverConf) -> anyhow::Result<()> {
+        self.pageserver_init(conf)
             .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
     }
 
@@ -209,7 +162,7 @@ impl PageServerNode {
         self.start_node().await
     }
 
-    fn pageserver_init(&self, cli_overrides: toml_edit::Document) -> anyhow::Result<()> {
+    fn pageserver_init(&self, conf: NeonLocalInitPageserverConf) -> anyhow::Result<()> {
         let datadir = self.repo_path();
         let node_id = self.conf.id;
         println!(
@@ -221,7 +174,7 @@ impl PageServerNode {
         io::stdout().flush()?;
 
         let config = self
-            .pageserver_init_make_toml(cli_overrides)
+            .pageserver_init_make_toml(conf)
             .context("make pageserver toml")?;
         let config_file_path = datadir.join("pageserver.toml");
         let mut config_file = std::fs::OpenOptions::new()

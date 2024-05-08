@@ -9,8 +9,11 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::local_env::{InitForceMode, LocalEnv};
-use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
+use control_plane::local_env::{
+    InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
+    SafekeeperConf,
+};
+use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
 use control_plane::{broker, local_env};
@@ -51,44 +54,6 @@ project_git_version!(GIT_VERSION);
 const DEFAULT_PG_VERSION: &str = "15";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
-
-fn default_conf(num_pageservers: u16) -> String {
-    let mut template = format!(
-        r#"
-# Default built-in configuration, defined in main.rs
-control_plane_api = '{DEFAULT_PAGESERVER_CONTROL_PLANE_API}'
-
-[broker]
-listen_addr = '{DEFAULT_BROKER_ADDR}'
-
-[[safekeepers]]
-id = {DEFAULT_SAFEKEEPER_ID}
-pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
-http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
-
-"#,
-    );
-
-    for i in 0..num_pageservers {
-        let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
-        let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
-        let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
-
-        template += &format!(
-            r#"
-[[pageservers]]
-id = {pageserver_id}
-listen_pg_addr = '127.0.0.1:{pg_port}'
-listen_http_addr = '127.0.0.1:{http_port}'
-pg_auth_type = '{trust_auth}'
-http_auth_type = '{trust_auth}'
-"#,
-            trust_auth = AuthType::Trust,
-        )
-    }
-
-    template
-}
 
 ///
 /// Timelines tree element used as a value in the HashMap.
@@ -152,7 +117,7 @@ fn main() -> Result<()> {
     };
 
     match subcommand_result {
-        Ok(Some(updated_env)) => updated_env.persist_config(&updated_env.base_data_dir)?,
+        Ok(Some(updated_env)) => updated_env.persist_config()?,
         Ok(None) => (),
         Err(e) => {
             eprintln!("command failed: {e:?}");
@@ -341,55 +306,65 @@ fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId
 }
 
 fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
-    let num_pageservers = init_match
-        .get_one::<u16>("num-pageservers")
-        .expect("num-pageservers arg has a default");
-    // Create config file
-    let toml_file: String = if let Some(config_path) = init_match.get_one::<PathBuf>("config") {
+    let num_pageservers = init_match.get_one::<u16>("num-pageservers");
+
+    let force = init_match.get_one("force").expect("we set a default value");
+
+    // Create the in-memory `LocalEnv` that we'd normally load from disk in `load_config`.
+    let init_conf: NeonLocalInitConf = if let Some(config_path) =
+        init_match.get_one::<PathBuf>("config")
+    {
+        // User (likely the Python test suite) provided a description of the environment.
+        if num_pageservers.is_some() {
+            bail!("Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead");
+        }
         // load and parse the file
-        std::fs::read_to_string(config_path).with_context(|| {
+        let contents = std::fs::read_to_string(config_path).with_context(|| {
             format!(
                 "Could not read configuration file '{}'",
                 config_path.display()
             )
-        })?
+        })?;
+        toml_edit::de::from_str(&contents)?
     } else {
-        // Built-in default config
-        default_conf(*num_pageservers)
+        // User (likely interactive) did not provide a description of the environment, give them the default
+        NeonLocalInitConf {
+            control_plane_api: Some(Some(DEFAULT_PAGESERVER_CONTROL_PLANE_API.parse().unwrap())),
+            broker: NeonBroker {
+                listen_addr: DEFAULT_BROKER_ADDR.parse().unwrap(),
+            },
+            safekeepers: vec![SafekeeperConf {
+                id: DEFAULT_SAFEKEEPER_ID,
+                pg_port: DEFAULT_SAFEKEEPER_PG_PORT,
+                http_port: DEFAULT_SAFEKEEPER_HTTP_PORT,
+                ..Default::default()
+            }],
+            pageservers: (0..num_pageservers.copied().unwrap_or(1))
+                .map(|i| {
+                    let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
+                    let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
+                    let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+                    NeonLocalInitPageserverConf {
+                        id: pageserver_id,
+                        listen_pg_addr: format!("127.0.0.1:{pg_port}"),
+                        listen_http_addr: format!("127.0.0.1:{http_port}"),
+                        pg_auth_type: AuthType::Trust,
+                        http_auth_type: AuthType::Trust,
+                        other: Default::default(),
+                    }
+                })
+                .collect(),
+            pg_distrib_dir: None,
+            neon_distrib_dir: None,
+            default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
+            storage_controller: None,
+            control_plane_compute_hook_api: None,
+        }
     };
 
-    let pageserver_config: toml_edit::Document =
-        if let Some(path) = init_match.get_one::<PathBuf>("pageserver-config") {
-            std::fs::read_to_string(path)?.parse()?
-        } else {
-            toml_edit::Document::new()
-        };
-
-    let pg_version = init_match
-        .get_one::<u32>("pg-version")
-        .copied()
-        .context("Failed to parse postgres version from the argument string")?;
-
-    let mut env =
-        LocalEnv::parse_config(&toml_file).context("Failed to create neon configuration")?;
-    let force = init_match.get_one("force").expect("we set a default value");
-    env.init(pg_version, force)
-        .context("Failed to initialize neon repository")?;
-
-    // Create remote storage location for default LocalFs remote storage
-    std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
-
-    // Initialize pageserver, create initial tenant and timeline.
-    for ps_conf in &env.pageservers {
-        PageServerNode::from_env(&env, ps_conf)
-            .initialize(pageserver_config.clone())
-            .unwrap_or_else(|e| {
-                eprintln!("pageserver init failed: {e:?}");
-                exit(1);
-            });
-    }
-
-    Ok(env)
+    LocalEnv::init(init_conf, force)
+        .context("materialize initial neon_local environment on disk")?;
+    Ok(LocalEnv::load_config().expect("freshly written config should be loadable"))
 }
 
 /// The default pageserver is the one where CLI tenant/timeline operations are sent by default.
@@ -1418,9 +1393,7 @@ fn cli() -> Command {
     let num_pageservers_arg = Arg::new("num-pageservers")
         .value_parser(value_parser!(u16))
         .long("num-pageservers")
-        .help("How many pageservers to create (default 1)")
-        .required(false)
-        .default_value("1");
+        .help("How many pageservers to create (default 1)");
 
     let update_catalog = Arg::new("update-catalog")
         .value_parser(value_parser!(bool))
@@ -1453,14 +1426,6 @@ fn cli() -> Command {
                         .required(false)
                         .value_parser(value_parser!(PathBuf))
                         .value_name("config")
-                )
-                .arg(
-                    Arg::new("pageserver-config")
-                        .long("pageserver-config")
-                        .required(false)
-                        .value_parser(value_parser!(PathBuf))
-                        .value_name("pageserver-config")
-                        .help("Merge the provided pageserver config into the one generated by neon_local."),
                 )
                 .arg(pg_version_arg.clone())
                 .arg(force_arg)
