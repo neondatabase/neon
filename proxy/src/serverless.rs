@@ -3,6 +3,7 @@
 //! Handles both SQL over HTTP and SQL over Websockets.
 
 mod backend;
+pub mod cancel_set;
 mod conn_pool;
 mod http_util;
 mod json;
@@ -111,21 +112,38 @@ pub async fn task_main(
         let conn_id = uuid::Uuid::new_v4();
         let http_conn_span = tracing::info_span!("http_conn", ?conn_id);
 
-        connections.spawn(
-            connection_handler(
-                config,
-                backend.clone(),
-                connections.clone(),
-                cancellation_handler.clone(),
-                endpoint_rate_limiter.clone(),
-                cancellation_token.clone(),
-                server.clone(),
-                tls_acceptor.clone(),
-                conn,
-                peer_addr,
-            )
-            .instrument(http_conn_span),
-        );
+        let n_connections = Metrics::get()
+            .proxy
+            .client_connections
+            .sample(crate::metrics::Protocol::Http);
+        tracing::trace!(?n_connections, threshold = ?config.http_config.client_conn_threshold, "check");
+        if n_connections > config.http_config.client_conn_threshold {
+            tracing::trace!("attempting to cancel a random connection");
+            if let Some(token) = config.http_config.cancel_set.take() {
+                tracing::debug!("cancelling a random connection");
+                token.cancel()
+            }
+        }
+
+        let conn_token = cancellation_token.child_token();
+        let conn = connection_handler(
+            config,
+            backend.clone(),
+            connections.clone(),
+            cancellation_handler.clone(),
+            endpoint_rate_limiter.clone(),
+            conn_token.clone(),
+            server.clone(),
+            tls_acceptor.clone(),
+            conn,
+            peer_addr,
+        )
+        .instrument(http_conn_span);
+
+        connections.spawn(async move {
+            let _cancel_guard = config.http_config.cancel_set.insert(conn_id, conn_token);
+            conn.await
+        });
     }
 
     connections.wait().await;
@@ -248,6 +266,7 @@ async fn connection_handler(
     // On cancellation, trigger the HTTP connection handler to shut down.
     let res = match select(pin!(cancellation_token.cancelled()), pin!(conn)).await {
         Either::Left((_cancelled, mut conn)) => {
+            tracing::debug!(%peer_addr, "cancelling connection");
             conn.as_mut().graceful_shutdown();
             conn.await
         }

@@ -236,27 +236,6 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Check Postgres submodules revision
-        shell: bash -euo pipefail {0}
-        run: |
-          # This is a temporary solution to ensure that the Postgres submodules revision is correct (i.e. the updated intentionally).
-          # Eventually it will be replaced by a regression test https://github.com/neondatabase/neon/pull/4603
-
-          FAILED=false
-          for postgres in postgres-v14 postgres-v15 postgres-v16; do
-            expected=$(cat vendor/revisions.json | jq --raw-output '."'"${postgres}"'"')
-            actual=$(git rev-parse "HEAD:vendor/${postgres}")
-            if [ "${expected}" != "${actual}" ]; then
-              echo >&2 "Expected ${postgres} rev to be at '${expected}', but it is at '${actual}'"
-              FAILED=true
-            fi
-          done
-
-          if [ "${FAILED}" = "true" ]; then
-            echo >&2 "Please update vendor/revisions.json if these changes are intentional"
-            exit 1
-          fi
-
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT

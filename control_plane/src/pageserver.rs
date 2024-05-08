@@ -17,7 +17,8 @@ use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
 use pageserver_api::models::{
-    self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
+    self, AuxFilePolicy, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo,
+    TimelineInfo,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -76,7 +77,7 @@ impl PageServerNode {
     /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
     ///
     /// These all end up on the command line of the `pageserver` binary.
-    fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
+    fn neon_local_overrides(&self, cli_overrides: &toml_edit::Document) -> Vec<String> {
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
@@ -156,10 +157,7 @@ impl PageServerNode {
             }
         }
 
-        if !cli_overrides
-            .iter()
-            .any(|c| c.starts_with("remote_storage"))
-        {
+        if !cli_overrides.contains_key("remote_storage") {
             overrides.push(format!(
                 "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
             ));
@@ -172,13 +170,13 @@ impl PageServerNode {
         }
 
         // Apply the user-provided overrides
-        overrides.extend(cli_overrides.iter().map(|&c| c.to_owned()));
+        overrides.push(cli_overrides.to_string());
 
         overrides
     }
 
     /// Initializes a pageserver node by creating its config with the overrides provided.
-    pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+    pub fn initialize(&self, config_overrides: &toml_edit::Document) -> anyhow::Result<()> {
         // First, run `pageserver --init` and wait for it to write a config into FS and exit.
         self.pageserver_init(config_overrides)
             .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
@@ -196,11 +194,11 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
-        self.start_node(config_overrides).await
+    pub async fn start(&self) -> anyhow::Result<()> {
+        self.start_node().await
     }
 
-    fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+    fn pageserver_init(&self, config_overrides: &toml_edit::Document) -> anyhow::Result<()> {
         let datadir = self.repo_path();
         let node_id = self.conf.id;
         println!(
@@ -268,7 +266,7 @@ impl PageServerNode {
         Ok(())
     }
 
-    async fn start_node(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+    async fn start_node(&self) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
@@ -285,11 +283,7 @@ impl PageServerNode {
                 self.conf.id, datadir,
             )
         })?;
-        let mut args = vec!["-D", datadir_path_str];
-        for config_override in config_overrides {
-            args.push("--config-override");
-            args.push(*config_override);
-        }
+        let args = vec!["-D", datadir_path_str];
         background_process::start_process(
             "pageserver",
             &datadir,
@@ -436,11 +430,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
-            switch_to_aux_file_v2: settings
-                .remove("switch_to_aux_file_v2")
-                .map(|x| x.parse::<bool>())
+            switch_aux_file_policy: settings
+                .remove("switch_aux_file_policy")
+                .map(|x| x.parse::<AuxFilePolicy>())
                 .transpose()
-                .context("Failed to parse 'switch_to_aux_file_v2' as bool")?,
+                .context("Failed to parse 'switch_aux_file_policy'")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -559,11 +553,11 @@ impl PageServerNode {
                     .map(serde_json::from_str)
                     .transpose()
                     .context("parse `timeline_get_throttle` from json")?,
-                switch_to_aux_file_v2: settings
-                    .remove("switch_to_aux_file_v2")
-                    .map(|x| x.parse::<bool>())
+                switch_aux_file_policy: settings
+                    .remove("switch_aux_file_policy")
+                    .map(|x| x.parse::<AuxFilePolicy>())
                     .transpose()
-                    .context("Failed to parse 'switch_to_aux_file_v2' as bool")?,
+                    .context("Failed to parse 'switch_aux_file_policy'")?,
             }
         };
 

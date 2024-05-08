@@ -23,8 +23,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
-        CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-        EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
+        AuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
+        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
+        TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -59,6 +60,7 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::tenant::storage_layer::layer::local_layer_path;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::TimelineMetadata,
@@ -863,9 +865,13 @@ impl Timeline {
                 // Initialise the reconstruct state for the key with the cache
                 // entry returned above.
                 let mut reconstruct_state = ValuesReconstructState::new();
-                let mut key_state = VectoredValueReconstructState::default();
-                key_state.img = cached_page_img;
-                reconstruct_state.keys.insert(key, Ok(key_state));
+
+                // Only add the cached image to the reconstruct state when it exists.
+                if cached_page_img.is_some() {
+                    let mut key_state = VectoredValueReconstructState::default();
+                    key_state.img = cached_page_img;
+                    reconstruct_state.keys.insert(key, Ok(key_state));
+                }
 
                 let vectored_res = self
                     .get_vectored_impl(keyspace.clone(), lsn, reconstruct_state, ctx)
@@ -1077,7 +1083,7 @@ impl Timeline {
         // We should generalize this into Keyspace::contains in the future.
         for range in &keyspace.ranges {
             if range.start.field1 < METADATA_KEY_BEGIN_PREFIX
-                || range.end.field1 >= METADATA_KEY_END_PREFIX
+                || range.end.field1 > METADATA_KEY_END_PREFIX
             {
                 return Err(GetVectoredError::Other(anyhow::anyhow!(
                     "only metadata keyspace can be scanned"
@@ -1899,7 +1905,7 @@ impl Timeline {
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     pub(crate) async fn download_layer(
         &self,
-        layer_file_name: &str,
+        layer_file_name: &LayerFileName,
     ) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
@@ -1917,7 +1923,10 @@ impl Timeline {
     /// Evict just one layer.
     ///
     /// Returns `Ok(None)` in the case where the layer could not be found by its `layer_file_name`.
-    pub(crate) async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+    pub(crate) async fn evict_layer(
+        &self,
+        layer_file_name: &LayerFileName,
+    ) -> anyhow::Result<Option<bool>> {
         let _gate = self
             .gate
             .enter()
@@ -1991,13 +2000,12 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
-    #[allow(dead_code)]
-    pub(crate) fn get_switch_to_aux_file_v2(&self) -> bool {
+    pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
             .tenant_conf
-            .switch_to_aux_file_v2
-            .unwrap_or(self.conf.default_tenant_conf.switch_to_aux_file_v2)
+            .switch_aux_file_policy
+            .unwrap_or(self.conf.default_tenant_conf.switch_aux_file_policy)
     }
 
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
@@ -2409,8 +2417,8 @@ impl Timeline {
 
                 for discovered in discovered {
                     let (name, kind) = match discovered {
-                        Discovered::Layer(file_name, file_size) => {
-                            discovered_layers.push((file_name, file_size));
+                        Discovered::Layer(layer_file_name, local_path, file_size) => {
+                            discovered_layers.push((layer_file_name, local_path, file_size));
                             continue;
                         }
                         Discovered::Metadata => {
@@ -2455,7 +2463,7 @@ impl Timeline {
                 let mut needs_cleanup = Vec::new();
                 let mut total_physical_size = 0;
 
-                for (name, decision) in decided {
+                for (name, local_path, decision) in decided {
                     let decision = match decision {
                         Ok(UseRemote { local, remote }) => {
                             // Remote is authoritative, but we may still choose to retain
@@ -2465,26 +2473,23 @@ impl Timeline {
                                 // the correct generation.
                                 UseLocal(remote)
                             } else {
-                                path.push(name.file_name());
-                                init::cleanup_local_file_for_remote(&path, &local, &remote)?;
-                                path.pop();
+                                let local_path = local_path.as_ref().expect("Locally found layer must have path");
+                                init::cleanup_local_file_for_remote(local_path, &local, &remote)?;
                                 UseRemote { local, remote }
                             }
                         }
                         Ok(decision) => decision,
                         Err(DismissedLayer::Future { local }) => {
                             if local.is_some() {
-                                path.push(name.file_name());
-                                init::cleanup_future_layer(&path, &name, disk_consistent_lsn)?;
-                                path.pop();
+                                let local_path = local_path.expect("Locally found layer must have path");
+                                init::cleanup_future_layer(&local_path, &name, disk_consistent_lsn)?;
                             }
                             needs_cleanup.push(name);
                             continue;
                         }
                         Err(DismissedLayer::LocalOnly(local)) => {
-                            path.push(name.file_name());
-                            init::cleanup_local_only_file(&path, &name, &local)?;
-                            path.pop();
+                            let local_path = local_path.expect("Locally found layer must have path");
+                            init::cleanup_local_only_file(&local_path, &name, &local)?;
                             // this file never existed remotely, we will have to do rework
                             continue;
                         }
@@ -2500,7 +2505,18 @@ impl Timeline {
                     let layer = match decision {
                         UseLocal(m) => {
                             total_physical_size += m.file_size();
-                            Layer::for_resident(conf, &this, name, m).drop_eviction_guard()
+
+                            let local_path = local_path.unwrap_or_else(|| {
+                                local_layer_path(
+                                    conf,
+                                    &this.tenant_shard_id,
+                                    &this.timeline_id,
+                                    &name,
+                                    &m.generation,
+                                )
+                            });
+
+                            Layer::for_resident(conf, &this, local_path, name, m).drop_eviction_guard()
                         }
                         Evicted(remote) | UseRemote { remote, .. } => {
                             Layer::for_evicted(conf, &this, name, remote)
@@ -2981,11 +2997,11 @@ impl Timeline {
         }
     }
 
-    async fn find_layer(&self, layer_file_name: &str) -> Option<Layer> {
+    async fn find_layer(&self, layer_name: &LayerFileName) -> Option<Layer> {
         let guard = self.layers.read().await;
         for historic_layer in guard.layer_map().iter_historic_layers() {
-            let historic_layer_name = historic_layer.filename().file_name();
-            if layer_file_name == historic_layer_name {
+            let historic_layer_name = historic_layer.filename();
+            if layer_name == &historic_layer_name {
                 return Some(guard.get_from_desc(&historic_layer));
             }
         }
@@ -3015,7 +3031,7 @@ impl Timeline {
 
             HeatMapLayer::new(
                 layer.layer_desc().filename(),
-                layer.metadata().into(),
+                (&layer.metadata()).into(),
                 last_activity_ts,
             )
         });
