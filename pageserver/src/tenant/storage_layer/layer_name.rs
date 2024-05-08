@@ -57,16 +57,14 @@ impl Ord for DeltaLayerName {
     }
 }
 
-/// Represents the filename of a DeltaLayer
+/// Represents the region of the LSN-Key space covered by a DeltaLayer
 ///
 /// ```text
 ///    <key start>-<key end>__<LSN start>-<LSN end>
 /// ```
 impl DeltaLayerName {
-    ///
-    /// Parse a string as a delta file name. Returns None if the filename does not
-    /// match the expected pattern.
-    ///
+    /// Parse the part of a delta layer's file name that represents the LayerName. Returns None
+    /// if the filename does not match the expected pattern.
     pub fn parse_str(fname: &str) -> Option<Self> {
         let mut parts = fname.split("__");
         let mut key_parts = parts.next()?.split('-');
@@ -172,16 +170,14 @@ impl ImageLayerName {
 }
 
 ///
-/// Represents the filename of an ImageLayer
+/// Represents the part of the Key-LSN space covered by an ImageLayer
 ///
 /// ```text
 ///    <key start>-<key end>__<LSN>
 /// ```
 impl ImageLayerName {
-    ///
-    /// Parse a string as an image file name. Returns None if the filename does not
-    /// match the expected pattern.
-    ///
+    /// Parse a string as then LayerName part of an image layer file name. Returns None if the
+    /// filename does not match the expected pattern.
     pub fn parse_str(fname: &str) -> Option<Self> {
         let mut parts = fname.split("__");
         let mut key_parts = parts.next()?.split('-');
@@ -220,6 +216,13 @@ impl fmt::Display for ImageLayerName {
         )
     }
 }
+
+/// LayerName is the logical identity of a layer within a LayerMap at a moment in time.  The
+/// LayerName is not a unique filename, as the same LayerName may have multiple physical incarnations
+/// over time (e.g. across shard splits or compression). The physical filenames of layers in local
+/// storage and object names in remote storage consist of the LayerName plus some extra qualifiers
+/// that uniquely identify the physical incarnation of a layer (see [crate::tenant::remote_timeline_client::remote_layer_path])
+/// and [`crate::tenant::storage_layer::layer::local_layer_path`])
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum LayerName {
     Image(ImageLayerName),
