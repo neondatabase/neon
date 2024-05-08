@@ -152,6 +152,9 @@ pub struct NeonStorageControllerConf {
     /// Heartbeat timeout before marking a node offline
     #[serde(with = "humantime_serde")]
     pub max_unavailable: Duration,
+
+    /// Threshold for auto-splitting a tenant into shards
+    pub split_threshold: Option<u64>,
 }
 
 impl NeonStorageControllerConf {
@@ -164,6 +167,7 @@ impl Default for NeonStorageControllerConf {
     fn default() -> Self {
         Self {
             max_unavailable: Self::DEFAULT_MAX_UNAVAILABLE_INTERVAL,
+            split_threshold: None,
         }
     }
 }
