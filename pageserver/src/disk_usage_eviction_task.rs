@@ -639,7 +639,7 @@ impl EvictionLayer {
 
     pub(crate) fn get_name(&self) -> LayerName {
         match self {
-            Self::Attached(l) => l.layer_desc().filename(),
+            Self::Attached(l) => l.layer_desc().layer_name(),
             Self::Secondary(sl) => sl.name.clone(),
         }
     }

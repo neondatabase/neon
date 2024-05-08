@@ -259,7 +259,7 @@ impl Layer {
                 conf,
                 &timeline.tenant_shard_id,
                 &timeline.timeline_id,
-                &desc.filename(),
+                &desc.layer_name(),
                 &timeline.generation,
             );
 
@@ -687,7 +687,7 @@ impl Drop for LayerInner {
         let span = tracing::info_span!(parent: None, "layer_delete", tenant_id = %self.layer_desc().tenant_shard_id.tenant_id, shard_id=%self.layer_desc().tenant_shard_id.shard_slug(), timeline_id = %self.layer_desc().timeline_id);
 
         let path = std::mem::take(&mut self.path);
-        let file_name = self.layer_desc().filename();
+        let file_name = self.layer_desc().layer_name();
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
         let meta = self.metadata();
@@ -780,7 +780,9 @@ impl LayerInner {
 
         LayerInner {
             conf,
-            debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
+            debug_str: {
+                format!("timelines/{}/{}", timeline.timeline_id, desc.layer_name()).into()
+            },
             path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
@@ -1118,7 +1120,7 @@ impl LayerInner {
 
         let result = client
             .download_layer_file(
-                &self.desc.filename(),
+                &self.desc.layer_name(),
                 &self.metadata(),
                 &timeline.cancel,
                 ctx,
@@ -1255,7 +1257,7 @@ impl LayerInner {
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_name = self.desc.filename().to_string();
+        let layer_name = self.desc.layer_name().to_string();
 
         let resident = self
             .inner

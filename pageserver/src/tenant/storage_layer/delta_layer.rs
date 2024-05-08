@@ -312,7 +312,7 @@ impl DeltaLayer {
 
         // not production code
         let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
-        let expected_layer_name = self.layer_desc().filename();
+        let expected_layer_name = self.layer_desc().layer_name();
 
         if actual_layer_name != expected_layer_name {
             println!("warning: filename does not match what is expected from in-file summary");

@@ -51,7 +51,7 @@ impl PersistentLayerDesc {
     }
 
     pub fn short_id(&self) -> impl Display {
-        self.filename()
+        self.layer_name()
     }
 
     #[cfg(test)]
@@ -132,10 +132,10 @@ impl PersistentLayerDesc {
         lsn..(lsn + 1)
     }
 
-    /// Get a delta file name for this layer.
+    /// Get a delta layer name for this layer.
     ///
     /// Panic: if this is not a delta layer.
-    pub fn delta_file_name(&self) -> DeltaLayerName {
+    pub fn delta_layer_name(&self) -> DeltaLayerName {
         assert!(self.is_delta);
         DeltaLayerName {
             key_range: self.key_range.clone(),
@@ -143,10 +143,10 @@ impl PersistentLayerDesc {
         }
     }
 
-    /// Get a delta file name for this layer.
+    /// Get a image layer name for this layer.
     ///
     /// Panic: if this is not an image layer, or the lsn range is invalid
-    pub fn image_file_name(&self) -> ImageLayerName {
+    pub fn image_layer_name(&self) -> ImageLayerName {
         assert!(!self.is_delta);
         assert!(self.lsn_range.start + 1 == self.lsn_range.end);
         ImageLayerName {
@@ -155,11 +155,11 @@ impl PersistentLayerDesc {
         }
     }
 
-    pub fn filename(&self) -> LayerName {
+    pub fn layer_name(&self) -> LayerName {
         if self.is_delta {
-            self.delta_file_name().into()
+            self.delta_layer_name().into()
         } else {
-            self.image_file_name().into()
+            self.image_layer_name().into()
         }
     }
 
