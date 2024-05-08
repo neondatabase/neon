@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Union
 
@@ -47,46 +48,36 @@ class InvalidFileName(Exception):
     pass
 
 
+IMAGE_LAYER_FILE_NAME = re.compile("^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})(-[a-f0-9]{8})?$")
+
+
 def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
     """Parse an image layer file name. Return key start, key end, and snapshot lsn"""
-    parts = f_name.split("__")
-    if len(parts) != 2:
-        raise InvalidFileName(f"expecting two parts separated by '__', got: {parts}")
-    key_parts = parts[0].split("-")
-    if len(key_parts) != 2:
-        raise InvalidFileName(
-            f"expecting two key parts separated by '--' in parts[0], got: {key_parts}"
-        )
-    try:
-        return int(key_parts[0], 16), int(key_parts[1], 16), int(parts[1], 16)
-    except ValueError as e:
-        raise InvalidFileName(f"conversion error: {f_name}") from e
+
+    match = IMAGE_LAYER_FILE_NAME.match(f_name)
+    if match is None:
+        raise InvalidFileName(f"'{f_name}' is not an image layer filename")
+
+    return int(match.group(1), 16), int(match.group(2), 16), int(match.group(3), 16)
+
+
+DELTA_LAYER_FILE_NAME = re.compile(
+    "^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})-([A-F0-9]{16})(-[a-f0-9]{8})?$"
+)
 
 
 def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
     """Parse a delta layer file name. Return key start, key end, lsn start, and lsn end"""
-    parts = f_name.split("__")
-    if len(parts) != 2:
-        raise InvalidFileName(f"expecting two parts separated by '__', got: {parts}")
-    key_parts = parts[0].split("-")
-    if len(key_parts) != 2:
-        raise InvalidFileName(
-            f"expecting two key parts separated by '--' in parts[0], got: {key_parts}"
-        )
-    lsn_parts = parts[1].split("-")
-    if len(lsn_parts) != 2:
-        raise InvalidFileName(
-            f"expecting two lsn parts separated by '--' in parts[1], got: {lsn_parts}"
-        )
-    try:
-        return (
-            int(key_parts[0], 16),
-            int(key_parts[1], 16),
-            int(lsn_parts[0], 16),
-            int(lsn_parts[1], 16),
-        )
-    except ValueError as e:
-        raise InvalidFileName(f"conversion error: {f_name}") from e
+    match = DELTA_LAYER_FILE_NAME.match(f_name)
+    if match is None:
+        raise InvalidFileName(f"'{f_name}' is not an delta layer filename")
+
+    return (
+        int(match.group(1), 16),
+        int(match.group(2), 16),
+        int(match.group(3), 16),
+        int(match.group(4), 16),
+    )
 
 
 def parse_layer_file_name(file_name: str) -> LayerFileName:

@@ -480,6 +480,15 @@ impl<A: CounterPairAssoc> CounterPairVec<A> {
         let id = self.vec.with_labels(labels);
         self.vec.remove_metric(id)
     }
+
+    pub fn sample(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) -> u64 {
+        let id = self.vec.with_labels(labels);
+        let metric = self.vec.get_metric(id);
+
+        let inc = metric.inc.count.load(std::sync::atomic::Ordering::Relaxed);
+        let dec = metric.dec.count.load(std::sync::atomic::Ordering::Relaxed);
+        inc.saturating_sub(dec)
+    }
 }
 
 impl<T, A> ::measured::metric::group::MetricGroup<T> for CounterPairVec<A>

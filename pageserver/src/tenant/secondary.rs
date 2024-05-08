@@ -7,6 +7,7 @@ use std::{sync::Arc, time::SystemTime};
 
 use crate::{
     config::PageServerConf,
+    context::RequestContext,
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     virtual_file::MaybeFatalIo,
@@ -20,8 +21,9 @@ use self::{
 use super::{
     config::{SecondaryLocationConfig, TenantConfOpt},
     mgr::TenantManager,
+    remote_timeline_client::LayerFileMetadata,
     span::debug_assert_current_span_has_tenant_id,
-    storage_layer::LayerFileName,
+    storage_layer::{layer::local_layer_path, LayerFileName},
 };
 
 use pageserver_api::{
@@ -181,6 +183,7 @@ impl SecondaryTenant {
         conf: &PageServerConf,
         timeline_id: TimelineId,
         name: LayerFileName,
+        metadata: LayerFileMetadata,
     ) {
         debug_assert_current_span_has_tenant_id();
 
@@ -194,9 +197,13 @@ impl SecondaryTenant {
 
         let now = SystemTime::now();
 
-        let path = conf
-            .timeline_path(&self.tenant_shard_id, &timeline_id)
-            .join(name.file_name());
+        let local_path = local_layer_path(
+            conf,
+            &self.tenant_shard_id,
+            &timeline_id,
+            &name,
+            &metadata.generation,
+        );
 
         let this = self.clone();
 
@@ -207,7 +214,7 @@ impl SecondaryTenant {
             // it, the secondary downloader could have seen an updated heatmap that
             // resulted in a layer being deleted.
             // Other local I/O errors are process-fatal: these should never happen.
-            let deleted = std::fs::remove_file(path);
+            let deleted = std::fs::remove_file(local_path);
 
             let not_found = deleted
                 .as_ref()
@@ -316,9 +323,13 @@ pub fn spawn_tasks(
     let (upload_req_tx, upload_req_rx) =
         tokio::sync::mpsc::channel::<CommandRequest<UploadCommand>>(16);
 
+    let downloader_task_ctx = RequestContext::new(
+        TaskKind::SecondaryDownloads,
+        crate::context::DownloadBehavior::Download,
+    );
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
-        TaskKind::SecondaryDownloads,
+        downloader_task_ctx.task_kind(),
         None,
         None,
         "secondary tenant downloads",
@@ -330,6 +341,7 @@ pub fn spawn_tasks(
                 download_req_rx,
                 bg_jobs_clone,
                 cancel_clone,
+                downloader_task_ctx,
             )
             .await;
 

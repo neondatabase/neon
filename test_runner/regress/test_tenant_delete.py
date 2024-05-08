@@ -64,7 +64,7 @@ def test_tenant_delete_smoke(
     )
 
     # Default tenant and the one we created
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 2
 
     # create two timelines one being the parent of another
     parent = None
@@ -90,9 +90,9 @@ def test_tenant_delete_smoke(
 
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 2
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
 
     tenant_path = env.pageserver.tenant_dir(tenant_id)
     assert not tenant_path.exists()
@@ -108,7 +108,7 @@ def test_tenant_delete_smoke(
     )
 
     # Deletion updates the tenant count: the one default tenant remains
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
 
 
 class Check(enum.Enum):
@@ -532,7 +532,9 @@ def test_tenant_delete_concurrent(
 
         # The TenantSlot is still present while the original request is hung before
         # final removal
-        assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+        assert (
+            ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
+        )
 
         # Permit the original request to run to success
         ps_http.configure_failpoints((BEFORE_REMOVE_FAILPOINT, "off"))
@@ -556,7 +558,8 @@ def test_tenant_delete_concurrent(
     )
 
     # Zero tenants remain (we deleted the default tenant)
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "inprogress"}) == 0
 
 
 def test_tenant_delete_races_timeline_creation(
@@ -673,7 +676,7 @@ def test_tenant_delete_races_timeline_creation(
     )
 
     # Zero tenants remain (we deleted the default tenant)
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0
 
 
 def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):

@@ -254,7 +254,9 @@ def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
     )
 
 
-def endpoint_create_start(env: NeonEnv, branch: str, pgdir_name: Optional[str]):
+def endpoint_create_start(
+    env: NeonEnv, branch: str, pgdir_name: Optional[str], allow_multiple: bool = False
+):
     endpoint = Endpoint(
         env,
         tenant_id=env.initial_tenant,
@@ -268,14 +270,23 @@ def endpoint_create_start(env: NeonEnv, branch: str, pgdir_name: Optional[str]):
     # embed current time in endpoint ID
     endpoint_id = pgdir_name or f"ep-{time.time()}"
     return endpoint.create_start(
-        branch_name=branch, endpoint_id=endpoint_id, config_lines=["log_statement=all"]
+        branch_name=branch,
+        endpoint_id=endpoint_id,
+        config_lines=["log_statement=all"],
+        allow_multiple=allow_multiple,
     )
 
 
 async def exec_compute_query(
-    env: NeonEnv, branch: str, query: str, pgdir_name: Optional[str] = None
+    env: NeonEnv,
+    branch: str,
+    query: str,
+    pgdir_name: Optional[str] = None,
+    allow_multiple: bool = False,
 ):
-    with endpoint_create_start(env, branch=branch, pgdir_name=pgdir_name) as endpoint:
+    with endpoint_create_start(
+        env, branch=branch, pgdir_name=pgdir_name, allow_multiple=allow_multiple
+    ) as endpoint:
         before_conn = time.time()
         conn = await endpoint.connect_async()
         res = await conn.fetch(query)
@@ -347,6 +358,7 @@ class BackgroundCompute(object):
                     self.branch,
                     f"INSERT INTO query_log(index, verify_key) VALUES ({self.index}, {verify_key}) RETURNING verify_key",
                     pgdir_name=f"bgcompute{self.index}_key{verify_key}",
+                    allow_multiple=True,
                 )
                 log.info(f"result: {res}")
                 if len(res) != 1:

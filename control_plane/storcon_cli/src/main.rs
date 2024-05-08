@@ -1,7 +1,6 @@
 use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use clap::{Parser, Subcommand};
-use hyper::{Method, StatusCode};
 use pageserver_api::{
     controller_api::{
         NodeAvailabilityWrapper, NodeDescribeResponse, ShardSchedulingPolicy,
@@ -14,7 +13,7 @@ use pageserver_api::{
     shard::{ShardStripeSize, TenantShardId},
 };
 use pageserver_client::mgmt_api::{self, ResponseErrorMessageExt};
-use reqwest::Url;
+use reqwest::{Method, StatusCode, Url};
 use serde::{de::DeserializeOwned, Serialize};
 use utils::id::{NodeId, TenantId};
 
@@ -232,7 +231,7 @@ impl Client {
     /// Simple HTTP request wrapper for calling into storage controller
     async fn dispatch<RQ, RS>(
         &self,
-        method: hyper::Method,
+        method: Method,
         path: String,
         body: Option<RQ>,
     ) -> mgmt_api::Result<RS>

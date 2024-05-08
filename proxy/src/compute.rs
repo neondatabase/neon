@@ -6,6 +6,7 @@ use crate::{
     error::{ReportableError, UserFacingError},
     metrics::{Metrics, NumDbConnectionsGuard},
     proxy::neon_option,
+    Host,
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
@@ -98,6 +99,16 @@ impl ConnCfg {
 
         if let Some(keys) = other.get_auth_keys() {
             self.auth_keys(keys);
+        }
+    }
+
+    pub fn get_host(&self) -> Result<Host, WakeComputeError> {
+        match self.0.get_hosts() {
+            [tokio_postgres::config::Host::Tcp(s)] => Ok(s.into()),
+            // we should not have multiple address or unix addresses.
+            _ => Err(WakeComputeError::BadComputeAddress(
+                "invalid compute address".into(),
+            )),
         }
     }
 

@@ -51,8 +51,8 @@ pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "gc")]
     Gc,
 
-    #[strum(serialize = "update gc info")]
-    UpdateGcInfo,
+    #[strum(serialize = "find gc cutoffs")]
+    FindGcCutoffs,
 
     #[strum(serialize = "create tenant")]
     CreateTenant,
@@ -194,6 +194,11 @@ pub(crate) struct GetVectoredLatency {
     map: EnumMap<TaskKind, Option<Histogram>>,
 }
 
+#[allow(dead_code)]
+pub(crate) struct ScanLatency {
+    map: EnumMap<TaskKind, Option<Histogram>>,
+}
+
 impl GetVectoredLatency {
     // Only these task types perform vectored gets. Filter all other tasks out to reduce total
     // cardinality of the metric.
@@ -201,6 +206,48 @@ impl GetVectoredLatency {
 
     pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
         self.map[task_kind].as_ref()
+    }
+}
+
+impl ScanLatency {
+    // Only these task types perform vectored gets. Filter all other tasks out to reduce total
+    // cardinality of the metric.
+    const TRACKED_TASK_KINDS: [TaskKind; 1] = [TaskKind::PageRequestHandler];
+
+    pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
+        self.map[task_kind].as_ref()
+    }
+}
+
+pub(crate) struct ScanLatencyOngoingRecording<'a> {
+    parent: &'a Histogram,
+    start: std::time::Instant,
+}
+
+impl<'a> ScanLatencyOngoingRecording<'a> {
+    pub(crate) fn start_recording(parent: &'a Histogram) -> ScanLatencyOngoingRecording<'a> {
+        let start = Instant::now();
+        ScanLatencyOngoingRecording { parent, start }
+    }
+
+    pub(crate) fn observe(self, throttled: Option<Duration>) {
+        let elapsed = self.start.elapsed();
+        let ex_throttled = if let Some(throttled) = throttled {
+            elapsed.checked_sub(throttled)
+        } else {
+            Some(elapsed)
+        };
+        if let Some(ex_throttled) = ex_throttled {
+            self.parent.observe(ex_throttled.as_secs_f64());
+        } else {
+            use utils::rate_limit::RateLimit;
+            static LOGGED: Lazy<Mutex<RateLimit>> =
+                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+            let mut rate_limit = LOGGED.lock().unwrap();
+            rate_limit.call(|| {
+                warn!("error deducting time spent throttled; this message is logged at a global rate limit");
+            });
+        }
     }
 }
 
@@ -218,6 +265,29 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
             let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
 
             if GetVectoredLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
+                let task_kind = task_kind.into();
+                Some(inner.with_label_values(&[task_kind]))
+            } else {
+                None
+            }
+        })),
+    }
+});
+
+pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
+    let inner = register_histogram_vec!(
+        "pageserver_scan_seconds",
+        "Time spent in scan, excluding time spent in timeline_get_throttle.",
+        &["task_kind"],
+        CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric");
+
+    ScanLatency {
+        map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
+            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+
+            if ScanLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
                 let task_kind = task_kind.into();
                 Some(inner.with_label_values(&[task_kind]))
             } else {
@@ -1442,29 +1512,80 @@ static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy
 });
 
 pub(crate) struct TenantManagerMetrics {
-    pub(crate) tenant_slots: UIntGauge,
+    tenant_slots_attached: UIntGauge,
+    tenant_slots_secondary: UIntGauge,
+    tenant_slots_inprogress: UIntGauge,
     pub(crate) tenant_slot_writes: IntCounter,
     pub(crate) unexpected_errors: IntCounter,
 }
 
+impl TenantManagerMetrics {
+    /// Helpers for tracking slots.  Note that these do not track the lifetime of TenantSlot objects
+    /// exactly: they track the lifetime of the slots _in the tenant map_.
+    pub(crate) fn slot_inserted(&self, slot: &TenantSlot) {
+        match slot {
+            TenantSlot::Attached(_) => {
+                self.tenant_slots_attached.inc();
+            }
+            TenantSlot::Secondary(_) => {
+                self.tenant_slots_secondary.inc();
+            }
+            TenantSlot::InProgress(_) => {
+                self.tenant_slots_inprogress.inc();
+            }
+        }
+    }
+
+    pub(crate) fn slot_removed(&self, slot: &TenantSlot) {
+        match slot {
+            TenantSlot::Attached(_) => {
+                self.tenant_slots_attached.dec();
+            }
+            TenantSlot::Secondary(_) => {
+                self.tenant_slots_secondary.dec();
+            }
+            TenantSlot::InProgress(_) => {
+                self.tenant_slots_inprogress.dec();
+            }
+        }
+    }
+
+    #[cfg(all(debug_assertions, not(test)))]
+    pub(crate) fn slots_total(&self) -> u64 {
+        self.tenant_slots_attached.get()
+            + self.tenant_slots_secondary.get()
+            + self.tenant_slots_inprogress.get()
+    }
+}
+
 pub(crate) static TENANT_MANAGER: Lazy<TenantManagerMetrics> = Lazy::new(|| {
-    TenantManagerMetrics {
-    tenant_slots: register_uint_gauge!(
+    let tenant_slots = register_uint_gauge_vec!(
         "pageserver_tenant_manager_slots",
         "How many slots currently exist, including all attached, secondary and in-progress operations",
+        &["mode"]
     )
-    .expect("failed to define a metric"),
-    tenant_slot_writes: register_int_counter!(
-        "pageserver_tenant_manager_slot_writes",
-        "Writes to a tenant slot, including all of create/attach/detach/delete"
-    )
-    .expect("failed to define a metric"),
-    unexpected_errors: register_int_counter!(
-        "pageserver_tenant_manager_unexpected_errors_total",
-        "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
-    )
-    .expect("failed to define a metric"),
-}
+    .expect("failed to define a metric");
+    TenantManagerMetrics {
+        tenant_slots_attached: tenant_slots
+            .get_metric_with_label_values(&["attached"])
+            .unwrap(),
+        tenant_slots_secondary: tenant_slots
+            .get_metric_with_label_values(&["secondary"])
+            .unwrap(),
+        tenant_slots_inprogress: tenant_slots
+            .get_metric_with_label_values(&["inprogress"])
+            .unwrap(),
+        tenant_slot_writes: register_int_counter!(
+            "pageserver_tenant_manager_slot_writes",
+            "Writes to a tenant slot, including all of create/attach/detach/delete"
+        )
+        .expect("failed to define a metric"),
+        unexpected_errors: register_int_counter!(
+            "pageserver_tenant_manager_unexpected_errors_total",
+            "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
+        )
+        .expect("failed to define a metric"),
+    }
 });
 
 pub(crate) struct DeletionQueueMetrics {
@@ -1989,7 +2110,7 @@ pub(crate) struct TimelineMetrics {
     pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
-    pub update_gc_info_histo: StorageTimeMetrics,
+    pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -2050,8 +2171,8 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
-        let update_gc_info_histo = StorageTimeMetrics::new(
-            StorageTimeOperation::UpdateGcInfo,
+        let find_gc_cutoffs_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::FindGcCutoffs,
             &tenant_id,
             &shard_id,
             &timeline_id,
@@ -2098,7 +2219,7 @@ impl TimelineMetrics {
             logical_size_histo,
             imitate_logical_size_histo,
             garbage_collect_histo,
-            update_gc_info_histo,
+            find_gc_cutoffs_histo,
             load_layer_map_histo,
             last_record_gauge,
             resident_physical_size_gauge,
@@ -2205,6 +2326,7 @@ use std::time::{Duration, Instant};
 
 use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
+use crate::tenant::mgr::TenantSlot;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
 struct PerTimelineRemotePhysicalSizeGauge {
@@ -2807,6 +2929,8 @@ pub fn preinitialize_metrics() {
         &WALRECEIVER_CANDIDATES_REMOVED,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_FAILURES,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_SUCCESSES,
+        &REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
+        &REMOTE_ONDEMAND_DOWNLOADED_BYTES,
     ]
     .into_iter()
     .for_each(|c| {

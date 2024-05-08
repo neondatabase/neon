@@ -4,7 +4,7 @@ use std::{collections::HashMap, time::Duration};
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use futures::StreamExt;
-use hyper::{Method, StatusCode};
+use hyper::StatusCode;
 use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
 use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
@@ -328,7 +328,7 @@ impl ComputeHook {
         reconfigure_request: &ComputeHookNotifyRequest,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let req = self.client.request(Method::PUT, url);
+        let req = self.client.request(reqwest::Method::PUT, url);
         let req = if let Some(value) = &self.authorization_header {
             req.header(reqwest::header::AUTHORIZATION, value)
         } else {
@@ -347,8 +347,10 @@ impl ComputeHook {
         };
 
         // Treat all 2xx responses as success
-        if response.status() >= StatusCode::OK && response.status() < StatusCode::MULTIPLE_CHOICES {
-            if response.status() != StatusCode::OK {
+        if response.status() >= reqwest::StatusCode::OK
+            && response.status() < reqwest::StatusCode::MULTIPLE_CHOICES
+        {
+            if response.status() != reqwest::StatusCode::OK {
                 // Non-200 2xx response: it doesn't make sense to retry, but this is unexpected, so
                 // log a warning.
                 tracing::warn!(
@@ -362,7 +364,7 @@ impl ComputeHook {
 
         // Error response codes
         match response.status() {
-            StatusCode::TOO_MANY_REQUESTS => {
+            reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 // TODO: 429 handling should be global: set some state visible to other requests
                 // so that they will delay before starting, rather than all notifications trying
                 // once before backing off.
@@ -371,20 +373,30 @@ impl ComputeHook {
                     .ok();
                 Err(NotifyError::SlowDown)
             }
-            StatusCode::LOCKED => {
+            reqwest::StatusCode::LOCKED => {
                 // We consider this fatal, because it's possible that the operation blocking the control one is
                 // also the one that is waiting for this reconcile.  We should let the reconciler calling
                 // this hook fail, to give control plane a chance to un-lock.
                 tracing::info!("Control plane reports tenant is locked, dropping out of notify");
                 Err(NotifyError::Busy)
             }
-            StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-            | StatusCode::BAD_GATEWAY => Err(NotifyError::Unavailable(response.status())),
-            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                Err(NotifyError::Fatal(response.status()))
+            reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                Err(NotifyError::Unavailable(StatusCode::SERVICE_UNAVAILABLE))
             }
-            _ => Err(NotifyError::Unexpected(response.status())),
+            reqwest::StatusCode::GATEWAY_TIMEOUT => {
+                Err(NotifyError::Unavailable(StatusCode::GATEWAY_TIMEOUT))
+            }
+            reqwest::StatusCode::BAD_GATEWAY => {
+                Err(NotifyError::Unavailable(StatusCode::BAD_GATEWAY))
+            }
+
+            reqwest::StatusCode::BAD_REQUEST => Err(NotifyError::Fatal(StatusCode::BAD_REQUEST)),
+            reqwest::StatusCode::UNAUTHORIZED => Err(NotifyError::Fatal(StatusCode::UNAUTHORIZED)),
+            reqwest::StatusCode::FORBIDDEN => Err(NotifyError::Fatal(StatusCode::FORBIDDEN)),
+            status => Err(NotifyError::Unexpected(
+                hyper::StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            )),
         }
     }
 

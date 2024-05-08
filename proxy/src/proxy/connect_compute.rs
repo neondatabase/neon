@@ -2,7 +2,7 @@ use crate::{
     auth::backend::ComputeCredentialKeys,
     compute::{self, PostgresConnection},
     config::RetryConfig,
-    console::{self, errors::WakeComputeError, CachedNodeInfo, NodeInfo},
+    console::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
     context::RequestMonitoring,
     error::ReportableError,
     metrics::{ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType},
@@ -10,6 +10,7 @@ use crate::{
         retry::{retry_after, ShouldRetry},
         wake_compute::wake_compute,
     },
+    Host,
 };
 use async_trait::async_trait;
 use pq_proto::StartupMessageParams;
@@ -64,6 +65,9 @@ pub trait ComputeConnectBackend {
 pub struct TcpMechanism<'a> {
     /// KV-dictionary with PostgreSQL connection params.
     pub params: &'a StartupMessageParams,
+
+    /// connect_to_compute concurrency lock
+    pub locks: &'static ApiLocks<Host>,
 }
 
 #[async_trait]
@@ -79,6 +83,8 @@ impl ConnectMechanism for TcpMechanism<'_> {
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
+        let host = node_info.config.get_host()?;
+        let _permit = self.locks.get_permit(&host).await?;
         node_info.connect(ctx, timeout).await
     }
 

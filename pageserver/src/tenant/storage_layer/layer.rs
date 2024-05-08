@@ -4,19 +4,21 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::ShardIndex;
+use pageserver_api::shard::{ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 use tracing::Instrument;
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::repository::Key;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
@@ -122,6 +124,25 @@ impl PartialEq for Layer {
     }
 }
 
+pub(crate) fn local_layer_path(
+    conf: &PageServerConf,
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+    layer_file_name: &LayerFileName,
+    _generation: &Generation,
+) -> Utf8PathBuf {
+    let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
+
+    timeline_path.join(layer_file_name.file_name())
+
+    // TOOD: include generation in the name in now+1 releases.
+    // timeline_path.join(format!(
+    //     "{}{}",
+    //     layer_file_name.file_name(),
+    //     generation.get_suffix()
+    // ))
+}
+
 impl Layer {
     /// Creates a layer value for a file we know to not be resident.
     pub(crate) fn for_evicted(
@@ -130,6 +151,14 @@ impl Layer {
         file_name: LayerFileName,
         metadata: LayerFileMetadata,
     ) -> Self {
+        let local_path = local_layer_path(
+            conf,
+            &timeline.tenant_shard_id,
+            &timeline.timeline_id,
+            &file_name,
+            &metadata.generation,
+        );
+
         let desc = PersistentLayerDesc::from_filename(
             timeline.tenant_shard_id,
             timeline.timeline_id,
@@ -142,6 +171,7 @@ impl Layer {
         let owner = Layer(Arc::new(LayerInner::new(
             conf,
             timeline,
+            local_path,
             access_stats,
             desc,
             None,
@@ -158,6 +188,7 @@ impl Layer {
     pub(crate) fn for_resident(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
+        local_path: Utf8PathBuf,
         file_name: LayerFileName,
         metadata: LayerFileMetadata,
     ) -> ResidentLayer {
@@ -183,6 +214,7 @@ impl Layer {
             LayerInner::new(
                 conf,
                 timeline,
+                local_path,
                 access_stats,
                 desc,
                 Some(inner),
@@ -224,9 +256,19 @@ impl Layer {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
+
+            let local_path = local_layer_path(
+                conf,
+                &timeline.tenant_shard_id,
+                &timeline.timeline_id,
+                &desc.filename(),
+                &timeline.generation,
+            );
+
             LayerInner::new(
                 conf,
                 timeline,
+                local_path,
                 access_stats,
                 desc,
                 Some(inner),
@@ -407,6 +449,13 @@ impl Layer {
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.0.metadata()
+    }
+
+    pub(crate) fn get_timeline_id(&self) -> Option<TimelineId> {
+        self.0
+            .timeline
+            .upgrade()
+            .map(|timeline| timeline.timeline_id)
     }
 
     /// Traditional debug dumping facility
@@ -708,19 +757,17 @@ impl Drop for LayerInner {
 }
 
 impl LayerInner {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
+        local_path: Utf8PathBuf,
         access_stats: LayerAccessStats,
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
         shard: ShardIndex,
     ) -> Self {
-        let path = conf
-            .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id)
-            .join(desc.filename().to_string());
-
         let (inner, version, init_status) = if let Some(inner) = downloaded {
             let version = inner.version;
             let resident = ResidentOrWantedEvicted::Resident(inner);
@@ -736,7 +783,7 @@ impl LayerInner {
         LayerInner {
             conf,
             debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
-            path,
+            path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
             have_remote_client: timeline.remote_client.is_some(),
@@ -939,11 +986,20 @@ impl LayerInner {
             return Err(DownloadError::DownloadRequired);
         }
 
+        let download_ctx = ctx
+            .map(|ctx| ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download))
+            .unwrap_or(RequestContext::new(
+                TaskKind::LayerDownload,
+                DownloadBehavior::Download,
+            ));
+
         async move {
             tracing::info!(%reason, "downloading on-demand");
 
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-            let res = self.download_init_and_wait(timeline, permit).await?;
+            let res = self
+                .download_init_and_wait(timeline, permit, download_ctx)
+                .await?;
             scopeguard::ScopeGuard::into_inner(init_cancelled);
             Ok(res)
         }
@@ -982,6 +1038,7 @@ impl LayerInner {
         self: &Arc<Self>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: RequestContext,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -1011,7 +1068,7 @@ impl LayerInner {
                     .await
                     .unwrap();
 
-                let res = this.download_and_init(timeline, permit).await;
+                let res = this.download_and_init(timeline, permit, &ctx).await;
 
                 if let Err(res) = tx.send(res) {
                     match res {
@@ -1054,6 +1111,7 @@ impl LayerInner {
         self: &Arc<LayerInner>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Arc<DownloadedLayer>> {
         let client = timeline
             .remote_client
@@ -1061,7 +1119,12 @@ impl LayerInner {
             .expect("checked before download_init_and_wait");
 
         let result = client
-            .download_layer_file(&self.desc.filename(), &self.metadata(), &timeline.cancel)
+            .download_layer_file(
+                &self.desc.filename(),
+                &self.metadata(),
+                &timeline.cancel,
+                ctx,
+            )
             .await;
 
         match result {
@@ -1780,25 +1843,23 @@ impl ResidentLayer {
         }
     }
 
-    /// FIXME: truncate is bad name because we are not truncating anything, but copying the
-    /// filtered parts.
-    #[cfg(test)]
-    pub(super) async fn copy_delta_prefix(
+    /// Returns the amount of keys and values written to the writer.
+    pub(crate) async fn copy_delta_prefix(
         &self,
         writer: &mut super::delta_layer::DeltaLayerWriter,
-        truncate_at: Lsn,
+        until: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         use LayerKind::*;
 
         let owner = &self.owner.0;
 
         match self.downloaded.get(owner, ctx).await? {
             Delta(ref d) => d
-                .copy_prefix(writer, truncate_at, ctx)
+                .copy_prefix(writer, until, ctx)
                 .await
-                .with_context(|| format!("truncate {self}")),
-            Image(_) => anyhow::bail!(format!("cannot truncate image layer {self}")),
+                .with_context(|| format!("copy_delta_prefix until {until} of {self}")),
+            Image(_) => anyhow::bail!(format!("cannot copy_lsn_prefix of image layer {self}")),
         }
     }
 

@@ -110,10 +110,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
 # Test pageserver get_timestamp_of_lsn API
 def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
-    if neon_env_builder.pageserver_get_impl == "vectored":
-        key_not_found_error = r".*Requested key.*not found,*"
-    else:
-        key_not_found_error = r".*could not find data for key.*"
+    key_not_found_error = r".*could not find data for key.*"
 
     env = neon_env_builder.init_start()
 
@@ -122,11 +119,11 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
 
     cur = endpoint_main.connect().cursor()
     # Create table, and insert rows, each in a separate transaction
-    # Disable synchronous_commit to make this initialization go faster.
+    # Enable synchronous commit as we are timing sensitive
     #
     # Each row contains current insert LSN and the current timestamp, when
     # the row was inserted.
-    cur.execute("SET synchronous_commit=off")
+    cur.execute("SET synchronous_commit=on")
     cur.execute("CREATE TABLE foo (x integer)")
     tbl = []
     for i in range(1000):
@@ -135,7 +132,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
         after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
         tbl.append([i, after_timestamp, after_lsn])
-        time.sleep(0.005)
+        time.sleep(0.02)
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions

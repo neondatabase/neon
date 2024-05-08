@@ -1,7 +1,9 @@
 use crate::{
     auth::{self, backend::AuthRateLimiter},
+    console::locks::ApiLocks,
     rate_limiter::RateBucketInfo,
-    serverless::GlobalConnPoolOptions,
+    serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
+    Host,
 };
 use anyhow::{bail, ensure, Context, Ok};
 use itertools::Itertools;
@@ -34,6 +36,7 @@ pub struct ProxyConfig {
     pub handshake_timeout: Duration,
     pub aws_region: String,
     pub wake_compute_retry_config: RetryConfig,
+    pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute_retry_config: RetryConfig,
 }
 
@@ -53,6 +56,8 @@ pub struct TlsConfig {
 pub struct HttpConfig {
     pub request_timeout: tokio::time::Duration,
     pub pool_options: GlobalConnPoolOptions,
+    pub cancel_set: CancelSet,
+    pub client_conn_threshold: u64,
 }
 
 pub struct AuthenticationConfig {
@@ -533,9 +538,9 @@ pub struct RetryConfig {
 impl RetryConfig {
     /// Default options for RetryConfig.
 
-    /// Total delay for 8 retries with 100ms base delay and 1.6 backoff factor is about 7s.
+    /// Total delay for 5 retries with 200ms base delay and 2 backoff factor is about 6s.
     pub const CONNECT_TO_COMPUTE_DEFAULT_VALUES: &'static str =
-        "num_retries=8,base_retry_wait_duration=100ms,retry_wait_exponent_base=1.6";
+        "num_retries=5,base_retry_wait_duration=200ms,retry_wait_exponent_base=2";
     /// Total delay for 8 retries with 100ms base delay and 1.6 backoff factor is about 7s.
     /// Cplane has timeout of 60s on each request. 8m7s in total.
     pub const WAKE_COMPUTE_DEFAULT_VALUES: &'static str =
@@ -573,7 +578,7 @@ impl RetryConfig {
 }
 
 /// Helper for cmdline cache options parsing.
-pub struct WakeComputeLockOptions {
+pub struct ConcurrencyLockOptions {
     /// The number of shards the lock map should have
     pub shards: usize,
     /// The number of allowed concurrent requests for each endpoitn
@@ -584,9 +589,12 @@ pub struct WakeComputeLockOptions {
     pub timeout: Duration,
 }
 
-impl WakeComputeLockOptions {
+impl ConcurrencyLockOptions {
     /// Default options for [`crate::console::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
+    /// Default options for [`crate::console::provider::ApiLocks`].
+    pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
+        "shards=64,permits=10,epoch=10m,timeout=10ms";
 
     // pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "shards=32,permits=4,epoch=10m,timeout=1s";
 
@@ -636,7 +644,7 @@ impl WakeComputeLockOptions {
     }
 }
 
-impl FromStr for WakeComputeLockOptions {
+impl FromStr for ConcurrencyLockOptions {
     type Err = anyhow::Error;
 
     fn from_str(options: &str) -> Result<Self, Self::Err> {
@@ -672,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_parse_lock_options() -> anyhow::Result<()> {
-        let WakeComputeLockOptions {
+        let ConcurrencyLockOptions {
             epoch,
             permits,
             shards,
@@ -683,7 +691,7 @@ mod tests {
         assert_eq!(shards, 32);
         assert_eq!(permits, 4);
 
-        let WakeComputeLockOptions {
+        let ConcurrencyLockOptions {
             epoch,
             permits,
             shards,
@@ -694,7 +702,7 @@ mod tests {
         assert_eq!(shards, 16);
         assert_eq!(permits, 8);
 
-        let WakeComputeLockOptions {
+        let ConcurrencyLockOptions {
             epoch,
             permits,
             shards,
