@@ -25,7 +25,7 @@ use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 use super::delta_layer::{self, DeltaEntry};
 use super::image_layer;
 use super::{
-    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerFileName, PersistentLayerDesc,
+    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerName, PersistentLayerDesc,
     ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
 };
 
@@ -128,19 +128,20 @@ pub(crate) fn local_layer_path(
     conf: &PageServerConf,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
-    layer_file_name: &LayerFileName,
+    layer_file_name: &LayerName,
     _generation: &Generation,
 ) -> Utf8PathBuf {
     let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
 
-    timeline_path.join(layer_file_name.file_name())
+    timeline_path.join(layer_file_name.to_string())
 
-    // TOOD: include generation in the name in now+1 releases.
-    // timeline_path.join(format!(
-    //     "{}{}",
-    //     layer_file_name.file_name(),
-    //     generation.get_suffix()
-    // ))
+    // TODO: switch to enabling new-style layer paths after next release
+    // if generation.is_none() {
+    //     // Without a generation, we may only use legacy path style
+    //     timeline_path.join(layer_file_name.to_string())
+    // } else {
+    //     timeline_path.join(format!("{}-v1{}", layer_file_name, generation.get_suffix()))
+    // }
 }
 
 impl Layer {
@@ -148,7 +149,7 @@ impl Layer {
     pub(crate) fn for_evicted(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
-        file_name: LayerFileName,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> Self {
         let local_path = local_layer_path(
@@ -189,7 +190,7 @@ impl Layer {
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
         local_path: Utf8PathBuf,
-        file_name: LayerFileName,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> ResidentLayer {
         let desc = PersistentLayerDesc::from_filename(
@@ -261,7 +262,7 @@ impl Layer {
                 conf,
                 &timeline.tenant_shard_id,
                 &timeline.timeline_id,
-                &desc.filename(),
+                &desc.layer_name(),
                 &timeline.generation,
             );
 
@@ -689,7 +690,7 @@ impl Drop for LayerInner {
         let span = tracing::info_span!(parent: None, "layer_delete", tenant_id = %self.layer_desc().tenant_shard_id.tenant_id, shard_id=%self.layer_desc().tenant_shard_id.shard_slug(), timeline_id = %self.layer_desc().timeline_id);
 
         let path = std::mem::take(&mut self.path);
-        let file_name = self.layer_desc().filename();
+        let file_name = self.layer_desc().layer_name();
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
         let meta = self.metadata();
@@ -782,7 +783,9 @@ impl LayerInner {
 
         LayerInner {
             conf,
-            debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
+            debug_str: {
+                format!("timelines/{}/{}", timeline.timeline_id, desc.layer_name()).into()
+            },
             path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
@@ -1120,7 +1123,7 @@ impl LayerInner {
 
         let result = client
             .download_layer_file(
-                &self.desc.filename(),
+                &self.desc.layer_name(),
                 &self.metadata(),
                 &timeline.cancel,
                 ctx,
@@ -1257,7 +1260,7 @@ impl LayerInner {
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.desc.filename().file_name();
+        let layer_name = self.desc.layer_name().to_string();
 
         let resident = self
             .inner
@@ -1271,7 +1274,7 @@ impl LayerInner {
             let lsn_range = &self.desc.lsn_range;
 
             HistoricLayerInfo::Delta {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
@@ -1282,7 +1285,7 @@ impl LayerInner {
             let lsn = self.desc.image_layer_lsn();
 
             HistoricLayerInfo::Image {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn,
                 remote: !resident,

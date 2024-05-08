@@ -12,7 +12,7 @@ class IndexLayerMetadata:
 
 
 @dataclass(frozen=True)
-class ImageLayerFileName:
+class ImageLayerName:
     lsn: Lsn
     key_start: Key
     key_end: Key
@@ -26,7 +26,7 @@ class ImageLayerFileName:
 
 
 @dataclass(frozen=True)
-class DeltaLayerFileName:
+class DeltaLayerName:
     lsn_start: Lsn
     lsn_end: Lsn
     key_start: Key
@@ -41,14 +41,16 @@ class DeltaLayerFileName:
         return ret
 
 
-LayerFileName = Union[ImageLayerFileName, DeltaLayerFileName]
+LayerName = Union[ImageLayerName, DeltaLayerName]
 
 
 class InvalidFileName(Exception):
     pass
 
 
-IMAGE_LAYER_FILE_NAME = re.compile("^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})(-[a-f0-9]{8})?$")
+IMAGE_LAYER_FILE_NAME = re.compile(
+    "^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})(-v1-[a-f0-9]{8})?$"
+)
 
 
 def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
@@ -62,7 +64,7 @@ def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
 
 
 DELTA_LAYER_FILE_NAME = re.compile(
-    "^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})-([A-F0-9]{16})(-[a-f0-9]{8})?$"
+    "^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})-([A-F0-9]{16})(-v1-[a-f0-9]{8})?$"
 )
 
 
@@ -80,16 +82,16 @@ def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
     )
 
 
-def parse_layer_file_name(file_name: str) -> LayerFileName:
+def parse_layer_file_name(file_name: str) -> LayerName:
     try:
         key_start, key_end, lsn = parse_image_layer(file_name)
-        return ImageLayerFileName(lsn=Lsn(lsn), key_start=Key(key_start), key_end=Key(key_end))
+        return ImageLayerName(lsn=Lsn(lsn), key_start=Key(key_start), key_end=Key(key_end))
     except InvalidFileName:
         pass
 
     try:
         key_start, key_end, lsn_start, lsn_end = parse_delta_layer(file_name)
-        return DeltaLayerFileName(
+        return DeltaLayerName(
             lsn_start=Lsn(lsn_start),
             lsn_end=Lsn(lsn_end),
             key_start=Key(key_start),
@@ -101,18 +103,15 @@ def parse_layer_file_name(file_name: str) -> LayerFileName:
     raise InvalidFileName("neither image nor delta layer")
 
 
-def is_future_layer(layer_file_name: LayerFileName, disk_consistent_lsn: Lsn):
+def is_future_layer(layer_file_name: LayerName, disk_consistent_lsn: Lsn):
     """
     Determines if this layer file is considered to be in future meaning we will discard these
     layers during timeline initialization from the given disk_consistent_lsn.
     """
-    if (
-        isinstance(layer_file_name, ImageLayerFileName)
-        and layer_file_name.lsn > disk_consistent_lsn
-    ):
+    if isinstance(layer_file_name, ImageLayerName) and layer_file_name.lsn > disk_consistent_lsn:
         return True
     elif (
-        isinstance(layer_file_name, DeltaLayerFileName)
+        isinstance(layer_file_name, DeltaLayerName)
         and layer_file_name.lsn_end > disk_consistent_lsn + 1
     ):
         return True
@@ -122,7 +121,7 @@ def is_future_layer(layer_file_name: LayerFileName, disk_consistent_lsn: Lsn):
 
 @dataclass
 class IndexPartDump:
-    layer_metadata: Dict[LayerFileName, IndexLayerMetadata]
+    layer_metadata: Dict[LayerName, IndexLayerMetadata]
     disk_consistent_lsn: Lsn
 
     @classmethod
