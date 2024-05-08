@@ -113,12 +113,14 @@ impl S3Bucket {
         // AWS SDK requires us to specify how the RetryConfig should sleep when it wants to back off
         let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
 
-        let sdk_config_loader: aws_config::ConfigLoader =
-            aws_config::defaults(BehaviorVersion::v2023_11_09())
-                .region(region)
-                .identity_cache(IdentityCache::lazy().build())
-                .credentials_provider(SharedCredentialsProvider::new(credentials_provider))
-                .sleep_impl(SharedAsyncSleep::from(sleep_impl));
+        let sdk_config_loader: aws_config::ConfigLoader = aws_config::defaults(
+            #[allow(deprecated)] /* TODO: https://github.com/neondatabase/neon/issues/7665 */
+            BehaviorVersion::v2023_11_09(),
+        )
+        .region(region)
+        .identity_cache(IdentityCache::lazy().build())
+        .credentials_provider(SharedCredentialsProvider::new(credentials_provider))
+        .sleep_impl(SharedAsyncSleep::from(sleep_impl));
 
         let sdk_config: aws_config::SdkConfig = std::thread::scope(|s| {
             s.spawn(|| {
