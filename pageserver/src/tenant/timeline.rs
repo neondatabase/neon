@@ -1220,11 +1220,17 @@ impl Timeline {
         }
         reconstruct_timer.stop_and_record();
 
-        // Note that this is an approximation. Tracking the exact number of layers visited
-        // per key requires virtually unbounded memory usage and is inefficient
-        // (i.e. segment tree tracking each range queried from a layer)
-        crate::metrics::VEC_READ_NUM_LAYERS_VISITED
-            .observe(layers_visited as f64 / results.len() as f64);
+        // For aux file keys (v1 or v2) the vectored read path does not return an error
+        // when they're missing. Instead they are omitted from the resulting btree
+        // (this is a requirement, not a bug). Skip updating the metric in these cases
+        // to avoid infinite results.
+        if !results.is_empty() {
+            // Note that this is an approximation. Tracking the exact number of layers visited
+            // per key requires virtually unbounded memory usage and is inefficient
+            // (i.e. segment tree tracking each range queried from a layer)
+            crate::metrics::VEC_READ_NUM_LAYERS_VISITED
+                .observe(layers_visited as f64 / results.len() as f64);
+        }
 
         Ok(results)
     }
