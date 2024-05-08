@@ -90,63 +90,6 @@ pub struct IndexPart {
     pub(crate) lineage: Lineage,
 }
 
-/// Limited history of earlier ancestors.
-///
-/// A timeline can have more than 1 earlier ancestor, in the rare case that it was repeatedly
-/// reparented by having an later timeline be detached from it's ancestor.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct Lineage {
-    /// Has the `reparenting_history` been truncated to `Lineage::REMEMBER_AT_MOST`.
-    #[serde(skip_serializing_if = "is_false", default)]
-    reparenting_history_truncated: bool,
-    /// Earlier ancestors, truncated when `reparented_overflown`
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    reparenting_history: Vec<TimelineId>,
-    /// The ancestor from which this timeline has been detached from and when.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    original_ancestor: Option<(TimelineId, Lsn, NaiveDateTime)>,
-}
-
-fn is_false(b: &bool) -> bool {
-    !b
-}
-
-impl Lineage {
-    const REMEMBER_AT_MOST: usize = 100;
-
-    pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) {
-        if self.reparenting_history.last() == Some(old_ancestor) {
-            // do not re-record it
-            return;
-        }
-
-        let drop_oldest = self.reparenting_history.len() + 1 > Self::REMEMBER_AT_MOST;
-
-        self.reparenting_history_truncated |= drop_oldest;
-        if drop_oldest {
-            self.reparenting_history.remove(0);
-        }
-        self.reparenting_history.push(*old_ancestor);
-    }
-
-    pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) {
-        assert!(self.original_ancestor.is_none());
-
-        self.original_ancestor =
-            Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
-    }
-
-    /// The queried lsn is most likely the basebackup lsn, and this answers question "is it allowed
-    /// to start a read/write primary at this lsn".
-    ///
-    /// Returns true if the Lsn was previously a branch point.
-    pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
-        self.original_ancestor
-            .as_ref()
-            .is_some_and(|(_, ancestor_lsn, _)| lsn == *ancestor_lsn)
-    }
-}
-
 impl IndexPart {
     /// When adding or modifying any parts of `IndexPart`, increment the version so that it can be
     /// used to understand later versions.
@@ -247,6 +190,63 @@ impl From<&LayerFileMetadata> for IndexLayerMetadata {
             generation: other.generation,
             shard: other.shard,
         }
+    }
+}
+
+/// Limited history of earlier ancestors.
+///
+/// A timeline can have more than 1 earlier ancestor, in the rare case that it was repeatedly
+/// reparented by having an later timeline be detached from it's ancestor.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct Lineage {
+    /// Has the `reparenting_history` been truncated to `Lineage::REMEMBER_AT_MOST`.
+    #[serde(skip_serializing_if = "is_false", default)]
+    reparenting_history_truncated: bool,
+    /// Earlier ancestors, truncated when `reparented_overflown`
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    reparenting_history: Vec<TimelineId>,
+    /// The ancestor from which this timeline has been detached from and when.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    original_ancestor: Option<(TimelineId, Lsn, NaiveDateTime)>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
+impl Lineage {
+    const REMEMBER_AT_MOST: usize = 100;
+
+    pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) {
+        if self.reparenting_history.last() == Some(old_ancestor) {
+            // do not re-record it
+            return;
+        }
+
+        let drop_oldest = self.reparenting_history.len() + 1 > Self::REMEMBER_AT_MOST;
+
+        self.reparenting_history_truncated |= drop_oldest;
+        if drop_oldest {
+            self.reparenting_history.remove(0);
+        }
+        self.reparenting_history.push(*old_ancestor);
+    }
+
+    pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) {
+        assert!(self.original_ancestor.is_none());
+
+        self.original_ancestor =
+            Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
+    }
+
+    /// The queried lsn is most likely the basebackup lsn, and this answers question "is it allowed
+    /// to start a read/write primary at this lsn".
+    ///
+    /// Returns true if the Lsn was previously a branch point.
+    pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
+        self.original_ancestor
+            .as_ref()
+            .is_some_and(|(_, ancestor_lsn, _)| lsn == *ancestor_lsn)
     }
 }
 
