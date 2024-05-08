@@ -9,7 +9,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::local_env::{InitForceMode, LocalEnv, NeonLocalInitConf, NeonLocalInitPageserverConf, PageServerConf};
+use control_plane::local_env::{
+    InitForceMode, LocalEnv, NeonLocalInitConf, NeonLocalInitPageserverConf,
+};
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
@@ -30,8 +32,7 @@ use safekeeper_api::{
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
 use std::collections::{BTreeSet, HashMap};
-use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
@@ -136,7 +137,7 @@ fn main() -> Result<()> {
     };
 
     match subcommand_result {
-        Ok(Some(updated_env)) => updated_env.persist_config(&updated_env.base_data_dir)?,
+        Ok(Some(updated_env)) => updated_env.persist_config()?,
         Ok(None) => (),
         Err(e) => {
             eprintln!("command failed: {e:?}");
@@ -327,11 +328,6 @@ fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId
 fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     let num_pageservers = init_match.get_one::<u16>("num-pageservers");
 
-    let pg_version = init_match
-        .get_one::<u32>("pg-version")
-        .copied()
-        .context("Failed to parse postgres version from the argument string")?;
-
     let force = init_match.get_one("force").expect("we set a default value");
 
     // Create the in-memory `LocalEnv` that we'd normally load from disk in `load_config`.
@@ -353,10 +349,10 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
         let mut builtin: NeonLocalInitConf =
             toml::from_str(&default_conf()).expect("default config should deserialize cleanly");
         assert!(
-            builtin.pageservers.is_none(),
+            builtin.pageservers.is_empty(),
             "default config should not have `pageservers`, we're doing that here"
         );
-        builtin.pageservers = (0..num_pageservers.as_deref().unwrap_or(1))
+        builtin.pageservers = (0..num_pageservers.map(|v| *v).unwrap_or(1))
             .map(|i| {
                 let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
                 let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
@@ -375,8 +371,9 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
         builtin
     };
 
-    LocalEnv::init(init_conf, pg_version, force)
-        .context("materialize initial neon_local environment on disk")?
+    LocalEnv::init(init_conf, force)
+        .context("materialize initial neon_local environment on disk")?;
+    Ok(LocalEnv::load_config().expect("freshly written config should be loadable"))
 }
 
 /// The default pageserver is the one where CLI tenant/timeline operations are sent by default.

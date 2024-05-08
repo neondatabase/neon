@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io;
 use std::io::Write;
 use std::num::NonZeroU64;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -76,68 +76,68 @@ impl PageServerNode {
 
     fn pageserver_init_make_toml(
         &self,
-        template: NeonLocalInitPageserverConf,
+        conf: NeonLocalInitPageserverConf,
     ) -> anyhow::Result<toml_edit::Document> {
-        // TODO: this is a legacy code, it should be refactored to use toml_edit directly.
+        assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
 
-        assert_eq!(template.into(), self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
-        let NeonLocalInitPageserverConf {
-            id: _,
-            listen_pg_addr: _,
-            listen_http_addr: _,
-            pg_auth_type,
-            http_auth_type,
-            other,
-        } = &mut template;
+        // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml once that PR is merged
 
-        // Provide neon_local defaults if not specified in the template.
-        // The Python test suite relies on some of these.
-        // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
-        other
-            .entry("pg_distrib_dir".to_string())
-            .or_insert_with(|| toml_edit::value(self.env.pg_distrib_dir_raw().display()));
-        other
-            .entry("broker_endpoint".to_string())
-            .or_insert_with(|| toml_edit::value(self.env.broker.client_url().as_str()));
+        // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
+        let pg_distrib_dir_param = format!(
+            "pg_distrib_dir='{}'",
+            self.env.pg_distrib_dir_raw().display()
+        );
+
+        let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
+
+        let mut overrides = vec![pg_distrib_dir_param, broker_endpoint_param];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
-            other
-                .entry("control_plane_api".to_string())
-                .or_insert_with(|| toml_edit::value(control_plane_api));
+            overrides.push(format!(
+                "control_plane_api='{}'",
+                control_plane_api.as_str()
+            ));
 
             // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
-            if matches!(http_auth_type, AuthType::NeonJWT) {
+            if matches!(conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
                     .env
                     .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
                     .unwrap();
-                other
-                    .entry("control_plane_api_token".to_string())
-                    .or_insert_with(|| toml_edit::value(jwt_token));
+                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
             }
         }
 
-        other
-            .entry("remote_storage".to_string())
-            .or_insert_with(|| {
-                let mut remote_storage_config = toml_edit::Document::new();
-                remote_storage_config.insert(
-                    "local_path",
-                    toml_edit::value(Path::from(b"..").join(PAGESERVER_REMOTE_STORAGE_DIR)),
-                );
-                remote_storage_config
-            });
-
-        if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
-            // Keys are generated in the toplevel repo dir, pageservers' workdirs
-            // are one level below that, so refer to keys with ../
-            other
-                .entry("auth_validation_public_key_path".to_string())
-                .or_insert_with(|| toml_edit::value("../auth_public_key.pem"));
+        if !conf.other.contains_key("remote_storage") {
+            overrides.push(format!(
+                "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
+            ));
         }
 
-        Ok(toml::ser::to_string_pretty(&template).context("serialize pageserver toml")?)
+        if conf.http_auth_type != AuthType::Trust || conf.pg_auth_type != AuthType::Trust {
+            // Keys are generated in the toplevel repo dir, pageservers' workdirs
+            // are one level below that, so refer to keys with ../
+            overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
+        }
+
+        // Apply the user-provided overrides
+        overrides.push(
+            toml_edit::ser::to_string_pretty(&conf)
+                .expect("we deserialized this from toml earlier"),
+        );
+
+        // Turn `overrides` into a toml document.
+        // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
+        let mut config_toml = toml_edit::Document::new();
+        for fragment_str in overrides {
+            let fragment = toml_edit::Document::from_str(&fragment_str)
+                .expect("all fragments in `overrides` are valid toml documents, this function controls that");
+            for (key, item) in fragment.iter() {
+                config_toml.insert(key, item.clone());
+            }
+        }
+        Ok(config_toml)
     }
 
     /// Initializes a pageserver node by creating its config with the overrides provided.

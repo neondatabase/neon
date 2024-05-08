@@ -3,7 +3,7 @@
 //! Now it also provides init method which acts like a stub for proper installation
 //! script which will use local paths.
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, Context};
 
 use clap::ValueEnum;
 use postgres_backend::AuthType;
@@ -212,7 +212,7 @@ impl Default for PageServerConf {
 /// The toml that can be passed to `neon_local init --config`.
 /// This is a subset of the `pageserver.toml` configuration.
 // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct NeonLocalInitPageserverConf {
     pub id: NodeId,
     pub listen_pg_addr: String,
@@ -441,7 +441,7 @@ impl LocalEnv {
 
         // load and parse file
         let config_file_contents = fs::read_to_string(repopath.join("config"))?;
-        let mut on_disk_config: OnDiskConfig = toml::from_str(config_file_contents.as_str())?;
+        let on_disk_config: OnDiskConfig = toml::from_str(config_file_contents.as_str())?;
         let mut env = {
             let OnDiskConfig {
                 pg_distrib_dir,
@@ -588,11 +588,7 @@ impl LocalEnv {
     }
 
     /// Materialize the [`NeonLocalInitConf`] to disk. Called during [`neon_local init`].
-    pub fn init(
-        conf: NeonLocalInitConf,
-        pg_version: u32,
-        force: &InitForceMode,
-    ) -> anyhow::Result<()> {
+    pub fn init(conf: NeonLocalInitConf, force: &InitForceMode) -> anyhow::Result<()> {
         let base_path = base_path();
         assert_ne!(base_path, Path::new(""));
         let base_path = &base_path;
@@ -678,8 +674,8 @@ impl LocalEnv {
         // create the runtime type because the remaining initialization code below needs
         // a LocalEnv instance op operation
         // TODO: refactor to avoid this, LocalEnv should only be constructed from on-disk state
-        let mut env = LocalEnv {
-            base_data_dir: base_path,
+        let env = LocalEnv {
+            base_data_dir: base_path.clone(),
             pg_distrib_dir,
             neon_distrib_dir,
             default_tenant_id: Some(default_tenant_id),
@@ -715,12 +711,6 @@ impl LocalEnv {
         std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
 
         env.persist_config()
-    }
-
-    fn auth_keys_needed(&self) -> bool {
-        self.pageservers.iter().any(|ps| {
-            ps.pg_auth_type == AuthType::NeonJWT || ps.http_auth_type == AuthType::NeonJWT
-        }) || self.safekeepers.iter().any(|sk| sk.auth_enabled)
     }
 }
 
