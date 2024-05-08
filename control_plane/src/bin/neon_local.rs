@@ -382,7 +382,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     // Initialize pageserver, create initial tenant and timeline.
     for ps_conf in &env.pageservers {
         PageServerNode::from_env(&env, ps_conf)
-            .initialize(&pageserver_config)
+            .initialize(pageserver_config.clone())
             .unwrap_or_else(|e| {
                 eprintln!("pageserver init failed: {e:?}");
                 exit(1);
