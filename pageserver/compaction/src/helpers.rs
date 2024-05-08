@@ -110,6 +110,23 @@ pub fn merge_delta_keys<'a, E: CompactionJobExecutor>(
     }
 }
 
+pub async fn merge_delta_keys_buffered<'a, E: CompactionJobExecutor + 'a>(
+    layers: &'a [E::DeltaLayer],
+    ctx: &'a E::RequestContext,
+) -> anyhow::Result<impl Stream<Item = <E::DeltaLayer as CompactionDeltaLayer<E>>::DeltaEntry<'a>>>
+{
+    let mut keys = Vec::new();
+    for l in layers {
+        // Boxing and casting to LoadFuture is required to obtain the right Sync bound.
+        // If we do l.load_keys(ctx).await? directly, there is a compilation error.
+        let load_future: LoadFuture<'a, _> = Box::pin(l.load_keys(ctx));
+        keys.extend(load_future.await?.into_iter());
+    }
+    keys.sort_by_key(|k| (k.key(), k.lsn()));
+    let stream = futures::stream::iter(keys.into_iter());
+    Ok(stream)
+}
+
 enum LazyLoadLayer<'a, E: CompactionJobExecutor> {
     Loaded(VecDeque<<E::DeltaLayer as CompactionDeltaLayer<E>>::DeltaEntry<'a>>),
     Unloaded(&'a E::DeltaLayer),
