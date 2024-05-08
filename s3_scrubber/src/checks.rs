@@ -110,7 +110,7 @@ pub(crate) fn branch_cleanup_and_check_errors(
                     for (layer, metadata) in index_part.layer_metadata {
                         if metadata.file_size == 0 {
                             result.errors.push(format!(
-                                "index_part.json contains a layer {} that has 0 size in its layer metadata", layer.file_name(),
+                                "index_part.json contains a layer {} that has 0 size in its layer metadata", layer,
                             ))
                         }
 
@@ -121,7 +121,7 @@ pub(crate) fn branch_cleanup_and_check_errors(
                             // layer we think is missing.
                             result.errors.push(format!(
                                 "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage",
-                                layer.file_name(),
+                                layer,
                                 metadata.generation.get_suffix(),
                                 metadata.shard
                             ))

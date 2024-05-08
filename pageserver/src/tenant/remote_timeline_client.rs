@@ -1903,7 +1903,7 @@ pub fn remote_layer_path(
     let path = format!(
         "tenants/{tenant_id}{0}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{1}{2}",
         shard.get_suffix(),
-        layer_file_name.file_name(),
+        layer_file_name,
         generation.get_suffix()
     );
 
@@ -2001,7 +2001,7 @@ mod tests {
     }
 
     fn assert_file_list(a: &HashSet<LayerName>, b: &[&str]) {
-        let mut avec: Vec<String> = a.iter().map(|x| x.file_name()).collect();
+        let mut avec: Vec<String> = a.iter().map(|x| x.to_string()).collect();
         avec.sort();
 
         let mut bvec = b.to_vec();
@@ -2234,9 +2234,9 @@ mod tests {
                 .map(|f| f.to_owned())
                 .collect(),
             &[
-                &initial_layer.file_name(),
-                &layers[0].layer_desc().filename().file_name(),
-                &layers[1].layer_desc().filename().file_name(),
+                &initial_layer.to_string(),
+                &layers[0].layer_desc().filename().to_string(),
+                &layers[1].layer_desc().filename().to_string(),
             ],
         );
         assert_eq!(index_part.metadata, metadata);
@@ -2268,9 +2268,9 @@ mod tests {
         }
         assert_remote_files(
             &[
-                &initial_layer.file_name(),
-                &layers[0].layer_desc().filename().file_name(),
-                &layers[1].layer_desc().filename().file_name(),
+                &initial_layer.to_string(),
+                &layers[0].layer_desc().filename().to_string(),
+                &layers[1].layer_desc().filename().to_string(),
                 "index_part.json",
             ],
             &remote_timeline_dir,
@@ -2283,9 +2283,9 @@ mod tests {
 
         assert_remote_files(
             &[
-                &initial_layer.file_name(),
-                &layers[1].layer_desc().filename().file_name(),
-                &layers[2].layer_desc().filename().file_name(),
+                &initial_layer.to_string(),
+                &layers[1].layer_desc().filename().to_string(),
+                &layers[2].layer_desc().filename().to_string(),
                 "index_part.json",
             ],
             &remote_timeline_dir,

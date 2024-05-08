@@ -135,13 +135,9 @@ pub(crate) fn local_layer_path(
 
     if generation.is_none() {
         // Without a generation, we may only use legacy path style
-        timeline_path.join(layer_file_name.file_name())
+        timeline_path.join(layer_file_name.to_string())
     } else {
-        timeline_path.join(format!(
-            "{}-v1{}",
-            layer_file_name.file_name(),
-            generation.get_suffix()
-        ))
+        timeline_path.join(format!("{}-v1{}", layer_file_name, generation.get_suffix()))
     }
 }
 
@@ -1259,7 +1255,7 @@ impl LayerInner {
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.desc.filename().file_name();
+        let layer_name = self.desc.filename().to_string();
 
         let resident = self
             .inner
@@ -1273,7 +1269,7 @@ impl LayerInner {
             let lsn_range = &self.desc.lsn_range;
 
             HistoricLayerInfo::Delta {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
@@ -1284,7 +1280,7 @@ impl LayerInner {
             let lsn = self.desc.image_layer_lsn();
 
             HistoricLayerInfo::Image {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn,
                 remote: !resident,

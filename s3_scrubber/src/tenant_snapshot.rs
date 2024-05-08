@@ -57,7 +57,7 @@ impl SnapshotDownloader {
             "{}/timelines/{}/{}{}",
             ttid.tenant_shard_id,
             ttid.timeline_id,
-            layer_name.file_name(),
+            layer_name,
             layer_metadata.generation.get_suffix()
         ));
 
@@ -76,7 +76,7 @@ impl SnapshotDownloader {
             let remote_layer_path = format!(
                 "{}{}{}",
                 timeline_root.prefix_in_bucket,
-                layer_name.file_name(),
+                layer_name,
                 layer_metadata.generation.get_suffix()
             );
 
@@ -138,7 +138,7 @@ impl SnapshotDownloader {
                     tracing::info!(
                         "[{download_count}/{layer_count}] OK: {} bytes {ttid} {}",
                         layer_metadata.file_size,
-                        layer_name.file_name()
+                        layer_name
                     );
                 }
                 Err(e) => {
