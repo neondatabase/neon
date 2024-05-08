@@ -1140,15 +1140,15 @@ impl DeltaLayerInner {
         Ok(all_keys)
     }
 
-    /// Using the given writer, write out a truncated version, where LSNs higher than the
-    /// truncate_at are missing.
-    #[cfg(test)]
+    /// Using the given writer, write out a version which has the earlier Lsns than `until`.
+    ///
+    /// Return the amount of key value records pushed to the writer.
     pub(super) async fn copy_prefix(
         &self,
         writer: &mut DeltaLayerWriter,
-        truncate_at: Lsn,
+        until: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         use crate::tenant::vectored_blob_io::{
             BlobMeta, VectoredReadBuilder, VectoredReadExtended,
         };
@@ -1212,6 +1212,8 @@ impl DeltaLayerInner {
         // FIXME: buffering of DeltaLayerWriter
         let mut per_blob_copy = Vec::new();
 
+        let mut records = 0;
+
         while let Some(item) = stream.try_next().await? {
             tracing::debug!(?item, "popped");
             let offset = item
@@ -1230,7 +1232,7 @@ impl DeltaLayerInner {
 
             prev = Option::from(item);
 
-            let actionable = actionable.filter(|x| x.0.lsn < truncate_at);
+            let actionable = actionable.filter(|x| x.0.lsn < until);
 
             let builder = if let Some((meta, offsets)) = actionable {
                 // extend or create a new builder
@@ -1298,7 +1300,7 @@ impl DeltaLayerInner {
                     let will_init = crate::repository::ValueBytes::will_init(data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
-                            tracing::error!(data=?utils::Hex(data), err=?_e, "failed to parse will_init out of serialized value");
+                            tracing::error!(data=?utils::Hex(data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
                         })
                         .unwrap_or(false);
 
@@ -1315,7 +1317,10 @@ impl DeltaLayerInner {
                         )
                         .await;
                     per_blob_copy = tmp;
+
                     res?;
+
+                    records += 1;
                 }
 
                 buffer = Some(res.buf);
@@ -1327,7 +1332,7 @@ impl DeltaLayerInner {
             "with the sentinel above loop should had handled all"
         );
 
-        Ok(())
+        Ok(records)
     }
 
     pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
@@ -1400,7 +1405,6 @@ impl DeltaLayerInner {
         Ok(())
     }
 
-    #[cfg(test)]
     fn stream_index_forwards<'a, R>(
         &'a self,
         reader: &'a DiskBtreeReader<R, DELTA_KEY_SIZE>,

@@ -182,6 +182,10 @@ impl wal_storage::Storage for DiskWALStorage {
         self.flush_record_lsn
     }
 
+    async fn initialize_first_segment(&mut self, _init_lsn: Lsn) -> Result<()> {
+        Ok(())
+    }
+
     /// Write piece of WAL from buf to disk, but not necessarily sync it.
     async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
         if self.write_lsn != startpos {

@@ -126,6 +126,9 @@ pub struct ProxyMetrics {
 
     /// Number of events consumed from redis (per event type).
     pub redis_events_count: CounterVec<StaticLabelSet<RedisEventsCount>>,
+
+    #[metric(namespace = "connect_compute_lock")]
+    pub connect_compute_lock: ApiLockMetrics,
 }
 
 #[derive(MetricGroup)]
@@ -144,6 +147,12 @@ pub struct ApiLockMetrics {
 }
 
 impl Default for ProxyMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for ApiLockMetrics {
     fn default() -> Self {
         Self::new()
     }

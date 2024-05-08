@@ -1512,29 +1512,80 @@ static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy
 });
 
 pub(crate) struct TenantManagerMetrics {
-    pub(crate) tenant_slots: UIntGauge,
+    tenant_slots_attached: UIntGauge,
+    tenant_slots_secondary: UIntGauge,
+    tenant_slots_inprogress: UIntGauge,
     pub(crate) tenant_slot_writes: IntCounter,
     pub(crate) unexpected_errors: IntCounter,
 }
 
+impl TenantManagerMetrics {
+    /// Helpers for tracking slots.  Note that these do not track the lifetime of TenantSlot objects
+    /// exactly: they track the lifetime of the slots _in the tenant map_.
+    pub(crate) fn slot_inserted(&self, slot: &TenantSlot) {
+        match slot {
+            TenantSlot::Attached(_) => {
+                self.tenant_slots_attached.inc();
+            }
+            TenantSlot::Secondary(_) => {
+                self.tenant_slots_secondary.inc();
+            }
+            TenantSlot::InProgress(_) => {
+                self.tenant_slots_inprogress.inc();
+            }
+        }
+    }
+
+    pub(crate) fn slot_removed(&self, slot: &TenantSlot) {
+        match slot {
+            TenantSlot::Attached(_) => {
+                self.tenant_slots_attached.dec();
+            }
+            TenantSlot::Secondary(_) => {
+                self.tenant_slots_secondary.dec();
+            }
+            TenantSlot::InProgress(_) => {
+                self.tenant_slots_inprogress.dec();
+            }
+        }
+    }
+
+    #[cfg(all(debug_assertions, not(test)))]
+    pub(crate) fn slots_total(&self) -> u64 {
+        self.tenant_slots_attached.get()
+            + self.tenant_slots_secondary.get()
+            + self.tenant_slots_inprogress.get()
+    }
+}
+
 pub(crate) static TENANT_MANAGER: Lazy<TenantManagerMetrics> = Lazy::new(|| {
-    TenantManagerMetrics {
-    tenant_slots: register_uint_gauge!(
+    let tenant_slots = register_uint_gauge_vec!(
         "pageserver_tenant_manager_slots",
         "How many slots currently exist, including all attached, secondary and in-progress operations",
+        &["mode"]
     )
-    .expect("failed to define a metric"),
-    tenant_slot_writes: register_int_counter!(
-        "pageserver_tenant_manager_slot_writes",
-        "Writes to a tenant slot, including all of create/attach/detach/delete"
-    )
-    .expect("failed to define a metric"),
-    unexpected_errors: register_int_counter!(
-        "pageserver_tenant_manager_unexpected_errors_total",
-        "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
-    )
-    .expect("failed to define a metric"),
-}
+    .expect("failed to define a metric");
+    TenantManagerMetrics {
+        tenant_slots_attached: tenant_slots
+            .get_metric_with_label_values(&["attached"])
+            .unwrap(),
+        tenant_slots_secondary: tenant_slots
+            .get_metric_with_label_values(&["secondary"])
+            .unwrap(),
+        tenant_slots_inprogress: tenant_slots
+            .get_metric_with_label_values(&["inprogress"])
+            .unwrap(),
+        tenant_slot_writes: register_int_counter!(
+            "pageserver_tenant_manager_slot_writes",
+            "Writes to a tenant slot, including all of create/attach/detach/delete"
+        )
+        .expect("failed to define a metric"),
+        unexpected_errors: register_int_counter!(
+            "pageserver_tenant_manager_unexpected_errors_total",
+            "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
+        )
+        .expect("failed to define a metric"),
+    }
 });
 
 pub(crate) struct DeletionQueueMetrics {
@@ -2275,6 +2326,7 @@ use std::time::{Duration, Instant};
 
 use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
+use crate::tenant::mgr::TenantSlot;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
 struct PerTimelineRemotePhysicalSizeGauge {
@@ -2877,6 +2929,8 @@ pub fn preinitialize_metrics() {
         &WALRECEIVER_CANDIDATES_REMOVED,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_FAILURES,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_SUCCESSES,
+        &REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
+        &REMOTE_ONDEMAND_DOWNLOADED_BYTES,
     ]
     .into_iter()
     .for_each(|c| {

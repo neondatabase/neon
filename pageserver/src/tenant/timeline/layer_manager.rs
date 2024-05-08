@@ -205,6 +205,24 @@ impl LayerManager {
         updates.flush();
     }
 
+    /// Called when compaction is completed.
+    pub(crate) fn rewrite_layers(
+        &mut self,
+        rewrite_layers: &[(Layer, ResidentLayer)],
+        drop_layers: &[Layer],
+        _metrics: &TimelineMetrics,
+    ) {
+        let mut updates = self.layer_map.batch_update();
+
+        // TODO: implement rewrites (currently this code path only used for drops)
+        assert!(rewrite_layers.is_empty());
+
+        for l in drop_layers {
+            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
+        }
+        updates.flush();
+    }
+
     /// Called when garbage collect has selected the layers to be removed.
     pub(crate) fn finish_gc_timeline(&mut self, gc_layers: &[Layer]) {
         let mut updates = self.layer_map.batch_update();

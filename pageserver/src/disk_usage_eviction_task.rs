@@ -533,7 +533,12 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                     js.spawn(async move {
                         layer
                             .secondary_tenant
-                            .evict_layer(tenant_manager.get_conf(), layer.timeline_id, layer.name)
+                            .evict_layer(
+                                tenant_manager.get_conf(),
+                                layer.timeline_id,
+                                layer.name,
+                                layer.metadata,
+                            )
                             .await;
                         Ok(file_size)
                     });

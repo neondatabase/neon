@@ -159,6 +159,9 @@ smol_str_wrapper!(EndpointCacheKey);
 
 smol_str_wrapper!(DbName);
 
+// postgres hostname, will likely be a port:ip addr
+smol_str_wrapper!(Host);
+
 // Endpoints are a bit tricky. Rare they might be branches or projects.
 impl EndpointId {
     pub fn is_endpoint(&self) -> bool {

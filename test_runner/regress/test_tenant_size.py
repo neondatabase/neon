@@ -668,9 +668,9 @@ def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
 
         client.configure_failpoints((failpoint, "off"))
 
-        with pytest.raises(
-            PageserverApiException, match="Failed to refresh gc_info before gathering inputs"
-        ):
+        # accept both, because the deletion might still complete before
+        matcher = "(Failed to refresh gc_info before gathering inputs|NotFound: tenant)"
+        with pytest.raises(PageserverApiException, match=matcher):
             completion.result()
 
     # this happens on both cases

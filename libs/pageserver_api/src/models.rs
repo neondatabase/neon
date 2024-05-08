@@ -1,3 +1,4 @@
+pub mod detach_ancestor;
 pub mod partitioning;
 pub mod utilization;
 
@@ -8,6 +9,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
+    str::FromStr,
     time::{Duration, SystemTime},
 };
 
@@ -303,7 +305,31 @@ pub struct TenantConfig {
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
-    pub switch_to_aux_file_v2: Option<bool>,
+    pub switch_aux_file_policy: Option<AuxFilePolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuxFilePolicy {
+    V1,
+    V2,
+    CrossValidation,
+}
+
+impl FromStr for AuxFilePolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.to_lowercase();
+        if s == "v1" {
+            Ok(Self::V1)
+        } else if s == "v2" {
+            Ok(Self::V2)
+        } else if s == "crossvalidation" || s == "cross_validation" {
+            Ok(Self::CrossValidation)
+        } else {
+            anyhow::bail!("cannot parse {} to aux file policy", s)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
