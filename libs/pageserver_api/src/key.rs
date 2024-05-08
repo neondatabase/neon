@@ -40,7 +40,7 @@ pub const RELATION_SIZE_PREFIX: u8 = 0x61;
 pub const AUX_KEY_PREFIX: u8 = 0x62;
 
 /// The key prefix of ReplOrigin keys.
-pub const REPL_ORIGIN_KEY: u8 = 0x4;
+pub const REPL_ORIGIN_KEY_PREFIX: u8 = 0x63;
 
 /// Check if the key falls in the range of metadata keys.
 pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
@@ -309,9 +309,6 @@ impl Key {
 //
 // AuxFiles:
 // 03 00000000 00000000 00000000 00   00000002
-//
-// ReplOrigin:
-// 04 00000000 00000000 00000000 00   ORIGIN_ID
 //
 
 //-- Section 01: relation data and metadata
@@ -597,7 +594,7 @@ pub const AUX_FILES_KEY: Key = Key {
 #[inline(always)]
 pub fn repl_origin_key(origin_id: RepOriginId) -> Key {
     Key {
-        field1: REPL_ORIGIN_KEY,
+        field1: REPL_ORIGIN_KEY_PREFIX,
         field2: 0,
         field3: 0,
         field4: 0,
@@ -609,19 +606,19 @@ pub fn repl_origin_key(origin_id: RepOriginId) -> Key {
 /// Get the range of replorigin keys.
 pub fn repl_origin_key_range() -> Range<Key> {
     Key {
-        field1: REPL_ORIGIN_KEY,
+        field1: REPL_ORIGIN_KEY_PREFIX,
         field2: 0,
         field3: 0,
         field4: 0,
         field5: 0,
         field6: 0,
     }..Key {
-        field1: REPL_ORIGIN_KEY + 1,
+        field1: REPL_ORIGIN_KEY_PREFIX,
         field2: 0,
         field3: 0,
         field4: 0,
         field5: 0,
-        field6: 0,
+        field6: 0x10000,
     }
 }
 
