@@ -562,6 +562,10 @@ impl LocalEnv {
             fs::create_dir_all(SafekeeperNode::datadir_path_by_id(self, safekeeper.id))?;
         }
 
+        for ps in &self.pageservers {
+            fs::create_dir(self.pageserver_data_dir(ps.id))?;
+        }
+
         self.persist_config(base_path)
     }
 

@@ -10,7 +10,7 @@ use std::io;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
-use std::process::Command;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -74,10 +74,12 @@ impl PageServerNode {
         }
     }
 
-    /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
-    ///
-    /// These all end up on the command line of the `pageserver` binary.
-    fn neon_local_overrides(&self, cli_overrides: &toml_edit::Document) -> Vec<String> {
+    fn pageserver_init_make_toml(
+        &self,
+        cli_overrides: toml_edit::Document,
+    ) -> anyhow::Result<toml_edit::Document> {
+        // TODO: this is a legacy code, it should be refactored to use toml_edit directly.
+
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
@@ -172,12 +174,21 @@ impl PageServerNode {
         // Apply the user-provided overrides
         overrides.push(cli_overrides.to_string());
 
-        overrides
+        // Turn `overrides` into a toml document.
+        // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
+        let mut config_toml = toml_edit::Document::new();
+        for fragment_str in overrides {
+            let fragment = toml_edit::Document::from_str(&fragment_str)
+                .expect("all fragments in `overrides` are valid toml documents, this function controls that");
+            for (key, item) in fragment.iter() {
+                config_toml.insert(key, item.clone());
+            }
+        }
+        Ok(config_toml)
     }
 
     /// Initializes a pageserver node by creating its config with the overrides provided.
-    pub fn initialize(&self, config_overrides: &toml_edit::Document) -> anyhow::Result<()> {
-        // First, run `pageserver --init` and wait for it to write a config into FS and exit.
+    pub fn initialize(&self, config_overrides: toml_edit::Document) -> anyhow::Result<()> {
         self.pageserver_init(config_overrides)
             .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
     }
@@ -198,7 +209,7 @@ impl PageServerNode {
         self.start_node().await
     }
 
-    fn pageserver_init(&self, config_overrides: &toml_edit::Document) -> anyhow::Result<()> {
+    fn pageserver_init(&self, cli_overrides: toml_edit::Document) -> anyhow::Result<()> {
         let datadir = self.repo_path();
         let node_id = self.conf.id;
         println!(
@@ -209,36 +220,20 @@ impl PageServerNode {
         );
         io::stdout().flush()?;
 
-        if !datadir.exists() {
-            std::fs::create_dir(&datadir)?;
-        }
-
-        let datadir_path_str = datadir.to_str().with_context(|| {
-            format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
-        })?;
-
-        // `pageserver --init` merges the `--config-override`s into a built-in default config,
-        // then writes out the merged product to `pageserver.toml`.
-        // TODO: just write the full `pageserver.toml` and get rid of `--config-override`.
-        let mut args = vec!["--init", "--workdir", datadir_path_str];
-        let overrides = self.neon_local_overrides(config_overrides);
-        for piece in &overrides {
-            args.push("--config-override");
-            args.push(piece);
-        }
-        let init_output = Command::new(self.env.pageserver_bin())
-            .args(args)
-            .envs(self.pageserver_env_variables()?)
-            .output()
-            .with_context(|| format!("Failed to run pageserver init for node {node_id}"))?;
-
-        anyhow::ensure!(
-            init_output.status.success(),
-            "Pageserver init for node {} did not finish successfully, stdout: {}, stderr: {}",
-            node_id,
-            String::from_utf8_lossy(&init_output.stdout),
-            String::from_utf8_lossy(&init_output.stderr),
-        );
+        let config = self
+            .pageserver_init_make_toml(cli_overrides)
+            .context("make pageserver toml")?;
+        let config_file_path = datadir.join("pageserver.toml");
+        let mut config_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&config_file_path)
+            .with_context(|| format!("open pageserver toml for write: {config_file_path:?}"))?;
+        config_file
+            .write_all(config.to_string().as_bytes())
+            .context("write pageserver toml")?;
+        drop(config_file);
+        // TODO: invoke a TBD config-check command to validate that pageserver will start with the written config
 
         // Write metadata file, used by pageserver on startup to register itself with
         // the storage controller
