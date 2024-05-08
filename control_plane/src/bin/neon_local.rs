@@ -10,7 +10,8 @@ use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::{
-    InitForceMode, LocalEnv, NeonLocalInitConf, NeonLocalInitPageserverConf,
+    InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
+    SafekeeperConf,
 };
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
@@ -53,27 +54,6 @@ project_git_version!(GIT_VERSION);
 const DEFAULT_PG_VERSION: &str = "15";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
-
-fn default_conf() -> String {
-    format!(
-        r#"
-# Default built-in configuration, defined in main.rs
-control_plane_api = '{DEFAULT_PAGESERVER_CONTROL_PLANE_API}'
-
-[broker]
-listen_addr = '{DEFAULT_BROKER_ADDR}'
-
-[[safekeepers]]
-id = {DEFAULT_SAFEKEEPER_ID}
-pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
-http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
-
-# NB: pageservers do not have a representation in this file.
-# They are discovered by listing the directory.
-
-"#,
-    )
-}
 
 ///
 /// Timelines tree element used as a value in the HashMap.
@@ -334,8 +314,9 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     let init_conf: NeonLocalInitConf = if let Some(config_path) =
         init_match.get_one::<PathBuf>("config")
     {
+        // User (likely the Python test suite) provided a description of the environment.
         if num_pageservers.is_some() {
-            bail!("Cannot specify both --num-pageservers and --config, use key `init_pageservers` in the --config file instead");
+            bail!("Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead");
         }
         // load and parse the file
         let contents = std::fs::read_to_string(config_path).with_context(|| {
@@ -346,29 +327,39 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
         })?;
         toml_edit::de::from_str(&contents)?
     } else {
-        let mut builtin: NeonLocalInitConf =
-            toml::from_str(&default_conf()).expect("default config should deserialize cleanly");
-        assert!(
-            builtin.pageservers.is_empty(),
-            "default config should not have `pageservers`, we're doing that here"
-        );
-        builtin.pageservers = (0..num_pageservers.copied().unwrap_or(1))
-            .map(|i| {
-                let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
-                let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
-                let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
-                // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
-                NeonLocalInitPageserverConf {
-                    id: pageserver_id,
-                    listen_pg_addr: format!("127.0.0.1:{pg_port}"),
-                    listen_http_addr: format!("127.0.0.1:{http_port}"),
-                    pg_auth_type: AuthType::Trust,
-                    http_auth_type: AuthType::Trust,
-                    other: Default::default(),
-                }
-            })
-            .collect();
-        builtin
+        // User (likely interactive) did not provide a description of the environment, give them the default
+        NeonLocalInitConf {
+            control_plane_api: Some(Some(DEFAULT_PAGESERVER_CONTROL_PLANE_API.parse().unwrap())),
+            broker: NeonBroker {
+                listen_addr: DEFAULT_BROKER_ADDR.parse().unwrap(),
+            },
+            safekeepers: vec![SafekeeperConf {
+                id: DEFAULT_SAFEKEEPER_ID,
+                pg_port: DEFAULT_SAFEKEEPER_PG_PORT,
+                http_port: DEFAULT_SAFEKEEPER_HTTP_PORT,
+                ..Default::default()
+            }],
+            pageservers: (0..num_pageservers.copied().unwrap_or(1))
+                .map(|i| {
+                    let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
+                    let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
+                    let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+                    NeonLocalInitPageserverConf {
+                        id: pageserver_id,
+                        listen_pg_addr: format!("127.0.0.1:{pg_port}"),
+                        listen_http_addr: format!("127.0.0.1:{http_port}"),
+                        pg_auth_type: AuthType::Trust,
+                        http_auth_type: AuthType::Trust,
+                        other: Default::default(),
+                    }
+                })
+                .collect(),
+            pg_distrib_dir: None,
+            neon_distrib_dir: None,
+            default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
+            storage_controller: None,
+            control_plane_compute_hook_api: None,
+        }
     };
 
     LocalEnv::init(init_conf, force)

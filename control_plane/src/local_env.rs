@@ -120,7 +120,7 @@ where
     ))
 }
 
-/// The toml that can be passed to `neon_local init --config`.
+/// The description of the neon_local env to be initialized by `neon_local init --config`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NeonLocalInitConf {
