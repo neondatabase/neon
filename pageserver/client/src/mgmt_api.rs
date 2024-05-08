@@ -486,6 +486,18 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    pub async fn top_n_tenant_shards(
+        &self,
+        request: TopNTenantShardsRequest,
+    ) -> Result<TopNTenantShardsResponse> {
+        let uri = format!("{}/v1/top_n_tenants", self.mgmt_api_endpoint);
+        self.request(Method::POST, uri, request)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn layer_map_info(
         &self,
         tenant_shard_id: TenantShardId,

@@ -21,6 +21,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::TimelineState;
+use pageserver_api::models::TopNTenantShardItem;
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::ShardStripeSize;
@@ -2211,6 +2212,47 @@ impl Tenant {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn get_sizes(&self) -> TopNTenantShardItem {
+        let mut result = TopNTenantShardItem {
+            id: self.tenant_shard_id,
+            resident_size: 0,
+            physical_size: 0,
+            max_logical_size: 0,
+        };
+
+        let timelines = self
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for timeline in timelines {
+            result.resident_size += timeline.metrics.resident_physical_size_gauge.get();
+
+            // FIXME: it's too expensive to take a mutex in this loop
+            result.physical_size += timeline
+                .remote_client
+                .as_ref()
+                .and_then(|c| {
+                    c.metrics
+                        .remote_physical_size_gauge
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|g| g.get())
+                })
+                .unwrap_or(0);
+            result.max_logical_size = std::cmp::max(
+                result.max_logical_size,
+                timeline.metrics.current_logical_size_gauge.get(),
+            );
+        }
+
+        result
     }
 }
 

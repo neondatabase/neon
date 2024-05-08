@@ -25,6 +25,10 @@ use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantState;
+use pageserver_api::models::TopNSorting;
+use pageserver_api::models::TopNTenantShardItem;
+use pageserver_api::models::TopNTenantShardsRequest;
+use pageserver_api::models::TopNTenantShardsResponse;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
@@ -2353,6 +2357,84 @@ async fn get_utilization(
         .map_err(ApiError::InternalServerError)
 }
 
+/// Report on the largest tenants on this pageserver, for the storage controller to identify
+/// candidates for splitting
+async fn post_top_n_tenants(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+    let request: TopNTenantShardsRequest = json_request(&mut r).await?;
+    let state = get_state(&r);
+
+    fn get_size_metric(sizes: &TopNTenantShardItem, order_by: &TopNSorting) -> u64 {
+        match order_by {
+            TopNSorting::ResidentSize => sizes.resident_size,
+            TopNSorting::MaxLogicalSize => sizes.max_logical_size,
+        }
+    }
+
+    let mut top_n = Vec::new();
+
+    // FIXME: this is a lot of clones to take this tenant list
+    for (tenant_shard_id, tenant_slot) in state.tenant_manager.list() {
+        if let Some(shards_lt) = request.where_shards_lt {
+            // Ignore tenants which already have >= this many shards
+            if tenant_shard_id.shard_count >= shards_lt {
+                continue;
+            }
+        }
+
+        let sizes = match tenant_slot {
+            TenantSlot::Attached(tenant) => tenant.get_sizes(),
+            TenantSlot::Secondary(_) | TenantSlot::InProgress(_) => {
+                continue;
+            }
+        };
+        let metric = get_size_metric(&sizes, &request.order_by);
+
+        if let Some(gt) = request.where_gt {
+            // Ignore tenants whose metric is <= the lower size threshold, to do less sorting work
+            if metric <= gt {
+                continue;
+            }
+        };
+
+        // Insert to vector keeping it sorted
+        match top_n.last() {
+            None => {
+                // Top N list is empty: candidate becomes first member
+                top_n.push((metric, sizes));
+            }
+            Some(last) if last.0 > metric && top_n.len() < request.limit => {
+                // Lowest item in list is greater than our candidate, but we aren't at limit yet: push to end
+                top_n.push((metric, sizes));
+            }
+            Some(last) if last.0 > metric => {
+                // List is at limit and lowest value is greater than our candidate, drop it.
+            }
+            Some(_) => {
+                // Find location to insert
+                for i in 0..top_n.len() {
+                    if top_n[i].0 < metric {
+                        top_n.insert(i, (metric, sizes));
+                        break;
+                    }
+                }
+
+                top_n.truncate(request.limit);
+            }
+        }
+    }
+
+    json_response(
+        StatusCode::OK,
+        TopNTenantShardsResponse {
+            shards: top_n.into_iter().map(|i| i.1).collect(),
+        },
+    )
+}
+
 /// Common functionality of all the HTTP API handlers.
 ///
 /// - Adds a tracing span to each request (by `request_span`)
@@ -2639,5 +2721,6 @@ pub fn make_router(
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
+        .post("/v1/top_n_tenants", |r| api_handler(r, post_top_n_tenants))
         .any(handler_404))
 }

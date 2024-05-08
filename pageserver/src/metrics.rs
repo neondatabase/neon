@@ -2121,7 +2121,7 @@ pub(crate) struct TimelineMetrics {
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
-    resident_physical_size_gauge: UIntGauge,
+    pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub aux_file_size_gauge: IntGauge,
@@ -2344,7 +2344,7 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::mgr::TenantSlot;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
-struct PerTimelineRemotePhysicalSizeGauge {
+pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
     last_set: u64,
     gauge: UIntGauge,
 }
@@ -2365,7 +2365,7 @@ impl PerTimelineRemotePhysicalSizeGauge {
         };
         self.last_set = sz;
     }
-    fn get(&self) -> u64 {
+    pub(crate) fn get(&self) -> u64 {
         self.gauge.get()
     }
 }
@@ -2380,7 +2380,7 @@ pub(crate) struct RemoteTimelineClientMetrics {
     tenant_id: String,
     shard_id: String,
     timeline_id: String,
-    remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
+    pub(crate) remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
     calls: Mutex<HashMap<(&'static str, &'static str), IntCounterPair>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,

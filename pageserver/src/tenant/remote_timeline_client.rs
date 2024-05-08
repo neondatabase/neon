@@ -317,7 +317,7 @@ pub struct RemoteTimelineClient {
 
     upload_queue: Mutex<UploadQueue>,
 
-    metrics: Arc<RemoteTimelineClientMetrics>,
+    pub(crate) metrics: Arc<RemoteTimelineClientMetrics>,
 
     storage_impl: GenericRemoteStorage,
 
