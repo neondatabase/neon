@@ -355,7 +355,6 @@ where
                 .await
                 .map_err(|e| BasebackupError::Server(e.into()))?
             {
-                let header = new_tar_header(&path, content.len() as u64)?;
                 if path.starts_with("pg_replslot") {
                     let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
                     let restart_lsn = Lsn(u64::from_le_bytes(
@@ -398,7 +397,11 @@ where
         {
             self.add_twophase_file(xid).await?;
         }
-        let repl_origins = self.timeline.get_replorigins(self.lsn, self.ctx).await?;
+        let repl_origins = self
+            .timeline
+            .get_replorigins(self.lsn, self.ctx)
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?;
         let n_origins = repl_origins.len();
         if n_origins != 0 {
             //

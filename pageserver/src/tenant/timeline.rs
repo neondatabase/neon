@@ -91,7 +91,7 @@ use crate::{
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 use crate::{
-    pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind, ReplOrigins},
+    pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
 
@@ -418,15 +418,11 @@ pub struct Timeline {
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
 
-<<<<<<< HEAD
     /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
 
     /// Indicate whether aux file v2 storage is enabled.
     pub(crate) last_aux_file_policy: AtomicAuxFilePolicy,
-=======
-    pub(crate) repl_origins: tokio::sync::Mutex<Option<ReplOrigins>>,
->>>>>>> 2280d128a (Handle replorigin_set and replorigin_drop WAL records, ignore pg_logical/replorigin_checkpoint file)
 }
 
 pub struct WalReceiverInfo {
@@ -2322,10 +2318,13 @@ impl Timeline {
                     dir: None,
                     n_deltas: 0,
                 }),
+<<<<<<< HEAD
 
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
 
                 last_aux_file_policy: AtomicAuxFilePolicy::new(aux_file_policy),
+=======
+>>>>>>> b57518599 (Store repl origins as individual entries)
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
