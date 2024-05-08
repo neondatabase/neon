@@ -157,7 +157,9 @@ pub fn generate_wal_segment(
     dispatch_pgversion!(
         pg_version,
         pgv::xlog_utils::generate_wal_segment(segno, system_id, lsn),
-        Err(SerializeError::BadInput)
+        Err(SerializeError::BadInput(anyhow::anyhow!(
+            "failed to generate wal segment"
+        )))
     )
 }
 

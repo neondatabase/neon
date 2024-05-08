@@ -48,8 +48,8 @@ impl From<bincode::Error> for DeserializeError {
 #[derive(Debug, Error)]
 pub enum SerializeError {
     /// The serializer isn't able to serialize the supplied data.
-    #[error("serialize error")]
-    BadInput,
+    #[error("serialize error: {0}")]
+    BadInput(anyhow::Error),
     /// While serializing into a `Write` sink, an `io::Error` occurred.
     #[error("serialize error: {0}")]
     Io(io::Error),
@@ -59,7 +59,7 @@ impl From<bincode::Error> for SerializeError {
     fn from(e: bincode::Error) -> Self {
         match *e {
             bincode::ErrorKind::Io(io_err) => SerializeError::Io(io_err),
-            _ => SerializeError::BadInput,
+            err => SerializeError::BadInput(err.into()),
         }
     }
 }
