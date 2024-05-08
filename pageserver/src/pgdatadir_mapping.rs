@@ -907,7 +907,7 @@ impl Timeline {
         Ok((
             result.to_keyspace(),
             /* AUX sparse key space */
-            SparseKeySpace(KeySpace::single(Key::metadata_aux_key_range())),
+            SparseKeySpace(KeySpace { ranges: vec![repl_origin_key_range(), Key::metadata_aux_key_range()] }),
         ))
     }
 
