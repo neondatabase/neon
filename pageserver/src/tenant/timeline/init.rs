@@ -114,7 +114,7 @@ pub(super) enum Decision {
 pub(super) enum DismissedLayer {
     /// The related layer is is in future compared to disk_consistent_lsn, it must not be loaded.
     Future {
-        /// The path to local layer file. `None` if the layer is only known through [`IndexPart`].
+        /// `None` if the layer is only known through [`IndexPart`].
         local: Option<LocalLayerFileMetadata>,
     },
     /// The layer only exists locally.
