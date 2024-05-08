@@ -7,7 +7,7 @@ fn hash256(data: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(data).into()
 }
 
-/// Create a metadata key from a hash, encoded as [AUX_KEY_PREFIX, 2B directory prefix, first 13B of 128b xxhash].
+/// Create a metadata key from a hash, encoded as [AUX_KEY_PREFIX, 2B directory prefix, first 13B of 128b sha256].
 fn aux_hash_to_metadata_key(dir_level1: u8, dir_level2: u8, data: &[u8]) -> Key {
     let mut key = [0; METADATA_KEY_SIZE];
     let hash = hash256(data);
