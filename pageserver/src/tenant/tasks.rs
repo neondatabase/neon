@@ -375,6 +375,9 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                     .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &cancel, &ctx)
                     .await;
                 if let Err(e) = res {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
                     let wait_duration = backoff::exponential_backoff_duration_seconds(
                         error_run_count + 1,
                         1.0,
