@@ -159,12 +159,9 @@ def test_basic_eviction(
 def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    # Disable GC for all tenants, because we want to control when it runs.
-    # Without this, GC can sometimes run for initial tenant and fail the test.
-    # The test can fail because of unexpected "gc_loop{...}: Nothing to GC" log line.
-    neon_env_builder.pageserver_config_override = "tenant_config={gc_period='0s'}"
-
-    env = neon_env_builder.init_start()
+    # don't create initial tenant, we'll create it manually with custom config
+    env = neon_env_builder.init_configs()
+    env.start()
 
     tenant_config = {
         "pitr_interval": "1s",  # set to non-zero, so GC actually does something
