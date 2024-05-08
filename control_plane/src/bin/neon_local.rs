@@ -352,7 +352,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
             builtin.pageservers.is_empty(),
             "default config should not have `pageservers`, we're doing that here"
         );
-        builtin.pageservers = (0..num_pageservers.map(|v| *v).unwrap_or(1))
+        builtin.pageservers = (0..num_pageservers.copied().unwrap_or(1))
             .map(|i| {
                 let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
                 let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;

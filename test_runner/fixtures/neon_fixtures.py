@@ -14,7 +14,7 @@ import textwrap
 import threading
 import time
 import uuid
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -1054,13 +1054,14 @@ class NeonEnv:
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_aux_file_policy = config.pageserver_aux_file_policy
 
-        # Create a config file corresponding to the options
+        # Create the neon_local's `NeonLocalInitConf`
         cfg: Dict[str, Any] = {
             "default_tenant_id": str(self.initial_tenant),
             "broker": {
                 "listen_addr": self.broker.listen_addr(),
             },
             "safekeepers": [],
+            "pageservers": [],
         }
 
         if self.control_plane_api is not None:
@@ -1100,7 +1101,9 @@ class NeonEnv:
                 ps_cfg["validate_vectored_get"] = config.pageserver_validate_vectored_get
 
             if self.pageserver_remote_storage is not None:
-                ps_cfg["remote_storage"] = remote_storage_to_toml_dict(self.pageserver_remote_storage)
+                ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
+                    self.pageserver_remote_storage
+                )
 
             if config.pageserver_config_override is not None:
                 for o in config.pageserver_config_override.split(";"):
@@ -1729,30 +1732,22 @@ class NeonCli(AbstractNeonCli):
 
     def init(
         self,
-        config: Dict[str, Any],
+        init_config: Dict[str, Any],
         force: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
-        remote_storage = self.env.pageserver_remote_storage
-
-        with ExitStack() as stack:
-            neon_local_config = stack.enter_context(tempfile.NamedTemporaryFile(mode="w+"))
-            neon_local_config.write(toml.dumps(config))
-            neon_local_config.flush()
+        with tempfile.NamedTemporaryFile(mode="w+") as init_config_tmpfile:
+            init_config_tmpfile.write(toml.dumps(init_config))
+            init_config_tmpfile.flush()
 
             cmd = [
                 "init",
-                f"--config={neon_local_config.name}",
-                "--pg-version",
-                self.env.pg_version,
+                f"--config={init_config_tmpfile.name}",
             ]
 
             if force is not None:
                 cmd.extend(["--force", force])
 
-            s3_env_vars = None
-            if isinstance(remote_storage, S3Storage):
-                s3_env_vars = remote_storage.access_env_vars()
-            res = self.raw_cli(cmd, extra_env_vars=s3_env_vars)
+            res = self.raw_cli(cmd)
             res.check_returncode()
         return res
 

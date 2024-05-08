@@ -548,7 +548,7 @@ impl LocalEnv {
             &OnDiskConfig {
                 pg_distrib_dir: self.pg_distrib_dir.clone(),
                 neon_distrib_dir: self.neon_distrib_dir.clone(),
-                default_tenant_id: self.default_tenant_id.clone(),
+                default_tenant_id: self.default_tenant_id,
                 private_key_path: self.private_key_path.clone(),
                 broker: self.broker.clone(),
                 storage_controller: self.storage_controller.clone(),
