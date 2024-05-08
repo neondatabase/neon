@@ -252,7 +252,7 @@ impl GlobalTimelines {
         // Take a lock and finish the initialization holding this mutex. No other threads
         // can interfere with creation after we will insert timeline into the map.
         {
-            let mut shared_state = timeline.write_shared_state().await;
+            let mut shared_state = timeline.write_shared_state_allow_cancelled().await;
 
             // We can get a race condition here in case of concurrent create calls, but only
             // in theory. create() will return valid timeline on the next try.
@@ -336,7 +336,7 @@ impl GlobalTimelines {
         match tli_res {
             Ok(timeline) => {
                 // Take a lock and finish the deletion holding this mutex.
-                let mut shared_state = timeline.write_shared_state().await;
+                let mut shared_state = timeline.write_shared_state_allow_cancelled().await;
 
                 info!("deleting timeline {}, only_local={}", ttid, only_local);
                 let (dir_existed, was_active) =
