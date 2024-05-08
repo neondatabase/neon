@@ -159,7 +159,9 @@ def test_basic_eviction(
 def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start()
+    # don't create initial tenant, we'll create it manually with custom config
+    env = neon_env_builder.init_configs()
+    env.start()
 
     tenant_config = {
         "pitr_interval": "1s",  # set to non-zero, so GC actually does something
