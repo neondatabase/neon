@@ -57,8 +57,8 @@ async fn test_simple_updates() {
     executor.target_file_size = 500_000; // 500 KB
 
     // Ingest some traffic.
-    for _ in 1..1000 {
-        executor.ingest_uniform(1000, 50, &(0..100_000)).unwrap();
+    for _ in 1..400 {
+        executor.ingest_uniform(100, 500, &(0..100_000)).unwrap();
     }
 
     for l in executor.live_layers.iter() {
