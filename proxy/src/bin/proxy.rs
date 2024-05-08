@@ -349,7 +349,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cancel_map = CancelMap::default();
 
-    let redis_publisher = match &regional_redis_client {
+    let redis_publisher = match &redis_notifications_client {
         Some(redis_publisher) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
             redis_publisher.clone(),
             args.region.clone(),
