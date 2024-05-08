@@ -645,7 +645,10 @@ paths:
           description: |
             Number of early checks meaning the timeline cannot be detached now:
               - timeline ancestor has an ancestor: not supported, see RFC
-              - another timeline detach for the same tenant is underway
+              - another timeline detach for the same tenant is underway, please retry later
+        "404":
+          description: |
+            No such tenant or timeline exists.
         "409":
           description: |
             The timeline can never be detached:
