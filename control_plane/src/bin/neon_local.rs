@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::local_env::{InitForceMode, LocalEnv, PageServerConf};
+use control_plane::local_env::{InitForceMode, LocalEnv, NeonLocalInitConf, NeonLocalInitPageserverConf, PageServerConf};
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
@@ -325,16 +325,7 @@ fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId
 }
 
 fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
-    let num_pageservers = init_match
-        .get_one::<u16>("num-pageservers")
-        .expect("num-pageservers arg has a default");
-
-    let pageserver_config_cli_overrides: toml_edit::Document =
-        if let Some(path) = init_match.get_one::<PathBuf>("pageserver-config") {
-            std::fs::read_to_string(path)?.parse()?
-        } else {
-            toml_edit::Document::new()
-        };
+    let num_pageservers = init_match.get_one::<u16>("num-pageservers");
 
     let pg_version = init_match
         .get_one::<u32>("pg-version")
@@ -344,66 +335,48 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     let force = init_match.get_one("force").expect("we set a default value");
 
     // Create the in-memory `LocalEnv` that we'd normally load from disk in `load_config`.
-    let env: LocalEnv = {
-        let toml_file: String = if let Some(config_path) = init_match.get_one::<PathBuf>("config") {
-            // load and parse the file
-            std::fs::read_to_string(config_path).with_context(|| {
-                format!(
-                    "Could not read configuration file '{}'",
-                    config_path.display()
-                )
-            })?
-        } else {
-            // Built-in default config
-            default_conf()
-        };
-        let mut env: LocalEnv = toml::from_str(&toml_file)?;
-
-        env.pageservers = (0..*num_pageservers)
+    let init_conf: NeonLocalInitConf = if let Some(config_path) =
+        init_match.get_one::<PathBuf>("config")
+    {
+        if num_pageservers.is_some() {
+            bail!("Cannot specify both --num-pageservers and --config, use key `init_pageservers` in the --config file instead");
+        }
+        // load and parse the file
+        let contents = std::fs::read_to_string(config_path).with_context(|| {
+            format!(
+                "Could not read configuration file '{}'",
+                config_path.display()
+            )
+        })?;
+        toml_edit::de::from_str(&contents)?
+    } else {
+        let mut builtin: NeonLocalInitConf =
+            toml::from_str(&default_conf()).expect("default config should deserialize cleanly");
+        assert!(
+            builtin.pageservers.is_none(),
+            "default config should not have `pageservers`, we're doing that here"
+        );
+        builtin.pageservers = (0..num_pageservers.as_deref().unwrap_or(1))
             .map(|i| {
                 let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
                 let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
                 let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
                 // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
-                PageServerConf {
+                NeonLocalInitPageserverConf {
                     id: pageserver_id,
                     listen_pg_addr: format!("127.0.0.1:{pg_port}"),
                     listen_http_addr: format!("127.0.0.1:{http_port}"),
                     pg_auth_type: AuthType::Trust,
                     http_auth_type: AuthType::Trust,
+                    other: Default::default(),
                 }
             })
             .collect();
-
-        // Find postgres binaries.
-        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install".
-        // Note that later in the code we assume, that distrib dirs follow the same pattern
-        // for all postgres versions.
-        if env.pg_distrib_dir == Path::new("") {
-            if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
-                env.pg_distrib_dir = postgres_bin.into();
-            } else {
-                let cwd = env::current_dir()?;
-                env.pg_distrib_dir = cwd.join("pg_install")
-            }
-        }
-
-        // Find neon binaries.
-        if env.neon_distrib_dir == Path::new("") {
-            env::current_exe()?
-                .parent()
-                .unwrap()
-                .clone_into(&mut env.neon_distrib_dir);
-        }
-
-        env.base_data_dir = local_env::base_path();
-        env
+        builtin
     };
 
-    env.init_on_disk(pg_version, force, &pageserver_config_cli_overrides)
-        .context("materialize initial neon_local environment on disk")?;
-
-    Ok(LocalEnv::load_config().expect("freshly initialized on-disk state should be loadable"))
+    LocalEnv::init(init_conf, pg_version, force)
+        .context("materialize initial neon_local environment on disk")?
 }
 
 /// The default pageserver is the one where CLI tenant/timeline operations are sent by default.
@@ -1432,9 +1405,7 @@ fn cli() -> Command {
     let num_pageservers_arg = Arg::new("num-pageservers")
         .value_parser(value_parser!(u16))
         .long("num-pageservers")
-        .help("How many pageservers to create (default 1)")
-        .required(false)
-        .default_value("1");
+        .help("How many pageservers to create (default 1)");
 
     let update_catalog = Arg::new("update-catalog")
         .value_parser(value_parser!(bool))
@@ -1467,14 +1438,6 @@ fn cli() -> Command {
                         .required(false)
                         .value_parser(value_parser!(PathBuf))
                         .value_name("config")
-                )
-                .arg(
-                    Arg::new("pageserver-config")
-                        .long("pageserver-config")
-                        .required(false)
-                        .value_parser(value_parser!(PathBuf))
-                        .value_name("pageserver-config")
-                        .help("Merge the provided pageserver config into the one generated by neon_local."),
                 )
                 .arg(pg_version_arg.clone())
                 .arg(force_arg)
