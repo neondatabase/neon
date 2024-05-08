@@ -449,19 +449,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required:
-                  - id
-                  - size
-                properties:
-                  id:
-                    type: string
-                    format: hex
-                  size:
-                    type: integer
-                    nullable: true
-                    description: |
-                      Size metric in bytes or null if inputs_only=true was given.
+                $ref: "#/components/schemas/SyntheticSizeResponse"
             text/html:
               description: SVG representation of the tenant and it's timelines.
         "401":
@@ -912,6 +900,9 @@ components:
           format: hex
         size:
           type: integer
+          nullable: true
+          description: |
+            Size metric in bytes or null if inputs_only=true was given.
         segment_sizes:
           type: array
           items:
