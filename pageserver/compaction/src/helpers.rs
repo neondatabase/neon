@@ -14,6 +14,7 @@ use std::future::Future;
 use std::ops::{DerefMut, Range};
 use std::pin::Pin;
 use std::task::{ready, Poll};
+use utils::lsn::Lsn;
 
 pub fn keyspace_total_size<K>(
     keyspace: &CompactionKeySpace<K>,
@@ -120,6 +121,12 @@ impl<'a, E: CompactionJobExecutor> LazyLoadLayer<'a, E> {
             Self::Unloaded(dl) => dl.key_range().start,
         }
     }
+    fn lsn(&self) -> Lsn {
+        match self {
+            Self::Loaded(entries) => entries.front().unwrap().lsn(),
+            Self::Unloaded(dl) => dl.lsn_range().start,
+        }
+    }
 }
 impl<'a, E: CompactionJobExecutor> PartialOrd for LazyLoadLayer<'a, E> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -129,12 +136,12 @@ impl<'a, E: CompactionJobExecutor> PartialOrd for LazyLoadLayer<'a, E> {
 impl<'a, E: CompactionJobExecutor> Ord for LazyLoadLayer<'a, E> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // reverse order so that we get a min-heap
-        other.key().cmp(&self.key())
+        (other.key(), other.lsn()).cmp(&(self.key(), self.lsn()))
     }
 }
 impl<'a, E: CompactionJobExecutor> PartialEq for LazyLoadLayer<'a, E> {
     fn eq(&self, other: &Self) -> bool {
-        self.key().eq(&other.key())
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 impl<'a, E: CompactionJobExecutor> Eq for LazyLoadLayer<'a, E> {}
