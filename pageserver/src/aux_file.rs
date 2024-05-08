@@ -4,9 +4,7 @@ use sha2::Digest;
 use tracing::warn;
 
 fn hash256(data: &[u8]) -> [u8; 32] {
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
+    sha2::Sha256::digest(data).into()
 }
 
 /// Create a metadata key from a hash, encoded as [AUX_KEY_PREFIX, 2B directory prefix, first 13B of 128b xxhash].
