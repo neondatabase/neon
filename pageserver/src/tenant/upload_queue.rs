@@ -1,4 +1,4 @@
-use super::storage_layer::LayerFileName;
+use super::storage_layer::LayerName;
 use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
@@ -45,7 +45,7 @@ pub(crate) struct UploadQueueInitialized {
 
     /// All layer files stored in the remote storage, taking into account all
     /// in-progress and queued operations
-    pub(crate) latest_files: HashMap<LayerFileName, LayerFileMetadata>,
+    pub(crate) latest_files: HashMap<LayerName, LayerFileMetadata>,
 
     /// How many file uploads or deletions been scheduled, since the
     /// last (scheduling of) metadata index upload?
@@ -89,7 +89,7 @@ pub(crate) struct UploadQueueInitialized {
     /// Putting this behind a testing feature to catch problems in tests, but assuming we could have a
     /// bug causing leaks, then it's better to not leave this enabled for production builds.
     #[cfg(feature = "testing")]
-    pub(crate) dangling_files: HashMap<LayerFileName, Generation>,
+    pub(crate) dangling_files: HashMap<LayerName, Generation>,
 
     /// Set to true when we have inserted the `UploadOp::Shutdown` into the `inprogress_tasks`.
     pub(crate) shutting_down: bool,
@@ -281,7 +281,7 @@ pub(crate) struct UploadTask {
 /// for timeline deletion, which skips this queue and goes directly to DeletionQueue.
 #[derive(Debug)]
 pub(crate) struct Delete {
-    pub(crate) layers: Vec<(LayerFileName, LayerFileMetadata)>,
+    pub(crate) layers: Vec<(LayerName, LayerFileMetadata)>,
 }
 
 #[derive(Debug)]

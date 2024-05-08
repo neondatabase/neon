@@ -407,7 +407,7 @@ async fn remote_copy(
     let owned = crate::tenant::storage_layer::Layer::for_evicted(
         adoptee.conf,
         adoptee,
-        adopted.layer_desc().filename(),
+        adopted.layer_desc().layer_name(),
         metadata,
     );
 
