@@ -12,6 +12,7 @@ use crate::{
     compute,
     config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
     context::RequestMonitoring,
+    error::ReportableError,
     intern::ProjectIdInt,
     metrics::ApiLockMetrics,
     scram, EndpointCacheKey,
@@ -29,6 +30,8 @@ pub mod errors {
         proxy::retry::ShouldRetry,
     };
     use thiserror::Error;
+
+    use super::ApiLockError;
 
     /// A go-to error message which doesn't leak any detail.
     const REQUEST_FAILED: &str = "Console request failed";
@@ -211,25 +214,14 @@ pub mod errors {
         #[error("Too many connections attempts")]
         TooManyConnections,
 
-        #[error("Timeout waiting to acquire wake compute lock")]
-        TimeoutError,
+        #[error("error acquiring resource permit: {0}")]
+        TooManyConnectionAttempts(#[from] ApiLockError),
     }
 
     // This allows more useful interactions than `#[from]`.
     impl<E: Into<ApiError>> From<E> for WakeComputeError {
         fn from(e: E) -> Self {
             Self::ApiError(e.into())
-        }
-    }
-
-    impl From<tokio::sync::AcquireError> for WakeComputeError {
-        fn from(_: tokio::sync::AcquireError) -> Self {
-            WakeComputeError::TimeoutError
-        }
-    }
-    impl From<tokio::time::error::Elapsed> for WakeComputeError {
-        fn from(_: tokio::time::error::Elapsed) -> Self {
-            WakeComputeError::TimeoutError
         }
     }
 
@@ -245,7 +237,9 @@ pub mod errors {
 
                 TooManyConnections => self.to_string(),
 
-                TimeoutError => "timeout while acquiring the compute resource lock".to_owned(),
+                TooManyConnectionAttempts(_) => {
+                    "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
+                }
             }
         }
     }
@@ -256,7 +250,7 @@ pub mod errors {
                 WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
                 WakeComputeError::ApiError(e) => e.get_error_kind(),
                 WakeComputeError::TooManyConnections => crate::error::ErrorKind::RateLimit,
-                WakeComputeError::TimeoutError => crate::error::ErrorKind::ServiceRateLimit,
+                WakeComputeError::TooManyConnectionAttempts(e) => e.get_error_kind(),
             }
         }
     }
@@ -456,6 +450,23 @@ pub struct ApiLocks<K> {
     metrics: &'static ApiLockMetrics,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ApiLockError {
+    #[error("lock was closed")]
+    AcquireError(#[from] tokio::sync::AcquireError),
+    #[error("permit could not be acquired")]
+    TimeoutError(#[from] tokio::time::error::Elapsed),
+}
+
+impl ReportableError for ApiLockError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        match self {
+            ApiLockError::AcquireError(_) => crate::error::ErrorKind::Service,
+            ApiLockError::TimeoutError(_) => crate::error::ErrorKind::RateLimit,
+        }
+    }
+}
+
 impl<K: Hash + Eq + Clone> ApiLocks<K> {
     pub fn new(
         name: &'static str,
@@ -475,7 +486,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         })
     }
 
-    pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, errors::WakeComputeError> {
+    pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
         if self.permits == 0 {
             return Ok(WakeComputePermit { permit: None });
         }
