@@ -312,7 +312,10 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
     let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
 
     let mut builder = Config::builder()
-        .behavior_version(BehaviorVersion::v2023_11_09())
+        .behavior_version(
+            #[allow(deprecated)] /* TODO: https://github.com/neondatabase/neon/issues/7665 */
+            BehaviorVersion::v2023_11_09(),
+        )
         .region(bucket_region)
         .retry_config(RetryConfig::adaptive().with_max_attempts(3))
         .sleep_impl(SharedAsyncSleep::from(sleep_impl))
