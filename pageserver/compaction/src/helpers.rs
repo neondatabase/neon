@@ -132,13 +132,13 @@ enum LazyLoadLayer<'a, E: CompactionJobExecutor> {
     Unloaded(&'a E::DeltaLayer),
 }
 impl<'a, E: CompactionJobExecutor> LazyLoadLayer<'a, E> {
-    fn key(&self) -> E::Key {
+    fn min_key(&self) -> E::Key {
         match self {
             Self::Loaded(entries) => entries.front().unwrap().key(),
             Self::Unloaded(dl) => dl.key_range().start,
         }
     }
-    fn lsn(&self) -> Lsn {
+    fn min_lsn(&self) -> Lsn {
         match self {
             Self::Loaded(entries) => entries.front().unwrap().lsn(),
             Self::Unloaded(dl) => dl.lsn_range().start,
@@ -153,7 +153,7 @@ impl<'a, E: CompactionJobExecutor> PartialOrd for LazyLoadLayer<'a, E> {
 impl<'a, E: CompactionJobExecutor> Ord for LazyLoadLayer<'a, E> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // reverse order so that we get a min-heap
-        (other.key(), other.lsn()).cmp(&(self.key(), self.lsn()))
+        (other.min_key(), other.min_lsn()).cmp(&(self.min_key(), self.min_lsn()))
     }
 }
 impl<'a, E: CompactionJobExecutor> PartialEq for LazyLoadLayer<'a, E> {
