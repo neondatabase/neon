@@ -3,5 +3,4 @@ comment = 'helpers for neon testing and debugging'
 default_version = '1.1'
 module_pathname = '$libdir/neon_test_utils'
 relocatable = true
-trusted = false
-superuser = true
+trusted = true
