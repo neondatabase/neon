@@ -1,13 +1,11 @@
 self-hosted-runner:
   labels:
     - arm64
-    - dev
     - gen3
     - large
+    - large-arm64
     - small
     - us-east-2
-    - ubuntu-22.04-arm64
-    - ubuntu-latest-arm64
 config-variables:
   - REMOTE_STORAGE_AZURE_CONTAINER
   - REMOTE_STORAGE_AZURE_REGION
