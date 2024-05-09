@@ -1597,7 +1597,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6943ae99c34386c84a470c499d3414f66502a41340aa895406e0d2e4a207b91d"
 dependencies = [
  "cfg-if",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "lock_api",
  "once_cell",
  "parking_lot_core 0.9.8",
@@ -2276,9 +2276,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.14.0"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c6201b9ff9fd90a5a3bac2e56a830d0caa509576f0e503818ee82c181b3437a"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 dependencies = [
  "ahash",
  "allocator-api2",
@@ -2286,11 +2286,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.8.4"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8094feaf31ff591f651a2664fb9cfd92bba7a60ce3197265e9482ebe753c8f7"
+checksum = "692eaaf7f7607518dd3cef090f1474b61edc5301d8012f09579920df68b725ee"
 dependencies = [
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -2691,7 +2691,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad227c3af19d4914570ad36d30409928b75967c298feb9ea1969db3a610bb14e"
 dependencies = [
  "equivalent",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "serde",
 ]
 
@@ -2954,7 +2954,7 @@ version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3262e75e648fce39813cb56ac41f3c3e3f65217ebf3844d818d1f9398cfb0dc"
 dependencies = [
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -3007,7 +3007,7 @@ checksum = "652bc741286361c06de8cb4d89b21a6437f120c508c51713663589eeb9928ac5"
 dependencies = [
  "bytes",
  "crossbeam-utils",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "itoa",
  "lasso",
  "measured-derive",
@@ -3552,7 +3552,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79"
 dependencies = [
  "dlv-list",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -3879,7 +3879,7 @@ dependencies = [
  "ahash",
  "bytes",
  "chrono",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "num",
  "num-bigint",
  "paste",
@@ -4354,7 +4354,7 @@ dependencies = [
  "fallible-iterator",
  "futures",
  "git-version",
- "hashbrown 0.13.2",
+ "hashbrown 0.14.5",
  "hashlink",
  "hex",
  "hmac",
@@ -6381,7 +6381,7 @@ dependencies = [
  "futures-io",
  "futures-sink",
  "futures-util",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "pin-project-lite",
  "tokio",
  "tracing",
@@ -7489,7 +7489,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "getrandom 0.2.11",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "hex",
  "hmac",
  "hyper 0.14.26",
