@@ -540,7 +540,7 @@ where
         let key_value_stream =
             std::pin::pin!(merge_delta_keys_buffered::<E>(deltas.as_slice(), ctx)
                 .await?
-                .map(|k| Result::<_, anyhow::Error>::Ok(k)));
+                .map(Result::<_, anyhow::Error>::Ok));
         let mut new_jobs = Vec::new();
 
         // Slide a window through the keyspace
