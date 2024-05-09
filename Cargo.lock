@@ -1202,7 +1202,6 @@ dependencies = [
  "remote_storage",
  "serde",
  "serde_json",
- "serde_with",
  "utils",
  "workspace_hack",
 ]
@@ -1245,7 +1244,6 @@ dependencies = [
  "tracing-utils",
  "url",
  "utils",
- "vm_monitor",
  "workspace_hack",
  "zstd",
 ]
@@ -1315,12 +1313,9 @@ dependencies = [
 name = "consumption_metrics"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
  "rand 0.8.5",
  "serde",
- "serde_with",
- "utils",
  "workspace_hack",
 ]
 
@@ -1355,7 +1350,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "storage_broker",
- "tar",
  "thiserror",
  "tokio",
  "tokio-postgres",
@@ -1994,16 +1988,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9c384f161156f5260c24a097c56119f9be8c798586aecc13afbcbe7b7e26bf8"
 dependencies = [
  "percent-encoding",
-]
-
-[[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -3775,7 +3759,6 @@ dependencies = [
  "chrono",
  "clap",
  "const_format",
- "consumption_metrics",
  "criterion",
  "crossbeam-utils",
  "either",
@@ -3795,10 +3778,8 @@ dependencies = [
  "rand 0.8.5",
  "smallvec",
  "svg_fmt",
- "sync_wrapper",
  "thiserror",
  "tokio",
- "tokio-io-timeout",
  "tokio-util",
  "tracing",
  "tracing-error",
@@ -3893,33 +3874,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "password-hash"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
-dependencies = [
- "base64ct",
- "rand_core 0.6.4",
- "subtle",
-]
-
-[[package]]
 name = "paste"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de3145af08024dea9fa9914f381a17b8fc6034dfb00f3a84013f7ff43f29ed4c"
-
-[[package]]
-name = "pbkdf2"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0ca0b5a68607598bf3bad68f32227a8164f6254833f84eafaac409cd6746c31"
-dependencies = [
- "digest",
- "hmac",
- "password-hash",
- "sha2",
-]
 
 [[package]]
 name = "peeking_take_while"
@@ -4362,7 +4320,6 @@ dependencies = [
  "ipnet",
  "itertools",
  "lasso",
- "md5",
  "measured",
  "metrics",
  "native-tls",
@@ -4371,7 +4328,6 @@ dependencies = [
  "parking_lot 0.12.1",
  "parquet",
  "parquet_derive",
- "pbkdf2",
  "pin-project-lite",
  "postgres-native-tls",
  "postgres-protocol",
@@ -4401,7 +4357,6 @@ dependencies = [
  "socket2 0.5.5",
  "subtle",
  "sync_wrapper",
- "task-local-extensions",
  "thiserror",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
@@ -4420,7 +4375,6 @@ dependencies = [
  "utils",
  "uuid",
  "walkdir",
- "webpki-roots 0.25.2",
  "workspace_hack",
  "x509-parser",
 ]
@@ -5179,7 +5133,6 @@ dependencies = [
  "crc32c",
  "desim",
  "fail",
- "fs2",
  "futures",
  "git-version",
  "hex",
@@ -5202,7 +5155,6 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_json",
- "serde_with",
  "sha2",
  "signal-hook",
  "storage_broker",
@@ -5227,7 +5179,6 @@ version = "0.1.0"
 dependencies = [
  "const_format",
  "serde",
- "serde_with",
  "utils",
  "workspace_hack",
 ]
@@ -5944,15 +5895,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "task-local-extensions"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba323866e5d033818e3240feeb9f7db2c4296674e4d9e16b97b7bf8f490434e8"
-dependencies = [
- "pin-utils",
-]
-
-[[package]]
 name = "tempfile"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6577,7 +6519,6 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
- "reqwest 0.12.4",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
@@ -6793,7 +6734,6 @@ dependencies = [
  "humantime",
  "hyper 0.14.26",
  "jsonwebtoken",
- "leaky-bucket",
  "metrics",
  "nix 0.27.1",
  "once_cell",
@@ -6808,7 +6748,6 @@ dependencies = [
  "serde_assert",
  "serde_json",
  "serde_path_to_error",
- "serde_with",
  "signal-hook",
  "strum",
  "strum_macros",
@@ -7424,7 +7363,6 @@ dependencies = [
  "aws-smithy-types",
  "axum",
  "base64 0.21.1",
- "base64ct",
  "bytes",
  "cc",
  "chrono",

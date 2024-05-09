@@ -8,7 +8,6 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true
-serde_with.workspace = true
 serde_json.workspace = true
 regex.workspace = true
 
