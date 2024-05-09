@@ -168,9 +168,9 @@ class S3Storage:
     prefix_in_bucket: str
     client: S3Client
     cleanup: bool
-    endpoint: Optional[str]
     """Is this MOCK_S3 (false) or REAL_S3 (true)"""
     real: bool
+    endpoint: Optional[str] = None
 
     def access_env_vars(self) -> Dict[str, str]:
         if self.aws_profile is not None:
@@ -350,7 +350,6 @@ class RemoteStorageKind(str, enum.Enum):
         env_access_key = os.getenv("AWS_ACCESS_KEY_ID")
         env_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
         env_profile = os.getenv("AWS_PROFILE")
-        env_endpoint = os.getenv("AWS_ENDPOINT_URL")
         assert (
             env_access_key and env_secret_key
         ) or env_profile, "need to specify either access key and secret access key or profile"
@@ -364,7 +363,6 @@ class RemoteStorageKind(str, enum.Enum):
 
         client = boto3.client(
             "s3",
-            endpoint_url=env_endpoint,
             region_name=bucket_region,
         )
 
@@ -378,7 +376,6 @@ class RemoteStorageKind(str, enum.Enum):
             client=client,
             cleanup=True,
             real=True,
-            endpoint=env_endpoint,
         )
 
 
