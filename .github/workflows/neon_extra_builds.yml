@@ -136,7 +136,7 @@ jobs:
   check-linux-arm-build:
     needs: [ check-permissions, build-build-tools-image ]
     timeout-minutes: 90
-    runs-on: [ self-hosted, ubuntu-latest-arm64 ]
+    runs-on: [ self-hosted, large-arm64 ]
 
     env:
       # Use release build only, to have less debug info around
@@ -260,7 +260,7 @@ jobs:
   check-codestyle-rust-arm:
     needs: [ check-permissions, build-build-tools-image ]
     timeout-minutes: 90
-    runs-on: [ self-hosted, ubuntu-latest-arm64 ]
+    runs-on: [ self-hosted, large-arm64 ]
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
@@ -347,7 +347,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
-    runs-on: [ self-hosted, large, x64 ]
+    runs-on: [ self-hosted, large ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
