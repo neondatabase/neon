@@ -25,7 +25,6 @@ chrono.workspace = true
 clap.workspace = true
 consumption_metrics.workspace = true
 dashmap.workspace = true
-env_logger.workspace = true
 futures.workspace = true
 git-version.workspace = true
 hashbrown.workspace = true
@@ -101,6 +100,7 @@ workspace_hack.workspace = true
 
 [dev-dependencies]
 camino-tempfile.workspace = true
+env_logger.workspace = true
 fallible-iterator.workspace = true
 rcgen.workspace = true
 tokio-postgres-rustls.workspace = true

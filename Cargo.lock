@@ -4065,7 +4065,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
- "futures",
  "once_cell",
  "pq_proto",
  "rustls 0.22.4",
@@ -4143,7 +4142,6 @@ dependencies = [
  "serde",
  "thiserror",
  "tokio",
- "tracing",
  "workspace_hack",
 ]
 
@@ -7371,11 +7369,10 @@ dependencies = [
  "crossbeam-utils",
  "either",
  "fail",
+ "futures",
  "futures-channel",
- "futures-core",
  "futures-executor",
  "futures-io",
- "futures-sink",
  "futures-util",
  "getrandom 0.2.11",
  "hashbrown 0.14.5",
