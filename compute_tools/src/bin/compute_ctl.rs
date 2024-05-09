@@ -51,6 +51,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
+use compute_api::spec::ComputeSpec;
 
 use compute_tools::compute::{
     forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
@@ -69,6 +70,34 @@ use compute_tools::swap::resize_swap;
 const BUILD_TAG_DEFAULT: &str = "latest";
 
 fn main() -> Result<()> {
+    let (build_tag, clap_args) = init()?;
+
+    let (pg_handle, start_pg_result) = {
+        // Enter startup tracing context
+        let _startup_context_guard = startup_context_from_env();
+
+        let cli_args = process_cli(&clap_args)?;
+
+        let cli_spec = try_spec_from_cli(&clap_args, &cli_args)?;
+
+        let wait_spec_result = wait_spec(build_tag, cli_args, cli_spec)?;
+
+        start_postgres(&clap_args, wait_spec_result)?
+
+        // Startup is finished, exit the startup tracing span
+    };
+
+    // PostgreSQL is now running, if startup was successful. Wait until it exits.
+    let wait_pg_result = wait_postgres(pg_handle)?;
+
+    let delay_exit = cleanup_after_postgres_exit(start_pg_result)?;
+
+    maybe_delay_exit(delay_exit);
+
+    deinit_and_exit(wait_pg_result);
+}
+
+fn init() -> Result<(String, clap::ArgMatches)> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
@@ -83,9 +112,15 @@ fn main() -> Result<()> {
         .to_string();
     info!("build_tag: {build_tag}");
 
-    let matches = cli().get_matches();
-    let pgbin_default = String::from("postgres");
-    let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
+    Ok((build_tag, cli().get_matches()))
+}
+
+fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
+    let pgbin_default = "postgres";
+    let pgbin = matches
+        .get_one::<String>("pgbin")
+        .map(|s| s.as_str())
+        .unwrap_or(pgbin_default);
 
     let ext_remote_storage = matches
         .get_one::<String>("remote-ext-config")
@@ -113,6 +148,30 @@ fn main() -> Result<()> {
     let spec_path = matches.get_one::<String>("spec-path");
     let resize_swap_on_bind = matches.get_flag("resize-swap-on-bind");
 
+    Ok(ProcessCliResult {
+        connstr,
+        pgdata,
+        pgbin,
+        ext_remote_storage,
+        http_port,
+        spec_json,
+        spec_path,
+        resize_swap_on_bind,
+    })
+}
+
+struct ProcessCliResult<'clap> {
+    connstr: &'clap str,
+    pgdata: &'clap str,
+    pgbin: &'clap str,
+    ext_remote_storage: Option<&'clap str>,
+    http_port: u16,
+    spec_json: Option<&'clap String>,
+    spec_path: Option<&'clap String>,
+    resize_swap_on_bind: bool,
+}
+
+fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
     // Extract OpenTelemetry context for the startup actions from the
     // TRACEPARENT and TRACESTATE env variables, and attach it to the current
     // tracing context.
@@ -149,7 +208,7 @@ fn main() -> Result<()> {
     if let Ok(val) = std::env::var("TRACESTATE") {
         startup_tracing_carrier.insert("tracestate".to_string(), val);
     }
-    let startup_context_guard = if !startup_tracing_carrier.is_empty() {
+    if !startup_tracing_carrier.is_empty() {
         use opentelemetry::propagation::TextMapPropagator;
         use opentelemetry::sdk::propagation::TraceContextPropagator;
         let guard = TraceContextPropagator::new()
@@ -159,8 +218,17 @@ fn main() -> Result<()> {
         Some(guard)
     } else {
         None
-    };
+    }
+}
 
+fn try_spec_from_cli(
+    matches: &clap::ArgMatches,
+    ProcessCliResult {
+        spec_json,
+        spec_path,
+        ..
+    }: &ProcessCliResult,
+) -> Result<CliSpecParams> {
     let compute_id = matches.get_one::<String>("compute-id");
     let control_plane_uri = matches.get_one::<String>("control-plane-uri");
 
@@ -201,6 +269,34 @@ fn main() -> Result<()> {
         }
     };
 
+    Ok(CliSpecParams {
+        spec,
+        live_config_allowed,
+    })
+}
+
+struct CliSpecParams {
+    /// If a spec was provided via CLI or file, the [`ComputeSpec`]
+    spec: Option<ComputeSpec>,
+    live_config_allowed: bool,
+}
+
+fn wait_spec(
+    build_tag: String,
+    ProcessCliResult {
+        connstr,
+        pgdata,
+        pgbin,
+        ext_remote_storage,
+        resize_swap_on_bind,
+        http_port,
+        ..
+    }: ProcessCliResult,
+    CliSpecParams {
+        spec,
+        live_config_allowed,
+    }: CliSpecParams,
+) -> Result<WaitSpecResult> {
     let mut new_state = ComputeState::new();
     let spec_set;
 
@@ -239,8 +335,6 @@ fn main() -> Result<()> {
     let _http_handle =
         launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
-    let extension_server_port: u16 = http_port;
-
     if !spec_set {
         // No spec provided, hang waiting for it.
         info!("no compute spec provided, waiting");
@@ -269,6 +363,29 @@ fn main() -> Result<()> {
         state.start_time = now;
     }
 
+    Ok(WaitSpecResult {
+        compute,
+        http_port,
+        resize_swap_on_bind,
+    })
+}
+
+struct WaitSpecResult {
+    compute: Arc<ComputeNode>,
+    // passed through from ProcessCliResult
+    http_port: u16,
+    resize_swap_on_bind: bool,
+}
+
+fn start_postgres(
+    // need to allow unused because `matches` is only used if target_os = "linux"
+    #[allow(unused_variables)] matches: &clap::ArgMatches,
+    WaitSpecResult {
+        compute,
+        http_port,
+        resize_swap_on_bind,
+    }: WaitSpecResult,
+) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
     state.status = ComputeStatus::Init;
@@ -318,10 +435,10 @@ fn main() -> Result<()> {
         }
     }
 
+    let extension_server_port: u16 = http_port;
+
     // Start Postgres
     let mut pg = None;
-    let mut exit_code = None;
-
     if !prestartup_failed {
         pg = match compute.start_compute(extension_server_port) {
             Ok(pg) => Some(pg),
@@ -376,7 +493,7 @@ fn main() -> Result<()> {
             // This token is used internally by the monitor to clean up all threads
             let token = CancellationToken::new();
 
-            let vm_monitor = &rt.as_ref().map(|rt| {
+            let vm_monitor = rt.as_ref().map(|rt| {
                 rt.spawn(vm_monitor::start(
                     Box::leak(Box::new(vm_monitor::Args {
                         cgroup: cgroup.cloned(),
@@ -389,12 +506,41 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok((
+        pg,
+        StartPostgresResult {
+            delay_exit,
+            compute,
+            #[cfg(target_os = "linux")]
+            rt,
+            #[cfg(target_os = "linux")]
+            token,
+            #[cfg(target_os = "linux")]
+            vm_monitor,
+        },
+    ))
+}
+
+type PostgresHandle = (std::process::Child, std::thread::JoinHandle<()>);
+
+struct StartPostgresResult {
+    delay_exit: bool,
+    // passed through from WaitSpecResult
+    compute: Arc<ComputeNode>,
+
+    #[cfg(target_os = "linux")]
+    rt: Option<tokio::runtime::Runtime>,
+    #[cfg(target_os = "linux")]
+    token: tokio_util::sync::CancellationToken,
+    #[cfg(target_os = "linux")]
+    vm_monitor: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+fn wait_postgres(pg: Option<PostgresHandle>) -> Result<WaitPostgresResult> {
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
+    let mut exit_code = None;
     if let Some((mut pg, logs_handle)) = pg {
-        // Startup is finished, exit the startup tracing span
-        drop(startup_context_guard);
-
         let ecode = pg
             .wait()
             .expect("failed to start waiting on Postgres process");
@@ -409,6 +555,25 @@ fn main() -> Result<()> {
         exit_code = ecode.code()
     }
 
+    Ok(WaitPostgresResult { exit_code })
+}
+
+struct WaitPostgresResult {
+    exit_code: Option<i32>,
+}
+
+fn cleanup_after_postgres_exit(
+    StartPostgresResult {
+        mut delay_exit,
+        compute,
+        #[cfg(target_os = "linux")]
+        vm_monitor,
+        #[cfg(target_os = "linux")]
+        token,
+        #[cfg(target_os = "linux")]
+        rt,
+    }: StartPostgresResult,
+) -> Result<bool> {
     // Terminate the vm_monitor so it releases the file watcher on
     // /sys/fs/cgroup/neon-postgres.
     // Note: the vm-monitor only runs on linux because it requires cgroups.
@@ -450,13 +615,19 @@ fn main() -> Result<()> {
         error!("error while checking for core dumps: {err:?}");
     }
 
+    Ok(delay_exit)
+}
+
+fn maybe_delay_exit(delay_exit: bool) {
     // If launch failed, keep serving HTTP requests for a while, so the cloud
     // control plane can get the actual error.
     if delay_exit {
         info!("giving control plane 30s to collect the error before shutdown");
         thread::sleep(Duration::from_secs(30));
     }
+}
 
+fn deinit_and_exit(WaitPostgresResult { exit_code }: WaitPostgresResult) -> ! {
     // Shutdown trace pipeline gracefully, so that it has a chance to send any
     // pending traces before we exit. Shutting down OTEL tracing provider may
     // hang for quite some time, see, for example:

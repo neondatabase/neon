@@ -8,7 +8,7 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
 use crate::tenant::metadata::TimelineMetadata;
-use crate::tenant::storage_layer::LayerFileName;
+use crate::tenant::storage_layer::LayerName;
 use crate::tenant::upload_queue::UploadQueueInitialized;
 use crate::tenant::Generation;
 use pageserver_api::shard::ShardIndex;
@@ -75,7 +75,7 @@ pub struct IndexPart {
     ///
     /// Older versions of `IndexPart` will not have this property or have only a part of metadata
     /// that latest version stores.
-    pub layer_metadata: HashMap<LayerFileName, IndexLayerMetadata>,
+    pub layer_metadata: HashMap<LayerName, IndexLayerMetadata>,
 
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
     // It's duplicated for convenience when reading the serialized structure, but is
@@ -104,7 +104,7 @@ impl IndexPart {
     pub const FILE_NAME: &'static str = "index_part.json";
 
     fn new(
-        layers_and_metadata: &HashMap<LayerFileName, LayerFileMetadata>,
+        layers_and_metadata: &HashMap<LayerName, LayerFileMetadata>,
         disk_consistent_lsn: Lsn,
         metadata: TimelineMetadata,
     ) -> Self {

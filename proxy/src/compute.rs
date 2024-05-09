@@ -1,7 +1,7 @@
 use crate::{
     auth::parse_endpoint_param,
     cancellation::CancelClosure,
-    console::{errors::WakeComputeError, messages::MetricsAuxInfo},
+    console::{errors::WakeComputeError, messages::MetricsAuxInfo, provider::ApiLockError},
     context::RequestMonitoring,
     error::{ReportableError, UserFacingError},
     metrics::{Metrics, NumDbConnectionsGuard},
@@ -34,6 +34,9 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     WakeComputeError(#[from] WakeComputeError),
+
+    #[error("error acquiring resource permit: {0}")]
+    TooManyConnectionAttempts(#[from] ApiLockError),
 }
 
 impl UserFacingError for ConnectionError {
@@ -57,6 +60,9 @@ impl UserFacingError for ConnectionError {
                 None => err.to_string(),
             },
             WakeComputeError(err) => err.to_string_client(),
+            TooManyConnectionAttempts(_) => {
+                "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
+            }
             _ => COULD_NOT_CONNECT.to_owned(),
         }
     }
@@ -72,6 +78,7 @@ impl ReportableError for ConnectionError {
             ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
+            ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
         }
     }
 }
