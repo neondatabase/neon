@@ -702,8 +702,9 @@ class NeonEnvBuilder:
         config["branch_name_mappings"] = snapshot_config["branch_name_mappings"]
 
         # Update the config with new neon + postgres path in case of compat test
-        config["pg_distrib_dir"] = self.pg_distrib_dir
-        config["neon_distrib_dir"] = self.neon_binpath
+        # FIXME: overriding pg_distrib_dir cause storage controller fail to start
+        # config["pg_distrib_dir"] = str(self.pg_distrib_dir)
+        config["neon_distrib_dir"] = str(self.neon_binpath)
 
         with (self.repo_dir / "config").open("w") as f:
             toml.dump(config, f)
