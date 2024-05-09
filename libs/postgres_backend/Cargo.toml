@@ -8,7 +8,6 @@ license.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
-futures.workspace = true
 rustls.workspace = true
 serde.workspace = true
 thiserror.workspace = true

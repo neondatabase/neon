@@ -124,7 +124,6 @@ opentelemetry-semantic-conventions = "0.14.0"
 parking_lot = "0.12"
 parquet = { version = "49.0.0", default-features = false, features = ["zstd"] }
 parquet_derive = "49.0.0"
-pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
 procfs = "0.14"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
@@ -163,7 +162,6 @@ strum_macros = "0.26"
 svg_fmt = { git = "https://github.com/neondatabase/fork--nical--rust_debug", branch = "neon" }
 sync_wrapper = "0.1.2"
 tar = "0.4"
-task-local-extensions = "0.1.4"
 test-context = "0.3"
 thiserror = "1.0"
 tikv-jemallocator = "0.5"
@@ -189,7 +187,6 @@ url = "2.2"
 urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
-webpki-roots = "0.25"
 x509-parser = "0.15"
 
 ## TODO replace this with tracing
