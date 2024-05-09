@@ -4745,7 +4745,7 @@ impl Service {
                     // them in an optimization
                     const DOWNLOAD_FRESHNESS_THRESHOLD: u64 = 10 * 1024 * 1024 * 1024;
 
-                    if progress.bytes_total == 0
+                    if progress.heatmap_mtime.is_none()
                         || progress.bytes_total < DOWNLOAD_FRESHNESS_THRESHOLD
                             && progress.bytes_downloaded != progress.bytes_total
                         || progress.bytes_total - progress.bytes_downloaded
