@@ -384,7 +384,7 @@ impl FromStr for NodeId {
 
 #[cfg(test)]
 mod tests {
-    use serde_assert::{Deserializer, Serializer, Token, Tokens};
+    use serde_assert::{Deserializer, Serializer, Token};
 
     use crate::bin_ser::BeSer;
 
@@ -395,7 +395,7 @@ mod tests {
         let original_id = Id([
             173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
         ]);
-        let expected_tokens = Tokens(vec![
+        let expected_tokens = vec![
             Token::Tuple { len: 16 },
             Token::U8(173),
             Token::U8(80),
@@ -414,15 +414,14 @@ mod tests {
             Token::U8(228),
             Token::U8(24),
             Token::TupleEnd,
-        ]);
+        ];
 
         let serializer = Serializer::builder().is_human_readable(false).build();
         let serialized_tokens = original_id.serialize(&serializer).unwrap();
         assert_eq!(serialized_tokens, expected_tokens);
 
-        let mut deserializer = Deserializer::builder()
+        let mut deserializer = Deserializer::builder(serialized_tokens)
             .is_human_readable(false)
-            .tokens(serialized_tokens)
             .build();
         let deserialized_id = Id::deserialize(&mut deserializer).unwrap();
         assert_eq!(deserialized_id, original_id);
@@ -433,20 +432,17 @@ mod tests {
         let original_id = Id([
             173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
         ]);
-        let expected_tokens = Tokens(vec![Token::Str(String::from(
-            "ad50847381e248feaac9876cc71ae418",
-        ))]);
+        let expected_tokens = vec![Token::Str(String::from("ad50847381e248feaac9876cc71ae418"))];
 
         let serializer = Serializer::builder().is_human_readable(true).build();
         let serialized_tokens = original_id.serialize(&serializer).unwrap();
         assert_eq!(serialized_tokens, expected_tokens);
 
-        let mut deserializer = Deserializer::builder()
-            .is_human_readable(true)
-            .tokens(Tokens(vec![Token::Str(String::from(
-                "ad50847381e248feaac9876cc71ae418",
-            ))]))
-            .build();
+        let mut deserializer = Deserializer::builder(vec![Token::Str(String::from(
+            "ad50847381e248feaac9876cc71ae418",
+        ))])
+        .is_human_readable(true)
+        .build();
         assert_eq!(Id::deserialize(&mut deserializer).unwrap(), original_id);
     }
 

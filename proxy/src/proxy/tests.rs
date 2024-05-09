@@ -20,7 +20,6 @@ use crate::proxy::retry::retry_after;
 use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use rstest::rstest;
 use rustls::pki_types;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
@@ -273,12 +272,26 @@ async fn keepalive_is_inherited() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[rstest]
-#[case("password_foo")]
-#[case("pwd-bar")]
-#[case("")]
-#[tokio::test]
-async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
+mod scram_auth_good {
+    use super::*;
+
+    #[tokio::test]
+    async fn case_1() -> anyhow::Result<()> {
+        scram_auth_good("password_foo").await
+    }
+
+    #[tokio::test]
+    async fn case_2() -> anyhow::Result<()> {
+        scram_auth_good("pwd-bar").await
+    }
+
+    #[tokio::test]
+    async fn case_3() -> anyhow::Result<()> {
+        scram_auth_good("").await
+    }
+}
+
+async fn scram_auth_good(password: &str) -> anyhow::Result<()> {
     let (client, server) = tokio::io::duplex(1024);
 
     let (client_config, server_config) =
