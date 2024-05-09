@@ -59,12 +59,17 @@ impl Node {
         self.id
     }
 
+    pub(crate) fn get_scheduling(&self) -> NodeSchedulingPolicy {
+        self.scheduling
+    }
+
     pub(crate) fn set_scheduling(&mut self, scheduling: NodeSchedulingPolicy) {
         self.scheduling = scheduling
     }
 
     /// Does this registration request match `self`?  This is used when deciding whether a registration
     /// request should be allowed to update an existing record with the same node ID.
+    /// how
     pub(crate) fn registration_match(&self, register_req: &NodeRegisterRequest) -> bool {
         self.id == register_req.node_id
             && self.listen_http_addr == register_req.listen_http_addr
@@ -141,6 +146,7 @@ impl Node {
             NodeSchedulingPolicy::Draining => MaySchedule::No,
             NodeSchedulingPolicy::Filling => MaySchedule::Yes(score),
             NodeSchedulingPolicy::Pause => MaySchedule::No,
+            NodeSchedulingPolicy::PauseForRestart => MaySchedule::No,
         }
     }
 
@@ -157,7 +163,7 @@ impl Node {
             listen_http_port,
             listen_pg_addr,
             listen_pg_port,
-            scheduling: NodeSchedulingPolicy::Filling,
+            scheduling: NodeSchedulingPolicy::Active,
             availability: NodeAvailability::Offline,
             cancel: CancellationToken::new(),
         }

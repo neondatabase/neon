@@ -8,13 +8,15 @@ use std::{
 };
 
 use crate::{
+    background_node_operations::{self, Controller, OperationError, MAX_RECONCILES_PER_OPERATION},
     compute_hook::NotifyError,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, WrappedWriteGuard},
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
-    scheduler::{ScheduleContext, ScheduleMode},
+    scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
-        MigrateAttachment, ReconcileNeeded, ScheduleOptimization, ScheduleOptimizationAction,
+        MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
+        ScheduleOptimizationAction,
     },
 };
 use anyhow::Context;
@@ -275,6 +277,8 @@ pub struct Service {
     /// use a VecDeque instead of a channel to reduce synchronization overhead, at the cost of some code complexity.
     delayed_reconcile_tx: tokio::sync::mpsc::Sender<TenantShardId>,
 
+    background_operations_controller: std::sync::OnceLock<Controller>,
+
     // Process shutdown will fire this token
     cancel: CancellationToken,
 
@@ -292,6 +296,19 @@ impl From<ReconcileWaitError> for ApiError {
             ReconcileWaitError::Shutdown => ApiError::ShuttingDown,
             e @ ReconcileWaitError::Timeout(_) => ApiError::Timeout(format!("{e}").into()),
             e @ ReconcileWaitError::Failed(..) => ApiError::InternalServerError(anyhow::anyhow!(e)),
+        }
+    }
+}
+
+impl From<OperationError> for ApiError {
+    fn from(value: OperationError) -> Self {
+        match value {
+            OperationError::PreconditionFailed(err) => ApiError::PreconditionFailed(err.into()),
+            OperationError::NodeStateChanged(err) => {
+                ApiError::InternalServerError(anyhow::anyhow!(err))
+            }
+            OperationError::ShuttingDown => ApiError::ShuttingDown,
+            OperationError::Cancelled => ApiError::Conflict("Operation was cancelled".into()),
         }
     }
 }
@@ -1090,11 +1107,19 @@ impl Service {
             delayed_reconcile_tx,
             abort_tx,
             startup_complete: startup_complete.clone(),
+            background_operations_controller: Default::default(),
             cancel,
             gate: Gate::default(),
             tenant_op_locks: Default::default(),
             node_op_locks: Default::default(),
         });
+
+        let (controller, node_operations_receiver) =
+            background_node_operations::Controller::new(this.clone());
+
+        this.background_operations_controller
+            .set(controller)
+            .expect("This is the only code path that sets the controller");
 
         let result_task_this = this.clone();
         tokio::task::spawn(async move {
@@ -1164,6 +1189,19 @@ impl Service {
             async move {
                 startup_complete.wait().await;
                 this.spawn_heartbeat_driver().await;
+            }
+        });
+
+        tokio::task::spawn({
+            let this = this.clone();
+            let startup_complete = startup_complete.clone();
+            async move {
+                startup_complete.wait().await;
+                this.background_operations_controller
+                    .get()
+                    .expect("Initialized at start up")
+                    .handle_operations(node_operations_receiver)
+                    .await;
             }
         });
 
@@ -1562,15 +1600,30 @@ impl Service {
         // Setting a node active unblocks any Reconcilers that might write to the location config API,
         // but those requests will not be accepted by the node until it has finished processing
         // the re-attach response.
+        //
+        // Additionally, reset the nodes scheduling policy to match the conditional update done
+        // in [`Persistence::re_attach`].
         if let Some(node) = nodes.get(&reattach_req.node_id) {
-            if !node.is_available() {
+            let reset_scheduling = matches!(
+                node.get_scheduling(),
+                NodeSchedulingPolicy::PauseForRestart | NodeSchedulingPolicy::Draining
+            );
+
+            if !node.is_available() || reset_scheduling {
                 let mut new_nodes = (**nodes).clone();
                 if let Some(node) = new_nodes.get_mut(&reattach_req.node_id) {
-                    node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
+                    if !node.is_available() {
+                        node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
+                    }
+
+                    if reset_scheduling {
+                        node.set_scheduling(NodeSchedulingPolicy::Active);
+                    }
+
                     scheduler.node_upsert(node);
+                    let new_nodes = Arc::new(new_nodes);
+                    *nodes = new_nodes;
                 }
-                let new_nodes = Arc::new(new_nodes);
-                *nodes = new_nodes;
             }
         }
 
@@ -1849,6 +1902,23 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    async fn kick_waiters(
+        &self,
+        waiters: Vec<ReconcilerWaiter>,
+        timeout: Duration,
+    ) -> Vec<ReconcilerWaiter> {
+        let deadline = Instant::now().checked_add(timeout).unwrap();
+        for waiter in waiters.iter() {
+            let timeout = deadline.duration_since(Instant::now());
+            let _ = waiter.wait_timeout(timeout).await;
+        }
+
+        waiters
+            .into_iter()
+            .filter(|waiter| matches!(waiter.get_status(), ReconcilerStatus::InProgress))
+            .collect::<Vec<_>>()
     }
 
     /// Part of [`Self::tenant_location_config`]: dissect an incoming location config request,
@@ -4128,6 +4198,18 @@ impl Service {
         Ok(nodes)
     }
 
+    pub(crate) async fn get_node_status(&self, node_id: NodeId) -> Result<Node, ApiError> {
+        self.inner
+            .read()
+            .unwrap()
+            .nodes
+            .get(&node_id)
+            .cloned()
+            .ok_or(ApiError::NotFound(
+                format!("Node {node_id} not registered").into(),
+            ))
+    }
+
     pub(crate) async fn node_register(
         &self,
         register_req: NodeRegisterRequest,
@@ -4282,9 +4364,6 @@ impl Service {
 
         if let Some(scheduling) = scheduling {
             node.set_scheduling(scheduling);
-
-            // TODO: once we have a background scheduling ticker for fill/drain, kick it
-            // to wake up and start working.
         }
 
         // Update the scheduler, in case the elegibility of the node for new shards has changed
@@ -4312,7 +4391,7 @@ impl Service {
                         continue;
                     }
 
-                    if tenant_shard.intent.demote_attached(node_id) {
+                    if tenant_shard.intent.demote_attached(scheduler, node_id) {
                         tenant_shard.sequence = tenant_shard.sequence.next();
 
                         // TODO: populate a ScheduleContext including all shards in the same tenant_id (only matters
@@ -4359,11 +4438,117 @@ impl Service {
                 // TODO: in the background, we should balance work back onto this pageserver
             }
             AvailabilityTransition::Unchanged => {
-                tracing::debug!("Node {} no change during config", node_id);
+                tracing::debug!("Node {} no availability change during config", node_id);
             }
         }
 
         locked.nodes = new_nodes;
+
+        Ok(())
+    }
+
+    pub(crate) async fn start_node_drain(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let (node_available, node_policy, schedulable_nodes_count) = {
+            let locked = self.inner.read().unwrap();
+            let nodes = &locked.nodes;
+            let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
+                anyhow::anyhow!("Node {} not registered", node_id).into(),
+            ))?;
+            let schedulable_nodes_count = nodes
+                .iter()
+                .filter(|(_, n)| matches!(n.may_schedule(), MaySchedule::Yes(_)))
+                .count();
+
+            (
+                node.is_available(),
+                node.get_scheduling(),
+                schedulable_nodes_count,
+            )
+        };
+
+        if !node_available {
+            return Err(ApiError::ResourceUnavailable(
+                format!("Node {node_id} is currently unavailable").into(),
+            ));
+        }
+
+        if schedulable_nodes_count == 0 {
+            return Err(ApiError::PreconditionFailed(
+                "No other schedulable nodes to drain to".into(),
+            ));
+        }
+
+        match node_policy {
+            NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Pause => {
+                self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Draining))
+                    .await?;
+                let controller = self
+                    .background_operations_controller
+                    .get()
+                    .expect("Initialized at start up");
+                controller.drain_node(node_id)?;
+            }
+            NodeSchedulingPolicy::Draining => {
+                return Err(ApiError::Conflict(format!(
+                    "Node {node_id} has drain in progress"
+                )));
+            }
+            policy => {
+                return Err(ApiError::PreconditionFailed(
+                    format!("Node {node_id} cannot be drained due to {policy:?} policy").into(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn start_node_fill(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let (node_available, node_policy, total_nodes_count) = {
+            let locked = self.inner.read().unwrap();
+            let nodes = &locked.nodes;
+            let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
+                anyhow::anyhow!("Node {} not registered", node_id).into(),
+            ))?;
+
+            (node.is_available(), node.get_scheduling(), nodes.len())
+        };
+
+        if !node_available {
+            return Err(ApiError::ResourceUnavailable(
+                format!("Node {node_id} is currently unavailable").into(),
+            ));
+        }
+
+        if total_nodes_count <= 1 {
+            return Err(ApiError::PreconditionFailed(
+                "No other nodes to fill from".into(),
+            ));
+        }
+
+        match node_policy {
+            // TODO: clear Draining, Filling and PauseForRestart on storage controller restart and
+            // re-attach
+            NodeSchedulingPolicy::Active => {
+                self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Filling))
+                    .await?;
+                let controller = self
+                    .background_operations_controller
+                    .get()
+                    .expect("Initialized at start up");
+                controller.fill_node(node_id)?;
+            }
+            NodeSchedulingPolicy::Filling => {
+                return Err(ApiError::Conflict(format!(
+                    "Node {node_id} has fill in progress"
+                )));
+            }
+            policy => {
+                return Err(ApiError::PreconditionFailed(
+                    format!("Node {node_id} cannot be filled due to {policy:?} policy").into(),
+                ));
+            }
+        }
 
         Ok(())
     }
@@ -4951,5 +5136,198 @@ impl Service {
         // Background tasks and reconcilers hold gate guards: this waits for them all
         // to complete.
         self.gate.close().await;
+    }
+
+    pub(crate) async fn drain_node(
+        &self,
+        node_id: NodeId,
+        cancel: CancellationToken,
+    ) -> Result<(), OperationError> {
+        tracing::info!(%node_id, "Starting drain background operation");
+
+        let last_inspected_shard: Option<TenantShardId> = None;
+        let mut inspected_all_shards = false;
+        let mut waiters = Vec::new();
+        let mut schedule_context = ScheduleContext::default();
+
+        while !inspected_all_shards {
+            if cancel.is_cancelled() {
+                return Err(OperationError::Cancelled);
+            }
+
+            {
+                let mut locked = self.inner.write().unwrap();
+                tracing::info!(%node_id, "Drain got write lock");
+                let (nodes, tenants, scheduler) = locked.parts_mut();
+
+                let node = nodes.get(&node_id).ok_or(OperationError::NodeStateChanged(
+                    format!("node {node_id} was removed").into(),
+                ))?;
+
+                let current_policy = node.get_scheduling();
+                if !matches!(current_policy, NodeSchedulingPolicy::Draining) {
+                    // TODO(vlad): maybe cancel pending reconciles before erroring out. need to think
+                    // about it
+                    return Err(OperationError::NodeStateChanged(
+                        format!("node {node_id} changed state to {current_policy:?}").into(),
+                    ));
+                }
+
+                let mut cursor =
+                    tenants
+                        .iter_mut()
+                        .skip_while(|(tid, _)| match last_inspected_shard {
+                            Some(last) => **tid != last,
+                            None => false,
+                        });
+
+                while waiters.len() < MAX_RECONCILES_PER_OPERATION {
+                    let (tid, tenant_shard) = match cursor.next() {
+                        Some(some) => some,
+                        None => {
+                            inspected_all_shards = true;
+                            break;
+                        }
+                    };
+
+                    if tenant_shard.intent.demote_attached(scheduler, node_id) {
+                        tenant_shard.sequence = tenant_shard.sequence.next();
+                        match tenant_shard.schedule(scheduler, &mut schedule_context) {
+                            Err(e) => {
+                                tracing::warn!(%tid, "Scheduling error when draining pageserver {} : {e}", node_id);
+                            }
+                            Ok(()) => {
+                                let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
+                                if let Some(some) = waiter {
+                                    waiters.push(some);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::info!(%node_id, "Drain released write lock");
+
+            waiters = self.kick_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await;
+        }
+
+        let _ = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await;
+
+        // At this point we have done the best we could to drain shards from this node.
+        // Set the node scheduling policy to `[NodeSchedulingPolicy::PauseForRestart]`
+        // to complete the drain.
+        if let Err(err) = self
+            .node_configure(node_id, None, Some(NodeSchedulingPolicy::PauseForRestart))
+            .await
+        {
+            // This is not fatal. Anything that is polling the node scheduling policy to detect
+            // the end of the drain operations will hang, but all such places should enforce an
+            // overall timeout. The scheduling policy will be updated upon node re-attach and/or
+            // by the counterpart fill operation.
+            tracing::warn!(%node_id, "Failed to finalise drain by setting scheduling policy: {err}");
+        }
+
+        tracing::info!(%node_id, "Completed drain background operation");
+
+        Ok(())
+    }
+
+    // TODO: exit early when we are balanced
+    pub(crate) async fn fill_node(
+        &self,
+        node_id: NodeId,
+        cancel: CancellationToken,
+    ) -> Result<(), OperationError> {
+        // TODO(vlad): Currently this operates on the assumption that all
+        // secondaries are warm. This is not always true (we just migrated the
+        // tenant). Take that into consideration by checking the secondary status.
+
+        // TODO(vlad): This is a subset of the optimizations applied by `Service::optimize_all`.
+        // The optimizations should be stopped while filing, othwewise we are going to fight for
+        // the same reconciler semaphore units.
+
+        tracing::info!(%node_id, "Starting fill background operation");
+
+        let last_inspected_shard: Option<TenantShardId> = None;
+        let mut shards_left = true;
+        let mut waiters = Vec::new();
+
+        let mut should_fill_node = {
+            self.inner
+                .write()
+                .unwrap()
+                .scheduler
+                .should_fill_node(node_id)
+        };
+
+        while shards_left && should_fill_node {
+            if cancel.is_cancelled() {
+                return Err(OperationError::Cancelled);
+            }
+
+            {
+                let mut locked = self.inner.write().unwrap();
+                let (nodes, tenants, scheduler) = locked.parts_mut();
+
+                let node = nodes.get(&node_id).ok_or(OperationError::NodeStateChanged(
+                    format!("node {node_id} was removed").into(),
+                ))?;
+
+                let current_policy = node.get_scheduling();
+                if !matches!(current_policy, NodeSchedulingPolicy::Filling) {
+                    // TODO(vlad): maybe cancel pending reconciles before erroring out. need to think
+                    // about it
+                    return Err(OperationError::NodeStateChanged(
+                        format!("node {node_id} changed state to {current_policy:?}").into(),
+                    ));
+                }
+
+                let mut cursor =
+                    tenants
+                        .iter_mut()
+                        .skip_while(|(tid, _)| match last_inspected_shard {
+                            Some(last) => **tid != last,
+                            None => false,
+                        });
+
+                while waiters.len() < MAX_RECONCILES_PER_OPERATION {
+                    let (_tid, tenant_shard) = match cursor.next() {
+                        Some(some) => some,
+                        None => {
+                            shards_left = false;
+                            break;
+                        }
+                    };
+
+                    if tenant_shard.intent.get_secondary().contains(&node_id) {
+                        tenant_shard.intent.promote_attached(scheduler, node_id);
+                        let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
+                        if let Some(some) = waiter {
+                            waiters.push(some);
+                        }
+                    }
+                }
+
+                should_fill_node = scheduler.should_fill_node(node_id);
+            }
+
+            waiters = self.kick_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await;
+        }
+
+        let _ = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await;
+
+        if let Err(err) = self
+            .node_configure(node_id, None, Some(NodeSchedulingPolicy::Active))
+            .await
+        {
+            // This isn't a huge issue since the filling process starts upon request. However, it
+            // will prevent the next drain from starting. The only case in which this can fail
+            // is database unavailability. Such a case will require manual intervention.
+            tracing::error!(%node_id, "Failed to finalise fill by setting scheduling policy: {err}");
+        }
+
+        tracing::info!(%node_id, "Completed fill background operation");
+
+        Ok(())
     }
 }
