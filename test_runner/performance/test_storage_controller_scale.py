@@ -102,6 +102,9 @@ def test_storage_controller_many_tenants(
                 tenant_id,
                 shard_count,
                 stripe_size,
+                # Upload heatmaps fast, so that secondary downloads happen promptly, enabling
+                # the controller's optimization migrations to proceed promptly.
+                tenant_config={"heatmap_period": "10s"},
                 placement_policy={"Attached": 1},
             )
             futs.append(f)
