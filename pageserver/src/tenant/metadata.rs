@@ -14,11 +14,25 @@ use utils::bin_ser::SerializeError;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn};
 
 /// Use special format number to enable backward compatibility.
+///
+/// Currently, we are in the transition period between bodyv3 and bodyv2. We will keep
+/// both formats available for a week, and then auto-upgrade everything to v3.
+///
+/// The version is distinguished by the header format number. We always use bodyv3 as
+/// the in-memory representation of the data. If the header format is the old one, the
+/// body will be serialized using bincode. Otherwise, it will be serialized using JSON,
+/// which is the default method for bodyv3.
 const METADATA_FORMAT_VERSION: u16 = 5;
 
 /// Previous supported format versions.
 const METADATA_OLD_FORMAT_VERSION_V2: u16 = 4;
 const METADATA_OLD_FORMAT_VERSION_V1: u16 = 3;
+
+/// We assume that a write of up to METADATA_MAX_SIZE bytes is atomic.
+///
+/// This is the same assumption that PostgreSQL makes with the control file,
+/// see PG_CONTROL_MAX_SAFE_SIZE
+const METADATA_MAX_SIZE: usize = 512;
 
 /// Metadata stored on disk for each timeline
 ///
@@ -113,7 +127,7 @@ impl TimelineMetadata {
             hdr: TimelineMetadataHeader {
                 checksum: 0,
                 size: 0,
-                format_version: METADATA_FORMAT_VERSION,
+                format_version: METADATA_OLD_FORMAT_VERSION_V2, // Default to the old format v2
             },
             body: TimelineMetadataBodyV3 {
                 disk_consistent_lsn,
@@ -148,7 +162,7 @@ impl TimelineMetadata {
                     pg_version: body.pg_version,
                 };
 
-                hdr.format_version = METADATA_FORMAT_VERSION;
+                hdr.format_version = METADATA_OLD_FORMAT_VERSION_V2; // DO NOT auto-upgrade
                 body
             }
             METADATA_OLD_FORMAT_VERSION_V1 => {
@@ -203,19 +217,38 @@ impl TimelineMetadata {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerializeError> {
-        let body_bytes =
-            serde_json::to_vec(&self.body).map_err(|e| SerializeError::BadInput(e.into()))?;
-        let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
-        let hdr = TimelineMetadataHeader {
-            size: metadata_size as u16,
-            format_version: METADATA_FORMAT_VERSION,
-            checksum: crc32c::crc32c(&body_bytes),
-        };
-        let hdr_bytes = hdr.ser()?;
-        let mut metadata_bytes = Vec::new();
-        metadata_bytes.extend(hdr_bytes);
-        metadata_bytes.extend(body_bytes);
-        Ok(metadata_bytes)
+        match self.hdr.format_version {
+            METADATA_OLD_FORMAT_VERSION_V2 => {
+                let body_bytes = self.body.ser()?;
+                let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
+                let hdr = TimelineMetadataHeader {
+                    size: metadata_size as u16,
+                    format_version: METADATA_OLD_FORMAT_VERSION_V2,
+                    checksum: crc32c::crc32c(&body_bytes),
+                };
+                let hdr_bytes = hdr.ser()?;
+                let mut metadata_bytes = vec![0u8; METADATA_MAX_SIZE];
+                metadata_bytes[0..METADATA_HDR_SIZE].copy_from_slice(&hdr_bytes);
+                metadata_bytes[METADATA_HDR_SIZE..metadata_size].copy_from_slice(&body_bytes);
+                Ok(metadata_bytes)
+            }
+            METADATA_FORMAT_VERSION => {
+                let body_bytes = serde_json::to_vec(&self.body)
+                    .map_err(|e| SerializeError::BadInput(e.into()))?;
+                let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
+                let hdr = TimelineMetadataHeader {
+                    size: metadata_size as u16,
+                    format_version: METADATA_FORMAT_VERSION,
+                    checksum: crc32c::crc32c(&body_bytes),
+                };
+                let hdr_bytes = hdr.ser()?;
+                let mut metadata_bytes = Vec::new();
+                metadata_bytes.extend(hdr_bytes);
+                metadata_bytes.extend(body_bytes);
+                Ok(metadata_bytes)
+            }
+            _ => unreachable!(),
+        }
     }
 
     /// [`Lsn`] that corresponds to the corresponding timeline directory
@@ -340,9 +373,6 @@ mod tests {
     use super::*;
     use crate::tenant::harness::TIMELINE_ID;
 
-    // Previous limit on maximum metadata size
-    const METADATA_MAX_SIZE: usize = 512;
-
     #[test]
     fn metadata_serializes_correctly() {
         let original_metadata = TimelineMetadata::new(
@@ -440,6 +470,7 @@ mod tests {
     // Generate old version metadata and read it with current code.
     // Ensure that it is upgraded correctly
     #[test]
+    #[ignore]
     fn test_metadata_upgrade_v2() {
         #[derive(Debug, Clone, PartialEq, Eq)]
         struct TimelineMetadataV2 {
@@ -507,12 +538,12 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_metadata_v3() {
-        let metadata_v3 = TimelineMetadata {
+    fn test_roundtrip_metadata_v2() {
+        let metadata_v2 = TimelineMetadata {
             hdr: TimelineMetadataHeader {
                 checksum: 0,
                 size: 0,
-                format_version: METADATA_FORMAT_VERSION,
+                format_version: METADATA_OLD_FORMAT_VERSION_V2,
             },
             body: TimelineMetadataBodyV3 {
                 disk_consistent_lsn: Lsn(0x200),
@@ -525,7 +556,7 @@ mod tests {
             },
         };
 
-        let metadata_bytes = metadata_v3
+        let metadata_bytes = metadata_v2
             .to_bytes()
             .expect("Should serialize correct metadata to bytes");
 
@@ -547,7 +578,75 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_regression() {
+    fn test_encode_regression_v2() {
+        let mut original_metadata = TimelineMetadata::new(
+            Lsn(0x200),
+            Some(Lsn(0x100)),
+            Some(TIMELINE_ID),
+            Lsn(0),
+            Lsn(0),
+            Lsn(0),
+            // Any version will do here, so use the default
+            crate::DEFAULT_PG_VERSION,
+        );
+        original_metadata.hdr.format_version = METADATA_OLD_FORMAT_VERSION_V2;
+
+        let expected_bytes = vec![
+            /* bincode length encoding bytes */
+            0, 0, 0, 0, 0, 0, 2, 0, // 8 bytes for the length of the serialized vector
+            /* TimelineMetadataHeader */
+            4, 37, 101, 34, 0, 70, 0, 4, // checksum, size, format_version (4 + 2 + 2)
+            /* TimelineMetadataBodyV2 */
+            0, 0, 0, 0, 0, 0, 2, 0, // disk_consistent_lsn (8 bytes)
+            1, 0, 0, 0, 0, 0, 0, 1, 0, // prev_record_lsn (9 bytes)
+            1, 17, 34, 51, 68, 85, 102, 119, 136, 17, 34, 51, 68, 85, 102, 119,
+            136, // ancestor_timeline (17 bytes)
+            0, 0, 0, 0, 0, 0, 0, 0, // ancestor_lsn (8 bytes)
+            0, 0, 0, 0, 0, 0, 0, 0, // latest_gc_cutoff_lsn (8 bytes)
+            0, 0, 0, 0, 0, 0, 0, 0, // initdb_lsn (8 bytes)
+            0, 0, 0, 15, // pg_version (4 bytes)
+            /* padding bytes */
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0,
+        ];
+        let metadata_ser_bytes = original_metadata.ser().unwrap();
+        assert_eq!(metadata_ser_bytes, expected_bytes);
+
+        let expected_metadata = {
+            let mut temp_metadata = original_metadata;
+            let body_bytes = temp_metadata
+                .body
+                .ser()
+                .expect("Cannot serialize the metadata body");
+            let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
+            let hdr = TimelineMetadataHeader {
+                size: metadata_size as u16,
+                format_version: METADATA_OLD_FORMAT_VERSION_V2,
+                checksum: crc32c::crc32c(&body_bytes),
+            };
+            temp_metadata.hdr = hdr;
+            temp_metadata
+        };
+        let des_metadata = TimelineMetadata::des(&metadata_ser_bytes).unwrap();
+        assert_eq!(des_metadata, expected_metadata);
+    }
+
+    #[test]
+    fn test_encode_regression_v3() {
         let metadata_v3 = TimelineMetadata {
             hdr: TimelineMetadataHeader {
                 checksum: 0,
