@@ -14,6 +14,7 @@ use std::future::Future;
 use std::ops::{DerefMut, Range};
 use std::pin::Pin;
 use std::task::{ready, Poll};
+use utils::lsn::Lsn;
 
 pub fn keyspace_total_size<K>(
     keyspace: &CompactionKeySpace<K>,
@@ -109,15 +110,38 @@ pub fn merge_delta_keys<'a, E: CompactionJobExecutor>(
     }
 }
 
+pub async fn merge_delta_keys_buffered<'a, E: CompactionJobExecutor + 'a>(
+    layers: &'a [E::DeltaLayer],
+    ctx: &'a E::RequestContext,
+) -> anyhow::Result<impl Stream<Item = <E::DeltaLayer as CompactionDeltaLayer<E>>::DeltaEntry<'a>>>
+{
+    let mut keys = Vec::new();
+    for l in layers {
+        // Boxing and casting to LoadFuture is required to obtain the right Sync bound.
+        // If we do l.load_keys(ctx).await? directly, there is a compilation error.
+        let load_future: LoadFuture<'a, _> = Box::pin(l.load_keys(ctx));
+        keys.extend(load_future.await?.into_iter());
+    }
+    keys.sort_by_key(|k| (k.key(), k.lsn()));
+    let stream = futures::stream::iter(keys.into_iter());
+    Ok(stream)
+}
+
 enum LazyLoadLayer<'a, E: CompactionJobExecutor> {
     Loaded(VecDeque<<E::DeltaLayer as CompactionDeltaLayer<E>>::DeltaEntry<'a>>),
     Unloaded(&'a E::DeltaLayer),
 }
 impl<'a, E: CompactionJobExecutor> LazyLoadLayer<'a, E> {
-    fn key(&self) -> E::Key {
+    fn min_key(&self) -> E::Key {
         match self {
             Self::Loaded(entries) => entries.front().unwrap().key(),
             Self::Unloaded(dl) => dl.key_range().start,
+        }
+    }
+    fn min_lsn(&self) -> Lsn {
+        match self {
+            Self::Loaded(entries) => entries.front().unwrap().lsn(),
+            Self::Unloaded(dl) => dl.lsn_range().start,
         }
     }
 }
@@ -129,12 +153,12 @@ impl<'a, E: CompactionJobExecutor> PartialOrd for LazyLoadLayer<'a, E> {
 impl<'a, E: CompactionJobExecutor> Ord for LazyLoadLayer<'a, E> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // reverse order so that we get a min-heap
-        other.key().cmp(&self.key())
+        (other.min_key(), other.min_lsn()).cmp(&(self.min_key(), self.min_lsn()))
     }
 }
 impl<'a, E: CompactionJobExecutor> PartialEq for LazyLoadLayer<'a, E> {
     fn eq(&self, other: &Self) -> bool {
-        self.key().eq(&other.key())
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 impl<'a, E: CompactionJobExecutor> Eq for LazyLoadLayer<'a, E> {}
