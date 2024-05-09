@@ -39,7 +39,9 @@ utils.workspace = true
 workspace_hack.workspace = true
 toml_edit.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
-# vm_monitor = { version = "0.1", path = "../libs/vm_monitor/" }
 zstd = "0.13"
 bytes = "1.0"
 rust-ini = "0.20.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+vm_monitor = { version = "0.1", path = "../libs/vm_monitor/" }

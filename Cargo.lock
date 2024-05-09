@@ -1244,6 +1244,7 @@ dependencies = [
  "tracing-utils",
  "url",
  "utils",
+ "vm_monitor",
  "workspace_hack",
  "zstd",
 ]
