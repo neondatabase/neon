@@ -27,7 +27,7 @@ use aws_config::{
 };
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_sdk_s3::{
-    config::{AsyncSleep, Builder, IdentityCache, Region, SharedAsyncSleep},
+    config::{AsyncSleep, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
     operation::get_object::GetObjectError,
     types::{Delete, DeleteMarkerEntry, ObjectIdentifier, ObjectVersion, StorageClass},
@@ -75,13 +75,13 @@ struct GetObjectRequest {
 }
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
-    pub fn new(aws_config: &S3Config, timeout: Duration) -> anyhow::Result<Self> {
+    pub fn new(remote_storage_config: &S3Config, timeout: Duration) -> anyhow::Result<Self> {
         tracing::debug!(
             "Creating s3 remote storage for S3 bucket {}",
-            aws_config.bucket_name
+            remote_storage_config.bucket_name
         );
 
-        let region = Some(Region::new(aws_config.bucket_region.clone()));
+        let region = Some(Region::new(remote_storage_config.bucket_region.clone()));
 
         let provider_conf = ProviderConfig::without_region().with_region(region.clone());
 
@@ -113,6 +113,38 @@ impl S3Bucket {
         // AWS SDK requires us to specify how the RetryConfig should sleep when it wants to back off
         let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
 
+        let sdk_config_loader: aws_config::ConfigLoader = aws_config::defaults(
+            #[allow(deprecated)] /* TODO: https://github.com/neondatabase/neon/issues/7665 */
+            BehaviorVersion::v2023_11_09(),
+        )
+        .region(region)
+        .identity_cache(IdentityCache::lazy().build())
+        .credentials_provider(SharedCredentialsProvider::new(credentials_provider))
+        .sleep_impl(SharedAsyncSleep::from(sleep_impl));
+
+        let sdk_config: aws_config::SdkConfig = std::thread::scope(|s| {
+            s.spawn(|| {
+                // TODO: make this function async.
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(sdk_config_loader.load())
+            })
+            .join()
+            .unwrap()
+        });
+
+        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&sdk_config);
+
+        // Technically, the `remote_storage_config.endpoint` field only applies to S3 interactions.
+        // (In case we ever re-use the `sdk_config` for more than just the S3 client in the future)
+        if let Some(custom_endpoint) = remote_storage_config.endpoint.clone() {
+            s3_config_builder = s3_config_builder
+                .endpoint_url(custom_endpoint)
+                .force_path_style(true);
+        }
+
         // We do our own retries (see [`backoff::retry`]).  However, for the AWS SDK to enable rate limiting in response to throttling
         // responses (e.g. 429 on too many ListObjectsv2 requests), we must provide a retry config.  We set it to use at most one
         // attempt, and enable 'Adaptive' mode, which causes rate limiting to be enabled.
@@ -120,42 +152,36 @@ impl S3Bucket {
         retry_config
             .set_max_attempts(Some(1))
             .set_mode(Some(RetryMode::Adaptive));
+        s3_config_builder = s3_config_builder.retry_config(retry_config.build());
 
-        let mut config_builder = Builder::default()
-            .behavior_version(BehaviorVersion::v2023_11_09())
-            .region(region)
-            .identity_cache(IdentityCache::lazy().build())
-            .credentials_provider(SharedCredentialsProvider::new(credentials_provider))
-            .retry_config(retry_config.build())
-            .sleep_impl(SharedAsyncSleep::from(sleep_impl));
+        let s3_config = s3_config_builder.build();
+        let client = aws_sdk_s3::Client::from_conf(s3_config);
 
-        if let Some(custom_endpoint) = aws_config.endpoint.clone() {
-            config_builder = config_builder
-                .endpoint_url(custom_endpoint)
-                .force_path_style(true);
-        }
+        let prefix_in_bucket = remote_storage_config
+            .prefix_in_bucket
+            .as_deref()
+            .map(|prefix| {
+                let mut prefix = prefix;
+                while prefix.starts_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                    prefix = &prefix[1..]
+                }
 
-        let client = Client::from_conf(config_builder.build());
+                let mut prefix = prefix.to_string();
+                while prefix.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                    prefix.pop();
+                }
+                prefix
+            });
 
-        let prefix_in_bucket = aws_config.prefix_in_bucket.as_deref().map(|prefix| {
-            let mut prefix = prefix;
-            while prefix.starts_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
-                prefix = &prefix[1..]
-            }
-
-            let mut prefix = prefix.to_string();
-            while prefix.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
-                prefix.pop();
-            }
-            prefix
-        });
         Ok(Self {
             client,
-            bucket_name: aws_config.bucket_name.clone(),
-            max_keys_per_list_response: aws_config.max_keys_per_list_response,
+            bucket_name: remote_storage_config.bucket_name.clone(),
+            max_keys_per_list_response: remote_storage_config.max_keys_per_list_response,
             prefix_in_bucket,
-            concurrency_limiter: ConcurrencyLimiter::new(aws_config.concurrency_limit.get()),
-            upload_storage_class: aws_config.upload_storage_class.clone(),
+            concurrency_limiter: ConcurrencyLimiter::new(
+                remote_storage_config.concurrency_limit.get(),
+            ),
+            upload_storage_class: remote_storage_config.upload_storage_class.clone(),
             timeout,
         })
     }
