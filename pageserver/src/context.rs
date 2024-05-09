@@ -86,8 +86,6 @@
 //! [`RequestContext`] argument. Functions in the middle of the call chain
 //! only need to pass it on.
 
-use std::sync::atomic::AtomicUsize;
-
 use crate::task_mgr::TaskKind;
 
 pub(crate) mod optional_counter;
