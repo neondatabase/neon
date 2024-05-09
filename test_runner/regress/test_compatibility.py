@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -247,12 +248,24 @@ def test_forward_compatibility(
 
         neon_env_builder.start()
 
+        # not using env.pageserver.version because it was initialized before
+        prev_pageserver_version_str = env.get_binary_version("pageserver")
+        print(prev_pageserver_version_str)
+        prev_pageserver_version = re.search(
+            "Neon page server git-env:(.*) failpoints: (.*), features: (.*)",
+            prev_pageserver_version_str,
+        ).group(0)
+
         check_neon_works(
             env,
             test_output_dir=test_output_dir,
             sql_dump_path=compatibility_snapshot_dir / "dump.sql",
             repo_dir=env.repo_dir,
         )
+
+        # ensure the specified pageserver is running
+        assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)
+
     except Exception:
         if breaking_changes_allowed:
             pytest.xfail(
