@@ -1,5 +1,4 @@
 import threading
-import time
 
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import wait_until
@@ -44,11 +43,10 @@ def test_subscriber_restart(neon_simple_env: NeonEnv):
         for _ in range(n_restarts):
             # restart subscriber
             # time.sleep(2)
-            sub.stop('immediate')
+            sub.stop("immediate")
             sub.start()
 
-        thread.join();
-
+        thread.join()
         pcur.execute(f"INSERT into t values ({n_records}, 0)")
         n_records += 1
         with sub.cursor() as scur:
