@@ -95,7 +95,7 @@ Exit after the first test failure:
 `./scripts/pytest -x ...`
 (there are many more pytest options; run `pytest -h` to see them.)
 
-#### Running tests against real S3 or S3-compatible services
+#### Running Python tests against real S3 or S3-compatible services
 
 Neon's `libs/remote_storage` supports multiple implementations of remote storage.
 At the time of writing, that is
@@ -195,7 +195,7 @@ If you want to run test without the cloud setup, we recommend [minio](https://mi
 ```bash
 # Start in Terminal 1
 mkdir /tmp/minio_data
-minio server /tmp/minio_data --console-address 127.0..1:9001 --address 127.0.0.1:9000
+minio server /tmp/minio_data --console-address 127.0.0.1:9001 --address 127.0.0.1:9000
 ```
 
 In another terminal, create an `aws` CLI profile for it:
@@ -215,7 +215,6 @@ It's an interactive prompt.
 
 ```bash
 # Terminal 2
-# (don't forget to have AWS_PROFILE env var set)
 $ aws --profile local-minio configure
 AWS Access Key ID [None]: minioadmin
 AWS Secret Access Key [None]: minioadmin
@@ -230,6 +229,10 @@ Now create a bucket `testbucket` using the CLI.
 aws --profile local-minio s3 mb s3://mybucket
 ```
 
+(If it doesn't work, make sure you update your AWS CLI to a recent version.
+ The [service-specific endpoint feature](https://docs.aws.amazon.com/sdkref/latest/guide/feature-ss-endpoints.html)
+ that we're using is quite new.)
+
 ```bash
 # with AWS PROFILE
 ENABLE_REAL_S3_REMOTE_STORAGE=true \
@@ -241,6 +244,16 @@ AWS_PROFILE=local-minio \
 
 NB: you can avoid the `--profile` by setting the `AWS_PROFILE` variable.
 Just like the AWS SDKs, the `aws` CLI is sensible to it.
+
+#### Running Rust tests against real S3 or S3-compatible services
+
+We have some Rust tests that only run against real S3, e.g., [here](https://github.com/neondatabase/neon/blob/c18d3340b5e3c978a81c3db8b6f1e83cd9087e8a/libs/remote_storage/tests/test_real_s3.rs#L392-L397).
+
+They use the same env vars as the Python test suite (see previous section)
+but interpret them on their own.
+However, at this time, the interpretation is identical.
+
+So, above instructions apply to the Rust test as well.
 
 ### Writing a test
 
