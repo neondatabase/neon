@@ -335,6 +335,8 @@ impl MetadataUpdate {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::tenant::harness::TIMELINE_ID;
 
@@ -542,5 +544,48 @@ mod tests {
         );
 
         assert_eq!(deserialized_metadata.body, expected_metadata.body);
+    }
+
+    #[test]
+    fn test_encode_regression() {
+        let metadata_v3 = TimelineMetadata {
+            hdr: TimelineMetadataHeader {
+                checksum: 0,
+                size: 0,
+                format_version: METADATA_FORMAT_VERSION,
+            },
+            body: TimelineMetadataBodyV3 {
+                disk_consistent_lsn: Lsn(0x200),
+                prev_record_lsn: Some(Lsn(0x100)),
+                ancestor_timeline: Some(TIMELINE_ID),
+                ancestor_lsn: Lsn(0),
+                latest_gc_cutoff_lsn: Lsn(0),
+                initdb_lsn: Lsn(0),
+                pg_version: 16,
+            },
+        };
+
+        let metadata_bytes = metadata_v3
+            .to_bytes()
+            .expect("Should serialize correct metadata to bytes");
+
+        assert_eq!(
+            &metadata_bytes[..METADATA_HDR_SIZE],
+            &[202, 106, 183, 219, 0, 205, 0, 5]
+        );
+        let json_value: serde_json::Value =
+            serde_json::from_slice(&metadata_bytes[METADATA_HDR_SIZE..]).unwrap();
+        assert_eq!(
+            json_value,
+            json!({
+                "ancestor_lsn": "0/0",
+                "ancestor_timeline": "11223344556677881122334455667788",
+                "disk_consistent_lsn": "0/200",
+                "initdb_lsn": "0/0",
+                "latest_gc_cutoff_lsn": "0/0",
+                "pg_version": 16,
+                "prev_record_lsn": "0/100"
+            })
+        );
     }
 }
