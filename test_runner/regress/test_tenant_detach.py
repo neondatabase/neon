@@ -132,7 +132,7 @@ def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
             assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
 
         # Check that we had to retry the downloads
-        assert env.pageserver.log_contains(".*list timelines.*failed, will retry.*")
+        assert env.pageserver.log_contains(".*list identifiers.*failed, will retry.*")
         assert env.pageserver.log_contains(".*download.*failed, will retry.*")
 
 

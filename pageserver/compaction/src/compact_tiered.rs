@@ -18,12 +18,15 @@
 //! database size. For example, if the logical database size is 10 GB, we would
 //! generate new image layers every 10 GB of WAL.
 use futures::StreamExt;
+use pageserver_api::shard::ShardIdentity;
 use tracing::{debug, info};
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
-use crate::helpers::{accum_key_values, keyspace_total_size, merge_delta_keys, overlaps_with};
+use crate::helpers::{
+    accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with,
+};
 use crate::interface::*;
 use utils::lsn::Lsn;
 
@@ -125,6 +128,7 @@ async fn compact_level<E: CompactionJobExecutor>(
     }
 
     let mut state = LevelCompactionState {
+        shard_identity: *executor.get_shard_identity(),
         target_file_size,
         _lsn_range: lsn_range.clone(),
         layers: layer_fragments,
@@ -164,6 +168,8 @@ struct LevelCompactionState<'a, E>
 where
     E: CompactionJobExecutor,
 {
+    shard_identity: ShardIdentity,
+
     // parameters
     target_file_size: u64,
 
@@ -366,6 +372,7 @@ where
                 .executor
                 .get_keyspace(&job.key_range, job.lsn_range.end, ctx)
                 .await?,
+            &self.shard_identity,
         ) * 8192;
 
         let wal_size = job
@@ -430,7 +437,7 @@ where
             keyspace,
             self.target_file_size / 8192,
         );
-        while let Some(key_range) = window.choose_next_image() {
+        while let Some(key_range) = window.choose_next_image(&self.shard_identity) {
             new_jobs.push(CompactionJob::<E> {
                 key_range,
                 lsn_range: job.lsn_range.clone(),
@@ -530,7 +537,10 @@ where
             }
         }
         // Open stream
-        let key_value_stream = std::pin::pin!(merge_delta_keys::<E>(deltas.as_slice(), ctx));
+        let key_value_stream =
+            std::pin::pin!(merge_delta_keys_buffered::<E>(deltas.as_slice(), ctx)
+                .await?
+                .map(Result::<_, anyhow::Error>::Ok));
         let mut new_jobs = Vec::new();
 
         // Slide a window through the keyspace
@@ -623,7 +633,12 @@ impl<K: CompactionKey> KeyspaceWindowPos<K> {
     }
 
     // Advance the cursor until it reaches 'target_keysize'.
-    fn advance_until_size(&mut self, w: &KeyspaceWindowHead<K>, max_size: u64) {
+    fn advance_until_size(
+        &mut self,
+        w: &KeyspaceWindowHead<K>,
+        max_size: u64,
+        shard_identity: &ShardIdentity,
+    ) {
         while self.accum_keysize < max_size && !self.reached_end(w) {
             let curr_range = &w.keyspace[self.keyspace_idx];
             if self.end_key < curr_range.start {
@@ -632,7 +647,7 @@ impl<K: CompactionKey> KeyspaceWindowPos<K> {
             }
 
             // We're now within 'curr_range'. Can we advance past it completely?
-            let distance = K::key_range_size(&(self.end_key..curr_range.end));
+            let distance = K::key_range_size(&(self.end_key..curr_range.end), shard_identity);
             if (self.accum_keysize + distance as u64) < max_size {
                 // oh yeah, it fits
                 self.end_key = curr_range.end;
@@ -641,7 +656,7 @@ impl<K: CompactionKey> KeyspaceWindowPos<K> {
             } else {
                 // advance within the range
                 let skip_key = self.end_key.skip_some();
-                let distance = K::key_range_size(&(self.end_key..skip_key));
+                let distance = K::key_range_size(&(self.end_key..skip_key), shard_identity);
                 if (self.accum_keysize + distance as u64) < max_size {
                     self.end_key = skip_key;
                     self.accum_keysize += distance as u64;
@@ -677,7 +692,7 @@ where
         }
     }
 
-    fn choose_next_image(&mut self) -> Option<Range<K>> {
+    fn choose_next_image(&mut self, shard_identity: &ShardIdentity) -> Option<Range<K>> {
         if self.start_pos.keyspace_idx == self.head.keyspace.len() {
             // we've reached the end
             return None;
@@ -687,6 +702,7 @@ where
         next_pos.advance_until_size(
             &self.head,
             self.start_pos.accum_keysize + self.head.target_keysize,
+            shard_identity,
         );
 
         // See if we can gobble up the rest of the keyspace if we stretch out the layer, up to
@@ -695,6 +711,7 @@ where
         end_pos.advance_until_size(
             &self.head,
             self.start_pos.accum_keysize + (self.head.target_keysize * 5 / 4),
+            shard_identity,
         );
         if end_pos.reached_end(&self.head) {
             // gobble up any unused keyspace between the last used key and end of the range

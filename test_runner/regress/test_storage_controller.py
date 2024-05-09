@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.types import TenantId, TenantShardId, TimelineId
 from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
+from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
@@ -228,6 +230,10 @@ def test_storage_controller_passthrough(
     }
     assert status["state"]["slug"] == "Active"
 
+    (synthetic_size, size_inputs) = client.tenant_size_and_modelinputs(env.initial_tenant)
+    assert synthetic_size > 0
+    assert "segments" in size_inputs
+
     env.storage_controller.consistency_check()
 
 
@@ -273,7 +279,8 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     but imports the generation number.
     """
 
-    neon_env_builder.num_pageservers = 2
+    # One pageserver to simulate legacy environment, two to be managed by storage controller
+    neon_env_builder.num_pageservers = 3
 
     # Start services by hand so that we can skip registration on one of the pageservers
     env = neon_env_builder.init_configs()
@@ -283,15 +290,18 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     # This is the pageserver where we'll initially create the tenant.  Run it in emergency
     # mode so that it doesn't talk to storage controller, and do not register it.
     env.pageservers[0].allowed_errors.append(".*Emergency mode!.*")
-    env.pageservers[0].start(
-        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
+    env.pageservers[0].patch_config_toml_nonrecursive(
+        {
+            "control_plane_emergency_mode": True,
+        }
     )
+    env.pageservers[0].start()
     origin_ps = env.pageservers[0]
 
-    # This is the pageserver managed by the sharding service, where the tenant
+    # These are the pageservers managed by the sharding service, where the tenant
     # will be attached after onboarding
     env.pageservers[1].start()
-    dest_ps = env.pageservers[1]
+    env.pageservers[2].start()
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 
     for sk in env.safekeepers:
@@ -330,6 +340,9 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
         )
 
         virtual_ps_http.tenant_secondary_download(tenant_id)
+        warm_up_ps = env.storage_controller.tenant_describe(tenant_id)["shards"][0][
+            "node_secondary"
+        ][0]
 
     # Call into storage controller to onboard the tenant
     generation += 1
@@ -343,6 +356,18 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
         },
     )
     assert len(r["shards"]) == 1
+
+    describe = env.storage_controller.tenant_describe(tenant_id)["shards"][0]
+    dest_ps_id = describe["node_attached"]
+    dest_ps = env.get_pageserver(dest_ps_id)
+    if warm_up:
+        # The storage controller should have attached the tenant to the same placce
+        # it had a secondary location, otherwise there was no point warming it up
+        assert dest_ps_id == warm_up_ps
+
+        # It should have been given a new secondary location as well
+        assert len(describe["node_secondary"]) == 1
+        assert describe["node_secondary"][0] != warm_up_ps
 
     # As if doing a live migration, detach the original pageserver
     origin_ps.http_client().tenant_location_conf(
@@ -415,6 +440,9 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
         dest_tenant_after_conf_change["generation"] == dest_tenant_before_conf_change["generation"]
     )
     dest_tenant_conf_after = dest_ps.http_client().tenant_config(tenant_id)
+
+    # Storage controller auto-sets heatmap period, ignore it for the comparison
+    del dest_tenant_conf_after.tenant_specific_overrides["heatmap_period"]
     assert dest_tenant_conf_after.tenant_specific_overrides == modified_tenant_conf
 
     env.storage_controller.consistency_check()
@@ -1237,3 +1265,132 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     # Quiesce any background reconciliation before doing consistency check
     env.storage_controller.reconcile_until_idle(timeout_secs=10)
     env.storage_controller.consistency_check()
+
+
+def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that when lock on resource (tenants, nodes) is held for too long it is
+    traced in logs.
+    """
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Lock on.*",
+            ".*Scheduling is disabled by policy.*",
+            f".*Operation TimelineCreate on key {tenant_id} has waited.*",
+        ]
+    )
+
+    # Apply failpoint
+    env.storage_controller.configure_failpoints(
+        ("tenant-update-policy-exclusive-lock", "return(31000)")
+    )
+
+    # This will hold the exclusive for enough time to cause an warning
+    def update_tenent_policy():
+        env.storage_controller.tenant_policy_update(
+            tenant_id=tenant_id,
+            body={
+                "scheduling": "Stop",
+            },
+        )
+
+    thread_update_tenant_policy = threading.Thread(target=update_tenent_policy)
+    thread_update_tenant_policy.start()
+
+    # Make sure the update policy thread has started
+    time.sleep(1)
+    # This will not be able to access and will log a warning
+    timeline_id = TimelineId.generate()
+    env.storage_controller.pageserver_api().timeline_create(
+        pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
+    )
+    thread_update_tenant_policy.join(timeout=10)
+
+    env.storage_controller.assert_log_contains("Lock on UpdatePolicy was held for")
+    env.storage_controller.assert_log_contains(
+        f"Operation TimelineCreate on key {tenant_id} has waited"
+    )
+
+
+@pytest.mark.parametrize("remote_storage", [RemoteStorageKind.LOCAL_FS, s3_storage()])
+@pytest.mark.parametrize("shard_count", [None, 4])
+def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_storage):
+    """
+    Tenant import is a support/debug tool for recovering a tenant from remote storage
+    if we don't have any metadata for it in the storage controller.
+    """
+
+    # This test is parametrized on remote storage because it exercises the relatively rare
+    # code path of listing with a prefix that is not a directory name: this helps us notice
+    # quickly if local_fs or s3_bucket implementations diverge.
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage)
+
+    # Use multiple pageservers because some test helpers assume single sharded tenants
+    # if there is only one pageserver.
+    neon_env_builder.num_pageservers = 2
+
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+    tenant_id = env.initial_tenant
+
+    # Create a second timeline to ensure that import finds both
+    timeline_a = env.initial_timeline
+    timeline_b = env.neon_cli.create_branch("branch_b", tenant_id=tenant_id)
+
+    workload_a = Workload(env, tenant_id, timeline_a, branch_name="main")
+    workload_a.init()
+
+    workload_b = Workload(env, tenant_id, timeline_b, branch_name="branch_b")
+    workload_b.init()
+
+    # Write some data
+    workload_a.write_rows(72)
+    expect_rows_a = workload_a.expect_rows
+    workload_a.stop()
+    del workload_a
+
+    # Bump generation to make sure generation recovery works properly
+    for pageserver in env.pageservers:
+        pageserver.stop()
+        pageserver.start()
+
+    # Write some data in the higher generation into the other branch
+    workload_b.write_rows(107)
+    expect_rows_b = workload_b.expect_rows
+    workload_b.stop()
+    del workload_b
+
+    # Detach from pageservers
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "placement": "Detached",
+        },
+    )
+    env.storage_controller.reconcile_until_idle(timeout_secs=10)
+
+    # Force-drop it from the storage controller
+    env.storage_controller.request(
+        "POST",
+        f"{env.storage_controller_api}/debug/v1/tenant/{tenant_id}/drop",
+        headers=env.storage_controller.headers(TokenScope.ADMIN),
+    )
+
+    # Now import it again
+    env.neon_cli.import_tenant(tenant_id)
+
+    # Check we found the shards
+    describe = env.storage_controller.tenant_describe(tenant_id)
+    literal_shard_count = 1 if shard_count is None else shard_count
+    assert len(describe["shards"]) == literal_shard_count
+
+    # Check the data is still there: this implicitly proves that we recovered generation numbers
+    # properly, for the timeline which was written to after a generation bump.
+    for timeline, branch, expect_rows in [
+        (timeline_a, "main", expect_rows_a),
+        (timeline_b, "branch_1", expect_rows_b),
+    ]:
+        workload = Workload(env, tenant_id, timeline, branch_name=branch)
+        workload.expect_rows = expect_rows
+        workload.validate()

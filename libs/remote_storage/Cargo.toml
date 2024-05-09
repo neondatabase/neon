@@ -38,6 +38,7 @@ azure_storage_blobs.workspace = true
 futures-util.workspace = true
 http-types.workspace = true
 itertools.workspace = true
+sync_wrapper = { workspace = true, features = ["futures"] }
 
 [dev-dependencies]
 camino-tempfile.workspace = true

@@ -7,6 +7,7 @@ use std::{
 use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
+    reconciler::ReconcileUnits,
     scheduler::{AffinityScore, MaySchedule, ScheduleContext},
 };
 use pageserver_api::controller_api::{PlacementPolicy, ShardSchedulingPolicy};
@@ -22,7 +23,7 @@ use utils::{
     generation::Generation,
     id::NodeId,
     seqwait::{SeqWait, SeqWaitError},
-    sync::gate::Gate,
+    sync::gate::GateGuard,
 };
 
 use crate::{
@@ -37,12 +38,18 @@ use crate::{
 };
 
 /// Serialization helper
-fn read_mutex_content<S, T>(v: &std::sync::Mutex<T>, serializer: S) -> Result<S::Ok, S::Error>
+fn read_last_error<S, T>(v: &std::sync::Mutex<Option<T>>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::ser::Serializer,
-    T: Clone + std::fmt::Display,
+    T: std::fmt::Display,
 {
-    serializer.collect_str(&v.lock().unwrap())
+    serializer.collect_str(
+        &v.lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| format!("{e}"))
+            .unwrap_or("".to_string()),
+    )
 }
 
 /// In-memory state for a particular tenant shard.
@@ -95,6 +102,10 @@ pub(crate) struct TenantShard {
     /// reconciliation, and timeline creation.
     pub(crate) splitting: SplitState,
 
+    /// If a tenant was enqueued for later reconcile due to hitting concurrency limit, this flag
+    /// is set. This flag is cleared when the tenant is popped off the delay queue.
+    pub(crate) delayed_reconcile: bool,
+
     /// Optionally wait for reconciliation to complete up to a particular
     /// sequence number.
     #[serde(skip)]
@@ -106,15 +117,19 @@ pub(crate) struct TenantShard {
     #[serde(skip)]
     pub(crate) error_waiter: std::sync::Arc<SeqWait<Sequence, Sequence>>,
 
-    /// The most recent error from a reconcile on this tenant
+    /// The most recent error from a reconcile on this tenant.  This is a nested Arc
+    /// because:
+    ///  - ReconcileWaiters need to Arc-clone the overall object to read it later
+    ///  - ReconcileWaitError needs to use an `Arc<ReconcileError>` because we can construct
+    ///    many waiters for one shard, and the underlying error types are not Clone.
     /// TODO: generalize to an array of recent events
     /// TOOD: use a ArcSwap instead of mutex for faster reads?
-    #[serde(serialize_with = "read_mutex_content")]
-    pub(crate) last_error: std::sync::Arc<std::sync::Mutex<String>>,
+    #[serde(serialize_with = "read_last_error")]
+    pub(crate) last_error: std::sync::Arc<std::sync::Mutex<Option<Arc<ReconcileError>>>>,
 
     /// If we have a pending compute notification that for some reason we weren't able to send,
-    /// set this to true. If this is set, calls to [`Self::maybe_reconcile`] will run a task to retry
-    /// sending it.  This is the mechanism by which compute notifications are included in the scope
+    /// set this to true. If this is set, calls to [`Self::get_reconcile_needed`] will return Yes
+    /// and trigger a Reconciler run.  This is the mechanism by which compute notifications are included in the scope
     /// of state that we publish externally in an eventually consistent way.
     pub(crate) pending_compute_notification: bool,
 
@@ -288,18 +303,18 @@ pub(crate) struct ReconcilerWaiter {
 
     seq_wait: std::sync::Arc<SeqWait<Sequence, Sequence>>,
     error_seq_wait: std::sync::Arc<SeqWait<Sequence, Sequence>>,
-    error: std::sync::Arc<std::sync::Mutex<String>>,
+    error: std::sync::Arc<std::sync::Mutex<Option<Arc<ReconcileError>>>>,
     seq: Sequence,
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ReconcileWaitError {
+pub(crate) enum ReconcileWaitError {
     #[error("Timeout waiting for shard {0}")]
     Timeout(TenantShardId),
     #[error("shutting down")]
     Shutdown,
     #[error("Reconcile error on shard {0}: {1}")]
-    Failed(TenantShardId, String),
+    Failed(TenantShardId, Arc<ReconcileError>),
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -310,16 +325,26 @@ pub(crate) struct ReplaceSecondary {
 
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) struct MigrateAttachment {
-    old_attached_node_id: NodeId,
-    new_attached_node_id: NodeId,
+    pub(crate) old_attached_node_id: NodeId,
+    pub(crate) new_attached_node_id: NodeId,
 }
 
 #[derive(Eq, PartialEq, Debug)]
-pub(crate) enum ScheduleOptimization {
+pub(crate) enum ScheduleOptimizationAction {
     // Replace one of our secondary locations with a different node
     ReplaceSecondary(ReplaceSecondary),
     // Migrate attachment to an existing secondary location
     MigrateAttachment(MigrateAttachment),
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub(crate) struct ScheduleOptimization {
+    // What was the reconcile sequence when we generated this optimization?  The optimization
+    // should only be applied if the shard's sequence is still at this value, in case other changes
+    // happened between planning the optimization and applying it.
+    sequence: Sequence,
+
+    pub(crate) action: ScheduleOptimizationAction,
 }
 
 impl ReconcilerWaiter {
@@ -337,7 +362,8 @@ impl ReconcilerWaiter {
                     SeqWaitError::Timeout => unreachable!()
                 })?;
 
-                return Err(ReconcileWaitError::Failed(self.tenant_shard_id, self.error.lock().unwrap().clone()))
+                return Err(ReconcileWaitError::Failed(self.tenant_shard_id,
+                    self.error.lock().unwrap().clone().expect("If error_seq_wait was advanced error was set").clone()))
             }
         }
 
@@ -351,6 +377,17 @@ pub(crate) struct ReconcilerHandle {
     sequence: Sequence,
     handle: JoinHandle<()>,
     cancel: CancellationToken,
+}
+
+pub(crate) enum ReconcileNeeded {
+    /// shard either doesn't need reconciliation, or is forbidden from spawning a reconciler
+    /// in its current state (e.g. shard split in progress, or ShardSchedulingPolicy forbids it)
+    No,
+    /// shard has a reconciler running, and its intent hasn't changed since that one was
+    /// spawned: wait for the existing reconciler rather than spawning a new one.
+    WaitExisting(ReconcilerWaiter),
+    /// shard needs reconciliation: call into [`TenantShard::spawn_reconciler`]
+    Yes,
 }
 
 /// When a reconcile task completes, it sends this result object
@@ -396,6 +433,7 @@ impl TenantShard {
             reconciler: None,
             splitting: SplitState::Idle,
             sequence: Sequence(1),
+            delayed_reconcile: false,
             waiter: Arc::new(SeqWait::new(Sequence(0))),
             error_waiter: Arc::new(SeqWait::new(Sequence(0))),
             last_error: Arc::default(),
@@ -647,10 +685,13 @@ impl TenantShard {
                         "Identified optimization: migrate attachment {attached}->{preferred_node} (secondaries {:?})",
                         self.intent.get_secondary()
                     );
-                    return Some(ScheduleOptimization::MigrateAttachment(MigrateAttachment {
-                        old_attached_node_id: attached,
-                        new_attached_node_id: *preferred_node,
-                    }));
+                    return Some(ScheduleOptimization {
+                        sequence: self.sequence,
+                        action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                            old_attached_node_id: attached,
+                            new_attached_node_id: *preferred_node,
+                        }),
+                    });
                 }
             } else {
                 tracing::debug!(
@@ -708,28 +749,37 @@ impl TenantShard {
                     "Identified optimization: replace secondary {secondary}->{candidate_node} (current secondaries {:?})",
                     self.intent.get_secondary()
                 );
-                return Some(ScheduleOptimization::ReplaceSecondary(ReplaceSecondary {
-                    old_node_id: *secondary,
-                    new_node_id: candidate_node,
-                }));
+                return Some(ScheduleOptimization {
+                    sequence: self.sequence,
+                    action: ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
+                        old_node_id: *secondary,
+                        new_node_id: candidate_node,
+                    }),
+                });
             }
         }
 
         None
     }
 
+    /// Return true if the optimization was really applied: it will not be applied if the optimization's
+    /// sequence is behind this tenant shard's
     pub(crate) fn apply_optimization(
         &mut self,
         scheduler: &mut Scheduler,
         optimization: ScheduleOptimization,
-    ) {
+    ) -> bool {
+        if optimization.sequence != self.sequence {
+            return false;
+        }
+
         metrics::METRICS_REGISTRY
             .metrics_group
             .storage_controller_schedule_optimization
             .inc();
 
-        match optimization {
-            ScheduleOptimization::MigrateAttachment(MigrateAttachment {
+        match optimization.action {
+            ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
                 old_attached_node_id,
                 new_attached_node_id,
             }) => {
@@ -737,7 +787,7 @@ impl TenantShard {
                 self.intent
                     .promote_attached(scheduler, new_attached_node_id);
             }
-            ScheduleOptimization::ReplaceSecondary(ReplaceSecondary {
+            ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
                 old_node_id,
                 new_node_id,
             }) => {
@@ -745,6 +795,8 @@ impl TenantShard {
                 self.intent.push_secondary(scheduler, new_node_id);
             }
         }
+
+        true
     }
 
     /// Query whether the tenant's observed state for attached node matches its intent state, and if so,
@@ -831,16 +883,10 @@ impl TenantShard {
 
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
-    pub(crate) fn maybe_reconcile(
+    pub(crate) fn get_reconcile_needed(
         &mut self,
-        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
         pageservers: &Arc<HashMap<NodeId, Node>>,
-        compute_hook: &Arc<ComputeHook>,
-        service_config: &service::Config,
-        persistence: &Arc<Persistence>,
-        gate: &Gate,
-        cancel: &CancellationToken,
-    ) -> Option<ReconcilerWaiter> {
+    ) -> ReconcileNeeded {
         // If there are any ambiguous observed states, and the nodes they refer to are available,
         // we should reconcile to clean them up.
         let mut dirty_observed = false;
@@ -862,8 +908,8 @@ impl TenantShard {
             active_nodes_dirty || dirty_observed || self.pending_compute_notification;
 
         if !do_reconcile {
-            tracing::info!("Not dirty, no reconciliation needed.");
-            return None;
+            tracing::debug!("Not dirty, no reconciliation needed.");
+            return ReconcileNeeded::No;
         }
 
         // If we are currently splitting, then never start a reconciler task: the splitting logic
@@ -871,7 +917,7 @@ impl TenantShard {
         // up top, so that we only log this message if we would otherwise have done a reconciliation.
         if !matches!(self.splitting, SplitState::Idle) {
             tracing::info!("Refusing to reconcile, splitting in progress");
-            return None;
+            return ReconcileNeeded::No;
         }
 
         // Reconcile already in flight for the current sequence?
@@ -881,7 +927,7 @@ impl TenantShard {
                     "Reconciliation already in progress for sequence {:?}",
                     self.sequence,
                 );
-                return Some(ReconcilerWaiter {
+                return ReconcileNeeded::WaitExisting(ReconcilerWaiter {
                     tenant_shard_id: self.tenant_shard_id,
                     seq_wait: self.waiter.clone(),
                     error_seq_wait: self.error_waiter.clone(),
@@ -900,9 +946,66 @@ impl TenantShard {
                 // We only reach this point if there is work to do and we're going to skip
                 // doing it: warn it obvious why this tenant isn't doing what it ought to.
                 tracing::warn!("Skipping reconcile for policy {:?}", self.scheduling_policy);
-                return None;
+                return ReconcileNeeded::No;
             }
         }
+
+        ReconcileNeeded::Yes
+    }
+
+    /// Ensure the sequence number is set to a value where waiting for this value will make us wait
+    /// for the next reconcile: i.e. it is ahead of all completed or running reconcilers.
+    ///
+    /// Constructing a ReconcilerWaiter with the resulting sequence number gives the property
+    /// that the waiter will not complete until some future Reconciler is constructed and run.
+    fn ensure_sequence_ahead(&mut self) {
+        // Find the highest sequence for which a Reconciler has previously run or is currently
+        // running
+        let max_seen = std::cmp::max(
+            self.reconciler
+                .as_ref()
+                .map(|r| r.sequence)
+                .unwrap_or(Sequence(0)),
+            std::cmp::max(self.waiter.load(), self.error_waiter.load()),
+        );
+
+        if self.sequence <= max_seen {
+            self.sequence = max_seen.next();
+        }
+    }
+
+    /// Create a waiter that will wait for some future Reconciler that hasn't been spawned yet.
+    ///
+    /// This is appropriate when you can't spawn a reconciler (e.g. due to resource limits), but
+    /// you would like to wait on the next reconciler that gets spawned in the background.
+    pub(crate) fn future_reconcile_waiter(&mut self) -> ReconcilerWaiter {
+        self.ensure_sequence_ahead();
+
+        ReconcilerWaiter {
+            tenant_shard_id: self.tenant_shard_id,
+            seq_wait: self.waiter.clone(),
+            error_seq_wait: self.error_waiter.clone(),
+            error: self.last_error.clone(),
+            seq: self.sequence,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
+    pub(crate) fn spawn_reconciler(
+        &mut self,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
+        pageservers: &Arc<HashMap<NodeId, Node>>,
+        compute_hook: &Arc<ComputeHook>,
+        service_config: &service::Config,
+        persistence: &Arc<Persistence>,
+        units: ReconcileUnits,
+        gate_guard: GateGuard,
+        cancel: &CancellationToken,
+    ) -> Option<ReconcilerWaiter> {
+        // Reconcile in flight for a stale sequence?  Our sequence's task will wait for it before
+        // doing our sequence's work.
+        let old_handle = self.reconciler.take();
 
         // Build list of nodes from which the reconciler should detach
         let mut detach = Vec::new();
@@ -919,18 +1022,9 @@ impl TenantShard {
             }
         }
 
-        // Reconcile in flight for a stale sequence?  Our sequence's task will wait for it before
-        // doing our sequence's work.
-        let old_handle = self.reconciler.take();
-
-        let Ok(gate_guard) = gate.enter() else {
-            // Shutting down, don't start a reconciler
-            return None;
-        };
-
         // Advance the sequence before spawning a reconciler, so that sequence waiters
         // can distinguish between before+after the reconcile completes.
-        self.sequence = self.sequence.next();
+        self.ensure_sequence_ahead();
 
         let reconciler_cancel = cancel.child_token();
         let reconciler_intent = TargetState::from_intent(pageservers, &self.intent);
@@ -945,6 +1039,7 @@ impl TenantShard {
             compute_hook: compute_hook.clone(),
             service_config: service_config.clone(),
             _gate_guard: gate_guard,
+            _resource_units: units,
             cancel: reconciler_cancel.clone(),
             persistence: persistence.clone(),
             compute_notify_failure: false,
@@ -1011,16 +1106,18 @@ impl TenantShard {
                         status: outcome_label,
                     });
 
-                result_tx
-                    .send(ReconcileResult {
-                        sequence: reconcile_seq,
-                        result,
-                        tenant_shard_id: reconciler.tenant_shard_id,
-                        generation: reconciler.generation,
-                        observed: reconciler.observed,
-                        pending_compute_notification: reconciler.compute_notify_failure,
-                    })
-                    .ok();
+                // Constructing result implicitly drops Reconciler, freeing any ReconcileUnits before the Service might
+                // try and schedule more work in response to our result.
+                let result = ReconcileResult {
+                    sequence: reconcile_seq,
+                    result,
+                    tenant_shard_id: reconciler.tenant_shard_id,
+                    generation: reconciler.generation,
+                    observed: reconciler.observed,
+                    pending_compute_notification: reconciler.compute_notify_failure,
+                };
+
+                result_tx.send(result).ok();
             }
             .instrument(reconciler_span),
         );
@@ -1089,6 +1186,13 @@ impl TenantShard {
         &self.scheduling_policy
     }
 
+    pub(crate) fn set_last_error(&mut self, sequence: Sequence, error: ReconcileError) {
+        // Ordering: always set last_error before advancing sequence, so that sequence
+        // waiters are guaranteed to see a Some value when they see an error.
+        *(self.last_error.lock().unwrap()) = Some(Arc::new(error));
+        self.error_waiter.advance(sequence);
+    }
+
     pub(crate) fn from_persistent(
         tsp: TenantShardPersistence,
         intent: IntentState,
@@ -1111,6 +1215,7 @@ impl TenantShard {
             error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
             last_error: Arc::default(),
             pending_compute_notification: false,
+            delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
         })
     }
@@ -1347,10 +1452,13 @@ pub(crate) mod tests {
         // would be no other shards from the same tenant, and request to do so.
         assert_eq!(
             optimization_a,
-            Some(ScheduleOptimization::MigrateAttachment(MigrateAttachment {
-                old_attached_node_id: NodeId(1),
-                new_attached_node_id: NodeId(2)
-            }))
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                    old_attached_node_id: NodeId(1),
+                    new_attached_node_id: NodeId(2)
+                })
+            })
         );
 
         // Note that these optimizing two shards in the same tenant with the same ScheduleContext is
@@ -1361,10 +1469,13 @@ pub(crate) mod tests {
         let optimization_b = shard_b.optimize_attachment(&nodes, &schedule_context);
         assert_eq!(
             optimization_b,
-            Some(ScheduleOptimization::MigrateAttachment(MigrateAttachment {
-                old_attached_node_id: NodeId(1),
-                new_attached_node_id: NodeId(3)
-            }))
+            Some(ScheduleOptimization {
+                sequence: shard_b.sequence,
+                action: ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                    old_attached_node_id: NodeId(1),
+                    new_attached_node_id: NodeId(3)
+                })
+            })
         );
 
         // Applying these optimizations should result in the end state proposed
@@ -1408,10 +1519,13 @@ pub(crate) mod tests {
         // same tenant should generate an optimization to move one away
         assert_eq!(
             optimization_a,
-            Some(ScheduleOptimization::ReplaceSecondary(ReplaceSecondary {
-                old_node_id: NodeId(3),
-                new_node_id: NodeId(4)
-            }))
+            Some(ScheduleOptimization {
+                sequence: shard_a.sequence,
+                action: ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
+                    old_node_id: NodeId(3),
+                    new_node_id: NodeId(4)
+                })
+            })
         );
 
         shard_a.apply_optimization(&mut scheduler, optimization_a.unwrap());

@@ -2,12 +2,12 @@ import json
 import os
 import random
 import time
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
+from fixtures.pageserver.types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
     poll_for_remote_storage_iterations,
@@ -51,9 +51,13 @@ def evict_random_layers(
         if "ephemeral" in layer.name or "temp_download" in layer.name:
             continue
 
+        layer_name = parse_layer_file_name(layer.name)
+
         if rng.choice([True, False]):
-            log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer.name}")
-            client.evict_layer(tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer.name)
+            log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer_name.to_str()}")
+            client.evict_layer(
+                tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer_name.to_str()
+            )
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
@@ -402,32 +406,6 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
     validate_heatmap(heatmap_second)
 
 
-def list_layers(pageserver, tenant_id: TenantId, timeline_id: TimelineId) -> list[Path]:
-    """
-    Inspect local storage on a pageserver to discover which layer files are present.
-
-    :return: list of relative paths to layers, from the timeline root.
-    """
-    timeline_path = pageserver.timeline_dir(tenant_id, timeline_id)
-
-    def relative(p: Path) -> Path:
-        return p.relative_to(timeline_path)
-
-    return sorted(
-        list(
-            map(
-                relative,
-                filter(
-                    lambda path: path.name != "metadata"
-                    and "ephemeral" not in path.name
-                    and "temp" not in path.name,
-                    timeline_path.glob("*"),
-                ),
-            )
-        )
-    )
-
-
 def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     """
     Test the overall data flow in secondary mode:
@@ -482,8 +460,8 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
 
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-    assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
-        ps_secondary, tenant_id, timeline_id
+    assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
+        tenant_id, timeline_id
     )
 
     # Make changes on attached pageserver, check secondary downloads them
@@ -500,8 +478,8 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
     try:
-        assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
-            ps_secondary, tenant_id, timeline_id
+        assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
+            tenant_id, timeline_id
         )
     except:
         # Do a full listing of the secondary location on errors, to help debug of
@@ -523,8 +501,8 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # ==================================================================
     try:
         log.info("Evicting a layer...")
-        layer_to_evict = list_layers(ps_attached, tenant_id, timeline_id)[0]
-        some_other_layer = list_layers(ps_attached, tenant_id, timeline_id)[1]
+        layer_to_evict = ps_attached.list_layers(tenant_id, timeline_id)[0]
+        some_other_layer = ps_attached.list_layers(tenant_id, timeline_id)[1]
         log.info(f"Victim layer: {layer_to_evict.name}")
         ps_attached.http_client().evict_layer(
             tenant_id, timeline_id, layer_name=layer_to_evict.name
@@ -537,13 +515,13 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
             layer["name"] for layer in heatmap_after_eviction["timelines"][0]["layers"]
         )
         assert layer_to_evict.name not in heatmap_layers
-        assert some_other_layer.name in heatmap_layers
+        assert parse_layer_file_name(some_other_layer.name).to_str() in heatmap_layers
 
         ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-        assert layer_to_evict not in list_layers(ps_attached, tenant_id, timeline_id)
-        assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
-            ps_secondary, tenant_id, timeline_id
+        assert layer_to_evict not in ps_attached.list_layers(tenant_id, timeline_id)
+        assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
+            tenant_id, timeline_id
         )
     except:
         # On assertion failures, log some details to help with debugging
@@ -630,7 +608,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         for timeline_id in timelines:
             log.info(f"Checking for secondary timeline {timeline_id} on node {ps_secondary.id}")
             # One or more layers should be present for all timelines
-            assert list_layers(ps_secondary, tenant_id, timeline_id)
+            assert ps_secondary.list_layers(tenant_id, timeline_id)
 
         # Delete the second timeline: this should be reflected later on the secondary
         env.storage_controller.pageserver_api().timeline_delete(tenant_id, timelines[1])
@@ -645,10 +623,10 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         ps_secondary = next(p for p in env.pageservers if p != ps_attached)
 
         # This one was not deleted
-        assert list_layers(ps_secondary, tenant_id, timelines[0])
+        assert ps_secondary.list_layers(tenant_id, timelines[0])
 
         # This one was deleted
-        assert not list_layers(ps_secondary, tenant_id, timelines[1])
+        assert not ps_secondary.list_layers(tenant_id, timelines[1])
 
     t_end = time.time()
 
@@ -708,7 +686,7 @@ def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controll
     ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
 
     # Expect lots of layers
-    assert len(list_layers(ps_attached, tenant_id, timeline_id)) > 10
+    assert len(ps_attached.list_layers(tenant_id, timeline_id)) > 10
 
     # Simulate large data by making layer downloads artifically slow
     for ps in env.pageservers:

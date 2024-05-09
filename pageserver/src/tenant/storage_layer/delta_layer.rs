@@ -57,6 +57,7 @@ use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tracing::*;
@@ -68,7 +69,8 @@ use utils::{
 };
 
 use super::{
-    AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+    AsLayerDesc, LayerAccessStats, LayerName, PersistentLayerDesc, ResidentLayer,
+    ValuesReconstructState,
 };
 
 ///
@@ -217,6 +219,7 @@ pub struct DeltaLayerInner {
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
+    lsn_range: Range<Lsn>,
 
     file: VirtualFile,
     file_id: FileId,
@@ -308,13 +311,13 @@ impl DeltaLayer {
             .and_then(|res| res)?;
 
         // not production code
-        let actual_filename = path.file_name().unwrap().to_owned();
-        let expected_filename = self.layer_desc().filename().file_name();
+        let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
+        let expected_layer_name = self.layer_desc().layer_name();
 
-        if actual_filename != expected_filename {
+        if actual_layer_name != expected_layer_name {
             println!("warning: filename does not match what is expected from in-file summary");
-            println!("actual: {:?}", actual_filename);
-            println!("expected: {:?}", expected_filename);
+            println!("actual: {:?}", actual_layer_name.to_string());
+            println!("expected: {:?}", expected_layer_name.to_string());
         }
 
         Ok(Arc::new(loaded))
@@ -427,9 +430,15 @@ impl DeltaLayerWriterInner {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
+    async fn put_value(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        val: Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         let (_, res) = self
-            .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init())
+            .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init(), ctx)
             .await;
         res
     }
@@ -440,9 +449,10 @@ impl DeltaLayerWriterInner {
         lsn: Lsn,
         val: Vec<u8>,
         will_init: bool,
+        ctx: &RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
-        let (val, res) = self.blob_writer.write_blob(val).await;
+        let (val, res) = self.blob_writer.write_blob(val, ctx).await;
         let off = match res {
             Ok(off) => off,
             Err(e) => return (val, Err(anyhow::anyhow!(e))),
@@ -462,18 +472,23 @@ impl DeltaLayerWriterInner {
     ///
     /// Finish writing the delta layer.
     ///
-    async fn finish(self, key_end: Key, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
+    async fn finish(
+        self,
+        key_end: Key,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
-        let mut file = self.blob_writer.into_inner().await?;
+        let mut file = self.blob_writer.into_inner(ctx).await?;
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf).await;
+            let (_buf, res) = file.write_all(buf, ctx).await;
             res?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
@@ -493,7 +508,7 @@ impl DeltaLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, ctx).await;
         res?;
 
         let metadata = file
@@ -591,8 +606,18 @@ impl DeltaLayerWriter {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    pub async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_value(key, lsn, val).await
+    pub async fn put_value(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        val: Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .as_mut()
+            .unwrap()
+            .put_value(key, lsn, val, ctx)
+            .await
     }
 
     pub async fn put_value_bytes(
@@ -601,11 +626,12 @@ impl DeltaLayerWriter {
         lsn: Lsn,
         val: Vec<u8>,
         will_init: bool,
+        ctx: &RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         self.inner
             .as_mut()
             .unwrap()
-            .put_value_bytes(key, lsn, val, will_init)
+            .put_value_bytes(key, lsn, val, will_init, ctx)
             .await
     }
 
@@ -620,10 +646,11 @@ impl DeltaLayerWriter {
         mut self,
         key_end: Key,
         timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
         let inner = self.inner.take().unwrap();
         let temp_path = inner.path.clone();
-        let result = inner.finish(key_end, timeline).await;
+        let result = inner.finish(key_end, timeline, ctx).await;
         // The delta layer files can sometimes be really large. Clean them up.
         if result.is_err() {
             tracing::warn!(
@@ -691,7 +718,7 @@ impl DeltaLayer {
         // TODO: could use smallvec here, but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, ctx).await;
         res?;
         Ok(())
     }
@@ -728,6 +755,9 @@ impl DeltaLayerInner {
             // production code path
             expected_summary.index_start_blk = actual_summary.index_start_blk;
             expected_summary.index_root_blk = actual_summary.index_root_blk;
+            // mask out the timeline_id, but still require the layers to be from the same tenant
+            expected_summary.timeline_id = actual_summary.timeline_id;
+
             if actual_summary != expected_summary {
                 bail!(
                     "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
@@ -742,6 +772,7 @@ impl DeltaLayerInner {
             file_id,
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
+            lsn_range: actual_summary.lsn_range,
             max_vectored_read_bytes,
         }))
     }
@@ -866,7 +897,7 @@ impl DeltaLayerInner {
         let data_end_offset = self.index_start_offset();
 
         let reads = Self::plan_reads(
-            keyspace,
+            &keyspace,
             lsn_range,
             data_end_offset,
             index_reader,
@@ -880,11 +911,13 @@ impl DeltaLayerInner {
         self.do_reads_and_update_state(reads, reconstruct_state)
             .await;
 
+        reconstruct_state.on_lsn_advanced(&keyspace, self.lsn_range.start);
+
         Ok(())
     }
 
     async fn plan_reads<Reader>(
-        keyspace: KeySpace,
+        keyspace: &KeySpace,
         lsn_range: Range<Lsn>,
         data_end_offset: u64,
         index_reader: DiskBtreeReader<Reader, DELTA_KEY_SIZE>,
@@ -1108,15 +1141,15 @@ impl DeltaLayerInner {
         Ok(all_keys)
     }
 
-    /// Using the given writer, write out a truncated version, where LSNs higher than the
-    /// truncate_at are missing.
-    #[cfg(test)]
+    /// Using the given writer, write out a version which has the earlier Lsns than `until`.
+    ///
+    /// Return the amount of key value records pushed to the writer.
     pub(super) async fn copy_prefix(
         &self,
         writer: &mut DeltaLayerWriter,
-        truncate_at: Lsn,
+        until: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         use crate::tenant::vectored_blob_io::{
             BlobMeta, VectoredReadBuilder, VectoredReadExtended,
         };
@@ -1180,6 +1213,8 @@ impl DeltaLayerInner {
         // FIXME: buffering of DeltaLayerWriter
         let mut per_blob_copy = Vec::new();
 
+        let mut records = 0;
+
         while let Some(item) = stream.try_next().await? {
             tracing::debug!(?item, "popped");
             let offset = item
@@ -1198,7 +1233,7 @@ impl DeltaLayerInner {
 
             prev = Option::from(item);
 
-            let actionable = actionable.filter(|x| x.0.lsn < truncate_at);
+            let actionable = actionable.filter(|x| x.0.lsn < until);
 
             let builder = if let Some((meta, offsets)) = actionable {
                 // extend or create a new builder
@@ -1266,7 +1301,7 @@ impl DeltaLayerInner {
                     let will_init = crate::repository::ValueBytes::will_init(data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
-                            tracing::error!(data=?utils::Hex(data), err=?_e, "failed to parse will_init out of serialized value");
+                            tracing::error!(data=?utils::Hex(data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
                         })
                         .unwrap_or(false);
 
@@ -1274,10 +1309,19 @@ impl DeltaLayerInner {
                     per_blob_copy.extend_from_slice(data);
 
                     let (tmp, res) = writer
-                        .put_value_bytes(key, lsn, std::mem::take(&mut per_blob_copy), will_init)
+                        .put_value_bytes(
+                            key,
+                            lsn,
+                            std::mem::take(&mut per_blob_copy),
+                            will_init,
+                            ctx,
+                        )
                         .await;
                     per_blob_copy = tmp;
+
                     res?;
+
+                    records += 1;
                 }
 
                 buffer = Some(res.buf);
@@ -1289,7 +1333,7 @@ impl DeltaLayerInner {
             "with the sentinel above loop should had handled all"
         );
 
-        Ok(())
+        Ok(records)
     }
 
     pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
@@ -1362,7 +1406,6 @@ impl DeltaLayerInner {
         Ok(())
     }
 
-    #[cfg(test)]
     fn stream_index_forwards<'a, R>(
         &'a self,
         reader: &'a DiskBtreeReader<R, DELTA_KEY_SIZE>,
@@ -1532,7 +1575,7 @@ mod test {
 
         // Plan and validate
         let vectored_reads = DeltaLayerInner::plan_reads(
-            keyspace.clone(),
+            &keyspace,
             lsn_range.clone(),
             disk_offset,
             reader,
@@ -1753,12 +1796,14 @@ mod test {
 
         for entry in entries {
             let (_, res) = writer
-                .put_value_bytes(entry.key, entry.lsn, entry.value, false)
+                .put_value_bytes(entry.key, entry.lsn, entry.value, false, &ctx)
                 .await;
             res?;
         }
 
-        let resident = writer.finish(entries_meta.key_range.end, &timeline).await?;
+        let resident = writer
+            .finish(entries_meta.key_range.end, &timeline, &ctx)
+            .await?;
 
         let inner = resident.as_delta(&ctx).await?;
 
@@ -1784,7 +1829,7 @@ mod test {
             let data_end_offset = inner.index_start_blk as u64 * PAGE_SZ as u64;
 
             let vectored_reads = DeltaLayerInner::plan_reads(
-                keyspace.clone(),
+                &keyspace,
                 entries_meta.lsn_range.clone(),
                 data_end_offset,
                 index_reader,
@@ -1944,7 +1989,7 @@ mod test {
                 .await
                 .unwrap();
 
-            let copied_layer = writer.finish(Key::MAX, &branch).await.unwrap();
+            let copied_layer = writer.finish(Key::MAX, &branch, ctx).await.unwrap();
 
             copied_layer.as_delta(ctx).await.unwrap();
 

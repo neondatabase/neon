@@ -293,7 +293,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         lazy: Optional[bool] = None,
     ):
         body = location_conf.copy()
-        body["tenant_id"] = str(tenant_id)
 
         params = {}
         if flush_ms is not None:
@@ -819,6 +818,23 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             if not layer.remote:
                 continue
             self.download_layer(tenant_id, timeline_id, layer.layer_file_name)
+
+    def detach_ancestor(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timeline_id: TimelineId,
+        batch_size: int | None = None,
+    ) -> Set[TimelineId]:
+        params = {}
+        if batch_size is not None:
+            params["batch_size"] = batch_size
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
+            params=params,
+        )
+        self.verbose_error(res)
+        json = res.json()
+        return set(map(TimelineId, json["reparented_timelines"]))
 
     def evict_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str

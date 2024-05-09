@@ -196,8 +196,13 @@ impl SubscriptionKey {
 
     /// Parse from FilterTenantTimelineId
     pub fn from_proto_filter_tenant_timeline_id(
-        f: &FilterTenantTimelineId,
+        opt: Option<&FilterTenantTimelineId>,
     ) -> Result<Self, Status> {
+        if opt.is_none() {
+            return Ok(SubscriptionKey::All);
+        }
+
+        let f = opt.unwrap();
         if !f.enabled {
             return Ok(SubscriptionKey::All);
         }
@@ -534,10 +539,7 @@ impl BrokerService for Broker {
             .remote_addr()
             .expect("TCPConnectInfo inserted by handler");
         let proto_filter = request.into_inner();
-        let ttid_filter = proto_filter
-            .tenant_timeline_id
-            .as_ref()
-            .ok_or_else(|| Status::new(Code::InvalidArgument, "missing tenant_timeline_id"))?;
+        let ttid_filter = proto_filter.tenant_timeline_id.as_ref();
 
         let sub_key = SubscriptionKey::from_proto_filter_tenant_timeline_id(ttid_filter)?;
         let types_set = proto_filter

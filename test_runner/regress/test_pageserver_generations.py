@@ -10,6 +10,7 @@ of the pageserver are:
 """
 
 import enum
+import os
 import re
 import time
 from typing import Optional
@@ -220,7 +221,12 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
     env.storage_controller.node_register(env.pageserver)
 
-    env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
+    replaced_config = env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "control_plane_api": "",
+        }
+    )
+    env.pageserver.start()
     env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
     env.neon_cli.create_tenant(
@@ -251,8 +257,8 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
         assert parse_generation_suffix(key) is None
 
     env.pageserver.stop()
-
     # Starting without the override that disabled control_plane_api
+    env.pageserver.patch_config_toml_nonrecursive(replaced_config)
     env.pageserver.start()
 
     generate_uploads_and_deletions(env, pageserver=env.pageserver, init=False)
@@ -525,9 +531,12 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # incident, but it might be unavoidable: if so, we want to be able to start up
     # and serve clients.
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
-    env.pageserver.start(
-        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
+    replaced = env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "control_plane_emergency_mode": True,
+        }
     )
+    env.pageserver.start()
 
     # The pageserver should provide service to clients
     generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)
@@ -549,6 +558,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     # The pageserver should work fine when subsequently restarted in non-emergency mode
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
+    env.pageserver.patch_config_toml_nonrecursive(replaced)
     env.pageserver.start()
 
     generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)
@@ -691,3 +701,50 @@ def test_multi_attach(
 
     # All data we wrote while multi-attached remains readable
     workload.validate(pageservers[2].id)
+
+
+@pytest.mark.skip(reason="To be enabled after release with new local path style")
+def test_upgrade_generationless_local_file_paths(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Test pageserver behavior when startup up with local layer paths without
+    generation numbers: it should accept these layer files, and avoid doing
+    a delete/download cycle on them.
+    """
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(1000)
+
+    env.pageserver.stop()
+
+    # Rename the local paths to legacy format, to simulate what
+    # we would see when upgrading
+    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
+    files_renamed = 0
+    for filename in os.listdir(timeline_dir):
+        path = os.path.join(timeline_dir, filename)
+        log.info(f"Found file {path}")
+        if path.endswith("-v1-00000001"):
+            new_path = path[:-12]
+            os.rename(path, new_path)
+            log.info(f"Renamed {path} -> {new_path}")
+            files_renamed += 1
+
+    assert files_renamed > 0
+
+    env.pageserver.start()
+
+    workload.validate()
+
+    # Assert that there were no on-demand downloads
+    assert (
+        env.pageserver.http_client().get_metric_value(
+            "pageserver_remote_ondemand_downloaded_layers_total"
+        )
+        == 0
+    )

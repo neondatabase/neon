@@ -6,10 +6,9 @@ use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
-use utils::bin_ser::SerializeError;
 
 use crate::tenant::metadata::TimelineMetadata;
-use crate::tenant::storage_layer::LayerFileName;
+use crate::tenant::storage_layer::LayerName;
 use crate::tenant::upload_queue::UploadQueueInitialized;
 use crate::tenant::Generation;
 use pageserver_api::shard::ShardIndex;
@@ -76,7 +75,7 @@ pub struct IndexPart {
     ///
     /// Older versions of `IndexPart` will not have this property or have only a part of metadata
     /// that latest version stores.
-    pub layer_metadata: HashMap<LayerFileName, IndexLayerMetadata>,
+    pub layer_metadata: HashMap<LayerName, IndexLayerMetadata>,
 
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
     // It's duplicated for convenience when reading the serialized structure, but is
@@ -104,15 +103,14 @@ impl IndexPart {
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
-    pub fn new(
-        layers_and_metadata: HashMap<LayerFileName, LayerFileMetadata>,
+    fn new(
+        layers_and_metadata: &HashMap<LayerName, LayerFileMetadata>,
         disk_consistent_lsn: Lsn,
         metadata: TimelineMetadata,
     ) -> Self {
-        // Transform LayerFileMetadata into IndexLayerMetadata
         let layer_metadata = layers_and_metadata
-            .into_iter()
-            .map(|(k, v)| (k, IndexLayerMetadata::from(v)))
+            .iter()
+            .map(|(k, v)| (k.to_owned(), IndexLayerMetadata::from(v)))
             .collect();
 
         Self {
@@ -141,20 +139,24 @@ impl IndexPart {
     pub fn to_s3_bytes(&self) -> serde_json::Result<Vec<u8>> {
         serde_json::to_vec(self)
     }
+
+    #[cfg(test)]
+    pub(crate) fn example() -> Self {
+        let example_metadata = TimelineMetadata::example();
+        Self::new(
+            &HashMap::new(),
+            example_metadata.disk_consistent_lsn(),
+            example_metadata,
+        )
+    }
 }
 
-impl TryFrom<&UploadQueueInitialized> for IndexPart {
-    type Error = SerializeError;
+impl From<&UploadQueueInitialized> for IndexPart {
+    fn from(uq: &UploadQueueInitialized) -> Self {
+        let disk_consistent_lsn = uq.latest_metadata.disk_consistent_lsn();
+        let metadata = uq.latest_metadata.clone();
 
-    fn try_from(upload_queue: &UploadQueueInitialized) -> Result<Self, Self::Error> {
-        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
-        let metadata = upload_queue.latest_metadata.clone();
-
-        Ok(Self::new(
-            upload_queue.latest_files.clone(),
-            disk_consistent_lsn,
-            metadata,
-        ))
+        Self::new(&uq.latest_files, disk_consistent_lsn, metadata)
     }
 }
 
@@ -172,8 +174,8 @@ pub struct IndexLayerMetadata {
     pub shard: ShardIndex,
 }
 
-impl From<LayerFileMetadata> for IndexLayerMetadata {
-    fn from(other: LayerFileMetadata) -> Self {
+impl From<&LayerFileMetadata> for IndexLayerMetadata {
+    fn from(other: &LayerFileMetadata) -> Self {
         IndexLayerMetadata {
             file_size: other.file_size,
             generation: other.generation,

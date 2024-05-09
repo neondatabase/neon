@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Tuple
 
 import pytest
-import toml
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -45,17 +44,16 @@ def test_min_resident_size_override_handling(
         ps_http.set_tenant_config(tenant_id, {})
         assert_config(tenant_id, None, default_tenant_conf_value)
 
-    env.pageserver.stop()
     if config_level_override is not None:
-        env.pageserver.start(
-            overrides=(
-                "--pageserver-config-override=tenant_config={ min_resident_size_override =  "
-                + str(config_level_override)
-                + " }",
-            )
-        )
-    else:
-        env.pageserver.start()
+
+        def set_min_resident_size(config):
+            tenant_config = config.get("tenant_config", {})
+            tenant_config["min_resident_size_override"] = config_level_override
+            config["tenant_config"] = tenant_config
+
+        env.pageserver.edit_config_toml(set_min_resident_size)
+    env.pageserver.stop()
+    env.pageserver.start()
 
     tenant_id, _ = env.neon_cli.create_tenant()
     assert_overrides(tenant_id, config_level_override)
@@ -164,33 +162,31 @@ class EvictionEnv:
         usage eviction task is unknown; it might need to run one more iteration
         before assertions can be made.
         """
-        disk_usage_config = {
-            "period": period,
-            "max_usage_pct": max_usage_pct,
-            "min_avail_bytes": min_avail_bytes,
-            "mock_statvfs": mock_behavior,
-            "eviction_order": eviction_order.config(),
-        }
-
-        enc = toml.TomlEncoder()
 
         # these can sometimes happen during startup before any tenants have been
         # loaded, so nothing can be evicted, we just wait for next iteration which
         # is able to evict.
         pageserver.allowed_errors.append(".*WARN.* disk usage still high.*")
 
-        pageserver.start(
-            overrides=(
-                "--pageserver-config-override=disk_usage_based_eviction="
-                + enc.dump_inline_table(disk_usage_config).replace("\n", " "),
+        pageserver.patch_config_toml_nonrecursive(
+            {
+                "disk_usage_based_eviction": {
+                    "period": period,
+                    "max_usage_pct": max_usage_pct,
+                    "min_avail_bytes": min_avail_bytes,
+                    "mock_statvfs": mock_behavior,
+                    "eviction_order": eviction_order.config(),
+                },
                 # Disk usage based eviction runs as a background task.
                 # But pageserver startup delays launch of background tasks for some time, to prioritize initial logical size calculations during startup.
                 # But, initial logical size calculation may not be triggered if safekeepers don't publish new broker messages.
                 # But, we only have a 10-second-timeout in this test.
                 # So, disable the delay for this test.
-                "--pageserver-config-override=background_task_maximum_delay='0s'",
-            ),
+                "background_task_maximum_delay": "0s",
+            }
         )
+
+        pageserver.start()
 
         # we now do initial logical size calculation on startup, which on debug builds can fight with disk usage based eviction
         for tenant_id, timeline_id in self.timelines:

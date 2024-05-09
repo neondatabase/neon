@@ -1,11 +1,11 @@
 //! Common traits and structs for layers
 
 pub mod delta_layer;
-mod filename;
 pub mod image_layer;
 pub(crate) mod inmemory_layer;
 pub(crate) mod layer;
 mod layer_desc;
+mod layer_name;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Value;
@@ -34,10 +34,10 @@ use utils::rate_limit::RateLimit;
 use utils::{id::TimelineId, lsn::Lsn};
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
-pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
+pub use layer_name::{DeltaLayerName, ImageLayerName, LayerName};
 
 pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 
@@ -118,6 +118,7 @@ pub(crate) struct ValuesReconstructState {
     pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
 
     keys_done: KeySpaceRandomAccum,
+    layers_visited: u32,
 }
 
 impl ValuesReconstructState {
@@ -125,6 +126,7 @@ impl ValuesReconstructState {
         Self {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),
+            layers_visited: 0,
         }
     }
 
@@ -134,6 +136,37 @@ impl ValuesReconstructState {
         if let Some(Ok(state)) = previous {
             if state.situation == ValueReconstructSituation::Continue {
                 self.keys_done.add_key(key);
+            }
+        }
+    }
+
+    pub(crate) fn on_layer_visited(&mut self) {
+        self.layers_visited += 1;
+    }
+
+    pub(crate) fn get_layers_visited(&self) -> u32 {
+        self.layers_visited
+    }
+
+    /// This function is called after reading a keyspace from a layer.
+    /// It checks if the read path has now moved past the cached Lsn for any keys.
+    ///
+    /// Implementation note: We intentionally iterate over the keys for which we've
+    /// already collected some reconstruct data. This avoids scaling complexity with
+    /// the size of the search space.
+    pub(crate) fn on_lsn_advanced(&mut self, keyspace: &KeySpace, advanced_to: Lsn) {
+        for (key, value) in self.keys.iter_mut() {
+            if !keyspace.contains(key) {
+                continue;
+            }
+
+            if let Ok(state) = value {
+                if state.situation != ValueReconstructSituation::Complete
+                    && state.get_cached_lsn() >= Some(advanced_to)
+                {
+                    state.situation = ValueReconstructSituation::Complete;
+                    self.keys_done.add_key(*key);
+                }
             }
         }
     }
@@ -162,11 +195,18 @@ impl ValuesReconstructState {
                         true
                     }
                     Value::WalRecord(rec) => {
-                        let reached_cache =
-                            state.get_cached_lsn().map(|clsn| clsn + 1) == Some(lsn);
+                        debug_assert!(
+                            Some(lsn) > state.get_cached_lsn(),
+                            "Attempt to collect a record below cached LSN for walredo: {} < {}",
+                            lsn,
+                            state
+                                .get_cached_lsn()
+                                .expect("Assertion can only fire if a cached lsn is present")
+                        );
+
                         let will_init = rec.will_init();
                         state.records.push((lsn, rec));
-                        will_init || reached_cache
+                        will_init
                     }
                 },
             };
@@ -606,8 +646,8 @@ pub mod tests {
 
     use super::*;
 
-    impl From<DeltaFileName> for PersistentLayerDesc {
-        fn from(value: DeltaFileName) -> Self {
+    impl From<DeltaLayerName> for PersistentLayerDesc {
+        fn from(value: DeltaLayerName) -> Self {
             PersistentLayerDesc::new_delta(
                 TenantShardId::from([0; 18]),
                 TimelineId::from_array([0; 16]),
@@ -618,8 +658,8 @@ pub mod tests {
         }
     }
 
-    impl From<ImageFileName> for PersistentLayerDesc {
-        fn from(value: ImageFileName) -> Self {
+    impl From<ImageLayerName> for PersistentLayerDesc {
+        fn from(value: ImageLayerName) -> Self {
             PersistentLayerDesc::new_img(
                 TenantShardId::from([0; 18]),
                 TimelineId::from_array([0; 16]),
@@ -630,11 +670,11 @@ pub mod tests {
         }
     }
 
-    impl From<LayerFileName> for PersistentLayerDesc {
-        fn from(value: LayerFileName) -> Self {
+    impl From<LayerName> for PersistentLayerDesc {
+        fn from(value: LayerName) -> Self {
             match value {
-                LayerFileName::Delta(d) => Self::from(d),
-                LayerFileName::Image(i) => Self::from(i),
+                LayerName::Delta(d) => Self::from(d),
+                LayerName::Image(i) => Self::from(i),
             }
         }
     }

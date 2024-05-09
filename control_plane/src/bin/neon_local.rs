@@ -9,20 +9,23 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::local_env::{InitForceMode, LocalEnv};
-use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
+use control_plane::local_env::{
+    InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
+    SafekeeperConf,
+};
+use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::StorageController;
 use control_plane::{broker, local_env};
+use pageserver_api::config::{
+    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
+};
 use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::models::{
     ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
 };
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
-use pageserver_api::{
-    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
-    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
-};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
 use safekeeper_api::{
@@ -51,44 +54,6 @@ project_git_version!(GIT_VERSION);
 const DEFAULT_PG_VERSION: &str = "15";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
-
-fn default_conf(num_pageservers: u16) -> String {
-    let mut template = format!(
-        r#"
-# Default built-in configuration, defined in main.rs
-control_plane_api = '{DEFAULT_PAGESERVER_CONTROL_PLANE_API}'
-
-[broker]
-listen_addr = '{DEFAULT_BROKER_ADDR}'
-
-[[safekeepers]]
-id = {DEFAULT_SAFEKEEPER_ID}
-pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
-http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
-
-"#,
-    );
-
-    for i in 0..num_pageservers {
-        let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
-        let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
-        let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
-
-        template += &format!(
-            r#"
-[[pageservers]]
-id = {pageserver_id}
-listen_pg_addr = '127.0.0.1:{pg_port}'
-listen_http_addr = '127.0.0.1:{http_port}'
-pg_auth_type = '{trust_auth}'
-http_auth_type = '{trust_auth}'
-"#,
-            trust_auth = AuthType::Trust,
-        )
-    }
-
-    template
-}
 
 ///
 /// Timelines tree element used as a value in the HashMap.
@@ -133,7 +98,7 @@ fn main() -> Result<()> {
         let subcommand_result = match sub_name {
             "tenant" => rt.block_on(handle_tenant(sub_args, &mut env)),
             "timeline" => rt.block_on(handle_timeline(sub_args, &mut env)),
-            "start" => rt.block_on(handle_start_all(sub_args, &env)),
+            "start" => rt.block_on(handle_start_all(&env)),
             "stop" => rt.block_on(handle_stop_all(sub_args, &env)),
             "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
             "storage_controller" => rt.block_on(handle_storage_controller(sub_args, &env)),
@@ -152,7 +117,7 @@ fn main() -> Result<()> {
     };
 
     match subcommand_result {
-        Ok(Some(updated_env)) => updated_env.persist_config(&updated_env.base_data_dir)?,
+        Ok(Some(updated_env)) => updated_env.persist_config()?,
         Ok(None) => (),
         Err(e) => {
             eprintln!("command failed: {e:?}");
@@ -341,48 +306,65 @@ fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId
 }
 
 fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
-    let num_pageservers = init_match
-        .get_one::<u16>("num-pageservers")
-        .expect("num-pageservers arg has a default");
-    // Create config file
-    let toml_file: String = if let Some(config_path) = init_match.get_one::<PathBuf>("config") {
+    let num_pageservers = init_match.get_one::<u16>("num-pageservers");
+
+    let force = init_match.get_one("force").expect("we set a default value");
+
+    // Create the in-memory `LocalEnv` that we'd normally load from disk in `load_config`.
+    let init_conf: NeonLocalInitConf = if let Some(config_path) =
+        init_match.get_one::<PathBuf>("config")
+    {
+        // User (likely the Python test suite) provided a description of the environment.
+        if num_pageservers.is_some() {
+            bail!("Cannot specify both --num-pageservers and --config, use key `pageservers` in the --config file instead");
+        }
         // load and parse the file
-        std::fs::read_to_string(config_path).with_context(|| {
+        let contents = std::fs::read_to_string(config_path).with_context(|| {
             format!(
                 "Could not read configuration file '{}'",
                 config_path.display()
             )
-        })?
+        })?;
+        toml_edit::de::from_str(&contents)?
     } else {
-        // Built-in default config
-        default_conf(*num_pageservers)
+        // User (likely interactive) did not provide a description of the environment, give them the default
+        NeonLocalInitConf {
+            control_plane_api: Some(Some(DEFAULT_PAGESERVER_CONTROL_PLANE_API.parse().unwrap())),
+            broker: NeonBroker {
+                listen_addr: DEFAULT_BROKER_ADDR.parse().unwrap(),
+            },
+            safekeepers: vec![SafekeeperConf {
+                id: DEFAULT_SAFEKEEPER_ID,
+                pg_port: DEFAULT_SAFEKEEPER_PG_PORT,
+                http_port: DEFAULT_SAFEKEEPER_HTTP_PORT,
+                ..Default::default()
+            }],
+            pageservers: (0..num_pageservers.copied().unwrap_or(1))
+                .map(|i| {
+                    let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
+                    let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
+                    let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+                    NeonLocalInitPageserverConf {
+                        id: pageserver_id,
+                        listen_pg_addr: format!("127.0.0.1:{pg_port}"),
+                        listen_http_addr: format!("127.0.0.1:{http_port}"),
+                        pg_auth_type: AuthType::Trust,
+                        http_auth_type: AuthType::Trust,
+                        other: Default::default(),
+                    }
+                })
+                .collect(),
+            pg_distrib_dir: None,
+            neon_distrib_dir: None,
+            default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
+            storage_controller: None,
+            control_plane_compute_hook_api: None,
+        }
     };
 
-    let pg_version = init_match
-        .get_one::<u32>("pg-version")
-        .copied()
-        .context("Failed to parse postgres version from the argument string")?;
-
-    let mut env =
-        LocalEnv::parse_config(&toml_file).context("Failed to create neon configuration")?;
-    let force = init_match.get_one("force").expect("we set a default value");
-    env.init(pg_version, force)
-        .context("Failed to initialize neon repository")?;
-
-    // Create remote storage location for default LocalFs remote storage
-    std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
-
-    // Initialize pageserver, create initial tenant and timeline.
-    for ps_conf in &env.pageservers {
-        PageServerNode::from_env(&env, ps_conf)
-            .initialize(&pageserver_config_overrides(init_match))
-            .unwrap_or_else(|e| {
-                eprintln!("pageserver init failed: {e:?}");
-                exit(1);
-            });
-    }
-
-    Ok(env)
+    LocalEnv::init(init_conf, force)
+        .context("materialize initial neon_local environment on disk")?;
+    Ok(LocalEnv::load_config().expect("freshly written config should be loadable"))
 }
 
 /// The default pageserver is the one where CLI tenant/timeline operations are sent by default.
@@ -397,15 +379,6 @@ fn get_default_pageserver(env: &local_env::LocalEnv) -> PageServerNode {
     PageServerNode::from_env(env, ps_conf)
 }
 
-fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
-    init_match
-        .get_many::<String>("pageserver-config-override")
-        .into_iter()
-        .flatten()
-        .map(String::as_str)
-        .collect()
-}
-
 async fn handle_tenant(
     tenant_match: &ArgMatches,
     env: &mut local_env::LocalEnv,
@@ -415,6 +388,54 @@ async fn handle_tenant(
         Some(("list", _)) => {
             for t in pageserver.tenant_list().await? {
                 println!("{} {:?}", t.id, t.state);
+            }
+        }
+        Some(("import", import_match)) => {
+            let tenant_id = parse_tenant_id(import_match)?.unwrap_or_else(TenantId::generate);
+
+            let storage_controller = StorageController::from_env(env);
+            let create_response = storage_controller.tenant_import(tenant_id).await?;
+
+            let shard_zero = create_response
+                .shards
+                .first()
+                .expect("Import response omitted shards");
+
+            let attached_pageserver_id = shard_zero.node_id;
+            let pageserver =
+                PageServerNode::from_env(env, env.get_pageserver_conf(attached_pageserver_id)?);
+
+            println!(
+                "Imported tenant {tenant_id}, attached to pageserver {attached_pageserver_id}"
+            );
+
+            let timelines = pageserver
+                .http_client
+                .list_timelines(shard_zero.shard_id)
+                .await?;
+
+            // Pick a 'main' timeline that has no ancestors, the rest will get arbitrary names
+            let main_timeline = timelines
+                .iter()
+                .find(|t| t.ancestor_timeline_id.is_none())
+                .expect("No timelines found")
+                .timeline_id;
+
+            let mut branch_i = 0;
+            for timeline in timelines.iter() {
+                let branch_name = if timeline.timeline_id == main_timeline {
+                    "main".to_string()
+                } else {
+                    branch_i += 1;
+                    format!("branch_{branch_i}")
+                };
+
+                println!(
+                    "Importing timeline {tenant_id}/{} as branch {branch_name}",
+                    timeline.timeline_id
+                );
+
+                env.register_branch_mapping(branch_name, tenant_id, timeline.timeline_id)?;
             }
         }
         Some(("create", create_match)) => {
@@ -789,6 +810,8 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .copied()
                 .unwrap_or(false);
 
+            let allow_multiple = sub_args.get_flag("allow-multiple");
+
             let mode = match (lsn, hot_standby) {
                 (Some(lsn), false) => ComputeMode::Static(lsn),
                 (None, true) => ComputeMode::Replica,
@@ -806,7 +829,9 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 _ => {}
             }
 
-            cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id)?;
+            if !allow_multiple {
+                cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id)?;
+            }
 
             cplane.new_endpoint(
                 &endpoint_id,
@@ -835,6 +860,8 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             let remote_ext_config = sub_args.get_one::<String>("remote-ext-config");
 
+            let allow_multiple = sub_args.get_flag("allow-multiple");
+
             // If --safekeepers argument is given, use only the listed safekeeper nodes.
             let safekeepers =
                 if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
@@ -860,11 +887,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .cloned()
                 .unwrap_or_default();
 
-            cplane.check_conflicting_endpoints(
-                endpoint.mode,
-                endpoint.tenant_id,
-                endpoint.timeline_id,
-            )?;
+            if !allow_multiple {
+                cplane.check_conflicting_endpoints(
+                    endpoint.mode,
+                    endpoint.tenant_id,
+                    endpoint.timeline_id,
+                )?;
+            }
 
             let (pageservers, stripe_size) = if let Some(pageserver_id) = pageserver_id {
                 let conf = env.get_pageserver_conf(pageserver_id).unwrap();
@@ -1020,10 +1049,7 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
-            if let Err(e) = get_pageserver(env, subcommand_args)?
-                .start(&pageserver_config_overrides(subcommand_args))
-                .await
-            {
+            if let Err(e) = get_pageserver(env, subcommand_args)?.start().await {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1049,10 +1075,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
                 exit(1);
             }
 
-            if let Err(e) = pageserver
-                .start(&pageserver_config_overrides(subcommand_args))
-                .await
-            {
+            if let Err(e) = pageserver.start().await {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1179,7 +1202,7 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
-async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
+async fn handle_start_all(env: &local_env::LocalEnv) -> anyhow::Result<()> {
     // Endpoints are not started automatically
 
     broker::start_broker_process(env).await?;
@@ -1196,10 +1219,7 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
-        if let Err(e) = pageserver
-            .start(&pageserver_config_overrides(sub_match))
-            .await
-        {
+        if let Err(e) = pageserver.start().await {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1340,13 +1360,6 @@ fn cli() -> Command {
         .required(false)
         .value_name("stop-mode");
 
-    let pageserver_config_args = Arg::new("pageserver-config-override")
-        .long("pageserver-config-override")
-        .num_args(1)
-        .action(ArgAction::Append)
-        .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'config-override' CLI parameter docs for more")
-        .required(false);
-
     let remote_ext_config_args = Arg::new("remote-ext-config")
         .long("remote-ext-config")
         .num_args(1)
@@ -1380,9 +1393,7 @@ fn cli() -> Command {
     let num_pageservers_arg = Arg::new("num-pageservers")
         .value_parser(value_parser!(u16))
         .long("num-pageservers")
-        .help("How many pageservers to create (default 1)")
-        .required(false)
-        .default_value("1");
+        .help("How many pageservers to create (default 1)");
 
     let update_catalog = Arg::new("update-catalog")
         .value_parser(value_parser!(bool))
@@ -1396,20 +1407,25 @@ fn cli() -> Command {
         .help("If set, will create test user `user` and `neondb` database. Requires `update-catalog = true`")
         .required(false);
 
+    let allow_multiple = Arg::new("allow-multiple")
+        .help("Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but useful for tests.")
+        .long("allow-multiple")
+        .action(ArgAction::SetTrue)
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
         .subcommand(
             Command::new("init")
                 .about("Initialize a new Neon repository, preparing configs for services to start with")
-                .arg(pageserver_config_args.clone())
                 .arg(num_pageservers_arg.clone())
                 .arg(
                     Arg::new("config")
                         .long("config")
                         .required(false)
                         .value_parser(value_parser!(PathBuf))
-                        .value_name("config"),
+                        .value_name("config")
                 )
                 .arg(pg_version_arg.clone())
                 .arg(force_arg)
@@ -1480,6 +1496,8 @@ fn cli() -> Command {
             .subcommand(Command::new("config")
                 .arg(tenant_id_arg.clone())
                 .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false)))
+            .subcommand(Command::new("import").arg(tenant_id_arg.clone().required(true))
+                .about("Import a tenant that is present in remote storage, and create branches for its timelines"))
         )
         .subcommand(
             Command::new("pageserver")
@@ -1489,7 +1507,6 @@ fn cli() -> Command {
                 .subcommand(Command::new("status"))
                 .subcommand(Command::new("start")
                     .about("Start local pageserver")
-                    .arg(pageserver_config_args.clone())
                 )
                 .subcommand(Command::new("stop")
                     .about("Stop local pageserver")
@@ -1497,15 +1514,14 @@ fn cli() -> Command {
                 )
                 .subcommand(Command::new("restart")
                     .about("Restart local pageserver")
-                    .arg(pageserver_config_args.clone())
                 )
         )
         .subcommand(
             Command::new("storage_controller")
                 .arg_required_else_help(true)
                 .about("Manage storage_controller")
-                .subcommand(Command::new("start").about("Start local pageserver").arg(pageserver_config_args.clone()))
-                .subcommand(Command::new("stop").about("Stop local pageserver")
+                .subcommand(Command::new("start").about("Start storage controller"))
+                .subcommand(Command::new("stop").about("Stop storage controller")
                             .arg(stop_mode_arg.clone()))
         )
         .subcommand(
@@ -1551,6 +1567,7 @@ fn cli() -> Command {
                     .arg(pg_version_arg.clone())
                     .arg(hot_standby_arg.clone())
                     .arg(update_catalog)
+                    .arg(allow_multiple.clone())
                 )
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
@@ -1559,6 +1576,7 @@ fn cli() -> Command {
                     .arg(safekeepers_arg)
                     .arg(remote_ext_config_args)
                     .arg(create_test_user)
+                    .arg(allow_multiple.clone())
                 )
                 .subcommand(Command::new("reconfigure")
                             .about("Reconfigure the endpoint")
@@ -1610,7 +1628,6 @@ fn cli() -> Command {
         .subcommand(
             Command::new("start")
                 .about("Start page server and safekeepers")
-                .arg(pageserver_config_args)
         )
         .subcommand(
             Command::new("stop")

@@ -725,6 +725,18 @@ where
             self.state.inmem.commit_lsn
         );
 
+        // Before first WAL write initialize its segment. It makes first segment
+        // pg_waldump'able because stream from compute doesn't include its
+        // segment and page headers.
+        //
+        // If we fail before first WAL write flush this action would be
+        // repeated, that's ok because it is idempotent.
+        if self.wal_store.flush_lsn() == Lsn::INVALID {
+            self.wal_store
+                .initialize_first_segment(msg.start_streaming_at)
+                .await?;
+        }
+
         // TODO: cross check divergence point, check if msg.start_streaming_at corresponds to
         // intersection of our history and history from msg
 
@@ -1005,6 +1017,10 @@ mod tests {
     impl wal_storage::Storage for DummyWalStore {
         fn flush_lsn(&self) -> Lsn {
             self.lsn
+        }
+
+        async fn initialize_first_segment(&mut self, _init_lsn: Lsn) -> Result<()> {
+            Ok(())
         }
 
         async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {

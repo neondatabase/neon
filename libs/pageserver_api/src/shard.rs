@@ -5,6 +5,7 @@ use crate::{
     models::ShardParameters,
 };
 use hex::FromHex;
+use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
 use utils::id::TenantId;
 
@@ -96,7 +97,7 @@ impl ShardCount {
 
     /// The internal value of a ShardCount may be zero, which means "1 shard, but use
     /// legacy format for TenantShardId that excludes the shard suffix", also known
-    /// as `TenantShardId::unsharded`.
+    /// as [`TenantShardId::unsharded`].
     ///
     /// This method returns the actual number of shards, i.e. if our internal value is
     /// zero, we return 1 (unsharded tenants have 1 shard).
@@ -115,7 +116,9 @@ impl ShardCount {
         self.0
     }
 
-    ///
+    /// Whether the `ShardCount` is for an unsharded tenant, so uses one shard but
+    /// uses the legacy format for `TenantShardId`. See also the documentation for
+    /// [`Self::count`].
     pub fn is_unsharded(&self) -> bool {
         self.0 == 0
     }
@@ -450,7 +453,7 @@ impl ShardIdentity {
     /// An identity with number=0 count=0 is a "none" identity, which represents legacy
     /// tenants.  Modern single-shard tenants should not use this: they should
     /// have number=0 count=1.
-    pub fn unsharded() -> Self {
+    pub const fn unsharded() -> Self {
         Self {
             number: ShardNumber(0),
             count: ShardCount(0),
@@ -649,7 +652,13 @@ fn key_is_shard0(key: &Key) -> bool {
     // relation pages are distributed to shards other than shard zero. Everything else gets
     // stored on shard 0.  This guarantees that shard 0 can independently serve basebackup
     // requests, and any request other than those for particular blocks in relations.
-    !is_rel_block_key(key)
+    //
+    // The only exception to this rule is "initfork" data -- this relates to postgres's UNLOGGED table
+    // type. These are special relations, usually with only 0 or 1 blocks, and we store them on shard 0
+    // because they must be included in basebackups.
+    let is_initfork = key.field5 == INIT_FORKNUM;
+
+    !is_rel_block_key(key) || is_initfork
 }
 
 /// Provide the same result as the function in postgres `hashfn.h` with the same name

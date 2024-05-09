@@ -177,6 +177,67 @@ def test_sharding_split_unsharded(
     env.storage_controller.consistency_check()
 
 
+def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that after a split, we clean up parent layer data in the child shards via compaction.
+    """
+    TENANT_CONF = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": f"{128 * 1024}",
+        "compaction_threshold": "1",
+        "compaction_target_size": f"{128 * 1024}",
+        # no PITR horizon, we specify the horizon when we request on-demand GC
+        "pitr_interval": "3600s",
+        # disable background compaction and GC. We invoke it manually when we want it to happen.
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        # create image layers eagerly, so that GC can remove some layers
+        "image_creation_threshold": "1",
+        "image_layer_creation_check_threshold": "0",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Check that we created with an unsharded TenantShardId: this is the default,
+    # but check it in case we change the default in future
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 0)) is not None
+
+    workload = Workload(env, tenant_id, timeline_id, branch_name="main")
+    workload.init()
+    workload.write_rows(256)
+    workload.validate()
+    workload.stop()
+
+    # Split one shard into two
+    shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=2)
+
+    # Check we got the shard IDs we expected
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 2)) is not None
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 1, 2)) is not None
+
+    workload.validate()
+    workload.stop()
+
+    env.storage_controller.consistency_check()
+
+    # Cleanup part 1: while layers are still in PITR window, we should only drop layers that are fully redundant
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+
+        # Invoke compaction: this should drop any layers that don't overlap with the shard's key stripes
+        detail_before = ps.http_client().timeline_detail(shard, timeline_id)
+        ps.http_client().timeline_compact(shard, timeline_id)
+        detail_after = ps.http_client().timeline_detail(shard, timeline_id)
+
+        # Physical size should shrink because some layers have been dropped
+        assert detail_after["current_physical_size"] < detail_before["current_physical_size"]
+
+    # Compaction shouldn't make anything unreadable
+    workload.validate()
+
+
 def test_sharding_split_smoke(
     neon_env_builder: NeonEnvBuilder,
 ):
@@ -287,6 +348,11 @@ def test_sharding_split_smoke(
         == shard_count
     )
 
+    # Make secondary downloads slow: this exercises the storage controller logic for not migrating an attachment
+    # during post-split optimization until the secondary is ready
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints([("secondary-layer-download-sleep", "return(1000)")])
+
     env.storage_controller.tenant_shard_split(tenant_id, shard_count=split_shard_count)
 
     post_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
@@ -300,7 +366,7 @@ def test_sharding_split_smoke(
 
     # Enough background reconciliations should result in the shards being properly distributed.
     # Run this before the workload, because its LSN-waiting code presumes stable locations.
-    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.reconcile_until_idle(timeout_secs=60)
 
     workload.validate()
 
@@ -341,6 +407,10 @@ def test_sharding_split_smoke(
     )
     assert cancelled_reconciles is not None and int(cancelled_reconciles) == 0
     assert errored_reconciles is not None and int(errored_reconciles) == 0
+
+    # We should see that the migration of shards after the split waited for secondaries to warm up
+    # before happening
+    assert env.storage_controller.log_contains(".*Skipping.*because secondary isn't ready.*")
 
     env.storage_controller.consistency_check()
 
@@ -928,6 +998,8 @@ def test_sharding_split_failures(
             ".*Reconcile error: receive body: error sending request for url.*",
             # Node offline cases will fail inside reconciler when detaching secondaries
             ".*Reconcile error on shard.*: receive body: error sending request for url.*",
+            # Node offline cases may eventually cancel reconcilers when the heartbeater realizes nodes are offline
+            ".*Reconcile error.*Cancelled.*",
             # While parent shard's client is stopped during split, flush loop updating LSNs will emit this warning
             ".*Failed to schedule metadata upload after updating disk_consistent_lsn.*",
         ]
@@ -1069,6 +1141,17 @@ def test_sharding_split_failures(
         finish_split()
         assert_split_done()
 
+    if isinstance(failure, StorageControllerFailpoint) and "post-complete" in failure.failpoint:
+        # On a post-complete failure, the controller will recover the post-split state
+        # after restart, but it will have missed the optimization part of the split function
+        # where secondary downloads are kicked off.  This means that reconcile_until_idle
+        # will take a very long time if we wait for all optimizations to complete, because
+        # those optimizations will wait for secondary downloads.
+        #
+        # Avoid that by configuring the tenant into Essential scheduling mode, so that it will
+        # skip optimizations when we're exercising this particular failpoint.
+        env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Essential"})
+
     # Having completed the split, pump the background reconciles to ensure that
     # the scheduler reaches an idle state
     env.storage_controller.reconcile_until_idle(timeout_secs=30)
@@ -1201,3 +1284,45 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
         max_lsn = max(Lsn(info["last_record_lsn"]) for info in infos)
         diff = max_lsn - min_lsn
         assert diff < 2 * 1024 * 1024, f"LSN diff={diff}, expected diff < 2MB due to backpressure"
+
+
+def test_sharding_unlogged_relation(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that an unlogged relation is handled properly on a sharded tenant
+
+    Reproducer for https://github.com/neondatabase/neon/issues/7451
+    """
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    neon_env_builder.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_tenant(tenant_id, timeline_id, shard_count=8)
+
+    # We will create many tables to ensure it's overwhelmingly likely that at least one
+    # of them doesn't land on shard 0
+    table_names = [f"my_unlogged_{i}" for i in range(0, 16)]
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as ep:
+        for table_name in table_names:
+            ep.safe_psql(f"CREATE UNLOGGED TABLE {table_name} (id integer, value varchar(64));")
+            ep.safe_psql(f"INSERT INTO {table_name} VALUES (1, 'foo')")
+            result = ep.safe_psql(f"SELECT * from {table_name};")
+            assert result == [(1, "foo")]
+            ep.safe_psql(f"CREATE INDEX ON {table_name} USING btree (value);")
+
+        wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as ep:
+        for table_name in table_names:
+            # Check that table works: we can select and insert
+            result = ep.safe_psql(f"SELECT * from {table_name};")
+            assert result == []
+            ep.safe_psql(f"INSERT INTO {table_name} VALUES (2, 'bar');")
+            result = ep.safe_psql(f"SELECT * from {table_name};")
+            assert result == [(2, "bar")]
+
+        # Ensure that post-endpoint-restart modifications are ingested happily by pageserver
+        wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)

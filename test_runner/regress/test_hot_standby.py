@@ -3,7 +3,7 @@ import re
 import time
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, wait_replica_caughtup
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, tenant_get_shards, wait_replica_caughtup
 
 
 # Check for corrupted WAL messages which might otherwise go unnoticed if
@@ -102,3 +102,80 @@ def test_2_replicas_start(neon_simple_env: NeonEnv):
             ) as secondary2:
                 wait_replica_caughtup(primary, secondary1)
                 wait_replica_caughtup(primary, secondary2)
+
+
+# We had an issue that a standby server made GetPage requests with an
+# old LSN, based on the last-written LSN cache, to avoid waits in the
+# pageserver.  However, requesting a page with a very old LSN, such
+# that the GC horizon has already advanced past it, results in an
+# error from the pageserver:
+# "Bad request: tried to request a page version that was garbage collected"
+#
+# To avoid that, the compute<-> pageserver protocol was updated so
+# that that the standby now sends two LSNs, the old last-written LSN
+# and the current replay LSN.
+#
+# https://github.com/neondatabase/neon/issues/6211
+def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder):
+    tenant_conf = {
+        # set PITR interval to be small, so we can do GC
+        "pitr_interval": "0 s",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
+    timeline_id = env.initial_timeline
+    tenant_id = env.initial_tenant
+
+    with env.endpoints.create_start(
+        branch_name="main",
+        endpoint_id="primary",
+    ) as primary:
+        with env.endpoints.new_replica_start(
+            origin=primary,
+            endpoint_id="secondary",
+            # Protocol version 2 was introduced to fix the issue
+            # that this test exercises. With protocol version 1 it
+            # fails.
+            config_lines=["neon.protocol_version=2"],
+        ) as secondary:
+            p_cur = primary.connect().cursor()
+            p_cur.execute("CREATE EXTENSION neon_test_utils")
+            p_cur.execute("CREATE TABLE test (id int primary key) WITH (autovacuum_enabled=false)")
+            p_cur.execute("INSERT INTO test SELECT generate_series(1, 10000) AS g")
+
+            wait_replica_caughtup(primary, secondary)
+
+            s_cur = secondary.connect().cursor()
+
+            s_cur.execute("SELECT 1 WHERE pg_is_in_recovery()")
+            res = s_cur.fetchone()
+            assert res is not None
+
+            s_cur.execute("SELECT COUNT(*) FROM test")
+            res = s_cur.fetchone()
+            assert res[0] == 10000
+
+            # Clear the cache in the standby, so that when we
+            # re-execute the query, it will make GetPage
+            # requests. This does not clear the last-written LSN cache
+            # so we still remember the LSNs of the pages.
+            s_cur.execute("SELECT clear_buffer_cache()")
+
+            # Do other stuff on the primary, to advance the WAL
+            p_cur.execute("CREATE TABLE test2 AS SELECT generate_series(1, 1000000) AS g")
+
+            # Run GC. The PITR interval is very small, so this advances the GC cutoff LSN
+            # very close to the primary's current insert LSN.
+            shards = tenant_get_shards(env, tenant_id, None)
+            for tenant_shard_id, pageserver in shards:
+                client = pageserver.http_client()
+                client.timeline_checkpoint(tenant_shard_id, timeline_id)
+                client.timeline_compact(tenant_shard_id, timeline_id)
+                client.timeline_gc(tenant_shard_id, timeline_id, 0)
+
+            # Re-execute the query. The GetPage requests that this
+            # generates use old not_modified_since LSNs, older than
+            # the GC cutoff, but new request LSNs. (In protocol
+            # version 1 there was only one LSN, and this failed.)
+            s_cur.execute("SELECT COUNT(*) FROM test")
+            res = s_cur.fetchone()
+            assert res[0] == 10000

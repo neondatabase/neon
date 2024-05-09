@@ -226,17 +226,24 @@ def test_forward_compatibility(
     )
 
     try:
+        # Previous version neon_local and pageserver are not aware
+        # of the new config.
+        # TODO: remove these once the previous version of neon local supports them
+        neon_env_builder.pageserver_get_impl = None
+        neon_env_builder.pageserver_validate_vectored_get = None
+
         neon_env_builder.num_safekeepers = 3
-        neon_local_binpath = neon_env_builder.neon_binpath
+
+        # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
+        # But always use the current version's neon_local binary.
+        # This is because we want to test the compatibility of the data format, not the compatibility of the neon_local CLI.
+        neon_env_builder.neon_binpath = compatibility_neon_bin
+        neon_env_builder.pg_distrib_dir = compatibility_postgres_distrib_dir
+        neon_env_builder.neon_local_binpath = neon_env_builder.neon_local_binpath
+
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
-            neon_binpath=compatibility_neon_bin,
-            pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
-
-        # Use current neon_local even though we're using old binaries for
-        # everything else: our test code is written for latest CLI args.
-        env.neon_local_binpath = neon_local_binpath
 
         neon_env_builder.start()
 

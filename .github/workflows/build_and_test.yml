@@ -236,27 +236,6 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Check Postgres submodules revision
-        shell: bash -euo pipefail {0}
-        run: |
-          # This is a temporary solution to ensure that the Postgres submodules revision is correct (i.e. the updated intentionally).
-          # Eventually it will be replaced by a regression test https://github.com/neondatabase/neon/pull/4603
-
-          FAILED=false
-          for postgres in postgres-v14 postgres-v15 postgres-v16; do
-            expected=$(cat vendor/revisions.json | jq --raw-output '."'"${postgres}"'"')
-            actual=$(git rev-parse "HEAD:vendor/${postgres}")
-            if [ "${expected}" != "${actual}" ]; then
-              echo >&2 "Expected ${postgres} rev to be at '${expected}', but it is at '${actual}'"
-              FAILED=true
-            fi
-          done
-
-          if [ "${FAILED}" = "true" ]; then
-            echo >&2 "Please update vendor/revisions.json if these changes are intentional"
-            exit 1
-          fi
-
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
@@ -477,6 +456,8 @@ jobs:
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
           PAGESERVER_GET_VECTORED_IMPL: vectored
+          PAGESERVER_GET_IMPL: vectored
+          PAGESERVER_VALIDATE_VEC_GET: true
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
@@ -556,6 +537,9 @@ jobs:
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          PAGESERVER_GET_VECTORED_IMPL: vectored
+          PAGESERVER_GET_IMPL: vectored
+          PAGESERVER_VALIDATE_VEC_GET: false
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
@@ -735,7 +719,7 @@ jobs:
         run: |
           mkdir -p .docker-custom
           echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v2
 
       - uses: docker/login-action@v3
         with:
@@ -792,7 +776,7 @@ jobs:
         run: |
           mkdir -p .docker-custom
           echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v2
         with:
           # Disable parallelism for docker buildkit.
           # As we already build everything with `make -j$(nproc)`, running it in additional level of parallelisam blows up the Runner.
@@ -865,7 +849,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.23.2
+      VM_BUILDER_VERSION: v0.28.1
 
     steps:
       - name: Checkout

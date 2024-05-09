@@ -27,6 +27,7 @@ use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
 use proxy::redis::notifications;
+use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
 
@@ -118,8 +119,11 @@ struct ProxyCliArgs {
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     wake_compute_cache: String,
     /// lock for `wake_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
-    #[clap(long, default_value = config::WakeComputeLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
+    #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
     wake_compute_lock: String,
+    /// lock for `connect_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
+    #[clap(long, default_value = config::ConcurrencyLockOptions::DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK)]
+    connect_compute_lock: String,
     /// Allow self-signed certificates for compute nodes (for testing)
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     allow_self_signed_compute: bool,
@@ -200,6 +204,12 @@ struct ProxyCliArgs {
     /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
     #[clap(long, default_value = "4194304")]
     metric_backup_collection_chunk_size: usize,
+    /// Whether to retry the connection to the compute node
+    #[clap(long, default_value = config::RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)]
+    connect_to_compute_retry: String,
+    /// Whether to retry the wake_compute request
+    #[clap(long, default_value = config::RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)]
+    wake_compute_retry: String,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -234,6 +244,12 @@ struct SqlOverHttpArgs {
     /// increase memory used by the pool
     #[clap(long, default_value_t = 128)]
     sql_over_http_pool_shards: usize,
+
+    #[clap(long, default_value_t = 10000)]
+    sql_over_http_client_conn_threshold: u64,
+
+    #[clap(long, default_value_t = 64)]
+    sql_over_http_cancel_set_shards: usize,
 }
 
 #[tokio::main]
@@ -397,27 +413,43 @@ async fn main() -> anyhow::Result<()> {
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
         client_tasks.spawn(usage_metrics::task_backup(
             &metrics_config.backup_metric_collection_config,
-            cancellation_token,
+            cancellation_token.clone(),
         ));
     }
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
-            if let Some(redis_notifications_client) = redis_notifications_client {
-                let cache = api.caches.project_info.clone();
-                maintenance_tasks.spawn(notifications::task_main(
-                    redis_notifications_client,
-                    cache.clone(),
-                    cancel_map.clone(),
-                    args.region.clone(),
-                ));
-                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+            match (redis_notifications_client, regional_redis_client.clone()) {
+                (None, None) => {}
+                (client1, client2) => {
+                    let cache = api.caches.project_info.clone();
+                    if let Some(client) = client1 {
+                        maintenance_tasks.spawn(notifications::task_main(
+                            client,
+                            cache.clone(),
+                            cancel_map.clone(),
+                            args.region.clone(),
+                        ));
+                    }
+                    if let Some(client) = client2 {
+                        maintenance_tasks.spawn(notifications::task_main(
+                            client,
+                            cache.clone(),
+                            cancel_map.clone(),
+                            args.region.clone(),
+                        ));
+                    }
+                    maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+                }
             }
             if let Some(regional_redis_client) = regional_redis_client {
                 let cache = api.caches.endpoints_cache.clone();
                 let con = regional_redis_client;
                 let span = tracing::info_span!("endpoints_cache");
-                maintenance_tasks.spawn(async move { cache.do_read(con).await }.instrument(span));
+                maintenance_tasks.spawn(
+                    async move { cache.do_read(con, cancellation_token.clone()).await }
+                        .instrument(span),
+                );
             }
         }
     }
@@ -507,24 +539,21 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 endpoint_cache_config,
             )));
 
-            let config::WakeComputeLockOptions {
+            let config::ConcurrencyLockOptions {
                 shards,
                 permits,
                 epoch,
                 timeout,
             } = args.wake_compute_lock.parse()?;
             info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
-            let locks = Box::leak(Box::new(
-                console::locks::ApiLocks::new(
-                    "wake_compute_lock",
-                    permits,
-                    shards,
-                    timeout,
-                    epoch,
-                    &Metrics::get().wake_compute_lock,
-                )
-                .unwrap(),
-            ));
+            let locks = Box::leak(Box::new(console::locks::ApiLocks::new(
+                "wake_compute_lock",
+                permits,
+                shards,
+                timeout,
+                epoch,
+                &Metrics::get().wake_compute_lock,
+            )?));
             tokio::spawn(locks.garbage_collect_worker());
 
             let url = args.auth_endpoint.parse()?;
@@ -550,6 +579,23 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             auth::BackendType::Link(MaybeOwned::Owned(url), ())
         }
     };
+
+    let config::ConcurrencyLockOptions {
+        shards,
+        permits,
+        epoch,
+        timeout,
+    } = args.connect_compute_lock.parse()?;
+    info!(permits, shards, ?epoch, "Using NodeLocks (connect_compute)");
+    let connect_compute_locks = console::locks::ApiLocks::new(
+        "connect_compute_lock",
+        permits,
+        shards,
+        timeout,
+        epoch,
+        &Metrics::get().proxy.connect_compute_lock,
+    )?;
+
     let http_config = HttpConfig {
         request_timeout: args.sql_over_http.sql_over_http_timeout,
         pool_options: GlobalConnPoolOptions {
@@ -560,6 +606,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             opt_in: args.sql_over_http.sql_over_http_pool_opt_in,
             max_total_conns: args.sql_over_http.sql_over_http_pool_max_total_conns,
         },
+        cancel_set: CancelSet::new(args.sql_over_http.sql_over_http_cancel_set_shards),
+        client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
     };
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
@@ -584,7 +632,14 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
         aws_region: args.aws_region.clone(),
+        wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
+        connect_compute_locks,
+        connect_to_compute_retry_config: config::RetryConfig::parse(
+            &args.connect_to_compute_retry,
+        )?,
     }));
+
+    tokio::spawn(config.connect_compute_locks.garbage_collect_worker());
 
     Ok(config)
 }

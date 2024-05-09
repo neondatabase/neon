@@ -33,7 +33,6 @@ impl Value {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, PartialEq)]
 pub(crate) enum InvalidInput {
     TooShortValue,
@@ -42,10 +41,8 @@ pub(crate) enum InvalidInput {
 
 /// We could have a ValueRef where everything is `serde(borrow)`. Before implementing that, lets
 /// use this type for querying if a slice looks some particular way.
-#[cfg(test)]
 pub(crate) struct ValueBytes;
 
-#[cfg(test)]
 impl ValueBytes {
     pub(crate) fn will_init(raw: &[u8]) -> Result<bool, InvalidInput> {
         if raw.len() < 12 {

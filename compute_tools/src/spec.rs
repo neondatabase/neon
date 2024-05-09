@@ -490,7 +490,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 "rename_db" => {
                     let new_name = op.new_name.as_ref().unwrap();
 
-                    if existing_dbs.get(&op.name).is_some() {
+                    if existing_dbs.contains_key(&op.name) {
                         let query: String = format!(
                             "ALTER DATABASE {} RENAME TO {}",
                             op.name.pg_quote(),

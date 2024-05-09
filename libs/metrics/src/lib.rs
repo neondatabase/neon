@@ -256,7 +256,16 @@ fn update_rusage_metrics() {
     DISK_IO_BYTES
         .with_label_values(&["write"])
         .set(rusage_stats.ru_oublock * BYTES_IN_BLOCK);
-    MAXRSS_KB.set(rusage_stats.ru_maxrss);
+
+    // On macOS, the unit of maxrss is bytes; on Linux, it's kilobytes. https://stackoverflow.com/a/59915669
+    #[cfg(target_os = "macos")]
+    {
+        MAXRSS_KB.set(rusage_stats.ru_maxrss / 1024);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        MAXRSS_KB.set(rusage_stats.ru_maxrss);
+    }
 }
 
 fn get_rusage_stats() -> libc::rusage {
@@ -470,6 +479,15 @@ impl<A: CounterPairAssoc> CounterPairVec<A> {
     ) -> Option<MeasuredCounterPairState> {
         let id = self.vec.with_labels(labels);
         self.vec.remove_metric(id)
+    }
+
+    pub fn sample(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) -> u64 {
+        let id = self.vec.with_labels(labels);
+        let metric = self.vec.get_metric(id);
+
+        let inc = metric.inc.count.load(std::sync::atomic::Ordering::Relaxed);
+        let dec = metric.dec.count.load(std::sync::atomic::Ordering::Relaxed);
+        inc.saturating_sub(dec)
     }
 }
 

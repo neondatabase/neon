@@ -4,21 +4,21 @@
 //!
 //!   .neon/
 //!
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use std::io;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
-use std::process::Command;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
 use pageserver_api::models::{
-    self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
+    self, AuxFilePolicy, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo,
+    TimelineInfo,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -30,7 +30,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::local_env::PageServerConf;
+use crate::local_env::{NeonLocalInitPageserverConf, PageServerConf};
 use crate::{background_process, local_env::LocalEnv};
 
 /// Directory within .neon which will be used by default for LocalFs remote storage.
@@ -74,57 +74,23 @@ impl PageServerNode {
         }
     }
 
-    /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
-    ///
-    /// These all end up on the command line of the `pageserver` binary.
-    fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
+    fn pageserver_init_make_toml(
+        &self,
+        conf: NeonLocalInitPageserverConf,
+    ) -> anyhow::Result<toml_edit::Document> {
+        assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
+
+        // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml (PR #7656)
+
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let PageServerConf {
-            id,
-            listen_pg_addr,
-            listen_http_addr,
-            pg_auth_type,
-            http_auth_type,
-            virtual_file_io_engine,
-            get_vectored_impl,
-        } = &self.conf;
-
-        let id = format!("id={}", id);
-
-        let http_auth_type_param = format!("http_auth_type='{}'", http_auth_type);
-        let listen_http_addr_param = format!("listen_http_addr='{}'", listen_http_addr);
-
-        let pg_auth_type_param = format!("pg_auth_type='{}'", pg_auth_type);
-        let listen_pg_addr_param = format!("listen_pg_addr='{}'", listen_pg_addr);
-        let virtual_file_io_engine = if let Some(virtual_file_io_engine) = virtual_file_io_engine {
-            format!("virtual_file_io_engine='{virtual_file_io_engine}'")
-        } else {
-            String::new()
-        };
-        let get_vectored_impl = if let Some(get_vectored_impl) = get_vectored_impl {
-            format!("get_vectored_impl='{get_vectored_impl}'")
-        } else {
-            String::new()
-        };
-
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
-        let mut overrides = vec![
-            id,
-            pg_distrib_dir_param,
-            http_auth_type_param,
-            pg_auth_type_param,
-            listen_http_addr_param,
-            listen_pg_addr_param,
-            broker_endpoint_param,
-            virtual_file_io_engine,
-            get_vectored_impl,
-        ];
+        let mut overrides = vec![pg_distrib_dir_param, broker_endpoint_param];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
             overrides.push(format!(
@@ -134,7 +100,7 @@ impl PageServerNode {
 
             // Storage controller uses the same auth as pageserver: if JWT is enabled
             // for us, we will also need it to talk to them.
-            if matches!(http_auth_type, AuthType::NeonJWT) {
+            if matches!(conf.http_auth_type, AuthType::NeonJWT) {
                 let jwt_token = self
                     .env
                     .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
@@ -143,31 +109,40 @@ impl PageServerNode {
             }
         }
 
-        if !cli_overrides
-            .iter()
-            .any(|c| c.starts_with("remote_storage"))
-        {
+        if !conf.other.contains_key("remote_storage") {
             overrides.push(format!(
                 "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
             ));
         }
 
-        if *http_auth_type != AuthType::Trust || *pg_auth_type != AuthType::Trust {
+        if conf.http_auth_type != AuthType::Trust || conf.pg_auth_type != AuthType::Trust {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
         }
 
         // Apply the user-provided overrides
-        overrides.extend(cli_overrides.iter().map(|&c| c.to_owned()));
+        overrides.push(
+            toml_edit::ser::to_string_pretty(&conf)
+                .expect("we deserialized this from toml earlier"),
+        );
 
-        overrides
+        // Turn `overrides` into a toml document.
+        // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
+        let mut config_toml = toml_edit::Document::new();
+        for fragment_str in overrides {
+            let fragment = toml_edit::Document::from_str(&fragment_str)
+                .expect("all fragments in `overrides` are valid toml documents, this function controls that");
+            for (key, item) in fragment.iter() {
+                config_toml.insert(key, item.clone());
+            }
+        }
+        Ok(config_toml)
     }
 
     /// Initializes a pageserver node by creating its config with the overrides provided.
-    pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
-        // First, run `pageserver --init` and wait for it to write a config into FS and exit.
-        self.pageserver_init(config_overrides)
+    pub fn initialize(&self, conf: NeonLocalInitPageserverConf) -> anyhow::Result<()> {
+        self.pageserver_init(conf)
             .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
     }
 
@@ -183,11 +158,11 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
-        self.start_node(config_overrides, false).await
+    pub async fn start(&self) -> anyhow::Result<()> {
+        self.start_node().await
     }
 
-    fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
+    fn pageserver_init(&self, conf: NeonLocalInitPageserverConf) -> anyhow::Result<()> {
         let datadir = self.repo_path();
         let node_id = self.conf.id;
         println!(
@@ -198,29 +173,20 @@ impl PageServerNode {
         );
         io::stdout().flush()?;
 
-        if !datadir.exists() {
-            std::fs::create_dir(&datadir)?;
-        }
-
-        let datadir_path_str = datadir.to_str().with_context(|| {
-            format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
-        })?;
-        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
-        args.push(Cow::Borrowed("--init"));
-
-        let init_output = Command::new(self.env.pageserver_bin())
-            .args(args.iter().map(Cow::as_ref))
-            .envs(self.pageserver_env_variables()?)
-            .output()
-            .with_context(|| format!("Failed to run pageserver init for node {node_id}"))?;
-
-        anyhow::ensure!(
-            init_output.status.success(),
-            "Pageserver init for node {} did not finish successfully, stdout: {}, stderr: {}",
-            node_id,
-            String::from_utf8_lossy(&init_output.stdout),
-            String::from_utf8_lossy(&init_output.stderr),
-        );
+        let config = self
+            .pageserver_init_make_toml(conf)
+            .context("make pageserver toml")?;
+        let config_file_path = datadir.join("pageserver.toml");
+        let mut config_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&config_file_path)
+            .with_context(|| format!("open pageserver toml for write: {config_file_path:?}"))?;
+        config_file
+            .write_all(config.to_string().as_bytes())
+            .context("write pageserver toml")?;
+        drop(config_file);
+        // TODO: invoke a TBD config-check command to validate that pageserver will start with the written config
 
         // Write metadata file, used by pageserver on startup to register itself with
         // the storage controller
@@ -234,12 +200,13 @@ impl PageServerNode {
         // situation: the metadata is written by some other script.
         std::fs::write(
             metadata_path,
-            serde_json::to_vec(&serde_json::json!({
-                "host": "localhost",
-                "port": self.pg_connection_config.port(),
-                "http_host": "localhost",
-                "http_port": http_port,
-            }))
+            serde_json::to_vec(&pageserver_api::config::NodeMetadata {
+                postgres_host: "localhost".to_string(),
+                postgres_port: self.pg_connection_config.port(),
+                http_host: "localhost".to_string(),
+                http_port,
+                other: HashMap::new(),
+            })
             .unwrap(),
         )
         .expect("Failed to write metadata file");
@@ -247,11 +214,7 @@ impl PageServerNode {
         Ok(())
     }
 
-    async fn start_node(
-        &self,
-        config_overrides: &[&str],
-        update_config: bool,
-    ) -> anyhow::Result<()> {
+    async fn start_node(&self) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
@@ -268,15 +231,12 @@ impl PageServerNode {
                 self.conf.id, datadir,
             )
         })?;
-        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
-        if update_config {
-            args.push(Cow::Borrowed("--update-config"));
-        }
+        let args = vec!["-D", datadir_path_str];
         background_process::start_process(
             "pageserver",
             &datadir,
             &self.env.pageserver_bin(),
-            args.iter().map(Cow::as_ref),
+            args,
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
@@ -291,22 +251,6 @@ impl PageServerNode {
         .await?;
 
         Ok(())
-    }
-
-    fn pageserver_basic_args<'a>(
-        &self,
-        config_overrides: &'a [&'a str],
-        datadir_path_str: &'a str,
-    ) -> Vec<Cow<'a, str>> {
-        let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
-
-        let overrides = self.neon_local_overrides(config_overrides);
-        for config_override in overrides {
-            args.push(Cow::Borrowed("-c"));
-            args.push(Cow::Owned(config_override));
-        }
-
-        args
     }
 
     fn pageserver_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
@@ -434,6 +378,11 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
+            switch_aux_file_policy: settings
+                .remove("switch_aux_file_policy")
+                .map(|x| x.parse::<AuxFilePolicy>())
+                .transpose()
+                .context("Failed to parse 'switch_aux_file_policy'")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -552,6 +501,11 @@ impl PageServerNode {
                     .map(serde_json::from_str)
                     .transpose()
                     .context("parse `timeline_get_throttle` from json")?,
+                switch_aux_file_policy: settings
+                    .remove("switch_aux_file_policy")
+                    .map(|x| x.parse::<AuxFilePolicy>())
+                    .transpose()
+                    .context("Failed to parse 'switch_aux_file_policy'")?,
             }
         };
 

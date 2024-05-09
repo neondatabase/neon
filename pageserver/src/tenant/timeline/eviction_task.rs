@@ -188,24 +188,10 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
-        let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
-            BackgroundLoopKind::Eviction,
-            ctx,
-        );
+        let permit = self.acquire_imitation_permit(cancel, ctx).await?;
 
-        let _permit = tokio::select! {
-            permit = acquire_permit => permit,
-            _ = cancel.cancelled() => return ControlFlow::Break(()),
-            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
-        };
-
-        match self
-            .imitate_layer_accesses(tenant, p, cancel, gate, ctx)
-            .await
-        {
-            ControlFlow::Break(()) => return ControlFlow::Break(()),
-            ControlFlow::Continue(()) => (),
-        }
+        self.imitate_layer_accesses(tenant, p, cancel, gate, permit, ctx)
+            .await?;
 
         #[derive(Debug, Default)]
         struct EvictionStats {
@@ -330,19 +316,27 @@ impl Timeline {
         gate: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
+        let permit = self.acquire_imitation_permit(cancel, ctx).await?;
+
+        self.imitate_layer_accesses(tenant, p, cancel, gate, permit, ctx)
+            .await
+    }
+
+    async fn acquire_imitation_permit(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> ControlFlow<(), tokio::sync::SemaphorePermit<'static>> {
         let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
             BackgroundLoopKind::Eviction,
             ctx,
         );
 
-        let _permit = tokio::select! {
-            permit = acquire_permit => permit,
-            _ = cancel.cancelled() => return ControlFlow::Break(()),
-            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
-        };
-
-        self.imitate_layer_accesses(tenant, p, cancel, gate, ctx)
-            .await
+        tokio::select! {
+            permit = acquire_permit => ControlFlow::Continue(permit),
+            _ = cancel.cancelled() => ControlFlow::Break(()),
+            _ = self.cancel.cancelled() => ControlFlow::Break(()),
+        }
     }
 
     /// If we evict layers but keep cached values derived from those layers, then
@@ -376,6 +370,7 @@ impl Timeline {
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
+        permit: tokio::sync::SemaphorePermit<'static>,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_shard_zero() {
@@ -408,7 +403,28 @@ impl Timeline {
         // Make one of the tenant's timelines draw the short straw and run the calculation.
         // The others wait until the calculation is done so that they take into account the
         // imitated accesses that the winner made.
-        let mut state = tenant.eviction_task_tenant_state.lock().await;
+        let (mut state, _permit) = {
+            if let Ok(locked) = tenant.eviction_task_tenant_state.try_lock() {
+                (locked, permit)
+            } else {
+                // we might need to wait for a long time here in case of pathological synthetic
+                // size calculation performance
+                drop(permit);
+                let locked = tokio::select! {
+                    locked = tenant.eviction_task_tenant_state.lock() => locked,
+                    _ = self.cancel.cancelled() => {
+                        return ControlFlow::Break(())
+                    },
+                    _ = cancel.cancelled() => {
+                        return ControlFlow::Break(())
+                    }
+                };
+                // then reacquire -- this will be bad if there is a lot of traffic, but because we
+                // released the permit, the overall latency will be much better.
+                let permit = self.acquire_imitation_permit(cancel, ctx).await?;
+                (locked, permit)
+            }
+        };
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {

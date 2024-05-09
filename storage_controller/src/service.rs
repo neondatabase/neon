@@ -8,10 +8,14 @@ use std::{
 };
 
 use crate::{
-    id_lock_map::IdLockMap,
+    compute_hook::NotifyError,
+    id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, WrappedWriteGuard},
     persistence::{AbortShardSplitStatus, TenantFilter},
-    reconciler::ReconcileError,
+    reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{ScheduleContext, ScheduleMode},
+    tenant_shard::{
+        MigrateAttachment, ReconcileNeeded, ScheduleOptimization, ScheduleOptimizationAction,
+    },
 };
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -19,7 +23,6 @@ use control_plane::storage_controller::{
 };
 use diesel::result::DatabaseErrorKind;
 use futures::{stream::FuturesUnordered, StreamExt};
-use hyper::StatusCode;
 use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
@@ -31,6 +34,8 @@ use pageserver_api::{
     },
     models::{SecondaryProgress, TenantConfigRequest},
 };
+use reqwest::StatusCode;
+use tracing::instrument;
 
 use crate::pageserver_client::PageserverClient;
 use pageserver_api::{
@@ -48,11 +53,11 @@ use pageserver_api::{
     },
 };
 use pageserver_client::mgmt_api;
-use tokio::sync::OwnedRwLockWriteGuard;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
 use utils::{
     completion::Barrier,
+    failpoint_support,
     generation::Generation,
     http::error::ApiError,
     id::{NodeId, TenantId, TimelineId},
@@ -60,7 +65,7 @@ use utils::{
 };
 
 use crate::{
-    compute_hook::{self, ComputeHook},
+    compute_hook::ComputeHook,
     heartbeater::{Heartbeater, PageserverState},
     node::{AvailabilityTransition, Node},
     persistence::{split_state::SplitState, DatabaseError, Persistence, TenantShardPersistence},
@@ -77,7 +82,7 @@ const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // For operations that might be slow, like migrating a tenant with
 // some data in it.
-const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // If we receive a call using Secondary mode initially, it will omit generation.  We will initialize
 // tenant shards into this generation, and as long as it remains in this generation, we will accept
@@ -88,7 +93,38 @@ const INITIAL_GENERATION: Generation = Generation::new(0);
 /// up on unresponsive pageservers and proceed.
 pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
+/// How long a node may be unresponsive to heartbeats before we declare it offline.
+/// This must be long enough to cover node restarts as well as normal operations: in future
+/// it should be separated into distinct timeouts for startup vs. normal operation
+/// (`<https://github.com/neondatabase/neon/issues/7552>`)
+pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);
+
+#[derive(Clone, strum_macros::Display)]
+enum TenantOperations {
+    Create,
+    LocationConfig,
+    ConfigSet,
+    TimeTravelRemoteStorage,
+    Delete,
+    UpdatePolicy,
+    ShardSplit,
+    SecondaryDownload,
+    TimelineCreate,
+    TimelineDelete,
+}
+
+#[derive(Clone, strum_macros::Display)]
+enum NodeOperations {
+    Register,
+    Configure,
+}
+
+pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
+
+// Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
+// This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
+// than they're being pushed onto the queue.
+const MAX_DELAYED_RECONCILES: usize = 10000;
 
 // Top level state available to all HTTP handlers
 struct ServiceState {
@@ -97,6 +133,45 @@ struct ServiceState {
     nodes: Arc<HashMap<NodeId, Node>>,
 
     scheduler: Scheduler,
+
+    /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
+    delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
+}
+
+/// Transform an error from a pageserver into an error to return to callers of a storage
+/// controller API.
+fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
+    match e {
+        mgmt_api::Error::ReceiveErrorBody(str) => {
+            // Presume errors receiving body are connectivity/availability issues
+            ApiError::ResourceUnavailable(
+                format!("{node} error receiving error body: {str}").into(),
+            )
+        }
+        mgmt_api::Error::ReceiveBody(str) => {
+            // Presume errors receiving body are connectivity/availability issues
+            ApiError::ResourceUnavailable(format!("{node} error receiving body: {str}").into())
+        }
+        mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, msg) => {
+            ApiError::NotFound(anyhow::anyhow!(format!("{node}: {msg}")).into())
+        }
+        mgmt_api::Error::ApiError(StatusCode::SERVICE_UNAVAILABLE, msg) => {
+            ApiError::ResourceUnavailable(format!("{node}: {msg}").into())
+        }
+        mgmt_api::Error::ApiError(status @ StatusCode::UNAUTHORIZED, msg)
+        | mgmt_api::Error::ApiError(status @ StatusCode::FORBIDDEN, msg) => {
+            // Auth errors talking to a pageserver are not auth errors for the caller: they are
+            // internal server errors, showing that something is wrong with the pageserver or
+            // storage controller's auth configuration.
+            ApiError::InternalServerError(anyhow::anyhow!("{node} {status}: {msg}"))
+        }
+        mgmt_api::Error::ApiError(status, msg) => {
+            // Presume general case of pageserver API errors is that we tried to do something
+            // that can't be done right now.
+            ApiError::Conflict(format!("{node} {status}: {status} {msg}"))
+        }
+        mgmt_api::Error::Cancelled => ApiError::ShuttingDown,
+    }
 }
 
 impl ServiceState {
@@ -104,11 +179,13 @@ impl ServiceState {
         nodes: HashMap<NodeId, Node>,
         tenants: BTreeMap<TenantShardId, TenantShard>,
         scheduler: Scheduler,
+        delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
     ) -> Self {
         Self {
             tenants,
             nodes: Arc::new(nodes),
             scheduler,
+            delayed_reconcile_rx,
         }
     }
 
@@ -142,6 +219,9 @@ pub struct Config {
     /// considered active. Once the grace period elapses, the next heartbeat failure will
     /// mark the pagseserver offline.
     pub max_unavailable_interval: Duration,
+
+    /// How many Reconcilers may be spawned concurrently
+    pub reconciler_concurrency: usize,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -174,11 +254,22 @@ pub struct Service {
     // Locking on a tenant granularity (covers all shards in the tenant):
     // - Take exclusively for rare operations that mutate the tenant's persistent state (e.g. create/delete/split)
     // - Take in shared mode for operations that need the set of shards to stay the same to complete reliably (e.g. timeline CRUD)
-    tenant_op_locks: IdLockMap<TenantId>,
+    tenant_op_locks: IdLockMap<TenantId, TenantOperations>,
 
     // Locking for node-mutating operations: take exclusively for operations that modify the node's persistent state, or
     // that transition it to/from Active.
-    node_op_locks: IdLockMap<NodeId>,
+    node_op_locks: IdLockMap<NodeId, NodeOperations>,
+
+    // Limit how many Reconcilers we will spawn concurrently
+    reconciler_concurrency: Arc<tokio::sync::Semaphore>,
+
+    /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
+    /// Send into this queue to promptly attempt to reconcile this shard next time units are available.
+    ///
+    /// Note that this state logically lives inside ServiceInner, but carrying Sender here makes the code simpler
+    /// by avoiding needing a &mut ref to something inside the ServiceInner.  This could be optimized to
+    /// use a VecDeque instead of a channel to reduce synchronization overhead, at the cost of some code complexity.
+    delayed_reconcile_tx: tokio::sync::mpsc::Sender<TenantShardId>,
 
     // Process shutdown will fire this token
     cancel: CancellationToken,
@@ -239,7 +330,7 @@ struct TenantShardSplitAbort {
     new_shard_count: ShardCount,
     new_stripe_size: Option<ShardStripeSize>,
     /// Until this abort op is complete, no other operations may be done on the tenant
-    _tenant_lock: tokio::sync::OwnedRwLockWriteGuard<()>,
+    _tenant_lock: WrappedWriteGuard<TenantOperations>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -269,7 +360,12 @@ impl Service {
     /// Called once on startup, this function attempts to contact all pageservers to build an up-to-date
     /// view of the world, and determine which pageservers are responsive.
     #[instrument(skip_all)]
-    async fn startup_reconcile(self: &Arc<Service>) {
+    async fn startup_reconcile(
+        self: &Arc<Service>,
+        bg_compute_notify_result_tx: tokio::sync::mpsc::Sender<
+            Result<(), (TenantShardId, NotifyError)>,
+        >,
+    ) {
         // For all tenant shards, a vector of observed states on nodes (where None means
         // indeterminate, same as in [`ObservedStateLocation`])
         let mut observed: HashMap<TenantShardId, Vec<(NodeId, Option<LocationConfig>)>> =
@@ -286,10 +382,6 @@ impl Service {
         let start_at = Instant::now();
         let node_scan_deadline = start_at
             .checked_add(STARTUP_RECONCILE_TIMEOUT / 2)
-            .expect("Reconcile timeout is a modest constant");
-
-        let compute_notify_deadline = start_at
-            .checked_add((STARTUP_RECONCILE_TIMEOUT / 4) * 3)
             .expect("Reconcile timeout is a modest constant");
 
         // Accumulate a list of any tenant locations that ought to be detached
@@ -317,6 +409,7 @@ impl Service {
         let mut compute_notifications = Vec::new();
 
         // Populate intent and observed states for all tenants, based on reported state on pageservers
+        tracing::info!("Populating tenant shards' states from initial pageserver scan...");
         let shard_count = {
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, scheduler) = locked.parts_mut();
@@ -383,28 +476,27 @@ impl Service {
         // Emit compute hook notifications for all tenants which are already stably attached.  Other tenants
         // will emit compute hook notifications when they reconcile.
         //
-        // Ordering: we must complete these notification attempts before doing any other reconciliation for the
-        // tenants named here, because otherwise our calls to notify() might race with more recent values
-        // generated by reconciliation.
-        let notify_failures = self
-            .compute_notify_many(compute_notifications, compute_notify_deadline)
-            .await;
-
-        // Compute notify is fallible.  If it fails here, do not delay overall startup: set the
-        // flag on these shards that they have a pending notification.
-        // Update tenant state for any that failed to do their initial compute notify, so that they'll retry later.
-        {
-            let mut locked = self.inner.write().unwrap();
-            for tenant_shard_id in notify_failures.into_iter() {
-                if let Some(shard) = locked.tenants.get_mut(&tenant_shard_id) {
-                    shard.pending_compute_notification = true;
-                }
-            }
-        }
+        // Ordering: our calls to notify_background synchronously establish a relative order for these notifications vs. any later
+        // calls into the ComputeHook for the same tenant: we can leave these to run to completion in the background and any later
+        // calls will be correctly ordered wrt these.
+        //
+        // Concurrency: we call notify_background for all tenants, which will create O(N) tokio tasks, but almost all of them
+        // will just wait on the ComputeHook::API_CONCURRENCY semaphore immediately, so very cheap until they get that semaphore
+        // unit and start doing I/O.
+        tracing::info!(
+            "Sending {} compute notifications",
+            compute_notifications.len()
+        );
+        self.compute_hook.notify_background(
+            compute_notifications,
+            bg_compute_notify_result_tx.clone(),
+            &self.cancel,
+        );
 
         // Finally, now that the service is up and running, launch reconcile operations for any tenants
         // which require it: under normal circumstances this should only include tenants that were in some
         // transient state before we restarted, or any tenants whose compute hooks failed above.
+        tracing::info!("Checking for shards in need of reconciliation...");
         let reconcile_tasks = self.reconcile_all();
         // We will not wait for these reconciliation tasks to run here: we're now done with startup and
         // normal operations may proceed.
@@ -445,6 +537,7 @@ impl Service {
             }
         }
 
+        tracing::info!("Sending initial heartbeats...");
         let res = self
             .heartbeater
             .heartbeat(Arc::new(nodes_to_heartbeat))
@@ -481,6 +574,7 @@ impl Service {
 
         let mut node_list_futs = FuturesUnordered::new();
 
+        tracing::info!("Scanning shards on {} nodes...", nodes.len());
         for node in nodes.values() {
             node_list_futs.push({
                 async move {
@@ -600,72 +694,6 @@ impl Service {
         }
     }
 
-    /// Used during [`Self::startup_reconcile`]: issue many concurrent compute notifications.
-    ///
-    /// Returns a set of any shards for which notifications where not acked within the deadline.
-    async fn compute_notify_many(
-        &self,
-        notifications: Vec<(TenantShardId, NodeId, ShardStripeSize)>,
-        deadline: Instant,
-    ) -> HashSet<TenantShardId> {
-        let attempt_shards = notifications.iter().map(|i| i.0).collect::<HashSet<_>>();
-        let mut success_shards = HashSet::new();
-
-        // Construct an async stream of futures to invoke the compute notify function: we do this
-        // in order to subsequently use .buffered() on the stream to execute with bounded parallelism.
-        let mut stream = futures::stream::iter(notifications.into_iter())
-            .map(|(tenant_shard_id, node_id, stripe_size)| {
-                let compute_hook = self.compute_hook.clone();
-                let cancel = self.cancel.clone();
-                async move {
-                    if let Err(e) = compute_hook
-                        .notify(tenant_shard_id, node_id, stripe_size, &cancel)
-                        .await
-                    {
-                        tracing::error!(
-                            %tenant_shard_id,
-                            %node_id,
-                            "Failed to notify compute on startup for shard: {e}"
-                        );
-                        None
-                    } else {
-                        Some(tenant_shard_id)
-                    }
-                }
-            })
-            .buffered(compute_hook::API_CONCURRENCY);
-
-        loop {
-            tokio::select! {
-                next = stream.next() => {
-                    match next {
-                        Some(Some(success_shard)) => {
-                            // A notification succeeded
-                            success_shards.insert(success_shard);
-                            },
-                        Some(None) => {
-                            // A notification that failed
-                        },
-                        None => {
-                            tracing::info!("Successfully sent all compute notifications");
-                            break;
-                        }
-                    }
-                },
-                _ = tokio::time::sleep(deadline.duration_since(Instant::now())) => {
-                    // Give up sending any that didn't succeed yet
-                    tracing::info!("Reached deadline while sending compute notifications");
-                    break;
-                }
-            };
-        }
-
-        attempt_shards
-            .difference(&success_shards)
-            .cloned()
-            .collect()
-    }
-
     /// Long running background task that periodically wakes up and looks for shards that need
     /// reconciliation.  Reconciliation is fallible, so any reconciliation tasks that fail during
     /// e.g. a tenant create/attach/migrate must eventually be retried: this task is responsible
@@ -683,7 +711,7 @@ impl Service {
                 let reconciles_spawned = self.reconcile_all();
                 if reconciles_spawned == 0 {
                     // Run optimizer only when we didn't find any other work to do
-                    self.optimize_all();
+                    self.optimize_all().await;
                 }
             }
               _ = self.cancel.cancelled() => return
@@ -742,8 +770,9 @@ impl Service {
     }
 
     /// Apply the contents of a [`ReconcileResult`] to our in-memory state: if the reconciliation
-    /// was successful, this will update the observed state of the tenant such that subsequent
-    /// calls to [`TenantShard::maybe_reconcile`] will do nothing.
+    /// was successful and intent hasn't changed since the Reconciler was spawned, this will update
+    /// the observed state of the tenant such that subsequent calls to [`TenantShard::get_reconcile_needed`]
+    /// will indicate that reconciliation is not needed.
     #[instrument(skip_all, fields(
         tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
         sequence=%result.sequence
@@ -796,11 +825,25 @@ impl Service {
 
                 // Ordering: populate last_error before advancing error_seq,
                 // so that waiters will see the correct error after waiting.
-                *(tenant.last_error.lock().unwrap()) = format!("{e}");
-                tenant.error_waiter.advance(result.sequence);
+                tenant.set_last_error(result.sequence, e);
 
                 for (node_id, o) in result.observed.locations {
                     tenant.observed.locations.insert(node_id, o);
+                }
+            }
+        }
+
+        // Maybe some other work can proceed now that this job finished.
+        if self.reconciler_concurrency.available_permits() > 0 {
+            while let Ok(tenant_shard_id) = locked.delayed_reconcile_rx.try_recv() {
+                let (nodes, tenants, _scheduler) = locked.parts_mut();
+                if let Some(shard) = tenants.get_mut(&tenant_shard_id) {
+                    shard.delayed_reconcile = false;
+                    self.maybe_reconcile_shard(shard, nodes);
+                }
+
+                if self.reconciler_concurrency.available_permits() == 0 {
+                    break;
                 }
             }
         }
@@ -809,23 +852,45 @@ impl Service {
     async fn process_results(
         &self,
         mut result_rx: tokio::sync::mpsc::UnboundedReceiver<ReconcileResult>,
+        mut bg_compute_hook_result_rx: tokio::sync::mpsc::Receiver<
+            Result<(), (TenantShardId, NotifyError)>,
+        >,
     ) {
         loop {
             // Wait for the next result, or for cancellation
-            let result = tokio::select! {
+            tokio::select! {
                 r = result_rx.recv() => {
                     match r {
-                        Some(result) => {result},
+                        Some(result) => {self.process_result(result);},
                         None => {break;}
                     }
                 }
+                _ = async{
+                    match bg_compute_hook_result_rx.recv().await {
+                        Some(result) => {
+                            if let Err((tenant_shard_id, notify_error)) = result {
+                                tracing::warn!("Marking shard {tenant_shard_id} for notification retry, due to error {notify_error}");
+                                let mut locked = self.inner.write().unwrap();
+                                if let Some(shard) = locked.tenants.get_mut(&tenant_shard_id) {
+                                    shard.pending_compute_notification = true;
+                                }
+
+                            }
+                        },
+                        None => {
+                            // This channel is dead, but we don't want to terminate the outer loop{}: just wait for shutdown
+                            self.cancel.cancelled().await;
+                        }
+                    }
+                } => {},
                 _ = self.cancel.cancelled() => {
                     break;
                 }
             };
-
-            self.process_result(result);
         }
+
+        // We should only fall through on shutdown
+        assert!(self.cancel.is_cancelled());
     }
 
     async fn process_aborts(
@@ -986,6 +1051,13 @@ impl Service {
 
         let (startup_completion, startup_complete) = utils::completion::channel();
 
+        // This channel is continuously consumed by process_results, so doesn't need to be very large.
+        let (bg_compute_notify_result_tx, bg_compute_notify_result_rx) =
+            tokio::sync::mpsc::channel(512);
+
+        let (delayed_reconcile_tx, delayed_reconcile_rx) =
+            tokio::sync::mpsc::channel(MAX_DELAYED_RECONCILES);
+
         let cancel = CancellationToken::new();
         let heartbeater = Heartbeater::new(
             config.jwt_token.clone(),
@@ -994,13 +1066,20 @@ impl Service {
         );
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
-                nodes, tenants, scheduler,
+                nodes,
+                tenants,
+                scheduler,
+                delayed_reconcile_rx,
             ))),
             config: config.clone(),
             persistence,
-            compute_hook: Arc::new(ComputeHook::new(config)),
+            compute_hook: Arc::new(ComputeHook::new(config.clone())),
             result_tx,
             heartbeater,
+            reconciler_concurrency: Arc::new(tokio::sync::Semaphore::new(
+                config.reconciler_concurrency,
+            )),
+            delayed_reconcile_tx,
             abort_tx,
             startup_complete: startup_complete.clone(),
             cancel,
@@ -1013,7 +1092,9 @@ impl Service {
         tokio::task::spawn(async move {
             // Block shutdown until we're done (we must respect self.cancel)
             if let Ok(_gate) = result_task_this.gate.enter() {
-                result_task_this.process_results(result_rx).await
+                result_task_this
+                    .process_results(result_rx, bg_compute_notify_result_rx)
+                    .await
             }
         });
 
@@ -1055,7 +1136,7 @@ impl Service {
                     return;
                 };
 
-                this.startup_reconcile().await;
+                this.startup_reconcile(bg_compute_notify_result_tx).await;
                 drop(startup_completion);
             }
         });
@@ -1282,7 +1363,7 @@ impl Service {
     async fn node_activate_reconcile(
         &self,
         mut node: Node,
-        _lock: &OwnedRwLockWriteGuard<()>,
+        _lock: &WrappedWriteGuard<NodeOperations>,
     ) -> Result<(), ApiError> {
         // This Node is a mutable local copy: we will set it active so that we can use its
         // API client to reconcile with the node.  The Node in [`Self::nodes`] will get updated
@@ -1528,14 +1609,15 @@ impl Service {
         let tenant_id = create_req.new_tenant_id.tenant_id;
 
         // Exclude any concurrent attempts to create/access the same tenant ID
-        let _tenant_lock = self
-            .tenant_op_locks
-            .exclusive(create_req.new_tenant_id.tenant_id)
-            .await;
-
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            create_req.new_tenant_id.tenant_id,
+            TenantOperations::Create,
+        )
+        .await;
         let (response, waiters) = self.do_tenant_create(create_req).await?;
 
-        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+        if let Err(e) = self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
             // Avoid deadlock: reconcile may fail while notifying compute, if the cloud control plane refuses to
             // accept compute notifications while it is in the process of creating.  Reconciliation will
             // be retried in the background.
@@ -1871,10 +1953,12 @@ impl Service {
         req: TenantLocationConfigRequest,
     ) -> Result<TenantLocationConfigResponse, ApiError> {
         // We require an exclusive lock, because we are updating both persistent and in-memory state
-        let _tenant_lock = self
-            .tenant_op_locks
-            .exclusive(tenant_shard_id.tenant_id)
-            .await;
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            tenant_shard_id.tenant_id,
+            TenantOperations::LocationConfig,
+        )
+        .await;
 
         if !tenant_shard_id.is_unsharded() {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
@@ -1992,7 +2076,12 @@ impl Service {
 
     pub(crate) async fn tenant_config_set(&self, req: TenantConfigRequest) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
-        let _tenant_lock = self.tenant_op_locks.exclusive(req.tenant_id).await;
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            req.tenant_id,
+            TenantOperations::ConfigSet,
+        )
+        .await;
 
         let tenant_id = req.tenant_id;
         let config = req.config;
@@ -2081,7 +2170,12 @@ impl Service {
         timestamp: Cow<'_, str>,
         done_if_after: Cow<'_, str>,
     ) -> Result<(), ApiError> {
-        let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimeTravelRemoteStorage,
+        )
+        .await;
 
         let node = {
             let locked = self.inner.read().unwrap();
@@ -2172,7 +2266,12 @@ impl Service {
         tenant_id: TenantId,
         wait: Option<Duration>,
     ) -> Result<(StatusCode, SecondaryProgress), ApiError> {
-        let _tenant_lock = self.tenant_op_locks.shared(tenant_id).await;
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::SecondaryDownload,
+        )
+        .await;
 
         // Acquire lock and yield the collection of shard-node tuples which we will send requests onward to
         let targets = {
@@ -2266,7 +2365,8 @@ impl Service {
     }
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
-        let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
+        let _tenant_lock =
+            trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -2366,7 +2466,14 @@ impl Service {
         req: TenantPolicyRequest,
     ) -> Result<(), ApiError> {
         // We require an exclusive lock, because we are updating persistent and in-memory state
-        let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::UpdatePolicy,
+        )
+        .await;
+
+        failpoint_support::sleep_millis_async!("tenant-update-policy-exclusive-lock");
 
         let TenantPolicyRequest {
             placement,
@@ -2420,7 +2527,12 @@ impl Service {
             create_req.new_timeline_id,
         );
 
-        let _tenant_lock = self.tenant_op_locks.shared(tenant_id).await;
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineCreate,
+        )
+        .await;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -2467,17 +2579,7 @@ impl Service {
             client
                 .timeline_create(tenant_shard_id, &create_req)
                 .await
-                .map_err(|e| match e {
-                    mgmt_api::Error::ApiError(status, msg)
-                        if status == StatusCode::INTERNAL_SERVER_ERROR
-                            || status == StatusCode::NOT_ACCEPTABLE =>
-                    {
-                        // TODO: handle more error codes, e.g. 503 should be passed through.  Make a general wrapper
-                        // for pass-through API calls.
-                        ApiError::InternalServerError(anyhow::anyhow!(msg))
-                    }
-                    _ => ApiError::Conflict(format!("Failed to create timeline: {e}")),
-                })
+                .map_err(|e| passthrough_api_error(&node, e))
         }
 
         // Because the caller might not provide an explicit LSN, we must do the creation first on a single shard, and then
@@ -2539,13 +2641,57 @@ impl Service {
         Ok(results)
     }
 
+    /// Concurrently invoke a pageserver API call on many shards at once
+    pub(crate) async fn tenant_for_shards_api<T, O, F>(
+        &self,
+        locations: Vec<(TenantShardId, Node)>,
+        op: O,
+        warn_threshold: u32,
+        max_retries: u32,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Vec<mgmt_api::Result<T>>
+    where
+        O: Fn(TenantShardId, PageserverClient) -> F + Copy,
+        F: std::future::Future<Output = mgmt_api::Result<T>>,
+    {
+        let mut futs = FuturesUnordered::new();
+        let mut results = Vec::with_capacity(locations.len());
+
+        for (tenant_shard_id, node) in locations {
+            futs.push(async move {
+                node.with_client_retries(
+                    |client| op(tenant_shard_id, client),
+                    &self.config.jwt_token,
+                    warn_threshold,
+                    max_retries,
+                    timeout,
+                    cancel,
+                )
+                .await
+            });
+        }
+
+        while let Some(r) = futs.next().await {
+            let r = r.unwrap_or(Err(mgmt_api::Error::Cancelled));
+            results.push(r);
+        }
+
+        results
+    }
+
     pub(crate) async fn tenant_timeline_delete(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> Result<StatusCode, ApiError> {
         tracing::info!("Deleting timeline {}/{}", tenant_id, timeline_id,);
-        let _tenant_lock = self.tenant_op_locks.shared(tenant_id).await;
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineDelete,
+        )
+        .await;
 
         self.ensure_attached_wait(tenant_id).await?;
 
@@ -2752,7 +2898,14 @@ impl Service {
                 tenant_shard_id: shard.tenant_shard_id,
                 node_attached: *shard.intent.get_attached(),
                 node_secondary: shard.intent.get_secondary().to_vec(),
-                last_error: shard.last_error.lock().unwrap().clone(),
+                last_error: shard
+                    .last_error
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|e| format!("{e}"))
+                    .unwrap_or("".to_string())
+                    .clone(),
                 is_reconciling: shard.reconciler.is_some(),
                 is_pending_compute_notification: shard.pending_compute_notification,
                 is_splitting: matches!(shard.splitting, SplitState::Splitting),
@@ -2976,11 +3129,14 @@ impl Service {
     ) -> (
         TenantShardSplitResponse,
         Vec<(TenantShardId, NodeId, ShardStripeSize)>,
+        Vec<ReconcilerWaiter>,
     ) {
         let mut response = TenantShardSplitResponse {
             new_shards: Vec::new(),
         };
         let mut child_locations = Vec::new();
+        let mut waiters = Vec::new();
+
         {
             let mut locked = self.inner.write().unwrap();
 
@@ -3059,14 +3215,112 @@ impl Service {
                         tracing::warn!("Failed to schedule child shard {child}: {e}");
                     }
                     // In the background, attach secondary locations for the new shards
-                    self.maybe_reconcile_shard(&mut child_state, nodes);
+                    if let Some(waiter) = self.maybe_reconcile_shard(&mut child_state, nodes) {
+                        waiters.push(waiter);
+                    }
 
                     tenants.insert(child, child_state);
                     response.new_shards.push(child);
                 }
             }
+            (response, child_locations, waiters)
+        }
+    }
 
-            (response, child_locations)
+    async fn tenant_shard_split_start_secondaries(
+        &self,
+        tenant_id: TenantId,
+        waiters: Vec<ReconcilerWaiter>,
+    ) {
+        // Wait for initial reconcile of child shards, this creates the secondary locations
+        if let Err(e) = self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
+            // This is not a failure to split: it's some issue reconciling the new child shards, perhaps
+            // their secondaries couldn't be attached.
+            tracing::warn!("Failed to reconcile after split: {e}");
+            return;
+        }
+
+        // Take the state lock to discover the attached & secondary intents for all shards
+        let (attached, secondary) = {
+            let locked = self.inner.read().unwrap();
+            let mut attached = Vec::new();
+            let mut secondary = Vec::new();
+
+            for (tenant_shard_id, shard) in
+                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+            {
+                let Some(node_id) = shard.intent.get_attached() else {
+                    // Unexpected.  Race with a PlacementPolicy change?
+                    tracing::warn!(
+                        "No attached node on {tenant_shard_id} immediately after shard split!"
+                    );
+                    continue;
+                };
+
+                let Some(secondary_node_id) = shard.intent.get_secondary().first() else {
+                    // No secondary location.  Nothing for us to do.
+                    continue;
+                };
+
+                let attached_node = locked
+                    .nodes
+                    .get(node_id)
+                    .expect("Pageservers may not be deleted while referenced");
+
+                let secondary_node = locked
+                    .nodes
+                    .get(secondary_node_id)
+                    .expect("Pageservers may not be deleted while referenced");
+
+                attached.push((*tenant_shard_id, attached_node.clone()));
+                secondary.push((*tenant_shard_id, secondary_node.clone()));
+            }
+            (attached, secondary)
+        };
+
+        if secondary.is_empty() {
+            // No secondary locations; nothing for us to do
+            return;
+        }
+
+        for result in self
+            .tenant_for_shards_api(
+                attached,
+                |tenant_shard_id, client| async move {
+                    client.tenant_heatmap_upload(tenant_shard_id).await
+                },
+                1,
+                1,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await
+        {
+            if let Err(e) = result {
+                tracing::warn!("Error calling heatmap upload after shard split: {e}");
+                return;
+            }
+        }
+
+        for result in self
+            .tenant_for_shards_api(
+                secondary,
+                |tenant_shard_id, client| async move {
+                    client
+                        .tenant_secondary_download(tenant_shard_id, Some(Duration::ZERO))
+                        .await
+                },
+                1,
+                1,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await
+        {
+            if let Err(e) = result {
+                tracing::warn!("Error calling secondary download after shard split: {e}");
+                return;
+            }
         }
     }
 
@@ -3077,7 +3331,12 @@ impl Service {
     ) -> Result<TenantShardSplitResponse, ApiError> {
         // TODO: return 503 if we get stuck waiting for this lock
         // (issue https://github.com/neondatabase/neon/issues/7108)
-        let _tenant_lock = self.tenant_op_locks.exclusive(tenant_id).await;
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::ShardSplit,
+        )
+        .await;
 
         let new_shard_count = ShardCount::new(split_req.new_shard_count);
         let new_stripe_size = split_req.new_stripe_size;
@@ -3095,8 +3354,8 @@ impl Service {
             .do_tenant_shard_split(tenant_id, shard_split_params)
             .await;
 
-        match r {
-            Ok(r) => Ok(r),
+        let (response, waiters) = match r {
+            Ok(r) => r,
             Err(e) => {
                 // Split might be part-done, we must do work to abort it.
                 tracing::warn!("Enqueuing background abort of split on {tenant_id}");
@@ -3109,9 +3368,17 @@ impl Service {
                     })
                     // Ignore error sending: that just means we're shutting down: aborts are ephemeral so it's fine to drop it.
                     .ok();
-                Err(e)
+                return Err(e);
             }
-        }
+        };
+
+        // The split is now complete.  As an optimization, we will trigger all the child shards to upload
+        // a heatmap immediately, and all their secondary locations to start downloading: this avoids waiting
+        // for the background heatmap/download interval before secondaries get warm enough to migrate shards
+        // in [`Self::optimize_all`]
+        self.tenant_shard_split_start_secondaries(tenant_id, waiters)
+            .await;
+        Ok(response)
     }
 
     fn prepare_tenant_shard_split(
@@ -3261,7 +3528,7 @@ impl Service {
         &self,
         tenant_id: TenantId,
         params: ShardSplitParams,
-    ) -> Result<TenantShardSplitResponse, ApiError> {
+    ) -> Result<(TenantShardSplitResponse, Vec<ReconcilerWaiter>), ApiError> {
         // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
         // request could occur here, deleting or mutating the tenant.  begin_shard_split checks that the
         // parent shards exist as expected, but it would be neater to do the above pre-checks within the
@@ -3463,7 +3730,7 @@ impl Service {
         ));
 
         // Replace all the shards we just split with their children: this phase is infallible.
-        let (response, child_locations) =
+        let (response, child_locations, waiters) =
             self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
 
         // Send compute notifications for all the new shards
@@ -3490,7 +3757,7 @@ impl Service {
             }
         }
 
-        Ok(response)
+        Ok((response, waiters))
     }
 
     pub(crate) async fn tenant_shard_migrate(
@@ -3593,6 +3860,88 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    /// This is for debug/support only: assuming tenant data is already present in S3, we "create" a
+    /// tenant with a very high generation number so that it will see the existing data.
+    pub(crate) async fn tenant_import(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantCreateResponse, ApiError> {
+        // Pick an arbitrary available pageserver to use for scanning the tenant in remote storage
+        let maybe_node = {
+            self.inner
+                .read()
+                .unwrap()
+                .nodes
+                .values()
+                .find(|n| n.is_available())
+                .cloned()
+        };
+        let Some(node) = maybe_node else {
+            return Err(ApiError::BadRequest(anyhow::anyhow!("No nodes available")));
+        };
+
+        let client = PageserverClient::new(
+            node.get_id(),
+            node.base_url(),
+            self.config.jwt_token.as_deref(),
+        );
+
+        let scan_result = client
+            .tenant_scan_remote_storage(tenant_id)
+            .await
+            .map_err(|e| passthrough_api_error(&node, e))?;
+
+        // A post-split tenant may contain a mixture of shard counts in remote storage: pick the highest count.
+        let Some(shard_count) = scan_result
+            .shards
+            .iter()
+            .map(|s| s.tenant_shard_id.shard_count)
+            .max()
+        else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("No shards found").into(),
+            ));
+        };
+
+        // Ideally we would set each newly imported shard's generation independently, but for correctness it is sufficient
+        // to
+        let generation = scan_result
+            .shards
+            .iter()
+            .map(|s| s.generation)
+            .max()
+            .expect("We already validated >0 shards");
+
+        // FIXME: we have no way to recover the shard stripe size from contents of remote storage: this will
+        // only work if they were using the default stripe size.
+        let stripe_size = ShardParameters::DEFAULT_STRIPE_SIZE;
+
+        let (response, waiters) = self
+            .do_tenant_create(TenantCreateRequest {
+                new_tenant_id: TenantShardId::unsharded(tenant_id),
+                generation,
+
+                shard_parameters: ShardParameters {
+                    count: shard_count,
+                    stripe_size,
+                },
+                placement_policy: Some(PlacementPolicy::Attached(0)), // No secondaries, for convenient debug/hacking
+
+                // There is no way to know what the tenant's config was: revert to defaults
+                config: TenantConfig::default(),
+            })
+            .await?;
+
+        if let Err(e) = self.await_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await {
+            // Since this is a debug/support operation, all kinds of weird issues are possible (e.g. this
+            // tenant doesn't exist in the control plane), so don't fail the request if it can't fully
+            // reconcile, as reconciliation includes notifying compute.
+            tracing::warn!(%tenant_id, "Reconcile not done yet while importing tenant ({e})");
+        }
+
+        Ok(response)
     }
 
     /// For debug/support: a full JSON dump of TenantShards.  Returns a response so that
@@ -3756,9 +4105,13 @@ impl Service {
         &self,
         register_req: NodeRegisterRequest,
     ) -> Result<(), ApiError> {
-        let _node_lock = self.node_op_locks.exclusive(register_req.node_id).await;
+        let _node_lock = trace_exclusive_lock(
+            &self.node_op_locks,
+            register_req.node_id,
+            NodeOperations::Register,
+        )
+        .await;
 
-        // Pre-check for an already-existing node
         {
             let locked = self.inner.read().unwrap();
             if let Some(node) = locked.nodes.get(&register_req.node_id) {
@@ -3845,7 +4198,8 @@ impl Service {
         availability: Option<NodeAvailability>,
         scheduling: Option<NodeSchedulingPolicy>,
     ) -> Result<(), ApiError> {
-        let _node_lock = self.node_op_locks.exclusive(node_id).await;
+        let _node_lock =
+            trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Configure).await;
 
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
@@ -3978,7 +4332,7 @@ impl Service {
                 // TODO: in the background, we should balance work back onto this pageserver
             }
             AvailabilityTransition::Unchanged => {
-                tracing::info!("Node {} no change during config", node_id);
+                tracing::debug!("Node {} no change during config", node_id);
             }
         }
 
@@ -4053,20 +4407,64 @@ impl Service {
         Ok(())
     }
 
-    /// Convenience wrapper around [`TenantShard::maybe_reconcile`] that provides
-    /// all the references to parts of Self that are needed
+    /// Wrap [`TenantShard`] reconciliation methods with acquisition of [`Gate`] and [`ReconcileUnits`],
     fn maybe_reconcile_shard(
         &self,
         shard: &mut TenantShard,
         nodes: &Arc<HashMap<NodeId, Node>>,
     ) -> Option<ReconcilerWaiter> {
-        shard.maybe_reconcile(
+        let reconcile_needed = shard.get_reconcile_needed(nodes);
+
+        match reconcile_needed {
+            ReconcileNeeded::No => return None,
+            ReconcileNeeded::WaitExisting(waiter) => return Some(waiter),
+            ReconcileNeeded::Yes => {
+                // Fall through to try and acquire units for spawning reconciler
+            }
+        };
+
+        let units = match self.reconciler_concurrency.clone().try_acquire_owned() {
+            Ok(u) => ReconcileUnits::new(u),
+            Err(_) => {
+                tracing::info!(tenant_id=%shard.tenant_shard_id.tenant_id, shard_id=%shard.tenant_shard_id.shard_slug(),
+                    "Concurrency limited: enqueued for reconcile later");
+                if !shard.delayed_reconcile {
+                    match self.delayed_reconcile_tx.try_send(shard.tenant_shard_id) {
+                        Err(TrySendError::Closed(_)) => {
+                            // Weird mid-shutdown case?
+                        }
+                        Err(TrySendError::Full(_)) => {
+                            // It is safe to skip sending our ID in the channel: we will eventually get retried by the background reconcile task.
+                            tracing::warn!(
+                                "Many shards are waiting to reconcile: delayed_reconcile queue is full"
+                            );
+                        }
+                        Ok(()) => {
+                            shard.delayed_reconcile = true;
+                        }
+                    }
+                }
+
+                // We won't spawn a reconciler, but we will construct a waiter that waits for the shard's sequence
+                // number to advance.  When this function is eventually called again and succeeds in getting units,
+                // it will spawn a reconciler that makes this waiter complete.
+                return Some(shard.future_reconcile_waiter());
+            }
+        };
+
+        let Ok(gate_guard) = self.gate.enter() else {
+            // Gate closed: we're shutting down, drop out.
+            return None;
+        };
+
+        shard.spawn_reconciler(
             &self.result_tx,
             nodes,
             &self.compute_hook,
             &self.config,
             &self.persistence,
-            &self.gate,
+            units,
+            gate_guard,
             &self.cancel,
         )
     }
@@ -4074,7 +4472,9 @@ impl Service {
     /// Check all tenants for pending reconciliation work, and reconcile those in need.
     /// Additionally, reschedule tenants that require it.
     ///
-    /// Returns how many reconciliation tasks were started
+    /// Returns how many reconciliation tasks were started, or `1` if no reconciles were
+    /// spawned but some _would_ have been spawned if `reconciler_concurrency` units where
+    /// available.  A return value of 0 indicates that everything is fully reconciled already.
     fn reconcile_all(&self) -> usize {
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, _scheduler) = locked.parts_mut();
@@ -4086,6 +4486,15 @@ impl Service {
         for (tenant_shard_id, shard) in tenants.iter_mut() {
             if tenant_shard_id.is_shard_zero() {
                 schedule_context = ScheduleContext::default();
+            }
+
+            // Skip checking if this shard is already enqueued for reconciliation
+            if shard.delayed_reconcile && self.reconciler_concurrency.available_permits() == 0 {
+                // If there is something delayed, then return a nonzero count so that
+                // callers like reconcile_all_now do not incorrectly get the impression
+                // that the system is in a quiescent state.
+                reconciles_spawned = std::cmp::max(1, reconciles_spawned);
+                continue;
             }
 
             // Eventual consistency: if an earlier reconcile job failed, and the shard is still
@@ -4114,25 +4523,68 @@ impl Service {
     /// To put it more briefly: whereas the scheduler respects soft constraints in a ScheduleContext at
     /// the time of scheduling, this function looks for cases where a better-scoring location is available
     /// according to those same soft constraints.
-    fn optimize_all(&self) -> usize {
-        let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
-        let pageservers = nodes.clone();
-
-        let mut schedule_context = ScheduleContext::default();
-
-        let mut reconciles_spawned = 0;
-
-        let mut tenant_shards: Vec<&TenantShard> = Vec::new();
-
+    async fn optimize_all(&self) -> usize {
         // Limit on how many shards' optmizations each call to this function will execute.  Combined
         // with the frequency of background calls, this acts as an implicit rate limit that runs a small
         // trickle of optimizations in the background, rather than executing a large number in parallel
         // when a change occurs.
-        const MAX_OPTIMIZATIONS_PER_PASS: usize = 2;
+        const MAX_OPTIMIZATIONS_EXEC_PER_PASS: usize = 2;
+
+        // Synchronous prepare: scan shards for possible scheduling optimizations
+        let candidate_work = self.optimize_all_plan();
+        let candidate_work_len = candidate_work.len();
+
+        // Asynchronous validate: I/O to pageservers to make sure shards are in a good state to apply validation
+        let validated_work = self.optimize_all_validate(candidate_work).await;
+
+        let was_work_filtered = validated_work.len() != candidate_work_len;
+
+        // Synchronous apply: update the shards' intent states according to validated optimisations
+        let mut reconciles_spawned = 0;
+        let mut optimizations_applied = 0;
+        let mut locked = self.inner.write().unwrap();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
+        for (tenant_shard_id, optimization) in validated_work {
+            let Some(shard) = tenants.get_mut(&tenant_shard_id) else {
+                // Shard was dropped between planning and execution;
+                continue;
+            };
+            if shard.apply_optimization(scheduler, optimization) {
+                optimizations_applied += 1;
+                if self.maybe_reconcile_shard(shard, nodes).is_some() {
+                    reconciles_spawned += 1;
+                }
+            }
+
+            if optimizations_applied >= MAX_OPTIMIZATIONS_EXEC_PER_PASS {
+                break;
+            }
+        }
+
+        if was_work_filtered {
+            // If we filtered any work out during validation, ensure we return a nonzero value to indicate
+            // to callers that the system is not in a truly quiet state, it's going to do some work as soon
+            // as these validations start passing.
+            reconciles_spawned = std::cmp::max(reconciles_spawned, 1);
+        }
+
+        reconciles_spawned
+    }
+
+    fn optimize_all_plan(&self) -> Vec<(TenantShardId, ScheduleOptimization)> {
+        let mut schedule_context = ScheduleContext::default();
+
+        let mut tenant_shards: Vec<&TenantShard> = Vec::new();
+
+        // How many candidate optimizations we will generate, before evaluating them for readniess: setting
+        // this higher than the execution limit gives us a chance to execute some work even if the first
+        // few optimizations we find are not ready.
+        const MAX_OPTIMIZATIONS_PLAN_PER_PASS: usize = 8;
 
         let mut work = Vec::new();
 
+        let mut locked = self.inner.write().unwrap();
+        let (nodes, tenants, scheduler) = locked.parts_mut();
         for (tenant_shard_id, shard) in tenants.iter() {
             if tenant_shard_id.is_shard_zero() {
                 // Reset accumulators on the first shard in a tenant
@@ -4141,7 +4593,7 @@ impl Service {
                 tenant_shards.clear();
             }
 
-            if work.len() >= MAX_OPTIMIZATIONS_PER_PASS {
+            if work.len() >= MAX_OPTIMIZATIONS_PLAN_PER_PASS {
                 break;
             }
 
@@ -4213,18 +4665,105 @@ impl Service {
             }
         }
 
-        for (tenant_shard_id, optimization) in work {
-            let shard = tenants
-                .get_mut(&tenant_shard_id)
-                .expect("We held lock from place we got this ID");
-            shard.apply_optimization(scheduler, optimization);
+        work
+    }
 
-            if self.maybe_reconcile_shard(shard, &pageservers).is_some() {
-                reconciles_spawned += 1;
+    async fn optimize_all_validate(
+        &self,
+        candidate_work: Vec<(TenantShardId, ScheduleOptimization)>,
+    ) -> Vec<(TenantShardId, ScheduleOptimization)> {
+        // Take a clone of the node map to use outside the lock in async validation phase
+        let validation_nodes = { self.inner.read().unwrap().nodes.clone() };
+
+        let mut want_secondary_status = Vec::new();
+
+        // Validate our plans: this is an async phase where we may do I/O to pageservers to
+        // check that the state of locations is acceptable to run the optimization, such as
+        // checking that a secondary location is sufficiently warmed-up to cleanly cut over
+        // in a live migration.
+        let mut validated_work = Vec::new();
+        for (tenant_shard_id, optimization) in candidate_work {
+            match optimization.action {
+                ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                    old_attached_node_id: _,
+                    new_attached_node_id,
+                }) => {
+                    match validation_nodes.get(&new_attached_node_id) {
+                        None => {
+                            // Node was dropped between planning and validation
+                        }
+                        Some(node) => {
+                            if !node.is_available() {
+                                tracing::info!("Skipping optimization migration of {tenant_shard_id} to {new_attached_node_id} because node unavailable");
+                            } else {
+                                // Accumulate optimizations that require fetching secondary status, so that we can execute these
+                                // remote API requests concurrently.
+                                want_secondary_status.push((
+                                    tenant_shard_id,
+                                    node.clone(),
+                                    optimization,
+                                ));
+                            }
+                        }
+                    }
+                }
+                ScheduleOptimizationAction::ReplaceSecondary(_) => {
+                    // No extra checks needed to replace a secondary: this does not interrupt client access
+                    validated_work.push((tenant_shard_id, optimization))
+                }
+            };
+        }
+
+        // Call into pageserver API to find out if the destination secondary location is warm enough for a reasonably smooth migration: we
+        // do this so that we avoid spawning a Reconciler that would have to wait minutes/hours for a destination to warm up: that reconciler
+        // would hold a precious reconcile semaphore unit the whole time it was waiting for the destination to warm up.
+        let results = self
+            .tenant_for_shards_api(
+                want_secondary_status
+                    .iter()
+                    .map(|i| (i.0, i.1.clone()))
+                    .collect(),
+                |tenant_shard_id, client| async move {
+                    client.tenant_secondary_status(tenant_shard_id).await
+                },
+                1,
+                1,
+                SHORT_RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await;
+
+        for ((tenant_shard_id, node, optimization), secondary_status) in
+            want_secondary_status.into_iter().zip(results.into_iter())
+        {
+            match secondary_status {
+                Err(e) => {
+                    tracing::info!("Skipping migration of {tenant_shard_id} to {node}, error querying secondary: {e}");
+                }
+                Ok(progress) => {
+                    // We require secondary locations to have less than 10GiB of downloads pending before we will use
+                    // them in an optimization
+                    const DOWNLOAD_FRESHNESS_THRESHOLD: u64 = 10 * 1024 * 1024 * 1024;
+
+                    if progress.heatmap_mtime.is_none()
+                        || progress.bytes_total < DOWNLOAD_FRESHNESS_THRESHOLD
+                            && progress.bytes_downloaded != progress.bytes_total
+                        || progress.bytes_total - progress.bytes_downloaded
+                            > DOWNLOAD_FRESHNESS_THRESHOLD
+                    {
+                        tracing::info!("Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}");
+                    } else {
+                        // Location looks ready: proceed
+                        tracing::info!(
+                            "{tenant_shard_id} secondary on {node} is warm enough for migration: {progress:?}"
+                        );
+                        validated_work.push((tenant_shard_id, optimization))
+                    }
+                }
             }
         }
 
-        reconciles_spawned
+        validated_work
     }
 
     /// Useful for tests: run whatever work a background [`Self::reconcile_all`] would have done, but
@@ -4232,10 +4771,12 @@ impl Service {
     /// put the system into a quiescent state where future background reconciliations won't do anything.
     pub(crate) async fn reconcile_all_now(&self) -> Result<usize, ReconcileWaitError> {
         let reconciles_spawned = self.reconcile_all();
-        if reconciles_spawned == 0 {
+        let reconciles_spawned = if reconciles_spawned == 0 {
             // Only optimize when we are otherwise idle
-            self.optimize_all();
-        }
+            self.optimize_all().await
+        } else {
+            reconciles_spawned
+        };
 
         let waiters = {
             let mut waiters = Vec::new();
@@ -4249,8 +4790,27 @@ impl Service {
         };
 
         let waiter_count = waiters.len();
-        self.await_waiters(waiters, RECONCILE_TIMEOUT).await?;
-        Ok(waiter_count)
+        match self.await_waiters(waiters, RECONCILE_TIMEOUT).await {
+            Ok(()) => {}
+            Err(ReconcileWaitError::Failed(_, reconcile_error))
+                if matches!(*reconcile_error, ReconcileError::Cancel) =>
+            {
+                // Ignore reconciler cancel errors: this reconciler might have shut down
+                // because some other change superceded it.  We will return a nonzero number,
+                // so the caller knows they might have to call again to quiesce the system.
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
+        tracing::info!(
+            "{} reconciles in reconcile_all, {} waiters",
+            reconciles_spawned,
+            waiter_count
+        );
+
+        Ok(std::cmp::max(waiter_count, reconciles_spawned))
     }
 
     pub async fn shutdown(&self) {
