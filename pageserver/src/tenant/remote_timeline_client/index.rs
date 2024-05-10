@@ -199,7 +199,7 @@ impl From<&LayerFileMetadata> for IndexLayerMetadata {
 /// reparented by having an later timeline be detached from it's ancestor.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct Lineage {
-    /// Has the `reparenting_history` been truncated to `Lineage::REMEMBER_AT_MOST`.
+    /// Has the `reparenting_history` been truncated to [`Lineage::REMEMBER_AT_MOST`].
     #[serde(skip_serializing_if = "is_false", default)]
     reparenting_history_truncated: bool,
 
@@ -232,7 +232,7 @@ impl Lineage {
             return;
         }
 
-        let drop_oldest = self.reparenting_history.len() + 1 > Self::REMEMBER_AT_MOST;
+        let drop_oldest = self.reparenting_history.len() + 1 >= Self::REMEMBER_AT_MOST;
 
         self.reparenting_history_truncated |= drop_oldest;
         if drop_oldest {
