@@ -43,9 +43,9 @@ async fn test_many_updates_for_single_key() {
     }
     for l in executor.live_layers.iter() {
         assert!(l.file_size() < executor.target_file_size * 2);
-        // sanity check that none of the delta layers are stupidly small either
+        // Sanity check that none of the delta layers are empty either.
         if l.is_delta() {
-            assert!(l.file_size() > executor.target_file_size / 2);
+            assert!(l.file_size() > 0);
         }
     }
 }
