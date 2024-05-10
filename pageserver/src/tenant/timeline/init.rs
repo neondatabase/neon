@@ -7,20 +7,21 @@ use crate::{
             index::{IndexPart, LayerFileMetadata},
         },
         storage_layer::LayerName,
-        Generation,
     },
     METADATA_FILE_NAME,
 };
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
-use pageserver_api::shard::ShardIndex;
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{hash_map, HashMap},
+    str::FromStr,
+};
 use utils::lsn::Lsn;
 
 /// Identified files in the timeline directory.
 pub(super) enum Discovered {
     /// The only one we care about
-    Layer(LayerName, Utf8PathBuf, u64),
+    Layer(LayerName, LocalLayerFileMetadata),
     /// Old ephmeral files from previous launches, should be removed
     Ephemeral(String),
     /// Old temporary timeline files, unsure what these really are, should be removed
@@ -46,7 +47,10 @@ pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovere
         let discovered = match LayerName::from_str(&file_name) {
             Ok(file_name) => {
                 let file_size = direntry.metadata()?.len();
-                Discovered::Layer(file_name, direntry.path().to_owned(), file_size)
+                Discovered::Layer(
+                    file_name,
+                    LocalLayerFileMetadata::new(direntry.path().to_owned(), file_size),
+                )
             }
             Err(_) => {
                 if file_name == METADATA_FILE_NAME {
@@ -76,20 +80,15 @@ pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovere
 /// this structure extends it with metadata describing the layer's presence in local storage.
 #[derive(Clone, Debug)]
 pub(super) struct LocalLayerFileMetadata {
-    pub(super) metadata: LayerFileMetadata,
+    pub(super) file_size: u64,
     pub(super) local_path: Utf8PathBuf,
 }
 
 impl LocalLayerFileMetadata {
-    pub fn new(
-        local_path: Utf8PathBuf,
-        file_size: u64,
-        generation: Generation,
-        shard: ShardIndex,
-    ) -> Self {
+    pub fn new(local_path: Utf8PathBuf, file_size: u64) -> Self {
         Self {
             local_path,
-            metadata: LayerFileMetadata::new(file_size, generation, shard),
+            file_size,
         }
     }
 }
@@ -99,14 +98,12 @@ impl LocalLayerFileMetadata {
 pub(super) enum Decision {
     /// The layer is not present locally.
     Evicted(LayerFileMetadata),
-    /// The layer is present locally, but local metadata does not match remote; we must
-    /// delete it and treat it as evicted.
-    UseRemote {
+    /// The layer is present locally, and metadata matches: we may hook up this layer to the
+    /// existing file in local storage.
+    UseLocal {
         local: LocalLayerFileMetadata,
         remote: LayerFileMetadata,
     },
-    /// The layer is present locally, and metadata matches.
-    UseLocal(LocalLayerFileMetadata),
 }
 
 /// A layer needs to be left out of the layer map.
@@ -122,77 +119,82 @@ pub(super) enum DismissedLayer {
     /// In order to make crash safe updates to layer map, we must dismiss layers which are only
     /// found locally or not yet included in the remote `index_part.json`.
     LocalOnly(LocalLayerFileMetadata),
+
+    /// The layer exists in remote storage but the local layer's metadata (e.g. file size)
+    /// does not match it
+    BadMetadata(LocalLayerFileMetadata),
 }
 
 /// Merges local discoveries and remote [`IndexPart`] to a collection of decisions.
 pub(super) fn reconcile(
-    discovered: Vec<(LayerName, Utf8PathBuf, u64)>,
+    local_layers: Vec<(LayerName, LocalLayerFileMetadata)>,
     index_part: Option<&IndexPart>,
     disk_consistent_lsn: Lsn,
-    generation: Generation,
-    shard: ShardIndex,
 ) -> Vec<(LayerName, Result<Decision, DismissedLayer>)> {
-    use Decision::*;
+    let Some(index_part) = index_part else {
+        // If we have no remote metadata, no local layer files are considered valid to load
+        return local_layers
+            .into_iter()
+            .map(|(layer_name, local_metadata)| {
+                (layer_name, Err(DismissedLayer::LocalOnly(local_metadata)))
+            })
+            .collect();
+    };
 
-    // name => (local_metadata, remote_metadata)
-    type Collected =
-        HashMap<LayerName, (Option<LocalLayerFileMetadata>, Option<LayerFileMetadata>)>;
+    let mut result = Vec::new();
 
-    let mut discovered = discovered
-        .into_iter()
-        .map(|(layer_name, local_path, file_size)| {
-            (
-                layer_name,
-                // The generation and shard here will be corrected to match IndexPart in the merge below, unless
-                // it is not in IndexPart, in which case using our current generation makes sense
-                // because it will be uploaded in this generation.
-                (
-                    Some(LocalLayerFileMetadata::new(
-                        local_path, file_size, generation, shard,
-                    )),
-                    None,
-                ),
-            )
-        })
-        .collect::<Collected>();
+    let mut remote_layers = HashMap::new();
 
-    // merge any index_part information, when available
+    // Construct Decisions for layers that are found locally, if they're in remote metadata.  Otherwise
+    // construct DismissedLayers to get rid of them.
+    for (layer_name, local_metadata) in local_layers {
+        let Some(remote_metadata) = index_part.layer_metadata.get(&layer_name) else {
+            result.push((layer_name, Err(DismissedLayer::LocalOnly(local_metadata))));
+            continue;
+        };
+
+        if remote_metadata.file_size != local_metadata.file_size {
+            result.push((layer_name, Err(DismissedLayer::BadMetadata(local_metadata))));
+            continue;
+        }
+
+        remote_layers.insert(
+            layer_name,
+            Decision::UseLocal {
+                local: local_metadata,
+                remote: remote_metadata.into(),
+            },
+        );
+    }
+
+    // Construct Decision for layers that were not found locally
     index_part
-        .as_ref()
-        .map(|ip| ip.layer_metadata.iter())
-        .into_iter()
-        .flatten()
+        .layer_metadata
+        .iter()
         .map(|(name, metadata)| (name, LayerFileMetadata::from(metadata)))
         .for_each(|(name, metadata)| {
-            if let Some(existing) = discovered.get_mut(name) {
-                existing.1 = Some(metadata);
-            } else {
-                discovered.insert(name.to_owned(), (None, Some(metadata)));
+            if let hash_map::Entry::Vacant(entry) = remote_layers.entry(name.clone()) {
+                entry.insert(Decision::Evicted(metadata));
             }
         });
 
-    discovered
-        .into_iter()
-        .map(|(name, (local, remote))| {
-            let decision = if name.is_in_future(disk_consistent_lsn) {
-                Err(DismissedLayer::Future { local })
-            } else {
-                match (local, remote) {
-                    (Some(local), Some(remote)) if local.metadata != remote => {
-                        Ok(UseRemote { local, remote })
-                    }
-                    (Some(x), Some(_)) => Ok(UseLocal(x)),
-                    (None, Some(x)) => Ok(Evicted(x)),
-                    (Some(x), None) => Err(DismissedLayer::LocalOnly(x)),
-                    (None, None) => {
-                        unreachable!("there must not be any non-local non-remote files")
-                    }
-                }
-            };
+    // For layers that were found in authoritative remote metadata, apply a final check that they are within
+    // the disk_consistent_lsn.
+    result.extend(remote_layers.into_iter().map(|(name, decision)| {
+        if name.is_in_future(disk_consistent_lsn) {
+            match decision {
+                Decision::Evicted(_remote) => (name, Err(DismissedLayer::Future { local: None })),
+                Decision::UseLocal {
+                    local,
+                    remote: _remote,
+                } => (name, Err(DismissedLayer::Future { local: Some(local) })),
+            }
+        } else {
+            (name, Ok(decision))
+        }
+    }));
 
-            (name, decision)
-        })
-        .collect::<Vec<_>>()
+    result
 }
 
 pub(super) fn cleanup(path: &Utf8Path, kind: &str) -> anyhow::Result<()> {
@@ -201,16 +203,14 @@ pub(super) fn cleanup(path: &Utf8Path, kind: &str) -> anyhow::Result<()> {
     std::fs::remove_file(path).with_context(|| format!("failed to remove {kind} at {path}"))
 }
 
-pub(super) fn cleanup_local_file_for_remote(
-    local: &LocalLayerFileMetadata,
-    remote: &LayerFileMetadata,
-) -> anyhow::Result<()> {
-    let local_size = local.metadata.file_size();
-    let remote_size = remote.file_size();
+pub(super) fn cleanup_local_file_for_remote(local: &LocalLayerFileMetadata) -> anyhow::Result<()> {
+    let local_size = local.file_size;
     let path = &local.local_path;
 
     let file_name = path.file_name().expect("must be file path");
-    tracing::warn!("removing local file {file_name:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
+    tracing::warn!(
+        "removing local file {file_name:?} because it has unexpected length {local_size};"
+    );
     if let Err(err) = crate::tenant::timeline::rename_to_backup(path) {
         assert!(
             path.exists(),
@@ -241,8 +241,8 @@ pub(super) fn cleanup_local_only_file(
 ) -> anyhow::Result<()> {
     let kind = name.kind();
     tracing::info!(
-        "found local-only {kind} layer {name}, metadata {:?}",
-        local.metadata
+        "found local-only {kind} layer {name} size {}",
+        local.file_size
     );
     std::fs::remove_file(&local.local_path)?;
     Ok(())

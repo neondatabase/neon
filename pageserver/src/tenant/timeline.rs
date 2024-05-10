@@ -60,7 +60,6 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::tenant::timeline::init::LocalLayerFileMetadata;
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
@@ -2418,8 +2417,6 @@ impl Timeline {
         let span = tracing::Span::current();
 
         // Copy to move into the task we're about to spawn
-        let generation = self.generation;
-        let shard = self.get_shard_index();
         let this = self.myself.upgrade().expect("&self method holds the arc");
 
         let (loaded_layers, needs_cleanup, total_physical_size) = tokio::task::spawn_blocking({
@@ -2433,8 +2430,8 @@ impl Timeline {
 
                 for discovered in discovered {
                     let (name, kind) = match discovered {
-                        Discovered::Layer(layer_file_name, local_path, file_size) => {
-                            discovered_layers.push((layer_file_name, local_path, file_size));
+                        Discovered::Layer(layer_file_name, local_metadata) => {
+                            discovered_layers.push((layer_file_name, local_metadata));
                             continue;
                         }
                         Discovered::Metadata => {
@@ -2471,8 +2468,6 @@ impl Timeline {
                     discovered_layers,
                     index_part.as_ref(),
                     disk_consistent_lsn,
-                    generation,
-                    shard,
                 );
 
                 let mut loaded_layers = Vec::new();
@@ -2481,23 +2476,6 @@ impl Timeline {
 
                 for (name, decision) in decided {
                     let decision = match decision {
-                        Ok(UseRemote { local, remote }) => {
-                            // Remote is authoritative, but we may still choose to retain
-                            // the local file if the contents appear to match
-                            if local.metadata.file_size() == remote.file_size() {
-                                // Use the local file, but take the remote metadata so that we pick up
-                                // the correct generation.
-                                UseLocal(
-                                    LocalLayerFileMetadata {
-                                        metadata: remote,
-                                        local_path: local.local_path
-                                    }
-                                )
-                            } else {
-                                init::cleanup_local_file_for_remote(&local, &remote)?;
-                                UseRemote { local, remote }
-                            }
-                        }
                         Ok(decision) => decision,
                         Err(DismissedLayer::Future { local }) => {
                             if let Some(local) = local {
@@ -2511,6 +2489,11 @@ impl Timeline {
                             // this file never existed remotely, we will have to do rework
                             continue;
                         }
+                        Err(DismissedLayer::BadMetadata(local)) => {
+                            init::cleanup_local_file_for_remote( &local)?;
+                            // this file never existed remotely, we will have to do rework
+                            continue;
+                        }
                     };
 
                     match &name {
@@ -2521,11 +2504,11 @@ impl Timeline {
                     tracing::debug!(layer=%name, ?decision, "applied");
 
                     let layer = match decision {
-                        UseLocal(local) => {
-                            total_physical_size += local.metadata.file_size();
-                            Layer::for_resident(conf, &this, local.local_path, name, local.metadata).drop_eviction_guard()
+                        UseLocal{local, remote} => {
+                            total_physical_size += local.file_size;
+                            Layer::for_resident(conf, &this, local.local_path, name, remote).drop_eviction_guard()
                         }
-                        Evicted(remote) | UseRemote { remote, .. } => {
+                        Evicted(remote) => {
                             Layer::for_evicted(conf, &this, name, remote)
                         }
                     };
