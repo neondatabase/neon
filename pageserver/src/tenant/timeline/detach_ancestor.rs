@@ -143,7 +143,7 @@ pub(super) async fn prepare(
         .await?;
     }
 
-    let end_lsn = ancestor_lsn + 1;
+    let end_lsn = ancestor_lsn + 0;
 
     let (filtered_layers, straddling_branchpoint, rest_of_historic) = {
         // we do not need to start from our layers, because they can only be layers that come
