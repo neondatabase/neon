@@ -280,7 +280,7 @@ files:
 
       - metric_name: checkpoints_req
         type: gauge
-        help: 'Number of requested heckpoints'
+        help: 'Number of requested checkpoints'
         key_labels:
         values: [checkpoints_req]
         query: |
