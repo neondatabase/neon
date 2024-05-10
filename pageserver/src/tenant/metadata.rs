@@ -1,12 +1,13 @@
-//! Every image of a certain timeline from [`crate::tenant::Tenant`]
-//! has a metadata that needs to be stored persistently.
+//! Describes the legacy now hopefully no longer modified per-timeline metadata stored in
+//! `index_part.json` managed by [`remote_timeline_client`]. For many tenants and their timelines,
+//! this struct and it's original serialization format is still needed because they were written a
+//! long time ago.
 //!
-//! Later, the file gets used in [`remote_timeline_client`] as a part of
-//! external storage import and export operations.
-//!
-//! The module contains all structs and related helper methods related to timeline metadata.
+//! Instead of changing and adding versioning to this, just change [`IndexPart`] with soft json
+//! versioning.
 //!
 //! [`remote_timeline_client`]: super::remote_timeline_client
+//! [`IndexPart`]: super::remote_timeline_client::index::IndexPart
 
 use anyhow::ensure;
 use serde::{Deserialize, Serialize};
@@ -17,17 +18,37 @@ use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn};
 const METADATA_FORMAT_VERSION: u16 = 4;
 
 /// Previous supported format versions.
+///
+/// In practice, none of these should remain, all are [`METADATA_FORMAT_VERSION`], but confirming
+/// that requires a scrubber run which is yet to be done.
 const METADATA_OLD_FORMAT_VERSION: u16 = 3;
 
-/// We assume that a write of up to METADATA_MAX_SIZE bytes is atomic.
+/// When the file existed on disk we assumed that a write of up to METADATA_MAX_SIZE bytes is atomic.
 ///
 /// This is the same assumption that PostgreSQL makes with the control file,
+///
 /// see PG_CONTROL_MAX_SAFE_SIZE
 const METADATA_MAX_SIZE: usize = 512;
 
-/// Metadata stored on disk for each timeline
+/// Legacy metadata stored as a component of `index_part.json` per timeline.
 ///
-/// The fields correspond to the values we hold in memory, in Timeline.
+/// Do not make new changes to this type or the module. In production, we have two different kinds
+/// of serializations of this type: bincode and json. Bincode version reflects what used to be
+/// stored on disk in earlier versions and does internal crc32 checksumming.
+///
+/// This type should not implement `serde::Serialize` or `serde::Deserialize` because there would
+/// be a confusion whether you want the old version ([`TimelineMetadata::from_bytes`]) or the modern
+/// as-exists in `index_part.json` ([`self::modern_serde`]).
+///
+/// ```compile_fail
+/// #[derive(serde::Serialize)]
+/// struct DoNotDoThis(pageserver::tenant::metadata::TimelineMetadata);
+/// ```
+///
+/// ```compile_fail
+/// #[derive(serde::Deserialize)]
+/// struct NeitherDoThis(pageserver::tenant::metadata::TimelineMetadata);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineMetadata {
     hdr: TimelineMetadataHeader,
@@ -260,28 +281,6 @@ impl TimelineMetadata {
         self.body.latest_gc_cutoff_lsn = update.latest_gc_cutoff_lsn;
     }
 }
-
-/*
-impl<'de> Deserialize<'de> for TimelineMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let bytes = Vec::<u8>::deserialize(deserializer)?;
-        Self::from_bytes(bytes.as_slice()).map_err(D::Error::custom)
-    }
-}
-
-impl Serialize for TimelineMetadata {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let bytes = self.to_bytes().map_err(serde::ser::Error::custom)?;
-        bytes.serialize(serializer)
-    }
-}
-*/
 
 pub(crate) mod modern_serde {
     use crate::tenant::metadata::METADATA_FORMAT_VERSION;
