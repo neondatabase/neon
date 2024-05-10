@@ -4230,7 +4230,7 @@ impl Timeline {
 
                     // Maybe flush `key_rest_accum`
                     if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
-                        || last_key_in_range
+                        || (last_key_in_range && key_request_accum.raw_size() > 0)
                     {
                         let results = self
                             .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
