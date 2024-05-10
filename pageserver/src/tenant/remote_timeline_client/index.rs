@@ -202,10 +202,15 @@ pub(crate) struct Lineage {
     /// Has the `reparenting_history` been truncated to `Lineage::REMEMBER_AT_MOST`.
     #[serde(skip_serializing_if = "is_false", default)]
     reparenting_history_truncated: bool,
+
     /// Earlier ancestors, truncated when `reparented_overflown`
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     reparenting_history: Vec<TimelineId>,
+
     /// The ancestor from which this timeline has been detached from and when.
+    ///
+    /// If you are adding support for detaching from a hierarchy, consider changing the ancestry
+    /// into a `Vec<TimelineId>` to be a path instead.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     original_ancestor: Option<(TimelineId, Lsn, NaiveDateTime)>,
 }
