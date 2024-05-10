@@ -3037,6 +3037,18 @@ impl Timeline {
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
+
+    /// Returns true if the given lsn is or was an ancestor branchpoint.
+    pub(crate) fn is_ancestor_lsn(&self, lsn: Lsn) -> bool {
+        // upon timeline detach, we set the ancestor_lsn to Lsn::INVALID and the store the original
+        // branchpoint in the value in IndexPart::lineage
+        self.ancestor_lsn == lsn
+            || (self.ancestor_lsn == Lsn::INVALID
+                && self
+                    .remote_client
+                    .as_ref()
+                    .is_some_and(|rtc| rtc.is_previous_ancestor_lsn(lsn)))
+    }
 }
 
 type TraversalId = Arc<str>;
@@ -4354,7 +4366,6 @@ impl Timeline {
     /// - has an ancestor to detach from
     /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
     /// a technical requirement
-    /// - has prev_lsn in remote storage (temporary restriction)
     ///
     /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
     /// polled again until completion.

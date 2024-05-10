@@ -437,6 +437,19 @@ impl RemoteTimelineClient {
         }
     }
 
+    /// Returns true if this timeline was previously detached at this Lsn and the remote timeline
+    /// client is currently initialized.
+    pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
+        // technically this is a dirty read, but given how timeline detach ancestor is implemented
+        // via tenant restart, the lineage has always been uploaded.
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .initialized_mut()
+            .map(|uq| uq.latest_lineage.is_previous_ancestor_lsn(lsn))
+            .unwrap_or(false)
+    }
+
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
         let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
             current_remote_index_part
@@ -628,7 +641,7 @@ impl RemoteTimelineClient {
         );
 
         let index_part = IndexPart::from(&*upload_queue);
-        let op = UploadOp::UploadMetadata(index_part, disk_consistent_lsn);
+        let op = UploadOp::UploadMetadata(Box::new(index_part), disk_consistent_lsn);
         self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
         upload_queue.latest_files_changes_since_metadata_upload_scheduled = 0;
@@ -647,7 +660,14 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
+            let Some(prev) = upload_queue.latest_metadata.ancestor_timeline() else {
+                return Err(anyhow::anyhow!(
+                    "cannot reparent without a current ancestor"
+                ));
+            };
+
             upload_queue.latest_metadata.reparent(new_parent);
+            upload_queue.latest_lineage.record_previous_ancestor(&prev);
 
             self.schedule_index_upload(upload_queue);
 
@@ -670,9 +690,8 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
-            upload_queue
-                .latest_metadata
-                .detach_from_ancestor(&adopted.0, &adopted.1);
+            upload_queue.latest_metadata.detach_from_ancestor(&adopted);
+            upload_queue.latest_lineage.record_detaching(&adopted);
 
             for layer in layers {
                 upload_queue
@@ -1811,6 +1830,7 @@ impl RemoteTimelineClient {
                         latest_files: initialized.latest_files.clone(),
                         latest_files_changes_since_metadata_upload_scheduled: 0,
                         latest_metadata: initialized.latest_metadata.clone(),
+                        latest_lineage: initialized.latest_lineage.clone(),
                         projected_remote_consistent_lsn: None,
                         visible_remote_consistent_lsn: initialized
                             .visible_remote_consistent_lsn
