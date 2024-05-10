@@ -4364,7 +4364,6 @@ impl Timeline {
     /// - has an ancestor to detach from
     /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
     /// a technical requirement
-    /// - has prev_lsn in remote storage (temporary restriction)
     ///
     /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
     /// polled again until completion.
