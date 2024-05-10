@@ -519,6 +519,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .get("/v1/status", |r| request_span(r, status_handler))
         .put("/v1/failpoints", |r| {
             request_span(r, move |r| async {
+                check_permission(&r, None)?;
                 let cancel = CancellationToken::new();
                 failpoints_handler(r, cancel).await
             })
