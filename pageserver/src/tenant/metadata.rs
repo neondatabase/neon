@@ -368,8 +368,7 @@ pub(crate) mod modern_serde {
     struct Crc32CalculationFailed<E>(#[source] E);
 
     // this should be false for a week, after that we can change it to true
-    // remember to change "metadata_bytes" from being a `serde(rename = "...")` to `serde(alias =
-    // "...")` in future.
+    // remember to check the IndexPart::metadata field TODO comment as well
     const LEGACY_BINCODED_BYTES: bool = true;
 
     #[derive(serde::Serialize)]
