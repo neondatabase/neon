@@ -1,10 +1,12 @@
 import datetime
 import enum
+import tarfile
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Barrier
-from typing import List, Set
+from typing import IO, List, Set, Tuple
 
 import pytest
 from fixtures.log_helper import log
@@ -162,7 +164,7 @@ def test_ancestor_detach_branched_from(
         "-c",
         f"fullbackup {env.initial_tenant} {env.initial_timeline} {branch_at}",
         "-o",
-        str(fullbackup_before)
+        str(fullbackup_before),
     ]
     pg_bin.run_capture(cmd, env=psql_env)
 
@@ -202,7 +204,7 @@ def test_ancestor_detach_branched_from(
         "-c",
         f"fullbackup {env.initial_tenant} {timeline_id} {branch_at}",
         "-o",
-        str(fullbackup_after)
+        str(fullbackup_after),
     ]
     pg_bin.run_capture(cmd, env=psql_env)
 
@@ -211,9 +213,10 @@ def test_ancestor_detach_branched_from(
 
     # because we do the fullbackup from ancestor at the branch_lsn, the zenith.signal is always different
     # as there is always "PREV_LSN: invalid" for "before"
-    skip_files = { "zenith.signal" }
+    skip_files = {"zenith.signal"}
 
     tar_cmp(fullbackup_before, fullbackup_after, skip_files)
+
 
 def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
     """
@@ -227,9 +230,6 @@ def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
 
     But in a more mac friendly fashion.
     """
-    import tarfile
-    from hashlib import sha256
-    from typing import IO, Tuple
 
     def hash_extracted(reader: IO[bytes] | None) -> bytes:
         assert reader is not None
@@ -244,7 +244,9 @@ def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
     def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
         with tarfile.open(p) as f:
             matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
-            ret = list(map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files))
+            ret = list(
+                map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files)
+            )
             ret.sort(key=lambda t: t[0])
             return ret
 
