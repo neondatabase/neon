@@ -426,25 +426,6 @@ paths:
         required: true
         schema:
           type: string
-    get:
-      description: |
-        Calculate tenant's synthetic size
-      responses:
-        "200":
-          description: Tenant's synthetic size
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SyntheticSizeResponse"
-
-  # This route has no handler. TODO: remove?
-  /v1/tenant/{tenant_id}/size:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
       - name: inputs_only
         in: query
         required: false
@@ -468,19 +449,9 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required:
-                  - id
-                  - size
-                properties:
-                  id:
-                    type: string
-                    format: hex
-                  size:
-                    type: integer
-                    nullable: true
-                    description: |
-                      Size metric in bytes or null if inputs_only=true was given.
+                $ref: "#/components/schemas/SyntheticSizeResponse"
+            text/html:
+              description: SVG representation of the tenant and it's timelines.
         "401":
           description: Unauthorized Error
           content:
@@ -929,6 +900,9 @@ components:
           format: hex
         size:
           type: integer
+          nullable: true
+          description: |
+            Size metric in bytes or null if inputs_only=true was given.
         segment_sizes:
           type: array
           items:
