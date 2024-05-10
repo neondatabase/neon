@@ -267,7 +267,7 @@ impl<'de> Deserialize<'de> for TimelineMetadata {
         D: serde::Deserializer<'de>,
     {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
-        Self::from_bytes(bytes.as_slice()).map_err(|e| D::Error::custom(format!("{e}")))
+        Self::from_bytes(bytes.as_slice()).map_err(D::Error::custom)
     }
 }
 
@@ -276,9 +276,7 @@ impl Serialize for TimelineMetadata {
     where
         S: Serializer,
     {
-        let bytes = self
-            .to_bytes()
-            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?;
+        let bytes = self.to_bytes().map_err(serde::ser::Error::custom)?;
         bytes.serialize(serializer)
     }
 }
