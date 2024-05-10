@@ -626,7 +626,7 @@ where
                         .collect();
                     new_jobs.push(CompactionJob {
                         key_range,
-                        lsn_range: lsn_range,
+                        lsn_range,
                         strategy: CompactionStrategy::CreateDelta,
                         input_layers: batch_layers,
                         completed: false,
