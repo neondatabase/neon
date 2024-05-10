@@ -3,7 +3,7 @@
 //!  # Example
 //!
 //!  ```
-//!  # tokio_test::block_on(async {
+//!  # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
 //!  use utils::poison::Poison;
 //!  use std::time::Duration;
 //!
