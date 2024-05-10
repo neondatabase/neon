@@ -43,9 +43,9 @@ pub struct IndexPart {
     // private because internally we would read from metadata instead.
     pub(super) disk_consistent_lsn: Lsn,
 
-    // TODO: later make this "rename" to "alias", rename field as "legacy_metadata"
+    // TODO: rename field as "legacy_metadata"
     #[serde(
-        rename = "metadata_bytes",
+        alias = "metadata_bytes",
         with = "crate::tenant::metadata::modern_serde"
     )]
     pub metadata: TimelineMetadata,
