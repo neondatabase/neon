@@ -41,7 +41,7 @@ pub struct IndexPart {
     /// Because of the trouble of eyeballing the legacy "metadata" field, we copied the
     /// "disk_consistent_lsn" out. After version 5 this is no longer needed, but the name cannot be
     /// reused.
-    disk_consistent_lsn: Lsn,
+    pub(super) disk_consistent_lsn: Lsn,
 
     // TODO: rename field as "legacy_metadata"
     #[serde(
@@ -97,7 +97,7 @@ impl IndexPart {
         }
     }
 
-    pub fn get_version(&self) -> usize {
+    pub fn version(&self) -> usize {
         self.version
     }
 
