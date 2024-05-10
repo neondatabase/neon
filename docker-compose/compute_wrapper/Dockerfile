@@ -8,6 +8,8 @@ USER root
 RUN apt-get update &&       \
     apt-get install -y curl \
                        jq   \
+                       python3-pip \
                        netcat
+RUN pip3 install Faker
 
 USER postgres
