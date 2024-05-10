@@ -23,7 +23,7 @@ use super::{
     mgr::TenantManager,
     remote_timeline_client::LayerFileMetadata,
     span::debug_assert_current_span_has_tenant_id,
-    storage_layer::{layer::local_layer_path, LayerFileName},
+    storage_layer::{layer::local_layer_path, LayerName},
 };
 
 use pageserver_api::{
@@ -182,7 +182,7 @@ impl SecondaryTenant {
         self: &Arc<Self>,
         conf: &PageServerConf,
         timeline_id: TimelineId,
-        name: LayerFileName,
+        name: LayerName,
         metadata: LayerFileMetadata,
     ) {
         debug_assert_current_span_has_tenant_id();
