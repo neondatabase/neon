@@ -933,9 +933,6 @@ jobs:
       fail-fast: false
       matrix:
         version: [ v14, v15, v16 ]
-    defaults:
-      run:
-        shell: sh -eu {0}
     env:
       VM_BUILDER_VERSION: v0.28.1
 
@@ -969,7 +966,12 @@ jobs:
 
   test-images:
     needs: [ check-permissions, tag, neon-image, compute-node-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ x64, arm64 ]
+
+    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
       - name: Checkout
@@ -987,7 +989,7 @@ jobs:
       - name: Verify image versions
         shell: bash # ensure no set -e for better error messages
         run: |
-          pageserver_version=$(docker run --rm 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
+          pageserver_version=$(docker run --rm neondatabase/neon:${{ needs.tag.outputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
 
           echo "Pageserver version string: $pageserver_version"
 
