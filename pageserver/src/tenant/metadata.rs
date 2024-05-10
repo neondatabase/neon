@@ -282,7 +282,11 @@ impl Serialize for TimelineMetadata {
 }
 
 pub(crate) mod modern_serde {
-    use super::{TimelineMetadata, TimelineMetadataBodyV2};
+    use crate::tenant::metadata::METADATA_FORMAT_VERSION;
+
+    use super::{
+        TimelineMetadata, TimelineMetadataBodyV2, TimelineMetadataHeader, METADATA_HDR_SIZE,
+    };
     use serde::{Deserialize, Serialize};
 
     pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TimelineMetadata, D::Error>
@@ -314,24 +318,54 @@ pub(crate) mod modern_serde {
             where
                 A: serde::de::MapAccess<'d>,
             {
-                let de = serde::de::value::MapAccessDeserializer::new(map);
+                use serde::de::Error;
 
+                let de = serde::de::value::MapAccessDeserializer::new(map);
                 let body = TimelineMetadataBodyV2::deserialize(de)?;
 
-                Ok(TimelineMetadata::new(
-                    body.disk_consistent_lsn,
-                    body.prev_record_lsn,
-                    body.ancestor_timeline,
-                    body.ancestor_lsn,
-                    body.latest_gc_cutoff_lsn,
-                    body.initdb_lsn,
-                    body.pg_version,
-                ))
+                // jump through hoops to calculate the crc32 so that TimelineMetadata::ne works
+                // across serialization versions
+                let mut sink = Crc32Sink::default();
+                <TimelineMetadataBodyV2 as utils::bin_ser::BeSer>::ser_into(&body, &mut sink)
+                    .map_err(|e| A::Error::custom(Crc32CalculationFailed(e)))?;
+
+                let size = METADATA_HDR_SIZE + sink.count;
+
+                Ok(TimelineMetadata {
+                    hdr: TimelineMetadataHeader {
+                        checksum: sink.crc,
+                        size: size as u16,
+                        format_version: METADATA_FORMAT_VERSION,
+                    },
+                    body,
+                })
             }
         }
 
         deserializer.deserialize_any(Visitor)
     }
+
+    #[derive(Default)]
+    struct Crc32Sink {
+        crc: u32,
+        count: usize,
+    }
+
+    impl std::io::Write for Crc32Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.crc = crc32c::crc32c_append(self.crc, buf);
+            self.count += buf.len();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(thiserror::Error)]
+    #[error("re-serializing for crc32 failed")]
+    struct Crc32CalculationFailed<E>(#[source] E);
 
     // this should be false for a week, after that we can change it to true
     const LEGACY_BINCODED_BYTES: bool = true;
