@@ -430,7 +430,7 @@ pub(crate) mod modern_serde {
 
         let wrapper_from_json = serde_json::value::from_value::<Wrapper>(serialized).unwrap();
 
-        assert_eq!(wrapper_from_bytes.0.body, wrapper_from_json.0.body);
+        assert_eq!(wrapper_from_bytes.0, wrapper_from_json.0);
     }
 }
 
