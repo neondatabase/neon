@@ -1,6 +1,7 @@
 import datetime
 import enum
 import tarfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
@@ -230,6 +231,7 @@ def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
 
     But in a more mac friendly fashion.
     """
+    started_at = time.time()
 
     def hash_extracted(reader: IO[bytes] | None) -> bytes:
         assert reader is not None
@@ -252,10 +254,14 @@ def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
 
     left_list, right_list = map(build_hash_list, [left, right])
 
-    assert len(left_list) == len(right_list)
+    try:
+        assert len(left_list) == len(right_list)
 
-    for left_tuple, right_tuple in zip(left_list, right_list):
-        assert left_tuple == right_tuple
+        for left_tuple, right_tuple in zip(left_list, right_list):
+            assert left_tuple == right_tuple
+    finally:
+        elapsed = time.time() - started_at
+        log.info(f"tar_cmp completed in {elapsed}s")
 
 
 def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
