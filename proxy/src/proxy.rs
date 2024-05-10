@@ -283,14 +283,6 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         Err(e) => stream.throw_error(e).await?,
     };
 
-    if let Some(ep) = user_info.get_endpoint() {
-        if !endpoint_rate_limiter.check(ep.into(), 1) {
-            return stream
-                .throw_error(auth::AuthError::too_many_connections())
-                .await?;
-        }
-    }
-
     let user = user_info.get_user().to_owned();
     let user_info = match user_info
         .authenticate(
@@ -298,6 +290,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             &mut stream,
             mode.allow_cleartext(),
             &config.authentication_config,
+            endpoint_rate_limiter,
         )
         .await
     {

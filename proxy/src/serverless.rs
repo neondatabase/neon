@@ -84,6 +84,7 @@ pub async fn task_main(
     let backend = Arc::new(PoolingBackend {
         pool: Arc::clone(&conn_pool),
         config,
+        endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
     });
 
     let tls_config = match config.tls_config.as_ref() {
@@ -343,16 +344,9 @@ async fn request_handler(
         );
         let span = ctx.span.clone();
 
-        sql_over_http::handle(
-            config,
-            ctx,
-            request,
-            backend,
-            http_cancellation_token,
-            endpoint_rate_limiter,
-        )
-        .instrument(span)
-        .await
+        sql_over_http::handle(config, ctx, request, backend, http_cancellation_token)
+            .instrument(span)
+            .await
     } else if request.uri().path() == "/sql" && *request.method() == Method::OPTIONS {
         Response::builder()
             .header("Allow", "OPTIONS, POST")
