@@ -106,7 +106,13 @@ pub async fn compact_tiered<E: CompactionJobExecutor>(
             ctx,
         )
         .await?;
-        if target_file_size == u64::MAX {
+        if current_level_target_height == u64::MAX {
+            // our target height includes all possible lsns
+            debug!(
+                level = current_level_no,
+                depth = depth,
+                "compaction loop reached max current_level_target_height"
+            );
             break;
         }
         current_level_no += 1;
