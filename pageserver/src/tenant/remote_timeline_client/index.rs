@@ -214,7 +214,7 @@ pub(crate) struct Lineage {
     /// The ancestor from which this timeline has been detached from and when.
     ///
     /// If you are adding support for detaching from a hierarchy, consider changing the ancestry
-    /// into a `Vec<TimelineId>` to be a path instead.
+    /// into a `Vec<(TimelineId, Lsn)>` to be a path instead.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     original_ancestor: Option<(TimelineId, Lsn, NaiveDateTime)>,
 }
