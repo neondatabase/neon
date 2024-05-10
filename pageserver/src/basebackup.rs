@@ -601,7 +601,7 @@ where
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
-            if self.lsn == self.timeline.get_ancestor_lsn() {
+            if self.timeline.is_ancestor_lsn(self.lsn) {
                 write!(zenith_signal, "PREV LSN: none")
                     .map_err(|e| BasebackupError::Server(e.into()))?;
             } else {

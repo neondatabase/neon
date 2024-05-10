@@ -159,7 +159,7 @@ impl SnapshotDownloader {
     async fn download_timeline(
         &self,
         ttid: TenantShardTimelineId,
-        index_part: IndexPart,
+        index_part: Box<IndexPart>,
         index_part_generation: Generation,
         ancestor_layers: &mut HashMap<
             TenantShardTimelineId,

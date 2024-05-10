@@ -26,7 +26,7 @@ pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
     pub locks: &'static ApiLocks<EndpointCacheKey>,
-    pub endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    pub wake_compute_endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     jwt: String,
 }
 
@@ -36,7 +36,7 @@ impl Api {
         endpoint: http::Endpoint,
         caches: &'static ApiCaches,
         locks: &'static ApiLocks<EndpointCacheKey>,
-        endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+        wake_compute_endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> Self {
         let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
             Ok(v) => v,
@@ -46,7 +46,7 @@ impl Api {
             endpoint,
             caches,
             locks,
-            endpoint_rate_limiter,
+            wake_compute_endpoint_rate_limiter,
             jwt,
         }
     }
@@ -283,7 +283,7 @@ impl super::Api for Api {
 
         // check rate limit
         if !self
-            .endpoint_rate_limiter
+            .wake_compute_endpoint_rate_limiter
             .check(user_info.endpoint.normalize().into(), 1)
         {
             return Err(WakeComputeError::TooManyConnections);

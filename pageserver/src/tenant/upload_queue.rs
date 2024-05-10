@@ -3,6 +3,7 @@ use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::remote_timeline_client::index::Lineage;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
@@ -55,6 +56,9 @@ pub(crate) struct UploadQueueInitialized {
     /// in-progress and queued operations.
     /// DANGER: do not return to outside world, e.g., safekeepers.
     pub(crate) latest_metadata: TimelineMetadata,
+
+    /// Part of the flattened "next" `index_part.json`.
+    pub(crate) latest_lineage: Lineage,
 
     /// `disk_consistent_lsn` from the last metadata file that was successfully
     /// uploaded. `Lsn(0)` if nothing was uploaded yet.
@@ -171,6 +175,7 @@ impl UploadQueue {
             latest_files: HashMap::new(),
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: metadata.clone(),
+            latest_lineage: Lineage::default(),
             projected_remote_consistent_lsn: None,
             visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
             // what follows are boring default initializations
@@ -218,6 +223,7 @@ impl UploadQueue {
             latest_files: files,
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: index_part.metadata.clone(),
+            latest_lineage: index_part.lineage.clone(),
             projected_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
             visible_remote_consistent_lsn: Arc::new(
                 index_part.metadata.disk_consistent_lsn().into(),
@@ -290,7 +296,7 @@ pub(crate) enum UploadOp {
     UploadLayer(ResidentLayer, LayerFileMetadata),
 
     /// Upload the metadata file
-    UploadMetadata(IndexPart, Lsn),
+    UploadMetadata(Box<IndexPart>, Lsn),
 
     /// Delete layer files
     Delete(Delete),

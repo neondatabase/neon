@@ -36,6 +36,7 @@ use crate::context::RequestMonitoring;
 use crate::metrics::Metrics;
 use crate::protocol2::read_proxy_protocol;
 use crate::proxy::run_until_cancelled;
+use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
 
@@ -54,6 +55,7 @@ pub async fn task_main(
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
@@ -82,6 +84,7 @@ pub async fn task_main(
     let backend = Arc::new(PoolingBackend {
         pool: Arc::clone(&conn_pool),
         config,
+        endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
     });
 
     let tls_config = match config.tls_config.as_ref() {
@@ -129,6 +132,7 @@ pub async fn task_main(
             backend.clone(),
             connections.clone(),
             cancellation_handler.clone(),
+            endpoint_rate_limiter.clone(),
             conn_token.clone(),
             server.clone(),
             tls_acceptor.clone(),
@@ -162,6 +166,7 @@ async fn connection_handler(
     backend: Arc<PoolingBackend>,
     connections: TaskTracker,
     cancellation_handler: Arc<CancellationHandlerMain>,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
     server: Builder<TokioExecutor>,
     tls_acceptor: TlsAcceptor,
@@ -245,6 +250,7 @@ async fn connection_handler(
                     session_id,
                     peer_addr,
                     http_request_token,
+                    endpoint_rate_limiter.clone(),
                 )
                 .in_current_span()
                 .map_ok_or_else(api_error_into_response, |r| r),
@@ -285,6 +291,7 @@ async fn request_handler(
     peer_addr: IpAddr,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
     let host = request
         .headers()
@@ -310,9 +317,15 @@ async fn request_handler(
 
         ws_connections.spawn(
             async move {
-                if let Err(e) =
-                    websocket::serve_websocket(config, ctx, websocket, cancellation_handler, host)
-                        .await
+                if let Err(e) = websocket::serve_websocket(
+                    config,
+                    ctx,
+                    websocket,
+                    cancellation_handler,
+                    endpoint_rate_limiter,
+                    host,
+                )
+                .await
                 {
                     error!("error in websocket connection: {e:#}");
                 }

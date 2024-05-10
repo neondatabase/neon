@@ -246,7 +246,7 @@ pub(crate) struct S3TimelineBlobData {
 #[derive(Debug)]
 pub(crate) enum BlobDataParseResult {
     Parsed {
-        index_part: IndexPart,
+        index_part: Box<IndexPart>,
         index_part_generation: Generation,
         s3_layers: HashSet<(LayerName, Generation)>,
     },
@@ -368,7 +368,7 @@ pub(crate) async fn list_timeline_blobs(
             Ok(index_part) => {
                 return Ok(S3TimelineBlobData {
                     blob_data: BlobDataParseResult::Parsed {
-                        index_part,
+                        index_part: Box::new(index_part),
                         index_part_generation,
                         s3_layers,
                     },
