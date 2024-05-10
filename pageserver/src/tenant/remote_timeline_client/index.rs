@@ -203,7 +203,11 @@ pub(crate) struct Lineage {
     #[serde(skip_serializing_if = "is_false", default)]
     reparenting_history_truncated: bool,
 
-    /// Earlier ancestors, truncated when `reparented_overflown`
+    /// Earlier ancestors, truncated when [`Self::reparenting_history_truncated`]
+    ///
+    /// These are stored in case we want to support WAL based DR on the timeline. There can be many
+    /// of these and at most one [`Self::original_ancestor`]. There cannot be more reparentings
+    /// after [`Self::original_ancestor`] has been set.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     reparenting_history: Vec<TimelineId>,
 
