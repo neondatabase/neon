@@ -3040,6 +3040,8 @@ impl Timeline {
 
     /// Returns true if the given lsn is or was an ancestor branchpoint.
     pub(crate) fn is_ancestor_lsn(&self, lsn: Lsn) -> bool {
+        // upon timeline detach, we set the ancestor_lsn to Lsn::INVALID and the store the original
+        // branchpoint in the value in IndexPart::lineage
         self.ancestor_lsn == lsn
             || (self.ancestor_lsn == Lsn::INVALID
                 && self
