@@ -281,6 +281,123 @@ impl Serialize for TimelineMetadata {
     }
 }
 
+pub(crate) mod modern_serde {
+    use super::{TimelineMetadata, TimelineMetadataBodyV2};
+    use serde::{Deserialize, Serialize};
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TimelineMetadata, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        // for legacy reasons versions 1-5 had TimelineMetadata serialized as a Vec<u8> field with
+        // BeSer.
+        struct Visitor;
+
+        impl<'d> serde::de::Visitor<'d> for Visitor {
+            type Value = TimelineMetadata;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("BeSer bytes or json structure")
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'d>,
+            {
+                use serde::de::Error;
+                let de = serde::de::value::SeqAccessDeserializer::new(seq);
+                Vec::<u8>::deserialize(de)
+                    .map(|v| TimelineMetadata::from_bytes(&v).map_err(A::Error::custom))?
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'d>,
+            {
+                let de = serde::de::value::MapAccessDeserializer::new(map);
+
+                let body = TimelineMetadataBodyV2::deserialize(de)?;
+
+                Ok(TimelineMetadata::new(
+                    body.disk_consistent_lsn,
+                    body.prev_record_lsn,
+                    body.ancestor_timeline,
+                    body.ancestor_lsn,
+                    body.latest_gc_cutoff_lsn,
+                    body.initdb_lsn,
+                    body.pg_version,
+                ))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+
+    // this should be false for a week, after that we can change it to true
+    const LEGACY_BINCODED_BYTES: bool = true;
+
+    #[derive(serde::Serialize)]
+    #[serde(transparent)]
+    struct LegacyPaddedBytes<'a>(&'a TimelineMetadata);
+
+    struct JustTheBodyV2<'a>(&'a TimelineMetadata);
+
+    impl serde::Serialize for JustTheBodyV2<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            // header is not needed, upon reading we've upgraded all v1 to v2
+            self.0.body.serialize(serializer)
+        }
+    }
+
+    pub(crate) fn serialize<S>(
+        metadata: &TimelineMetadata,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // we cannot use TimelineMetadata::serialize for now because it'll do
+        // TimelineMetadata::to_bytes
+        if LEGACY_BINCODED_BYTES {
+            LegacyPaddedBytes(metadata).serialize(serializer)
+        } else {
+            JustTheBodyV2(metadata).serialize(serializer)
+        }
+    }
+
+    #[test]
+    fn deserializes_bytes_as_well_as_equivalent_body_v2() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Wrapper(#[serde(deserialize_with = "deserialize")] TimelineMetadata);
+
+        let too_many_bytes = "[216,111,252,208,0,54,0,4,0,0,0,0,1,73,253,144,1,0,0,0,0,1,73,253,24,0,0,0,0,0,0,0,0,0,0,0,0,0,1,73,253,24,0,0,0,0,1,73,253,24,0,0,0,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]";
+
+        let wrapper_from_bytes = serde_json::from_str::<Wrapper>(&too_many_bytes).unwrap();
+
+        let serialized = serde_json::to_value(&JustTheBodyV2(&wrapper_from_bytes.0)).unwrap();
+
+        assert_eq!(
+            serialized,
+            serde_json::json! {{
+                "disk_consistent_lsn": "0/149FD90",
+                "prev_record_lsn": "0/149FD18",
+                "ancestor_timeline": null,
+                "ancestor_lsn": "0/0",
+                "latest_gc_cutoff_lsn": "0/149FD18",
+                "initdb_lsn": "0/149FD18",
+                "pg_version": 15
+            }}
+        );
+
+        let wrapper_from_json = serde_json::value::from_value::<Wrapper>(serialized).unwrap();
+
+        assert_eq!(wrapper_from_bytes.0.body, wrapper_from_json.0.body);
+    }
+}
+
 /// Parts of the metadata which are regularly modified.
 pub(crate) struct MetadataUpdate {
     disk_consistent_lsn: Lsn,
