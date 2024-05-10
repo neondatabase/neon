@@ -723,9 +723,13 @@ jobs:
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
 
-  neon-image:
+  neon-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
-    runs-on: [ self-hosted, gen3, large ]
+    strategy:
+      matrix:
+        arch: [ x64, arm64 ]
+
+    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Checkout
@@ -747,12 +751,6 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
-        with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
-
       - uses: docker/build-push-action@v5
         with:
           context: .
@@ -764,16 +762,42 @@ jobs:
           push: true
           pull: true
           file: Dockerfile
-          cache-from: type=registry,ref=neondatabase/neon:cache
-          cache-to: type=registry,ref=neondatabase/neon:cache,mode=max
+          cache-from: type=registry,ref=neondatabase/neon:cache-${{ matrix.arch }}
+          cache-to: type=registry,ref=neondatabase/neon:cache-${{ matrix.arch }},mode=max
           tags: |
-            369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
-            neondatabase/neon:${{needs.tag.outputs.build-tag}}
+            neondatabase/neon:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
       - name: Remove custom docker config directory
         if: always()
         run: |
           rm -rf .docker-custom
+
+  neon-image:
+    needs: [ neon-image-arch, tag ]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Create multi-arch image
+        run: |
+          docker buildx imagetools create -t neondatabase/neon:${{ needs.tag.outputs.build-tag }} \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-x64 \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-arm64
+
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - name: Push multi-arch image to ECR
+        run: |
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{ needs.tag.outputs.build-tag }} \
+                                                                                neondatabase/neon:${{ needs.tag.outputs.build-tag }}
 
   compute-node-image:
     needs: [ check-permissions, build-build-tools-image, tag ]
