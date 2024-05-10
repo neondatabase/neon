@@ -7,7 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Barrier
-from typing import IO, List, Set, Tuple
+from typing import IO, List, Set, Tuple, Union
 
 import pytest
 from fixtures.log_helper import log
@@ -233,7 +233,7 @@ def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
     """
     started_at = time.time()
 
-    def hash_extracted(reader: IO[bytes] | None) -> bytes:
+    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
         assert reader is not None
         digest = sha256(usedforsecurity=False)
         while True:
