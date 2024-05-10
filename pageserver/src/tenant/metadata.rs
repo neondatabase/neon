@@ -61,6 +61,49 @@ struct TimelineMetadataHeader {
     size: u16,           // size of serialized metadata
     format_version: u16, // metadata format version (used for compatibility checks)
 }
+
+impl TryFrom<&TimelineMetadataBodyV2> for TimelineMetadataHeader {
+    type Error = Crc32CalculationFailed;
+
+    fn try_from(value: &TimelineMetadataBodyV2) -> Result<Self, Self::Error> {
+        #[derive(Default)]
+        struct Crc32Sink {
+            crc: u32,
+            count: usize,
+        }
+
+        impl std::io::Write for Crc32Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.crc = crc32c::crc32c_append(self.crc, buf);
+                self.count += buf.len();
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // jump through hoops to calculate the crc32 so that TimelineMetadata::ne works
+        // across serialization versions
+        let mut sink = Crc32Sink::default();
+        <TimelineMetadataBodyV2 as utils::bin_ser::BeSer>::ser_into(value, &mut sink)
+            .map_err(Crc32CalculationFailed)?;
+
+        let size = METADATA_HDR_SIZE + sink.count;
+
+        Ok(TimelineMetadataHeader {
+            checksum: sink.crc,
+            size: size as u16,
+            format_version: METADATA_FORMAT_VERSION,
+        })
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("re-serializing for crc32 failed")]
+struct Crc32CalculationFailed(#[source] utils::bin_ser::SerializeError);
+
 const METADATA_HDR_SIZE: usize = std::mem::size_of::<TimelineMetadataHeader>();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +173,12 @@ impl TimelineMetadata {
                 pg_version,
             },
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_recalculated_checksum(mut self) -> anyhow::Result<Self> {
+        self.hdr = TimelineMetadataHeader::try_from(&self.body)?;
+        Ok(self)
     }
 
     fn upgrade_timeline_metadata(metadata_bytes: &[u8]) -> anyhow::Result<Self> {
@@ -283,11 +332,7 @@ impl TimelineMetadata {
 }
 
 pub(crate) mod modern_serde {
-    use crate::tenant::metadata::METADATA_FORMAT_VERSION;
-
-    use super::{
-        TimelineMetadata, TimelineMetadataBodyV2, TimelineMetadataHeader, METADATA_HDR_SIZE,
-    };
+    use super::{TimelineMetadata, TimelineMetadataBodyV2, TimelineMetadataHeader};
     use serde::{Deserialize, Serialize};
 
     pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TimelineMetadata, D::Error>
@@ -323,50 +368,14 @@ pub(crate) mod modern_serde {
 
                 let de = serde::de::value::MapAccessDeserializer::new(map);
                 let body = TimelineMetadataBodyV2::deserialize(de)?;
+                let hdr = TimelineMetadataHeader::try_from(&body).map_err(A::Error::custom)?;
 
-                // jump through hoops to calculate the crc32 so that TimelineMetadata::ne works
-                // across serialization versions
-                let mut sink = Crc32Sink::default();
-                <TimelineMetadataBodyV2 as utils::bin_ser::BeSer>::ser_into(&body, &mut sink)
-                    .map_err(|e| A::Error::custom(Crc32CalculationFailed(e)))?;
-
-                let size = METADATA_HDR_SIZE + sink.count;
-
-                Ok(TimelineMetadata {
-                    hdr: TimelineMetadataHeader {
-                        checksum: sink.crc,
-                        size: size as u16,
-                        format_version: METADATA_FORMAT_VERSION,
-                    },
-                    body,
-                })
+                Ok(TimelineMetadata { hdr, body })
             }
         }
 
         deserializer.deserialize_any(Visitor)
     }
-
-    #[derive(Default)]
-    struct Crc32Sink {
-        crc: u32,
-        count: usize,
-    }
-
-    impl std::io::Write for Crc32Sink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.crc = crc32c::crc32c_append(self.crc, buf);
-            self.count += buf.len();
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[derive(thiserror::Error)]
-    #[error("re-serializing for crc32 failed")]
-    struct Crc32CalculationFailed<E>(#[source] E);
 
     pub(crate) fn serialize<S>(
         metadata: &TimelineMetadata,
