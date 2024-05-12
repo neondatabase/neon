@@ -31,7 +31,7 @@ pub(super) enum Discovered {
     /// "metadata" file we persist locally and include in `index_part.json`
     Metadata,
     /// Backup file from previously future layers
-    IgnoredBackup,
+    IgnoredBackup(Utf8PathBuf),
     /// Unrecognized, warn about these
     Unknown(String),
 }
@@ -57,7 +57,7 @@ pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovere
                     Discovered::Metadata
                 } else if file_name.ends_with(".old") {
                     // ignore these
-                    Discovered::IgnoredBackup
+                    Discovered::IgnoredBackup(direntry.path().to_owned())
                 } else if remote_timeline_client::is_temp_download_file(direntry.path()) {
                     Discovered::TemporaryDownload(file_name)
                 } else if is_ephemeral_file(&file_name) {
@@ -206,20 +206,12 @@ pub(super) fn cleanup(path: &Utf8Path, kind: &str) -> anyhow::Result<()> {
 pub(super) fn cleanup_local_file_for_remote(local: &LocalLayerFileMetadata) -> anyhow::Result<()> {
     let local_size = local.file_size;
     let path = &local.local_path;
-
     let file_name = path.file_name().expect("must be file path");
     tracing::warn!(
         "removing local file {file_name:?} because it has unexpected length {local_size};"
     );
-    if let Err(err) = crate::tenant::timeline::rename_to_backup(path) {
-        assert!(
-            path.exists(),
-            "we would leave the local_layer without a file if this does not hold: {path}",
-        );
-        Err(err)
-    } else {
-        Ok(())
-    }
+
+    std::fs::remove_file(path).with_context(|| format!("failed to remove layer at {path}"))
 }
 
 pub(super) fn cleanup_future_layer(

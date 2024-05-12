@@ -41,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
+    fs_ext,
     sync::gate::{Gate, GateGuard},
     vec_map::VecMap,
 };
@@ -2438,7 +2439,8 @@ impl Timeline {
                             warn!("found legacy metadata file, these should have been removed in load_tenant_config");
                             continue;
                         }
-                        Discovered::IgnoredBackup => {
+                        Discovered::IgnoredBackup(path) => {
+                            std::fs::remove_file(path).or_else(fs_ext::ignore_not_found).fatal_err("Removing .old file");
                             continue;
                         }
                         Discovered::Unknown(file_name) => {
@@ -5368,26 +5370,6 @@ impl<'a> TimelineWriter<'a> {
 fn is_send() {
     fn _assert_send<T: Send>() {}
     _assert_send::<TimelineWriter<'_>>();
-}
-
-/// Add a suffix to a layer file's name: .{num}.old
-/// Uses the first available num (starts at 0)
-fn rename_to_backup(path: &Utf8Path) -> anyhow::Result<()> {
-    let filename = path
-        .file_name()
-        .ok_or_else(|| anyhow!("Path {path} don't have a file name"))?;
-    let mut new_path = path.to_owned();
-
-    for i in 0u32.. {
-        new_path.set_file_name(format!("{filename}.{i}.old"));
-        if !new_path.exists() {
-            std::fs::rename(path, &new_path)
-                .with_context(|| format!("rename {path:?} to {new_path:?}"))?;
-            return Ok(());
-        }
-    }
-
-    bail!("couldn't find an unused backup number for {:?}", path)
 }
 
 #[cfg(test)]
