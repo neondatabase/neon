@@ -1284,7 +1284,7 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
 
     # Apply failpoint
     env.storage_controller.configure_failpoints(
-        ("tenant-update-policy-exclusive-lock", "return(31000)")
+        ("tenant-update-policy-exclusive-lock", "return(35000)")
     )
 
     # This will hold the exclusive for enough time to cause an warning
@@ -1306,7 +1306,7 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.pageserver_api().timeline_create(
         pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
     )
-    thread_update_tenant_policy.join(timeout=10)
+    thread_update_tenant_policy.join()
 
     env.storage_controller.assert_log_contains("Lock on UpdatePolicy was held for")
     env.storage_controller.assert_log_contains(
