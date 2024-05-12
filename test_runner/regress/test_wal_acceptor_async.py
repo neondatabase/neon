@@ -531,6 +531,43 @@ def test_recovery_uncommitted(neon_env_builder: NeonEnvBuilder):
     asyncio.run(run_recovery_uncommitted(env))
 
 
+async def run_pause(env: NeonEnv):
+    (sk1, sk2, _) = env.safekeepers
+    (sk1_http, sk2_http, _) = [sk.http_client() for sk in env.safekeepers]
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_pause")
+
+    ep = env.endpoints.create_start("test_pause")
+    ep.safe_psql("create table t(key int, value text)")
+    ep.safe_psql("insert into t select generate_series(1, 100), 'payload'")
+
+    # Halt two safekeepers, query should hang
+    sk1_http.set_pause(tenant_id, timeline_id, True)
+    sk2_http.set_pause(tenant_id, timeline_id, True)
+    conn = await ep.connect_async()
+    # query should hang, so execute in separate task
+    bg_query = asyncio.create_task(
+        conn.execute("insert into t select generate_series(1, 200), 'payload'")
+    )
+    sleep_sec = 2
+    await asyncio.sleep(sleep_sec)
+    # it must still be not finished
+    assert not bg_query.done()
+
+    # resume timeline on one of paused safekeepers, should be enough to commit
+    sk2_http.set_pause(tenant_id, timeline_id, False)
+    ep.safe_psql("insert into t select generate_series(1, 2000), 'payload'")
+
+
+# Test timeline pause
+def test_pause(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    asyncio.run(run_pause(env))
+
+
 async def run_segment_init_failure(env: NeonEnv):
     env.neon_cli.create_branch("test_segment_init_failure")
     ep = env.endpoints.create_start("test_segment_init_failure")

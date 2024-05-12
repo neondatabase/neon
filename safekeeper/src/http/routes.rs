@@ -194,6 +194,28 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     json_response(StatusCode::OK, ())
 }
 
+/// Info about timeline on safekeeper ready for reporting.
+#[derive(Debug, Serialize, Deserialize)]
+struct PauseRequest {
+    pause: bool,
+}
+
+async fn timeline_pause_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let data: PauseRequest = json_request(&mut request).await?;
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+
+    let tli = GlobalTimelines::get(ttid)?;
+    tli.set_pause(data.pause)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, ())
+}
+
 /// Pull timeline from peer safekeeper instances.
 async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
@@ -535,6 +557,9 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         })
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
+        })
+        .post("/v1/tenant/:tenant_id/timeline/:timeline_id/pause", |r| {
+            request_span(r, timeline_pause_handler)
         })
         .post("/v1/pull_timeline", |r| {
             request_span(r, timeline_pull_handler)

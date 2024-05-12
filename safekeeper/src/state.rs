@@ -63,6 +63,9 @@ pub struct TimelinePersistentState {
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
     pub partial_backup: wal_backup_partial::State,
+    /// Paused timeline forbids writes to it (it might be useful to pause any
+    /// other activity as well, but that's a todo).
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -98,6 +101,7 @@ impl TimelinePersistentState {
                     .collect(),
             ),
             partial_backup: wal_backup_partial::State::default(),
+            paused: false,
         }
     }
 

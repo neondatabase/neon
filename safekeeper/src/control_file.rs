@@ -20,7 +20,7 @@ use utils::{bin_ser::LeSer, id::TenantTimelineId};
 use crate::SafeKeeperConf;
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 8;
+pub const SK_FORMAT_VERSION: u32 = 9;
 
 // contains persistent metadata for safekeeper
 const CONTROL_FILE_NAME: &str = "safekeeper.control";

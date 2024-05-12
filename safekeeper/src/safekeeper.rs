@@ -1238,6 +1238,7 @@ mod tests {
                 },
             )]),
             partial_backup: crate::wal_backup_partial::State::default(),
+            paused: false,
         };
 
         let ser = state.ser().unwrap();
@@ -1285,6 +1286,8 @@ mod tests {
             0xb0, 0x01, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
             // partial_backup
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // paused
+            0x00
         ];
 
         assert_eq!(Hex(&ser), Hex(&expected));
