@@ -700,6 +700,7 @@ impl Timeline {
                                 debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
                                 lsn_range.clone()
                             },
+                            ctx,
                         )
                         .await?,
                     );
@@ -755,6 +756,7 @@ impl Timeline {
                 &self
                     .conf
                     .timeline_path(&self.tenant_shard_id, &self.timeline_id),
+                ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -1093,6 +1095,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range.start,
             lsn_range.clone(),
+            ctx,
         )
         .await?;
 
@@ -1167,6 +1170,7 @@ impl TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range,
             lsn,
+            ctx,
         )
         .await?;
 

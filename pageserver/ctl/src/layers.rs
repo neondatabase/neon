@@ -61,7 +61,7 @@ async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
     virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
     page_cache::init(100);
-    let file = VirtualFile::open(path).await?;
+    let file = VirtualFile::open(path, ctx).await?;
     let file_id = page_cache::next_file_id();
     let block_reader = FileBlockReader::new(&file, file_id);
     let summary_blk = block_reader.read_blk(0, ctx).await?;
