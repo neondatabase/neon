@@ -383,7 +383,7 @@ fn start_pageserver(
     let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
 
     // Set up remote storage client
-    let remote_storage = create_remote_storage_client(conf)?;
+    let remote_storage = Some(create_remote_storage_client(conf)?);
 
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
@@ -708,12 +708,11 @@ fn start_pageserver(
 
 fn create_remote_storage_client(
     conf: &'static PageServerConf,
-) -> anyhow::Result<Option<GenericRemoteStorage>> {
+) -> anyhow::Result<GenericRemoteStorage> {
     let config = if let Some(config) = &conf.remote_storage_config {
         config
     } else {
-        tracing::warn!("no remote storage configured, this is a deprecated configuration");
-        return Ok(None);
+        anyhow::bail!("no remote storage configured, this is a deprecated configuration");
     };
 
     // Create the client
@@ -733,7 +732,7 @@ fn create_remote_storage_client(
             GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
     }
 
-    Ok(Some(remote_storage))
+    Ok(remote_storage)
 }
 
 fn cli() -> Command {
