@@ -128,6 +128,47 @@ fails it will require manual intervention to set the nodes scheduling policy to
 `NodeSchedulingPolicy::Active`. Not doing that is not immediately problematic,
 but it constrains the scheduler as mentioned previously.
 
+### Node Scheduling Policy State Machine
+
+The state machine below encodes the behaviours discussed above and
+the various failover situations described in a later section.
+
+Assuming no failures and/or timeouts the flow should be:
+`Active -> Draining -> PauseForRestart -> Active -> Filling -> Active`
+
+```
+                          Operator requested drain
+               +-----------------------------------------+
+               |                                         |
+       +-------+-------+                         +-------v-------+
+       |               |                         |               |
+       |     Pause     |             +----------->    Draining   +----------+
+       |               |             |           |               |          |
+       +---------------+             |           +-------+-------+          |
+                                     |                   |                  |
+                                     |                   |                  |
+                      Drain requested|                   |                  |
+                                     |                   |Drain complete    | Drain failed
+                                     |                   |                  | Cancelled/PS reattach/Storcon restart
+                                     |                   |                  |
+                             +-------+-------+           |                  |
+                             |               |           |                  |
+               +-------------+    Active     <-----------+------------------+
+               |             |               |           |
+Fill requested |             +---^---^-------+           |
+               |                 |   |                   |
+               |                 |   |                   |
+               |                 |   |                   |
+               |   Fill completed|   |                   |
+               |                 |   |PS reattach        |
+               |                 |   |after restart      |
+       +-------v-------+         |   |           +-------v-------+
+       |               |         |   |           |               |
+       |    Filling    +---------+   +-----------+PauseForRestart|
+       |               |                         |               |
+       +---------------+                         +---------------+
+```
+
 ### Draining/Filling APIs
 
 The storage controller API to trigger the draining of a given node is:
@@ -153,6 +194,8 @@ Before accpeting a drain request the following validations is applied:
 * Ensure that the node is known the storage controller
 * Ensure that the schedulling policy is `NodeSchedulingPolicy::Active` or `NodeSchedulingPolicy::Pause`
 * Ensure that another drain or fill is not already running on the node
+* Ensure that a drain is possible (i.e. check that there is at least one
+schedulable node to drain to)
 
 After accepting the drain, the scheduling policy of the node is set to
 `NodeSchedulingPolicy::Draining` and persisted in both memory and the database.
@@ -196,6 +239,13 @@ Like for draining, the concurrency of spawned reconciles is limited.
 
 ### Failure Modes & Handling
 
+Failures are generally handled by transition back into the `Active`
+(neutral) state. This simplifies the implementation greatly at the
+cost of adding transitions to the state machine. For example, we
+could detect the `Draining` state upon restart and proceed with a drain,
+but how should the storage controller know that's what the orchestrator
+needs still?
+
 #### Storage Controller Crash
 
 When the storage controller starts up reset the node scheduling policy
@@ -207,6 +257,15 @@ of all nodes in states `Draining`, `Filling` or `PauseForRestart` to
 The pageserver will attempt to re-attach during restart at which
 point the node scheduling policy will be set back to `Active`, thus
 reenabling the scheduler to use the node.
+
+#### Non-drained Pageserver Crash During Drain
+
+What should happen when a pageserver we are draining to crashes during the
+process. Two reasonable options are: cancel the drain and focus on the failover
+*or* do both, but prioritise failover. Since the number of concurrent reconciles
+produced by drains/fills are limited, we get the later behaviour for free.
+My suggestion is we take this approach, but the cancellation option is trivial
+to implement as well.
 
 #### Pageserver Crash During Fill
 
@@ -251,6 +310,24 @@ for the foreseable future, the first implementation could simply query the tenan
 for secondary status. This doesn't scale well with increasing tenant counts, so
 eventually we will need new pageserver API endpoints to report the sets of
 "warm" and "cold" nodes.
+
+## Alternatives Considered
+
+### Draining and Filling Purely as Scheduling Constraints
+
+At its core, the storage controller is a big background loop that detects changes
+in the environment and reacts on them. One could express draining and filling
+of nodes purely in terms of constraining the scheduler (as opposed to having
+such background tasks).
+
+While theoretically nice, I think that's harder to implement and more importantly operate and reason about.
+Consider cancellation of a drain/fill operation. We would have to update the scheduler state, create
+an entirely new schedule (intent state) and start work on applying that. It gets trickier if we wish
+to cancel the reconciliation tasks spawned by drain/fill nodes. How would we know which ones belong
+to the conceptual drain/fill? One could add labels to reconciliations, but it gets messy in my opinion.
+
+It would also mean that reconciliations themselves have side effects that persist in the database
+(persist something to the databse when the drain is done), which I'm not conceptually fond of.
 
 ## Proof of Concept
 
