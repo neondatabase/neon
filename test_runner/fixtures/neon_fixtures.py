@@ -47,14 +47,15 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pageserver.allowed_errors import (
     DEFAULT_PAGESERVER_ALLOWED_ERRORS,
     DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
+from fixtures.pageserver.common_types import IndexPartDump, LayerName, parse_layer_file_name
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.types import IndexPartDump, LayerFileName, parse_layer_file_name
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -72,7 +73,6 @@ from fixtures.remote_storage import (
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     allure_add_grafana_links,
@@ -700,6 +700,11 @@ class NeonEnvBuilder:
 
         config["default_tenant_id"] = snapshot_config["default_tenant_id"]
         config["branch_name_mappings"] = snapshot_config["branch_name_mappings"]
+
+        # Update the config with new neon + postgres path in case of compat test
+        # FIXME: overriding pg_distrib_dir cause storage controller fail to start
+        # config["pg_distrib_dir"] = str(self.pg_distrib_dir)
+        config["neon_distrib_dir"] = str(self.neon_binpath)
 
         with (self.repo_dir / "config").open("w") as f:
             toml.dump(config, f)
@@ -2664,7 +2669,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         )
 
     def layer_exists(
-        self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: LayerFileName
+        self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: LayerName
     ) -> bool:
         layers = self.list_layers(tenant_id, timeline_id)
         return layer_name in [parse_layer_file_name(p.name) for p in layers]

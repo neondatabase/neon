@@ -22,7 +22,7 @@ use crate::{
             FAILED_REMOTE_OP_RETRIES,
         },
         span::debug_assert_current_span_has_tenant_id,
-        storage_layer::{layer::local_layer_path, LayerFileName},
+        storage_layer::{layer::local_layer_path, LayerName},
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
     },
     virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
@@ -111,7 +111,7 @@ impl OnDiskState {
         _conf: &'static PageServerConf,
         _tenant_shard_id: &TenantShardId,
         _imeline_id: &TimelineId,
-        _ame: LayerFileName,
+        _ame: LayerName,
         metadata: LayerFileMetadata,
         access_time: SystemTime,
     ) -> Self {
@@ -124,10 +124,10 @@ impl OnDiskState {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct SecondaryDetailTimeline {
-    pub(super) on_disk_layers: HashMap<LayerFileName, OnDiskState>,
+    pub(super) on_disk_layers: HashMap<LayerName, OnDiskState>,
 
     /// We remember when layers were evicted, to prevent re-downloading them.
-    pub(super) evicted_at: HashMap<LayerFileName, SystemTime>,
+    pub(super) evicted_at: HashMap<LayerName, SystemTime>,
 }
 
 /// This state is written by the secondary downloader, it is opaque
@@ -997,7 +997,7 @@ async fn init_timeline_state(
 
     // As we iterate through layers found on disk, we will look up their metadata from this map.
     // Layers not present in metadata will be discarded.
-    let heatmap_metadata: HashMap<&LayerFileName, &HeatMapLayer> =
+    let heatmap_metadata: HashMap<&LayerName, &HeatMapLayer> =
         heatmap.layers.iter().map(|l| (&l.name, l)).collect();
 
     while let Some(dentry) = dir
@@ -1034,7 +1034,7 @@ async fn init_timeline_state(
             continue;
         }
 
-        match LayerFileName::from_str(file_name) {
+        match LayerName::from_str(file_name) {
             Ok(name) => {
                 let remote_meta = heatmap_metadata.get(&name);
                 match remote_meta {

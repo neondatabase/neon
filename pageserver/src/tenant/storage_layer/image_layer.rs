@@ -55,6 +55,7 @@ use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
@@ -66,8 +67,10 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::ImageFileName;
-use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer, ValuesReconstructState};
+use super::layer_name::ImageLayerName;
+use super::{
+    AsLayerDesc, Layer, LayerName, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -232,7 +235,7 @@ impl ImageLayer {
         conf: &PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        fname: &ImageFileName,
+        fname: &ImageLayerName,
     ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -268,13 +271,13 @@ impl ImageLayer {
             .and_then(|res| res)?;
 
         // not production code
-        let actual_filename = path.file_name().unwrap().to_owned();
-        let expected_filename = self.layer_desc().filename().file_name();
+        let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
+        let expected_layer_name = self.layer_desc().layer_name();
 
-        if actual_filename != expected_filename {
+        if actual_layer_name != expected_layer_name {
             println!("warning: filename does not match what is expected from in-file summary");
-            println!("actual: {:?}", actual_filename);
-            println!("expected: {:?}", expected_filename);
+            println!("actual: {:?}", actual_layer_name.to_string());
+            println!("expected: {:?}", expected_layer_name.to_string());
         }
 
         Ok(loaded)
@@ -472,7 +475,7 @@ impl ImageLayerInner {
             .await
             .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state)
+        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
 
         Ok(())
@@ -535,6 +538,7 @@ impl ImageLayerInner {
         &self,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
     ) {
         let max_vectored_read_bytes = self
             .max_vectored_read_bytes
@@ -563,7 +567,7 @@ impl ImageLayerInner {
             }
 
             let buf = BytesMut::with_capacity(buf_size);
-            let res = vectored_blob_reader.read_blobs(&read, buf).await;
+            let res = vectored_blob_reader.read_blobs(&read, buf, ctx).await;
 
             match res {
                 Ok(blobs_buf) => {
@@ -636,7 +640,7 @@ impl ImageLayerWriterInner {
             conf,
             timeline_id,
             tenant_shard_id,
-            &ImageFileName {
+            &ImageLayerName {
                 key_range: key_range.clone(),
                 lsn,
             },

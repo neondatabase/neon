@@ -63,7 +63,7 @@ use crate::tenant::remote_timeline_client::list_remote_timelines;
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
-use crate::tenant::storage_layer::LayerFileName;
+use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::SpawnMode;
@@ -1229,7 +1229,7 @@ async fn layer_download_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
-    let layer_name = LayerFileName::from_str(layer_file_name)
+    let layer_name = LayerName::from_str(layer_file_name)
         .map_err(|s| ApiError::BadRequest(anyhow::anyhow!(s)))?;
     let state = get_state(&request);
 
@@ -1261,7 +1261,7 @@ async fn evict_timeline_layer_handler(
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
     let state = get_state(&request);
 
-    let layer_name = LayerFileName::from_str(layer_file_name)
+    let layer_name = LayerName::from_str(layer_file_name)
         .map_err(|s| ApiError::BadRequest(anyhow::anyhow!(s)))?;
 
     let timeline =

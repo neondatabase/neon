@@ -1,11 +1,9 @@
 self-hosted-runner:
   labels:
     - arm64
-    - dev
     - gen3
     - large
-    # Remove `macos-14` from the list after https://github.com/rhysd/actionlint/pull/392 is merged.
-    - macos-14
+    - large-arm64
     - small
     - us-east-2
 config-variables:

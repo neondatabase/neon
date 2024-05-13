@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Union
 
 import pytest
 import requests
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -18,7 +19,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty
 from fixtures.remote_storage import s3_storage
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 from pytest_httpserver import HTTPServer

@@ -16,6 +16,7 @@ import time
 from typing import Optional
 
 import pytest
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -37,7 +38,6 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import (
     RemoteStorageKind,
 )
-from fixtures.types import TenantId, TimelineId
 from fixtures.utils import print_gc_result, wait_until
 from fixtures.workload import Workload
 
@@ -729,8 +729,8 @@ def test_upgrade_generationless_local_file_paths(
     for filename in os.listdir(timeline_dir):
         path = os.path.join(timeline_dir, filename)
         log.info(f"Found file {path}")
-        if path.endswith("-00000001"):
-            new_path = path[:-9]
+        if path.endswith("-v1-00000001"):
+            new_path = path[:-12]
             os.rename(path, new_path)
             log.info(f"Renamed {path} -> {new_path}")
             files_renamed += 1

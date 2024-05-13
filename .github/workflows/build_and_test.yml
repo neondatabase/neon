@@ -341,6 +341,9 @@ jobs:
         env:
           NEXTEST_RETRIES: 3
         run: |
+          #nextest does not yet support running doctests
+          cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
+
           for io_engine in std-fs tokio-epoll-uring ; do
             NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
           done

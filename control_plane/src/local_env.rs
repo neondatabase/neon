@@ -211,7 +211,7 @@ impl Default for PageServerConf {
 
 /// The toml that can be passed to `neon_local init --config`.
 /// This is a subset of the `pageserver.toml` configuration.
-// TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
+// TODO(christian): use pageserver_api::config::ConfigToml (PR #7656)
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct NeonLocalInitPageserverConf {
     pub id: NodeId,
@@ -498,7 +498,7 @@ impl LocalEnv {
                 let id = dentry_name[PREFIX.len()..]
                     .parse::<NodeId>()
                     .with_context(|| format!("parse id from {:?}", dentry.path()))?;
-                // TODO(christian): use pageserver_api::config::ConfigToml once that PR is merged
+                // TODO(christian): use pageserver_api::config::ConfigToml (PR #7656)
                 #[derive(serde::Serialize, serde::Deserialize)]
                 // (allow unknown fields, unlike PageServerConf)
                 struct PageserverConfigTomlSubset {

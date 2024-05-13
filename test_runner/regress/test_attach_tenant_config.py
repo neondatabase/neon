@@ -2,13 +2,13 @@ from dataclasses import dataclass
 from typing import Generator, Optional
 
 import pytest
+from fixtures.common_types import TenantId
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
 )
 from fixtures.pageserver.http import PageserverApiException, TenantConfig
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.types import TenantId
 from fixtures.utils import wait_until
 
 

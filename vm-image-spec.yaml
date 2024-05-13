@@ -244,6 +244,55 @@ files:
         values: [approximate_working_set_size]
         query: |
           select neon.approximate_working_set_size(false) as approximate_working_set_size;
+
+      - metric_name: current_lsn
+        type: gauge
+        help: 'Current LSN of the database'
+        key_labels:
+        values: [lsn]
+        query: |
+          select
+            case
+              when pg_catalog.pg_is_in_recovery()
+              then pg_last_wal_replay_lsn()
+              else pg_current_wal_lsn()
+            end as lsn;
+
+      - metric_name: replication_delay_bytes
+        type: gauge
+        help: 'Bytes between received and replayed LSN'
+        key_labels:
+        values: [replication_delay_bytes]
+        query: |
+          SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()) AS replication_delay_bytes;
+
+      - metric_name: replication_delay_seconds
+        type: gauge
+        help: 'Time since last LSN was replayed'
+        key_labels:
+        values: [replication_delay_seconds]
+        query: |
+          SELECT
+            CASE
+              WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
+              ELSE GREATEST (0, EXTRACT (EPOCH FROM now() - pg_last_xact_replay_timestamp()))
+            END AS replication_delay_seconds;
+
+      - metric_name: checkpoints_req
+        type: gauge
+        help: 'Number of requested checkpoints'
+        key_labels:
+        values: [checkpoints_req]
+        query: |
+          SELECT checkpoints_req FROM pg_stat_bgwriter;
+
+      - metric_name: checkpoints_timed
+        type: gauge
+        help: 'Number of scheduled checkpoints'
+        key_labels:
+        values: [checkpoints_timed]
+        query: |
+          SELECT checkpoints_timed FROM pg_stat_bgwriter;
   - filename: neon_collector_autoscaling.yml
     content: |
       collector_name: neon_collector_autoscaling
@@ -295,7 +344,6 @@ files:
         values: [approximate_working_set_size]
         query: |
           select neon.approximate_working_set_size(false) as approximate_working_set_size;
-
 build: |
   # Build cgroup-tools
   #

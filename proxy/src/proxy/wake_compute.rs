@@ -119,7 +119,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
             WakeupFailureKind::ApiConsoleOtherError
         }
         WakeComputeError::TooManyConnections => WakeupFailureKind::ApiConsoleLocked,
-        WakeComputeError::TimeoutError => WakeupFailureKind::TimeoutError,
+        WakeComputeError::TooManyConnectionAttempts(_) => WakeupFailureKind::TimeoutError,
     };
     Metrics::get()
         .proxy

@@ -80,7 +80,7 @@ impl PageServerNode {
     ) -> anyhow::Result<toml_edit::Document> {
         assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
 
-        // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml once that PR is merged
+        // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml (PR #7656)
 
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(

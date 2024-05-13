@@ -3,6 +3,7 @@ import random
 import time
 
 import pytest
+from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -10,7 +11,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion
-from fixtures.types import TenantId, TenantShardId, TimelineId
 
 
 @pytest.mark.timeout(3600)  # super long running test: should go down as we optimize
@@ -102,6 +102,9 @@ def test_storage_controller_many_tenants(
                 tenant_id,
                 shard_count,
                 stripe_size,
+                # Upload heatmaps fast, so that secondary downloads happen promptly, enabling
+                # the controller's optimization migrations to proceed promptly.
+                tenant_config={"heatmap_period": "10s"},
                 placement_policy={"Attached": 1},
             )
             futs.append(f)
