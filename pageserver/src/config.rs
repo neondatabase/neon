@@ -24,7 +24,7 @@ use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use toml_edit::{Document, Item};
+use toml_edit::Item;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use postgres_backend::AuthType;
@@ -37,8 +37,8 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
+use crate::virtual_file;
 use crate::virtual_file::io_engine;
-use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{
     IGNORED_TENANT_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
     TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX,
@@ -99,7 +99,7 @@ pub struct PageServerConf {
 
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
-    pub default_tenant_conf: TenantConf,
+    pub default_tenant_conf: crate::tenant::config::TenantConf,
 
     /// Storage broker endpoints to connect to.
     pub broker_endpoint: Uri,
@@ -378,6 +378,7 @@ impl PageServerConf {
             concurrent_tenant_warmup,
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
+            tenant_config,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -432,8 +433,7 @@ impl PageServerConf {
             }),
             control_plane_api_token: control_plane_api_token.map(SecretString::from),
             id: id.parse().context("parse `id` field")?,
-            // TenantConf is handled separately
-            default_tenant_conf: { todo!("tenant conf should come from the config file") },
+            default_tenant_conf: tenant_config,
             concurrent_tenant_warmup: ConfigurableSemaphore::new(
                 config_toml.concurrent_tenant_warmup,
             ),

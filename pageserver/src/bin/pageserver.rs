@@ -173,7 +173,7 @@ fn initialize_config(
         }
     };
 
-    let mut effective_config = file_contents.unwrap_or_else(|| {
+    let mut effective_config_toml = file_contents.unwrap_or_else(|| {
         DEFAULT_CONFIG_FILE
             .parse()
             .expect("unit tests ensure this works")
@@ -187,21 +187,25 @@ fn initialize_config(
             })?;
 
             for (key, item) in doc.iter() {
-                effective_config.insert(key, item.clone());
+                effective_config_toml.insert(key, item.clone());
             }
         }
     }
 
-    debug!("Resulting toml: {effective_config}");
+    debug!("Resulting toml: {effective_config_toml}");
+
+    let effective_config_deserialized: pageserver_api::config::ConfigToml =
+        toml_edit::de::from_document(effective_config_toml.clone())
+            .context("deserialize config")?;
 
     // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
+    let conf = PageServerConf::parse_and_validate(effective_config_deserialized, workdir)
         .context("Failed to parse pageserver configuration")?;
 
     if init {
         info!("Writing pageserver config to '{cfg_file_path}'");
 
-        std::fs::write(cfg_file_path, effective_config.to_string())
+        std::fs::write(cfg_file_path, effective_config_toml.to_string())
             .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
         info!("Config successfully written to '{cfg_file_path}'")
     }
