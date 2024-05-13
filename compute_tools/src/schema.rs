@@ -51,7 +51,7 @@ pub enum SchemaDumpError {
 // and special error is returned.
 //
 // To make sure that the process is killed when the caller drops the stream, we use tokio kill_on_drop feature.
-pub async fn schema_dump(
+pub async fn get_schema_ddl(
     compute: &Arc<ComputeNode>,
     dbname: &str,
 ) -> Result<impl Stream<Item = Result<bytes::Bytes, std::io::Error>>, SchemaDumpError> {

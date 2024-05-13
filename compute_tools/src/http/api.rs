@@ -8,7 +8,7 @@ use std::thread;
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use crate::schema::SchemaDumpError;
-use crate::schema::{get_schema_objects, schema_dump};
+use crate::schema::{get_schema_ddl, get_schema_objects};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
@@ -154,7 +154,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Ok(database) => database,
             };
             info!("serving /schema/ddl GET request with database: {database}",);
-            match schema_dump(compute, &database).await {
+            match get_schema_ddl(compute, &database).await {
                 Ok(res) => render_plain(Body::wrap_stream(res)),
                 Err(SchemaDumpError::DatabaseDoesNotExist) => {
                     render_json_error("database does not exist", StatusCode::NOT_FOUND)
