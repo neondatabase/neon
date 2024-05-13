@@ -701,6 +701,7 @@ class NeonEnvBuilder:
         config["default_tenant_id"] = snapshot_config["default_tenant_id"]
         config["branch_name_mappings"] = snapshot_config["branch_name_mappings"]
 
+        # Update the config with new neon + postgres path in case of compat test
         config["pg_distrib_dir"] = str(self.pg_distrib_dir)
         config["neon_distrib_dir"] = str(self.neon_binpath)
 
