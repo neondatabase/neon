@@ -546,9 +546,27 @@ jobs:
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
+  report-benchmarks-failures:
+    needs: [ benchmarks, create-test-report ]
+    if: github.ref_name == 'main' && failure()
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: C060CNA47S9 # on-call-staging-storage-stream
+        slack-message: |
+          Benchmarks failed on main: ${{ github.event.head_commit.url }}
+
+          Allure report: ${{ needs.create-test-report.outputs.report-url }}
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
   create-test-report:
     needs: [ check-permissions, regress-tests, coverage-report, benchmarks, build-build-tools-image ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
+    outputs:
+      report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
     runs-on: [ self-hosted, gen3, small ]
     container:
