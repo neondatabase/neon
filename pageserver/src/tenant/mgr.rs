@@ -391,22 +391,17 @@ async fn init_load_generations(
     // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
     // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
     // are processed, even though we don't block on recovery completing here.
-    //
-    // Must only do this if remote storage is enabled, otherwise deletion queue
-    // is not running and channel push will fail.
-    if resources.remote_storage.is_some() {
-        let attached_tenants = generations
-            .iter()
-            .flat_map(|(id, start_mode)| {
-                match start_mode {
-                    TenantStartupMode::Attached((_mode, generation)) => Some(generation),
-                    TenantStartupMode::Secondary => None,
-                }
-                .map(|gen| (*id, *gen))
-            })
-            .collect();
-        resources.deletion_queue_client.recover(attached_tenants)?;
-    }
+    let attached_tenants = generations
+        .iter()
+        .flat_map(|(id, start_mode)| {
+            match start_mode {
+                TenantStartupMode::Attached((_mode, generation)) => Some(generation),
+                TenantStartupMode::Secondary => None,
+            }
+            .map(|gen| (*id, *gen))
+        })
+        .collect();
+    resources.deletion_queue_client.recover(attached_tenants)?;
 
     Ok(Some(generations))
 }
@@ -611,6 +606,7 @@ pub async fn init_tenant_mgr(
                     TenantSlot::Attached(Tenant::create_broken_tenant(
                         conf,
                         tenant_shard_id,
+                        resources.remote_storage.clone(),
                         format!("{}", e),
                     )),
                 );
@@ -803,6 +799,7 @@ fn tenant_spawn(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
+    let remote_storage = resources.remote_storage.clone();
     let tenant = match Tenant::spawn(
         conf,
         tenant_shard_id,
@@ -817,7 +814,7 @@ fn tenant_spawn(
         Ok(tenant) => tenant,
         Err(e) => {
             error!("Failed to spawn tenant {tenant_shard_id}, reason: {e:#}");
-            Tenant::create_broken_tenant(conf, tenant_shard_id, format!("{e:#}"))
+            Tenant::create_broken_tenant(conf, tenant_shard_id, remote_storage, format!("{e:#}"))
         }
     };
 
@@ -2276,7 +2273,7 @@ pub(crate) async fn load_tenant(
     tenant_id: TenantId,
     generation: Generation,
     broker_client: storage_broker::BrokerClientChannel,
-    remote_storage: Option<GenericRemoteStorage>,
+    remote_storage: GenericRemoteStorage,
     deletion_queue_client: DeletionQueueClient,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
@@ -2937,7 +2934,7 @@ pub(crate) async fn immediate_gc(
         }
 
         let timeline = tenant.get_timeline(timeline_id, false).ok();
-        let rtc = timeline.as_ref().and_then(|x| x.remote_client.as_ref());
+        let rtc = timeline.as_ref().map(|x| &x.remote_client);
 
         if let Some(rtc) = rtc {
             // layer drops schedule actions on remote timeline client to actually do the
