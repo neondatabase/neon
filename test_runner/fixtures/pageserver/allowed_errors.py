@@ -131,9 +131,10 @@ if __name__ == "__main__":
         "-i",
         "--input",
         type=argparse.FileType("r"),
-        default=sys.stdin,
-        help="Pageserver logs file. Reads from stdin if no file is provided.",
+        help="Pageserver logs file. Use '-' for stdin.",
+        required=True
     )
+
     args = parser.parse_args()
     errors = _check_allowed_errors(args.input)
 
