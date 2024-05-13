@@ -9,9 +9,9 @@
 //! may lead to a data loss.
 //!
 use anyhow::bail;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::CompactionAlgorithm;
 use pageserver_api::models::EvictionPolicy;
+use pageserver_api::models::SwitchAuxFilePolicy;
 use pageserver_api::models::{self, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
@@ -373,7 +373,7 @@ pub struct TenantConf {
 
     /// Switch to a new aux file policy. Switching this flag requires the user has not written any aux file into
     /// the storage before, and this flag cannot be switched back. Otherwise there will be data corruptions.
-    pub switch_aux_file_policy: AuxFilePolicy,
+    pub switch_aux_file_policy: SwitchAuxFilePolicy,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -472,7 +472,7 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub switch_aux_file_policy: Option<AuxFilePolicy>,
+    pub switch_aux_file_policy: Option<SwitchAuxFilePolicy>,
 }
 
 impl TenantConfOpt {
@@ -574,7 +574,7 @@ impl Default for TenantConf {
             lazy_slru_download: false,
             timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
-            switch_aux_file_policy: AuxFilePolicy::V1,
+            switch_aux_file_policy: SwitchAuxFilePolicy::V1,
         }
     }
 }

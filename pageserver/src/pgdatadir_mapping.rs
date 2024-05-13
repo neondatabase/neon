@@ -24,7 +24,7 @@ use pageserver_api::key::{
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
-use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::{RuntimeAuxFilePolicy, SwitchAuxFilePolicy};
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -35,7 +35,7 @@ use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -718,10 +718,13 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        match self.get_switch_aux_file_policy() {
-            AuxFilePolicy::V1 => self.list_aux_files_v1(lsn, ctx).await,
-            AuxFilePolicy::V2 => self.list_aux_files_v2(lsn, ctx).await,
-            AuxFilePolicy::CrossValidation => {
+        let current_policy = self.last_aux_file_policy.load();
+        match current_policy {
+            RuntimeAuxFilePolicy::V1 | RuntimeAuxFilePolicy::Unspecified => {
+                self.list_aux_files_v1(lsn, ctx).await
+            }
+            RuntimeAuxFilePolicy::V2 => self.list_aux_files_v2(lsn, ctx).await,
+            RuntimeAuxFilePolicy::CrossValidation => {
                 let v1_result = self.list_aux_files_v1(lsn, ctx).await;
                 let v2_result = self.list_aux_files_v2(lsn, ctx).await;
                 match (v1_result, v2_result) {
@@ -1451,7 +1454,7 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
-        if let AuxFilePolicy::V2 = self.tline.get_switch_aux_file_policy() {
+        if let SwitchAuxFilePolicy::V2 = self.tline.get_switch_aux_file_policy() {
             return Ok(());
         }
         let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
@@ -1469,8 +1472,34 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let policy = self.tline.get_switch_aux_file_policy();
-        if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
+        let switch_policy = self.tline.get_switch_aux_file_policy();
+
+        let policy = {
+            let current_policy = self.tline.last_aux_file_policy.load();
+            // Allowed switch path:
+            // * no aux files -> v1/v2/cross-validation
+            // * cross-validation->v2
+            match (current_policy, switch_policy) {
+                (RuntimeAuxFilePolicy::Unspecified, _)
+                | (RuntimeAuxFilePolicy::CrossValidation, SwitchAuxFilePolicy::V2) => {
+                    let new_policy = switch_policy.to_runtime_policy();
+                    self.tline.last_aux_file_policy.store(new_policy);
+                    info!("switching to aux file policy {:?}", new_policy);
+                    if let Some(ref remote_client) = self.tline.remote_client {
+                        remote_client
+                            .schedule_index_upload_for_aux_file_policy_update(new_policy)?;
+                        remote_client.wait_completion().await?;
+                    }
+                    info!("finish switching to aux file policy {:?}", new_policy);
+                    new_policy
+                }
+                (current_policy, _) => current_policy,
+            }
+        };
+
+        assert!(policy != RuntimeAuxFilePolicy::Unspecified);
+
+        if let RuntimeAuxFilePolicy::V2 | RuntimeAuxFilePolicy::CrossValidation = policy {
             let key = aux_file::encode_aux_file_key(path);
             // retrieve the key from the engine
             let old_val = match self.get(key, ctx).await {
@@ -1521,7 +1550,7 @@ impl<'a> DatadirModification<'a> {
             self.put(key, Value::Image(new_val.into()));
         }
 
-        if let AuxFilePolicy::V1 | AuxFilePolicy::CrossValidation = policy {
+        if let RuntimeAuxFilePolicy::V1 | RuntimeAuxFilePolicy::CrossValidation = policy {
             let file_path = path.to_string();
             let content = if content.is_empty() {
                 None

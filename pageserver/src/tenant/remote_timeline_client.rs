@@ -189,6 +189,7 @@ use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
 pub(crate) use download::download_initdb_tar_zst;
+use pageserver_api::models::RuntimeAuxFilePolicy;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -609,6 +610,17 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Launch an index-file upload operation in the background, with only aux_file_policy flag updated.
+    pub(crate) fn schedule_index_upload_for_aux_file_policy_update(
+        self: &Arc<Self>,
+        last_aux_file_policy: RuntimeAuxFilePolicy,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        upload_queue.last_aux_file_policy = last_aux_file_policy;
+        self.schedule_index_upload(upload_queue);
+        Ok(())
+    }
     ///
     /// Launch an index-file upload operation in the background, if necessary.
     ///
@@ -942,7 +954,7 @@ impl RemoteTimelineClient {
     }
 
     /// Wait for all previously scheduled uploads/deletions to complete
-    pub(crate) async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
         let receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
@@ -1844,6 +1856,7 @@ impl RemoteTimelineClient {
                         dangling_files: HashMap::default(),
                         shutting_down: false,
                         shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
+                        last_aux_file_policy: initialized.last_aux_file_policy,
                     };
 
                     let upload_queue = std::mem::replace(

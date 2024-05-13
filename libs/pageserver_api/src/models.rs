@@ -10,6 +10,7 @@ use std::{
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
     str::FromStr,
+    sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
 };
 
@@ -305,17 +306,107 @@ pub struct TenantConfig {
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
-    pub switch_aux_file_policy: Option<AuxFilePolicy>,
+    pub switch_aux_file_policy: Option<SwitchAuxFilePolicy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AuxFilePolicy {
+pub enum SwitchAuxFilePolicy {
     V1,
     V2,
     CrossValidation,
 }
 
-impl FromStr for AuxFilePolicy {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeAuxFilePolicy {
+    V1,
+    V2,
+    CrossValidation,
+    Unspecified,
+}
+
+pub struct AtomicRuntimeAuxFilePolicy(AtomicUsize);
+
+impl AtomicRuntimeAuxFilePolicy {
+    pub fn new(policy: RuntimeAuxFilePolicy) -> Self {
+        Self(AtomicUsize::new(policy.to_usize()))
+    }
+
+    pub fn load(&self) -> RuntimeAuxFilePolicy {
+        RuntimeAuxFilePolicy::from_usize(self.0.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    pub fn store(&self, policy: RuntimeAuxFilePolicy) {
+        self.0.store(
+            RuntimeAuxFilePolicy::to_usize(policy),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
+impl SwitchAuxFilePolicy {
+    pub fn to_usize(self) -> usize {
+        match self {
+            Self::V1 => 1,
+            Self::CrossValidation => 2,
+            Self::V2 => 3,
+        }
+    }
+
+    pub fn from_usize(this: usize) -> Self {
+        match this {
+            1 => Self::V1,
+            2 => Self::CrossValidation,
+            3 => Self::V2,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn to_runtime_policy(&self) -> RuntimeAuxFilePolicy {
+        RuntimeAuxFilePolicy::from_usize(self.to_usize())
+    }
+}
+
+impl RuntimeAuxFilePolicy {
+    pub fn to_usize(self) -> usize {
+        match self {
+            Self::V1 => 1,
+            Self::CrossValidation => 2,
+            Self::V2 => 3,
+            Self::Unspecified => 0,
+        }
+    }
+
+    pub fn from_usize(this: usize) -> Self {
+        match this {
+            1 => Self::V1,
+            2 => Self::CrossValidation,
+            3 => Self::V2,
+            0 => Self::Unspecified,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl FromStr for RuntimeAuxFilePolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.to_lowercase();
+        if s.is_empty() || s == "unspecified" {
+            Ok(Self::Unspecified)
+        } else if s == "v1" {
+            Ok(Self::V1)
+        } else if s == "v2" {
+            Ok(Self::V2)
+        } else if s == "crossvalidation" || s == "cross_validation" {
+            Ok(Self::CrossValidation)
+        } else {
+            anyhow::bail!("cannot parse {} to aux file policy", s)
+        }
+    }
+}
+
+impl FromStr for SwitchAuxFilePolicy {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -604,6 +695,9 @@ pub struct TimelineInfo {
     pub state: TimelineState,
 
     pub walreceiver_status: String,
+
+    /// Whether aux file v2 is enabled
+    pub last_aux_file_policy: RuntimeAuxFilePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

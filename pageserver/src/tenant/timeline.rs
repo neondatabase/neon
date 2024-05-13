@@ -23,9 +23,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
-        AuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
+        AtomicRuntimeAuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
         DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
-        TimelineState,
+        RuntimeAuxFilePolicy, SwitchAuxFilePolicy, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -413,7 +413,11 @@ pub struct Timeline {
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
 
+    /// Size estiamtor for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
+
+    /// Indicate whether aux file v2 storage is enabled.
+    pub(crate) last_aux_file_policy: AtomicRuntimeAuxFilePolicy,
 }
 
 pub struct WalReceiverInfo {
@@ -2011,7 +2015,7 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
-    pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
+    pub(crate) fn get_switch_aux_file_policy(&self) -> SwitchAuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
             .tenant_conf
@@ -2149,6 +2153,7 @@ impl Timeline {
         resources: TimelineResources,
         pg_version: u32,
         state: TimelineState,
+        aux_file_policy: RuntimeAuxFilePolicy,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2273,6 +2278,8 @@ impl Timeline {
                 }),
 
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
+
+                last_aux_file_policy: AtomicRuntimeAuxFilePolicy::new(aux_file_policy),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -2421,6 +2428,11 @@ impl Timeline {
         let generation = self.generation;
         let shard = self.get_shard_index();
         let this = self.myself.upgrade().expect("&self method holds the arc");
+
+        if let Some(ref index_part) = index_part {
+            self.last_aux_file_policy
+                .store(index_part.last_aux_file_policy());
+        }
 
         let (loaded_layers, needs_cleanup, total_physical_size) = tokio::task::spawn_blocking({
             move || {

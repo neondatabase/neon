@@ -20,6 +20,7 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
+use pageserver_api::models::RuntimeAuxFilePolicy;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::ShardIdentity;
@@ -528,6 +529,7 @@ impl Tenant {
         index_part: Option<IndexPart>,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
+        last_aux_file_policy: RuntimeAuxFilePolicy,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
@@ -538,6 +540,10 @@ impl Tenant {
             ancestor.clone(),
             resources,
             CreateTimelineCause::Load,
+            // This could be derived from ancestor branch + index part. Though the only caller of `timeline_init_and_sync` is `load_remote_timeline`,
+            // there will potentially be other caller of this function in the future, and we don't know whether `index_part` or `ancestor` takes precedence.
+            // Therefore, we pass this field explicitly for now, and remove it once we fully migrate to aux file v2.
+            last_aux_file_policy,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -1176,12 +1182,15 @@ impl Tenant {
             None
         };
 
+        let last_aux_file_policy = index_part.last_aux_file_policy();
+
         self.timeline_init_and_sync(
             timeline_id,
             resources,
             Some(index_part),
             remote_metadata,
             ancestor,
+            last_aux_file_policy,
             ctx,
         )
         .await
@@ -1360,6 +1369,7 @@ impl Tenant {
             create_guard,
             initdb_lsn,
             None,
+            RuntimeAuxFilePolicy::Unspecified,
         )
         .await
     }
@@ -2431,6 +2441,7 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
+        last_aux_file_policy: RuntimeAuxFilePolicy,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -2459,6 +2470,7 @@ impl Tenant {
             resources,
             pg_version,
             state,
+            last_aux_file_policy,
             self.cancel.child_token(),
         );
 
@@ -3109,6 +3121,7 @@ impl Tenant {
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
+                src_timeline.last_aux_file_policy.load(),
             )
             .await?;
 
@@ -3311,6 +3324,7 @@ impl Tenant {
                 timeline_create_guard,
                 pgdata_lsn,
                 None,
+                RuntimeAuxFilePolicy::Unspecified,
             )
             .await?;
 
@@ -3388,6 +3402,7 @@ impl Tenant {
         create_guard: TimelineCreateGuard<'a>,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
+        last_aux_file_policy: RuntimeAuxFilePolicy,
     ) -> anyhow::Result<UninitializedTimeline> {
         let tenant_shard_id = self.tenant_shard_id;
 
@@ -3403,6 +3418,7 @@ impl Tenant {
                 ancestor,
                 resources,
                 CreateTimelineCause::Load,
+                last_aux_file_policy,
             )
             .context("Failed to create timeline data structure")?;
 
