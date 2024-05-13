@@ -49,7 +49,7 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
-int         neon_protocol_version = 2;
+int         neon_protocol_version = 1;
 
 static int	n_reconnect_attempts = 0;
 static int	max_reconnect_attempts = 60;
@@ -860,7 +860,7 @@ pg_init_libpagestore(void)
 							"Version of compute<->page server protocol",
 							NULL,
 							&neon_protocol_version,
-							2, /* use protocol version 2 */
+							1, /* default to old protocol for now */
 							1, /* min */
 							2, /* max */
 							PGC_SU_BACKEND,
