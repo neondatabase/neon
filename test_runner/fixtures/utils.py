@@ -485,7 +485,7 @@ def assert_no_errors(log_file, service, allowed_errors):
     for _lineno, error in errors:
         log.info(f"not allowed {service} error: {error.strip()}")
 
-    assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.bash to test any new allowed_error you add"
+    assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
 
 
 @enum.unique
