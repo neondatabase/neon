@@ -259,6 +259,9 @@ def test_forward_compatibility(
                 "cannot find git hash in the version string: " + prev_pageserver_version_str
             )
 
+        # does not include logs from previous runs
+        assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
+
         neon_env_builder.start()
 
         # ensure the specified pageserver is running
