@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
+use bytes::Bytes;
 use pageserver_api::{models::*, shard::TenantShardId};
 use reqwest::{IntoUrl, Method, StatusCode};
 use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
+    lsn::Lsn,
 };
 
 pub mod util;
@@ -566,9 +568,37 @@ impl Client {
             .request_noerror(Method::POST, &uri, IngestAuxFilesRequest { aux_files })
             .await?;
         match resp.status() {
-            StatusCode::OK => Ok(true),
+            StatusCode::ACCEPTED | StatusCode::OK => Ok(true),
             StatusCode::NOT_MODIFIED => Ok(false),
-            // TODO: dedupe this pattern / introduce separate error variant?
+            status => Err(match resp.json::<HttpErrorBody>().await {
+                Ok(HttpErrorBody { msg }) => Error::ApiError(status, msg),
+                Err(_) => {
+                    Error::ReceiveErrorBody(format!("Http error ({}) at {}.", status.as_u16(), uri))
+                }
+            }),
+        }
+    }
+
+    pub async fn list_aux_files(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+    ) -> Result<HashMap<String, Bytes>> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/list_aux_files",
+            self.mgmt_api_endpoint, tenant_shard_id, timeline_id
+        );
+        let resp = self
+            .request_noerror(Method::POST, &uri, ListAuxFilesRequest { lsn })
+            .await?;
+        match resp.status() {
+            StatusCode::ACCEPTED | StatusCode::OK => {
+                let resp: HashMap<String, Bytes> = resp.json().await.map_err(|e| {
+                    Error::ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
+                })?;
+                Ok(resp)
+            }
             status => Err(match resp.json::<HttpErrorBody>().await {
                 Ok(HttpErrorBody { msg }) => Error::ApiError(status, msg),
                 Err(_) => {
