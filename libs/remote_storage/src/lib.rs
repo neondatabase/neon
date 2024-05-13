@@ -618,7 +618,7 @@ impl<'de> serde::Deserialize<'de> for RemoteStorageConfig {
     where
         D: serde::Deserializer<'de>,
     {
-        todo!()
+        todo!("done in https://github.com/neondatabase/neon/pull/7743")
     }
 }
 
