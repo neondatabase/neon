@@ -8,9 +8,10 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import s3_storage
+from fixtures.utils import humantime_to_ms
 
 
-@pytest.mark.parametrize("duration", [120])
+@pytest.mark.parametrize("duration", [30])
 @pytest.mark.parametrize("io_engine", ["tokio-epoll-uring", "std-fs"])
 @pytest.mark.parametrize("concurrency_per_target", [1, 10, 100])
 @pytest.mark.timeout(1000)
@@ -30,7 +31,7 @@ def test_download_churn(
     # params from fixtures
     params.update(
         {
-            "duration": (duration, {"unit": "s"}),
+            # we don't capture `duration`, but instead use the `runtime` output field from pagebench
         }
     )
 
@@ -163,4 +164,12 @@ def run_benchmark(
         metric_value=results[metric],
         unit="",
         report=MetricReport.LOWER_IS_BETTER,
+    )
+
+    metric = "runtime"
+    record(
+        metric,
+        metric_value=humantime_to_ms(results[metric]) / 1000,
+        unit="s",
+        report=MetricReport.TEST_PARAM,
     )

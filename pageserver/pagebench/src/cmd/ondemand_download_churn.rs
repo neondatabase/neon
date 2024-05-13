@@ -56,6 +56,7 @@ struct Output {
     downloads_bytes: u64,
     evictions_count: u64,
     timeline_restarts: u64,
+    #[serde(with = "humantime_serde")]
     runtime: Duration,
 }
 
