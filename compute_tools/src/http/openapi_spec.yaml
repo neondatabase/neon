@@ -106,6 +106,12 @@ paths:
               schema:
                 type: string
                 description: Schema dump in SQL format.
+        404:
+          description: Non existing database.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
 
   /check_writability:
     post:
