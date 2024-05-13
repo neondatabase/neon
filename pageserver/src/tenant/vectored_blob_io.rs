@@ -16,7 +16,6 @@
 //! Note that the vectored blob api does *not* go through the page cache.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
 
 use bytes::BytesMut;
 use pageserver_api::key::Key;

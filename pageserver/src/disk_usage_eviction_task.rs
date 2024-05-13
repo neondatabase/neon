@@ -41,10 +41,7 @@
 // - The `#[allow(dead_code)]` above various structs are to suppress warnings about only the Debug impl
 //   reading these fields. We use the Debug impl for semi-structured logging, though.
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{sync::Arc, time::SystemTime};
 
 use anyhow::Context;
 use pageserver_api::{config::DiskUsageEvictionTaskConfig, shard::TenantShardId};
@@ -53,7 +50,6 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::serde_percent::Percent;
 use utils::{completion, id::TimelineId};
 
 use crate::{

@@ -4,7 +4,7 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{bail, ensure, Context};
 use pageserver_api::{
     config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes},
     shard::TenantShardId,
@@ -21,10 +21,8 @@ use utils::logging::SecretString;
 use once_cell::sync::OnceCell;
 use reqwest::Url;
 use std::num::NonZeroUsize;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use toml_edit::Item;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use postgres_backend::AuthType;
@@ -33,7 +31,6 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
@@ -45,13 +42,17 @@ use crate::{
 };
 
 pub mod defaults {
-    use const_format::formatcp;
-    pub use pageserver_api::config::defaults::*;
-
-    ///
-    /// Default built-in configuration file.
-    ///
+    // TODO(christian): this can be removed after https://github.com/neondatabase/aws/pull/1322
     pub const DEFAULT_CONFIG_FILE: &str = "";
+
+    #[cfg(test)]
+    fn test_default_config_file_var_desers_to_default_impl() {
+        use super::PageServerConf;
+
+        let doc = toml_edit::de::from_str(DEFAULT_CONFIG_FILE).unwrap();
+        let conf = PageServerConf::parse_and_validate(doc, std::env::current_dir().unwrap());
+        assert_eq!(conf, pageserver_api::config::ConfigToml::default());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,17 +435,15 @@ impl PageServerConf {
             control_plane_api_token: control_plane_api_token.map(SecretString::from),
             id: id.parse().context("parse `id` field")?,
             default_tenant_conf: tenant_config,
-            concurrent_tenant_warmup: ConfigurableSemaphore::new(
-                config_toml.concurrent_tenant_warmup,
-            ),
+            concurrent_tenant_warmup: ConfigurableSemaphore::new(concurrent_tenant_warmup),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
-                config_toml.concurrent_tenant_size_logical_size_queries,
+                concurrent_tenant_size_logical_size_queries,
             ),
             eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::new(
                 // re-use `concurrent_tenant_size_logical_size_queries`
-                config_toml.concurrent_tenant_size_logical_size_queries,
+                concurrent_tenant_size_logical_size_queries,
             ),
-            virtual_file_io_engine: match config_toml.virtual_file_io_engine {
+            virtual_file_io_engine: match virtual_file_io_engine {
                 Some(v) => v,
                 None => match crate::virtual_file::io_engine_feature_test()
                     .context("auto-detect virtual_file_io_engine")?
@@ -500,68 +499,6 @@ impl PageServerConf {
         };
         PageServerConf::parse_and_validate(config_toml, &repo_dir).unwrap()
     }
-}
-
-// Helper functions to parse a toml Item
-
-fn parse_toml_string(name: &str, item: &Item) -> Result<String> {
-    let s = item
-        .as_str()
-        .with_context(|| format!("configure option {name} is not a string"))?;
-    Ok(s.to_string())
-}
-
-fn parse_toml_u64(name: &str, item: &Item) -> Result<u64> {
-    // A toml integer is signed, so it cannot represent the full range of an u64. That's OK
-    // for our use, though.
-    let i: i64 = item
-        .as_integer()
-        .with_context(|| format!("configure option {name} is not an integer"))?;
-    if i < 0 {
-        bail!("configure option {name} cannot be negative");
-    }
-    Ok(i as u64)
-}
-
-fn parse_toml_bool(name: &str, item: &Item) -> Result<bool> {
-    item.as_bool()
-        .with_context(|| format!("configure option {name} is not a bool"))
-}
-
-fn parse_toml_duration(name: &str, item: &Item) -> Result<Duration> {
-    let s = item
-        .as_str()
-        .with_context(|| format!("configure option {name} is not a string"))?;
-
-    Ok(humantime::parse_duration(s)?)
-}
-
-fn parse_toml_from_str<T>(name: &str, item: &Item) -> anyhow::Result<T>
-where
-    T: FromStr,
-    <T as FromStr>::Err: std::fmt::Display,
-{
-    let v = item
-        .as_str()
-        .with_context(|| format!("configure option {name} is not a string"))?;
-    T::from_str(v).map_err(|e| {
-        anyhow!(
-            "Failed to parse string as {parse_type} for configure option {name}: {e}",
-            parse_type = stringify!(T)
-        )
-    })
-}
-
-fn deserialize_from_item<T>(name: &str, item: &Item) -> anyhow::Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    // ValueDeserializer::new is not public, so use the ValueDeserializer's documented way
-    let deserializer = match item.clone().into_value() {
-        Ok(value) => value.into_deserializer(),
-        Err(item) => anyhow::bail!("toml_edit::Item '{item}' is not a toml_edit::Value"),
-    };
-    T::deserialize(deserializer).with_context(|| format!("deserializing item for node {name}"))
 }
 
 /// Configurable semaphore permits setting.
