@@ -2880,86 +2880,73 @@ use {
     utils::http::error::ApiError,
 };
 
-pub(crate) fn immediate_gc(
+#[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id))]
+pub(crate) async fn immediate_gc(
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,
     cancel: CancellationToken,
     ctx: &RequestContext,
-) -> Result<tokio::sync::oneshot::Receiver<Result<GcResult, anyhow::Error>>, ApiError> {
-    let guard = TENANTS.read().unwrap();
-
-    let tenant = guard
-        .get(&tenant_shard_id)
-        .cloned()
-        .with_context(|| format!("tenant {tenant_shard_id}"))
-        .map_err(|e| ApiError::NotFound(e.into()))?;
+) -> Result<GcResult, ApiError> {
+    let tenant = {
+        let guard = TENANTS.read().unwrap();
+        guard
+            .get(&tenant_shard_id)
+            .cloned()
+            .with_context(|| format!("tenant {tenant_shard_id}"))
+            .map_err(|e| ApiError::NotFound(e.into()))?
+    };
 
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
     // Use tenant's pitr setting
     let pitr = tenant.get_pitr_interval();
 
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
     // Run in task_mgr to avoid race with tenant_detach operation
-    let ctx = ctx.detached_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
-    let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
-    let span = info_span!("manual_gc", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
+    let ctx: RequestContext =
+        ctx.detached_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
 
-    // TODO: spawning is redundant now, need to hold the gate
-    task_mgr::spawn(
-        &tokio::runtime::Handle::current(),
-        TaskKind::GarbageCollector,
-        Some(tenant_shard_id),
-        Some(timeline_id),
-        &format!("timeline_gc_handler garbage collection run for tenant {tenant_shard_id} timeline {timeline_id}"),
-        false,
-        async move {
-            fail::fail_point!("immediate_gc_task_pre");
+    let _gate_guard = tenant.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
 
-            #[allow(unused_mut)]
-            let mut result = tenant
-                .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
-                .await;
-                // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
-                // better once the types support it.
+    fail::fail_point!("immediate_gc_task_pre");
 
-            #[cfg(feature = "testing")]
-            {
-                // we need to synchronize with drop completion for python tests without polling for
-                // log messages
-                if let Ok(result) = result.as_mut() {
-                    let mut js = tokio::task::JoinSet::new();
-                    for layer in std::mem::take(&mut result.doomed_layers) {
-                        js.spawn(layer.wait_drop());
-                    }
-                    tracing::info!(total = js.len(), "starting to wait for the gc'd layers to be dropped");
-                    while let Some(res) = js.join_next().await {
-                        res.expect("wait_drop should not panic");
-                    }
-                }
+    #[allow(unused_mut)]
+    let mut result = tenant
+        .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
+        .await;
+    // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
+    // better once the types support it.
 
-                let timeline = tenant.get_timeline(timeline_id, false).ok();
-                let rtc = timeline.as_ref().and_then(|x| x.remote_client.as_ref());
-
-                if let Some(rtc) = rtc {
-                    // layer drops schedule actions on remote timeline client to actually do the
-                    // deletions; don't care about the shutdown error, just exit fast
-                    drop(rtc.wait_completion().await);
-                }
+    #[cfg(feature = "testing")]
+    {
+        // we need to synchronize with drop completion for python tests without polling for
+        // log messages
+        if let Ok(result) = result.as_mut() {
+            let mut js = tokio::task::JoinSet::new();
+            for layer in std::mem::take(&mut result.doomed_layers) {
+                js.spawn(layer.wait_drop());
             }
-
-            match task_done.send(result) {
-                Ok(_) => (),
-                Err(result) => error!("failed to send gc result: {result:?}"),
+            tracing::info!(
+                total = js.len(),
+                "starting to wait for the gc'd layers to be dropped"
+            );
+            while let Some(res) = js.join_next().await {
+                res.expect("wait_drop should not panic");
             }
-            Ok(())
         }
-        .instrument(span)
-    );
 
-    // drop the guard until after we've spawned the task so that timeline shutdown will wait for the task
-    drop(guard);
+        let timeline = tenant.get_timeline(timeline_id, false).ok();
+        let rtc = timeline.as_ref().and_then(|x| x.remote_client.as_ref());
 
-    Ok(wait_task_done)
+        if let Some(rtc) = rtc {
+            // layer drops schedule actions on remote timeline client to actually do the
+            // deletions; don't care about the shutdown error, just exit fast
+            drop(rtc.wait_completion().await);
+        }
+    }
+
+    result.map_err(ApiError::InternalServerError)
 }
 
 #[cfg(test)]
