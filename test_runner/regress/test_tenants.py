@@ -9,6 +9,7 @@ from typing import List
 
 import pytest
 import requests
+from fixtures.common_types import Lsn, TenantId
 from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
@@ -24,7 +25,6 @@ from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until_tenant_active
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 

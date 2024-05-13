@@ -4,6 +4,7 @@ from random import choice
 from string import ascii_lowercase
 
 import pytest
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     AuxFileStore,
@@ -12,7 +13,6 @@ from fixtures.neon_fixtures import (
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
-from fixtures.types import Lsn
 from fixtures.utils import query_scalar, wait_until
 
 

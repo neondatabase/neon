@@ -16,6 +16,7 @@ import time
 from typing import Optional
 
 import pytest
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -37,7 +38,6 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import (
     RemoteStorageKind,
 )
-from fixtures.types import TenantId, TimelineId
 from fixtures.utils import print_gc_result, wait_until
 from fixtures.workload import Workload
 

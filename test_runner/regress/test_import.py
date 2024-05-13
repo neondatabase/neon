@@ -7,6 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -20,7 +21,6 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 
 

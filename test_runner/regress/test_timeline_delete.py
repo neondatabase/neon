@@ -6,6 +6,7 @@ import threading
 
 import pytest
 import requests
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -31,7 +32,6 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     s3_storage,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, run_pg_bench_small, wait_until
 from urllib3.util.retry import Retry
 

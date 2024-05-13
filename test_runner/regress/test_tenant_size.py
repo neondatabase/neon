@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -19,7 +20,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 
