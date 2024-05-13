@@ -3,12 +3,12 @@ import shutil
 from typing import Optional
 
 import pytest
+from fixtures.common_types import TenantShardId
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     S3Scrubber,
 )
 from fixtures.remote_storage import S3Storage, s3_storage
-from fixtures.types import TenantShardId
 from fixtures.workload import Workload
 
 

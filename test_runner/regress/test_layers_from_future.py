@@ -1,8 +1,9 @@
 import time
 
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
-from fixtures.pageserver.types import (
+from fixtures.pageserver.common_types import (
     DeltaLayerName,
     ImageLayerName,
     is_future_layer,
@@ -13,7 +14,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.types import Lsn
 from fixtures.utils import query_scalar, wait_until
 
 

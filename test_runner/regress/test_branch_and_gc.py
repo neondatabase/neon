@@ -2,10 +2,10 @@ import threading
 import time
 
 import pytest
+from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.pageserver.http import TimelineCreate406
-from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar
 
 

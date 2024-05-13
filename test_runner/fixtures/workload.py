@@ -1,6 +1,7 @@
 import threading
 from typing import Any, Optional
 
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -10,7 +11,6 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
-from fixtures.types import TenantId, TimelineId
 
 # neon_local doesn't handle creating/modifying endpoints concurrently, so we use a mutex
 # to ensure we don't do that: this enables running lots of Workloads in parallel safely.

@@ -47,14 +47,15 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pageserver.allowed_errors import (
     DEFAULT_PAGESERVER_ALLOWED_ERRORS,
     DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
+from fixtures.pageserver.common_types import IndexPartDump, LayerName, parse_layer_file_name
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.types import IndexPartDump, LayerName, parse_layer_file_name
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -72,7 +73,6 @@ from fixtures.remote_storage import (
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     allure_add_grafana_links,

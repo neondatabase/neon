@@ -5,6 +5,7 @@ import shutil
 from threading import Thread
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -26,7 +27,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
 from requests.exceptions import ReadTimeout
 

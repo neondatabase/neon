@@ -12,8 +12,8 @@ import boto3
 import toml
 from mypy_boto3_s3 import S3Client
 
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.types import TenantId, TimelineId
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
 TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"

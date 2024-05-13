@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder, NeonPageserver
 from fixtures.pageserver.http import PageserverHttpClient
@@ -20,7 +21,6 @@ from fixtures.remote_storage import (
     LocalFsStorage,
     RemoteStorageKind,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     query_scalar,
     wait_until,

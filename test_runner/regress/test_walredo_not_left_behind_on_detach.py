@@ -2,10 +2,10 @@ import time
 
 import psutil
 import pytest
+from fixtures.common_types import TenantId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.types import TenantId
 
 
 def assert_child_processes(pageserver_pid, wal_redo_present=False, defunct_present=False):

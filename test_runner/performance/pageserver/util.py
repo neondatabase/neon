@@ -5,13 +5,13 @@ Utilities used by all code in this sub-directory
 from typing import Any, Callable, Dict, Tuple
 
 import fixtures.pageserver.many_tenants as many_tenants
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
 )
 from fixtures.pageserver.utils import wait_until_all_tenants_state
-from fixtures.types import TenantId, TimelineId
 
 
 def ensure_pageserver_ready_for_benchmarking(env: NeonEnv, n_tenants: int):

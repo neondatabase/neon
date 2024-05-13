@@ -1,8 +1,8 @@
 from contextlib import closing
 
+from fixtures.common_types import Lsn
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.pageserver.utils import wait_for_last_record_lsn
-from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
 

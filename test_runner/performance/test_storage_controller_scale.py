@@ -3,6 +3,7 @@ import random
 import time
 
 import pytest
+from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -10,7 +11,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion
-from fixtures.types import TenantId, TenantShardId, TimelineId
 
 
 @pytest.mark.timeout(3600)  # super long running test: should go down as we optimize
