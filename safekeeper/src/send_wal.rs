@@ -340,12 +340,16 @@ impl SafekeeperPostgresHandler {
         start_pos: Lsn,
         term: Option<Term>,
     ) -> Result<(), QueryError> {
+        let tli = GlobalTimelines::get(self.ttid).map_err(|e| QueryError::Other(e.into()))?;
         if let Err(end) = self
-            .handle_start_replication_guts(pgb, start_pos, term)
+            .handle_start_replication_guts(pgb, start_pos, term, tli.clone())
             .await
         {
+            let info = tli.get_safekeeper_info(&self.conf).await;
             // Log the result and probably send it to the client, closing the stream.
-            pgb.handle_copy_stream_end(end).await;
+            pgb.handle_copy_stream_end(end)
+            .instrument(info_span!("", term=%info.term, last_log_term=%info.last_log_term, flush_lsn=%Lsn(info.flush_lsn), commit_lsn=%Lsn(info.flush_lsn)))
+            .await;
         }
         Ok(())
     }
@@ -355,10 +359,9 @@ impl SafekeeperPostgresHandler {
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
         term: Option<Term>,
+        tli: Arc<Timeline>,
     ) -> Result<(), CopyStreamHandlerEnd> {
         let appname = self.appname.clone();
-        let tli =
-            GlobalTimelines::get(self.ttid).map_err(|e| CopyStreamHandlerEnd::Other(e.into()))?;
 
         // Use a guard object to remove our entry from the timeline when we are done.
         let ws_guard = Arc::new(tli.get_walsenders().register(
