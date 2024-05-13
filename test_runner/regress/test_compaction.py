@@ -1,10 +1,11 @@
+import enum
 import json
 import os
 from typing import Optional
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, generate_uploads_and_deletions
 from fixtures.workload import Workload
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
@@ -190,3 +191,46 @@ def test_sharding_compaction(
 
     # Assert that everything is still readable
     workload.validate()
+
+
+class CompactionAlgorithm(str, enum.Enum):
+    LEGACY = "Legacy"
+    TIERED = "Tiered"
+
+
+@pytest.mark.parametrize(
+    "compaction_algorithm", [CompactionAlgorithm.LEGACY, CompactionAlgorithm.TIERED]
+)
+def test_uploads_and_deletions(
+    neon_env_builder: NeonEnvBuilder,
+    compaction_algorithm: CompactionAlgorithm,
+):
+    """
+    :param compaction_algorithm: the compaction algorithm to use.
+    """
+    neon_env_builder.num_pageservers = 1
+
+    tenant_conf = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": f"{128 * 1024}",
+        "compaction_threshold": "1",
+        "compaction_target_size": f"{128 * 1024}",
+        # no PITR horizon, we specify the horizon when we request on-demand GC
+        "pitr_interval": "0s",
+        # disable background compaction and GC. We invoke it manually when we want it to happen.
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        # create image layers eagerly, so that GC can remove some layers
+        "image_creation_threshold": "1",
+        "image_layer_creation_check_threshold": "0",
+        "compaction_algorithm": f'{{"kind": "{compaction_algorithm.value}"}}',
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
+
+    # TODO remove these allowed errors
+    # https://github.com/neondatabase/neon/issues/7707
+    env.pageserver.allowed_errors.extend(
+        [".*duplicated L1 layer.*", ".*delta layer created with.*duplicate values.*"]
+    )
+
+    generate_uploads_and_deletions(env, pageserver=env.pageserver)
