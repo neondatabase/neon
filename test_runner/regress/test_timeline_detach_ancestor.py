@@ -58,6 +58,7 @@ class Branchpoint(str, enum.Enum):
 SHUTDOWN_ALLOWED_ERRORS = [
     ".*initial size calculation failed: downloading failed, possibly for shutdown",
     ".*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+    ".*logical_size_calculation_task:panic.*: Sequential get failed with Bad state (not active).*",
 ]
 
 
