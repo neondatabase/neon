@@ -452,6 +452,7 @@ def humantime_to_ms(humantime: str) -> float:
 
 
 def scan_log_for_errors(input: Iterable[str], allowed_errors: List[str]) -> List[Tuple[int, str]]:
+    # FIXME: this duplicates test_runner/fixtures/pageserver/allowed_errors.py
     error_or_warn = re.compile(r"\s(ERROR|WARN)")
     errors = []
     for lineno, line in enumerate(input, start=1):
