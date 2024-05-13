@@ -312,6 +312,13 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 
 	request_lsns.request_lsn = PG_ARGISNULL(3) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(3);
 	request_lsns.not_modified_since = PG_ARGISNULL(4) ? request_lsns.request_lsn : PG_GETARG_LSN(4);
+	/*
+	 * For the time being, use the same LSN for request and
+	 * effective request LSN. If any test needed to use UINT64_MAX
+	 * as the request LSN, we'd need to add effective_request_lsn
+	 * as a new argument.
+	 */
+	request_lsns.effective_request_lsn = request_lsns.request_lsn;
 
 	if (!superuser())
 		ereport(ERROR,
@@ -419,6 +426,13 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 
 		request_lsns.request_lsn = PG_ARGISNULL(5) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(5);
 		request_lsns.not_modified_since = PG_ARGISNULL(6) ? request_lsns.request_lsn : PG_GETARG_LSN(6);
+		/*
+		 * For the time being, use the same LSN for request
+		 * and effective request LSN. If any test needed to
+		 * use UINT64_MAX as the request LSN, we'd need to add
+		 * effective_request_lsn as a new argument.
+		 */
+		request_lsns.effective_request_lsn = request_lsns.request_lsn;
 
 		SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 		raw_page_data = VARDATA(raw_page);
