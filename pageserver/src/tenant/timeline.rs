@@ -3560,7 +3560,11 @@ impl Timeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
+    async fn get_layer_for_write(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
         let layer = guard
             .get_layer_for_write(
@@ -3569,6 +3573,7 @@ impl Timeline {
                 self.conf,
                 self.timeline_id,
                 self.tenant_shard_id,
+                ctx,
             )
             .await?;
         Ok(layer)
@@ -3833,8 +3838,8 @@ impl Timeline {
                 );
                 self.create_delta_layer(
                     &frozen_layer,
-                    ctx,
                     Some(metadata_keyspace.0.ranges[0].clone()),
+                    ctx,
                 )
                 .await?
             } else {
@@ -3863,7 +3868,7 @@ impl Timeline {
             // Normal case, write out a L0 delta layer file.
             // `create_delta_layer` will not modify the layer map.
             // We will remove frozen layer and add delta layer in one atomic operation later.
-            let Some(layer) = self.create_delta_layer(&frozen_layer, ctx, None).await? else {
+            let Some(layer) = self.create_delta_layer(&frozen_layer, None, ctx).await? else {
                 panic!("delta layer cannot be empty if no filter is applied");
             };
             (
@@ -3992,8 +3997,8 @@ impl Timeline {
     async fn create_delta_layer(
         self: &Arc<Self>,
         frozen_layer: &Arc<InMemoryLayer>,
-        ctx: &RequestContext,
         key_range: Option<Range<Key>>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Option<ResidentLayer>> {
         let self_clone = Arc::clone(self);
         let frozen_layer = Arc::clone(frozen_layer);
@@ -4016,6 +4021,7 @@ impl Timeline {
                 &self_clone
                     .conf
                     .timeline_path(&self_clone.tenant_shard_id, &self_clone.timeline_id),
+                &ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -4209,6 +4215,7 @@ impl Timeline {
                 self.tenant_shard_id,
                 &img_range,
                 lsn,
+                ctx,
             )
             .await?;
 
@@ -4313,6 +4320,7 @@ impl Timeline {
                 &self
                     .conf
                     .timeline_path(&self.tenant_shard_id, &self.timeline_id),
+                ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -5214,7 +5222,7 @@ impl<'a> TimelineWriter<'a> {
         let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
 
         let action = self.get_open_layer_action(lsn, buf_size);
-        let layer = self.handle_open_layer_action(lsn, action).await?;
+        let layer = self.handle_open_layer_action(lsn, action, ctx).await?;
         let res = layer.put_value(key, lsn, &buf, ctx).await;
 
         if res.is_ok() {
@@ -5237,14 +5245,15 @@ impl<'a> TimelineWriter<'a> {
         &mut self,
         at: Lsn,
         action: OpenLayerAction,
+        ctx: &RequestContext,
     ) -> anyhow::Result<&Arc<InMemoryLayer>> {
         match action {
             OpenLayerAction::Roll => {
                 let freeze_at = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
                 self.roll_layer(freeze_at).await?;
-                self.open_layer(at).await?;
+                self.open_layer(at, ctx).await?;
             }
-            OpenLayerAction::Open => self.open_layer(at).await?,
+            OpenLayerAction::Open => self.open_layer(at, ctx).await?,
             OpenLayerAction::None => {
                 assert!(self.write_guard.is_some());
             }
@@ -5253,8 +5262,8 @@ impl<'a> TimelineWriter<'a> {
         Ok(&self.write_guard.as_ref().unwrap().open_layer)
     }
 
-    async fn open_layer(&mut self, at: Lsn) -> anyhow::Result<()> {
-        let layer = self.tl.get_layer_for_write(at).await?;
+    async fn open_layer(&mut self, at: Lsn, ctx: &RequestContext) -> anyhow::Result<()> {
+        let layer = self.tl.get_layer_for_write(at, ctx).await?;
         let initial_size = layer.size().await?;
 
         let last_freeze_at = self.last_freeze_at.load();
@@ -5331,10 +5340,14 @@ impl<'a> TimelineWriter<'a> {
         Ok(())
     }
 
-    pub(crate) async fn delete_batch(&mut self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+    pub(crate) async fn delete_batch(
+        &mut self,
+        batch: &[(Range<Key>, Lsn)],
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         if let Some((_, lsn)) = batch.first() {
             let action = self.get_open_layer_action(*lsn, 0);
-            let layer = self.handle_open_layer_action(*lsn, action).await?;
+            let layer = self.handle_open_layer_action(*lsn, action, ctx).await?;
             layer.put_tombstones(batch).await?;
         }
 

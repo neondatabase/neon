@@ -28,6 +28,7 @@ impl EphemeralFile {
         conf: &PageServerConf,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        ctx: &RequestContext,
     ) -> Result<EphemeralFile, io::Error> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
         let filename_disambiguator =
@@ -45,6 +46,7 @@ impl EphemeralFile {
                 .read(true)
                 .write(true)
                 .create(true),
+            ctx,
         )
         .await?;
 
@@ -153,7 +155,7 @@ mod tests {
     async fn test_ephemeral_blobs() -> Result<(), io::Error> {
         let (conf, tenant_id, timeline_id, ctx) = harness("ephemeral_blobs")?;
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id).await?;
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &ctx).await?;
 
         let pos_foo = file.write_blob(b"foo", &ctx).await?;
         assert_eq!(
