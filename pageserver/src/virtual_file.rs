@@ -1187,7 +1187,6 @@ mod tests {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
-    use std::future::Future;
     use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::sync::Arc;
@@ -1301,35 +1300,62 @@ mod tests {
         // results with VirtualFiles as with native Files. (Except that with
         // native files, you will run out of file descriptors if the ulimit
         // is low enough.)
-        test_files("virtual_files", |path, open_options, ctx| async move {
-            let vf = VirtualFile::open_with_options(&path, &open_options, ctx).await?;
-            Ok(MaybeVirtualFile::VirtualFile(vf))
-        })
-        .await
+        struct A;
+
+        impl Adapter for A {
+            async fn open(
+                path: Utf8PathBuf,
+                opts: OpenOptions,
+                ctx: &RequestContext,
+            ) -> Result<MaybeVirtualFile, anyhow::Error> {
+                let vf = VirtualFile::open_with_options(&path, &opts, ctx).await?;
+                Ok(MaybeVirtualFile::VirtualFile(vf))
+            }
+        }
+        test_files::<A>("virtual_files").await
     }
 
     #[tokio::test]
     async fn test_physical_files() -> anyhow::Result<()> {
-        test_files("physical_files", |path, open_options, _ctx| async move {
-            Ok(MaybeVirtualFile::File({
-                let owned_fd = open_options.open(path.as_std_path()).await?;
-                File::from(owned_fd)
-            }))
-        })
-        .await
+        struct B;
+
+        impl Adapter for B {
+            async fn open(
+                path: Utf8PathBuf,
+                opts: OpenOptions,
+                _ctx: &RequestContext,
+            ) -> Result<MaybeVirtualFile, anyhow::Error> {
+                Ok(MaybeVirtualFile::File({
+                    let owned_fd = opts.open(path.as_std_path()).await?;
+                    File::from(owned_fd)
+                }))
+            }
+        }
+
+        test_files::<B>("physical_files").await
     }
 
-    async fn test_files<OF, FT>(testname: &str, openfunc: OF) -> anyhow::Result<()>
+    /// This is essentially a closure which returns a MaybeVirtualFile, but because rust edition
+    /// 2024 is not yet out with new lifetime capture or outlives rules, this is a async function
+    /// in trait which benefits from the new lifetime capture rules already.
+    trait Adapter {
+        async fn open(
+            path: Utf8PathBuf,
+            opts: OpenOptions,
+            ctx: &RequestContext,
+        ) -> Result<MaybeVirtualFile, anyhow::Error>;
+    }
+
+    async fn test_files<A>(testname: &str) -> anyhow::Result<()>
     where
-        OF: Fn(Utf8PathBuf, OpenOptions, &RequestContext) -> FT,
-        FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
+        A: Adapter,
     {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
         let path_a = testdir.join("file_a");
-        let mut file_a = openfunc(
+        let mut file_a = A::open(
             path_a.clone(),
             OpenOptions::new()
                 .write(true)
@@ -1345,7 +1371,7 @@ mod tests {
         let _ = file_a.read_string(&ctx).await.unwrap_err();
 
         // Close the file and re-open for reading
-        let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
+        let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
         let _ = file_a.write_all(b"bar".to_vec(), &ctx).await.unwrap_err();
@@ -1380,7 +1406,7 @@ mod tests {
 
         // Create another test file, and try FileExt functions on it.
         let path_b = testdir.join("file_b");
-        let mut file_b = openfunc(
+        let mut file_b = A::open(
             path_b.clone(),
             OpenOptions::new()
                 .read(true)
@@ -1404,7 +1430,7 @@ mod tests {
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
-            let mut vfile = openfunc(
+            let mut vfile = A::open(
                 path_b.clone(),
                 OpenOptions::new().read(true).to_owned(),
                 &ctx,
