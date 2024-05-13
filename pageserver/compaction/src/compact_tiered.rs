@@ -584,7 +584,8 @@ where
 
             // If we now have enough keyspace for next delta layer in the window, create a
             // new delta layer
-            if let Some(key_range) = window.choose_next_delta(self.target_file_size, !all_in_window) {
+            if let Some(key_range) = window.choose_next_delta(self.target_file_size, !all_in_window)
+            {
                 create_delta_job(key_range, &job.lsn_range, &mut new_jobs);
                 continue;
             }
@@ -606,9 +607,9 @@ where
                     // Drain the window with has_more = false to make a clean cut before
                     // the key, and then make dedicated delta layers for the single key.
                     //
-                    // We cannot cluster the key with the others, because layer files are
-                    // not allowed to overlap with each other in the lsn,key space (no
-                    // overlaps allowed for the rectangles).
+                    // We cannot cluster the key with the others, because we don't want
+                    // layer files to overlap with each other in the lsn,key space (no
+                    // overlaps for the rectangles).
                     let key = next_key.key;
                     debug!("key {key} with size impact larger than the layer size");
                     while !window.is_empty() {
