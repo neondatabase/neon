@@ -17,12 +17,13 @@ Note that lots of shutdowns on loaded pageservers do not finish within the
 [10 second systemd enforced timeout](https://github.com/neondatabase/aws/blob/0a5280b383e43c063d43cbf87fa026543f6d6ad4/.github/ansible/systemd/pageserver.service#L16). This means we are shutting down without flushing ephemeral layers
 and have to reingest data in order to serve requests after restarting, potentially making first request latencies worse.
 
-This problem is not yet very acutely felt in storage controller managed pageservers since they
+This problem is not yet very acutely felt in storage controller managed pageservers since
 tenant density is much lower there. However, we are planning on eventually migrating all
 pageservers to storage controller management, so it makes sense to solve the issue proactively.
 
 ## Requirements
 
+- Pageserver re-deployments cause minimal downtime for tenants
 - The storage controller exposes HTTP API hooks for draining and filling tenant shards
 from a given pageserver. Said hooks can be used by an orchestrator proces or a human operator.
 - The storage controller exposes some HTTP API to cancel draining and filling background operations.
@@ -51,7 +52,7 @@ pageserver until the cluster reaches a resonable, quiescent distribution of tena
 ** Node scheduling policies ** act as constraints to the scheduler. For instance, when a
 node is set in the `Paused` policy, no further shards will be scheduled on it.
 
-** Node ** is a pagserver. Term is used interchangeably in this RFC.
+** Node ** is a pageserver. Term is used interchangeably in this RFC.
 
 ** Deployment orchestrator ** is a generic term for whatever drives our deployments.
 Currently, it's an Ansible playbook.
@@ -91,7 +92,7 @@ pageserver restart:
 
 #### Prologue
 
-The orchestrator shall first fetch the pageserver from the control plane or
+The orchestrator shall first fetch the pageserver node id from the control plane or
 the pageserver it aims to restart directly. Next, it issues an HTTP request
 to the storage controller in order to start the drain of said pageserver node.
 All error responses are retried with a short back-off. When a 202 (Accepted)
@@ -197,7 +198,7 @@ Like for draining, the concurrency of spawned reconciles is limited.
 
 #### Storage Controller Crash
 
-When the storage controller starts up resset the node scheduling policy
+When the storage controller starts up reset the node scheduling policy
 of all nodes in states `Draining`, `Filling` or `PauseForRestart` to
 `Active`.
 
@@ -222,7 +223,7 @@ failure mode.
 
 #### Orchestrator Drain Times Out
 
-Orchestrator will proceed will still proceed with the restart.
+Orchestrator will still proceed with the restart.
 When the pageserver re-attaches, the scheduling policy is set back to
 `Active`.
 
@@ -232,7 +233,7 @@ Orchestrator will attempt to cancel the fill operation. If that fails,
 the fill will continue until it quiesces and the node will be left
 in the `Filling` scheduling policy. This hinders the scheduler, but is
 otherwise harmless. A human operator can handle this by setting the scheduling
-policy to active, or we can bake in a fill timeout into the storage controller.
+policy to `Active`, or we can bake in a fill timeout into the storage controller.
 
 ## Optimizations
 
@@ -246,7 +247,7 @@ tenants that are already "warm". Similarly, the fill stage can prioritise the
 "warmest" tenants in the fill.
 
 Given that the number of tenants by the storage controller will be fairly low
-for the foreseable future, the first implementation could simply query the pageserver
+for the foreseable future, the first implementation could simply query the tenants
 for secondary status. This doesn't scale well with increasing tenant counts, so
 eventually we will need new pageserver API endpoints to report the sets of
 "warm" and "cold" nodes.
