@@ -1013,7 +1013,7 @@ impl<'a> TenantDownloader<'a> {
         Ok(Some(layer))
     }
 
-    /// Calculate how many layers to download in parallel, based on activity level of the remote storage
+    /// Calculate the currently allowed parallelism of layer download tasks, based on activity level of the remote storage
     fn layer_concurrency(activity: RemoteStorageActivity) -> usize {
         // When less than 75% of units are available, use minimum concurrency.  Else, do a linear mapping
         // of our concurrency range to the units available within the remaining 25%.
