@@ -296,6 +296,8 @@ components:
       required:
         - name
         - owner
+        - restrict_conn
+        - invalid
       properties:
         name:
           type: string
@@ -305,6 +307,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SchemaGenericOption"
+        restrict_conn:
+          type: boolean
+        invalid:
+          type: boolean
 
     SchemaRole:
       type: object
