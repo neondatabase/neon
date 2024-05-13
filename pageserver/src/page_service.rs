@@ -258,6 +258,8 @@ async fn page_service_conn_main(
     socket.set_timeout(Some(std::time::Duration::from_millis(socket_timeout_ms)));
     let socket = std::pin::pin!(socket);
 
+    fail::fail_point!("ps::connection-start::pre-login");
+
     // XXX: pgbackend.run() should take the connection_ctx,
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
@@ -601,6 +603,7 @@ impl PageServerHandler {
             };
 
             trace!("query: {copy_data_bytes:?}");
+            fail::fail_point!("ps::handle-pagerequest-message");
 
             // Trace request if needed
             if let Some(t) = tracer.as_mut() {
@@ -1470,6 +1473,7 @@ where
         _pgb: &mut PostgresBackend<IO>,
         _sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
+        fail::fail_point!("ps::connection-start::startup-packet");
         Ok(())
     }
 
@@ -1483,6 +1487,8 @@ where
             info!("Hit failpoint for bad connection");
             Err(QueryError::SimulatedConnectionError)
         });
+
+        fail::fail_point!("ps::connection-start::process-query");
 
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
