@@ -745,6 +745,16 @@ impl HistoricLayerInfo {
         };
         *field = value;
     }
+    pub fn layer_file_size(&self) -> u64 {
+        match self {
+            HistoricLayerInfo::Delta {
+                layer_file_size, ..
+            } => *layer_file_size,
+            HistoricLayerInfo::Image {
+                layer_file_size, ..
+            } => *layer_file_size,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -133,7 +133,7 @@ def run_benchmark(
         results = json.load(f)
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 
-    metric = "downloads"
+    metric = "downloads_count"
     record(
         metric,
         metric_value=results[metric],
@@ -141,7 +141,15 @@ def run_benchmark(
         report=MetricReport.HIGHER_IS_BETTER,
     )
 
-    metric = "evictions"
+    metric = "downloads_bytes"
+    record(
+        metric,
+        metric_value=results[metric],
+        unit="byte",
+        report=MetricReport.HIGHER_IS_BETTER,
+    )
+
+    metric = "evictions_count"
     record(
         metric,
         metric_value=results[metric],

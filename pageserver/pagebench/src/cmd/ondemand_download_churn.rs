@@ -52,25 +52,28 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
 
 #[derive(serde::Serialize)]
 struct Output {
-    downloads: u64,
-    evictions: u64,
+    downloads_count: u64,
+    downloads_bytes: u64,
+    evictions_count: u64,
     timeline_restarts: u64,
     runtime: Duration,
 }
 
 #[derive(Debug, Default)]
 struct LiveStats {
-    evictions: AtomicU64,
-    downloads: AtomicU64,
+    evictions_count: AtomicU64,
+    downloads_count: AtomicU64,
+    downloads_bytes: AtomicU64,
     timeline_restarts: AtomicU64,
 }
 
 impl LiveStats {
     fn eviction_done(&self) {
-        self.evictions.fetch_add(1, Ordering::Relaxed);
+        self.evictions_count.fetch_add(1, Ordering::Relaxed);
     }
-    fn download_done(&self) {
-        self.downloads.fetch_add(1, Ordering::Relaxed);
+    fn download_done(&self, size: u64) {
+        self.downloads_count.fetch_add(1, Ordering::Relaxed);
+        self.downloads_bytes.fetch_add(size, Ordering::Relaxed);
     }
     fn timeline_restart_done(&self) {
         self.timeline_restarts.fetch_add(1, Ordering::Relaxed);
@@ -122,22 +125,26 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                 last_at = now;
 
                 let LiveStats {
-                    evictions,
-                    downloads,
+                    evictions_count,
+                    downloads_count,
+                    downloads_bytes,
                     timeline_restarts,
                 } = &*periodic_stats;
-                let evictions = evictions.swap(0, Ordering::Relaxed);
-                let downloads = downloads.swap(0, Ordering::Relaxed);
+                let evictions_count = evictions_count.swap(0, Ordering::Relaxed);
+                let downloads_count = downloads_count.swap(0, Ordering::Relaxed);
+                let downloads_bytes = downloads_bytes.swap(0, Ordering::Relaxed);
                 let timeline_restarts = timeline_restarts.swap(0, Ordering::Relaxed);
 
-                total_stats.evictions.fetch_add(evictions, Ordering::Relaxed);
-                total_stats.downloads.fetch_add(downloads, Ordering::Relaxed);
+                total_stats.evictions_count.fetch_add(evictions_count, Ordering::Relaxed);
+                total_stats.downloads_count.fetch_add(downloads_count, Ordering::Relaxed);
+                total_stats.downloads_bytes.fetch_add(downloads_bytes, Ordering::Relaxed);
                 total_stats.timeline_restarts.fetch_add(timeline_restarts, Ordering::Relaxed);
 
-                let evictions_per_s = evictions as f64 / delta.as_secs_f64();
-                let downloads_per_s = downloads as f64 / delta.as_secs_f64();
+                let evictions_per_s = evictions_count as f64 / delta.as_secs_f64();
+                let downloads_per_s = downloads_count as f64 / delta.as_secs_f64();
+                let downloads_mibs_per_s = downloads_bytes as f64 / delta.as_secs_f64() / ((1 << 20) as f64);
 
-                info!("evictions={evictions_per_s:.2}/s downloads={downloads_per_s:.2}/s timeline_restarts={timeline_restarts}");
+                info!("evictions={evictions_per_s:.2}/s downloads={downloads_per_s:.2}/s download_bytes={downloads_mibs_per_s:.2}MiB/s timeline_restarts={timeline_restarts}");
             }
         }
     });
@@ -166,11 +173,20 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     let end = Instant::now();
     let duration: Duration = end - start;
 
-    let output = Output {
-        downloads: total_stats.downloads.load(Ordering::Relaxed),
-        evictions: total_stats.evictions.load(Ordering::Relaxed),
-        timeline_restarts: total_stats.timeline_restarts.load(Ordering::Relaxed),
-        runtime: duration,
+    let output = {
+        let LiveStats {
+            evictions_count,
+            downloads_count,
+            downloads_bytes,
+            timeline_restarts,
+        } = &*total_stats;
+        Output {
+            downloads_count: downloads_count.load(Ordering::Relaxed),
+            downloads_bytes: downloads_bytes.load(Ordering::Relaxed),
+            evictions_count: evictions_count.load(Ordering::Relaxed),
+            timeline_restarts: timeline_restarts.load(Ordering::Relaxed),
+            runtime: duration,
+        }
     };
     let output = serde_json::to_string_pretty(&output).unwrap();
     println!("{output}");
@@ -299,7 +315,7 @@ async fn layer_actor(
                     .layer_ondemand_download(tenant_shard_id, timeline_id, layer.layer_file_name())
                     .await
                     .unwrap();
-                live_stats.download_done();
+                live_stats.download_done(layer.layer_file_size());
                 did_it
             }
         };
