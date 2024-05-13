@@ -378,6 +378,7 @@ async fn upload_tenant_heatmap(
     let mut heatmap = HeatMapTenant {
         timelines: Vec::new(),
         generation,
+        upload_period_ms: tenant.get_heatmap_period().map(|p| p.as_millis()),
     };
     let timelines = tenant.timelines.lock().unwrap().clone();
 
