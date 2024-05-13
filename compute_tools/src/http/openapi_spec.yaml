@@ -89,7 +89,7 @@ paths:
         - Info
       summary: Get schema dump
       parameters:
-        - name: db_name
+        - name: database
           in: query
           description: Database name to dump.
           required: true
