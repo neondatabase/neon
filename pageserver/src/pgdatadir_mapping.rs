@@ -1671,7 +1671,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         if !self.pending_deletions.is_empty() {
-            writer.delete_batch(&self.pending_deletions).await?;
+            writer.delete_batch(&self.pending_deletions, ctx).await?;
             self.pending_deletions.clear();
         }
 
