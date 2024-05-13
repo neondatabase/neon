@@ -61,9 +61,12 @@ use std::{
 };
 
 use crate::tenant::timeline::init::LocalLayerFileMetadata;
-use crate::tenant::{
-    layer_map::{LayerMap, SearchResult},
-    metadata::TimelineMetadata,
+use crate::{
+    aux_file::AuxFileSizeEstimator,
+    tenant::{
+        layer_map::{LayerMap, SearchResult},
+        metadata::TimelineMetadata,
+    },
 };
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -409,6 +412,8 @@ pub struct Timeline {
 
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
+
+    pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
 }
 
 pub struct WalReceiverInfo {
@@ -2161,6 +2166,16 @@ impl Timeline {
         };
 
         Arc::new_cyclic(|myself| {
+            let metrics = TimelineMetrics::new(
+                &tenant_shard_id,
+                &timeline_id,
+                crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
+                    "mtime",
+                    evictions_low_residence_duration_metric_threshold,
+                ),
+            );
+            let aux_file_metrics = metrics.aux_file_size_gauge.clone();
+
             let mut result = Timeline {
                 conf,
                 tenant_conf,
@@ -2192,14 +2207,7 @@ impl Timeline {
                 ancestor_timeline: ancestor,
                 ancestor_lsn: metadata.ancestor_lsn(),
 
-                metrics: TimelineMetrics::new(
-                    &tenant_shard_id,
-                    &timeline_id,
-                    crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
-                        "mtime",
-                        evictions_low_residence_duration_metric_threshold,
-                    ),
-                ),
+                metrics,
 
                 query_metrics: crate::metrics::SmgrQueryTimePerTimeline::new(
                     &tenant_shard_id,
@@ -2263,6 +2271,8 @@ impl Timeline {
                     dir: None,
                     n_deltas: 0,
                 }),
+
+                aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
