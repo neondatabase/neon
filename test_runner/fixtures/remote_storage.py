@@ -50,7 +50,7 @@ class MockS3Server:
         # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
         # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
         # if a process is started from the shell process.
-        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", "s3", f"-p{port}"])
+        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", f"-p{port}"])
         error = None
         try:
             return_code = self.subprocess.poll()
@@ -141,11 +141,13 @@ class LocalFsStorage:
         with self.heatmap_path(tenant_id).open("r") as f:
             return json.load(f)
 
-    def to_toml_inline_table(self) -> str:
-        rv = {
+    def to_toml_dict(self) -> Dict[str, Any]:
+        return {
             "local_path": str(self.root),
         }
-        return toml.TomlEncoder().dump_inline_table(rv)
+
+    def to_toml_inline_table(self) -> str:
+        return toml.TomlEncoder().dump_inline_table(self.to_toml_dict())
 
     def cleanup(self):
         # no cleanup is done here, because there's NeonEnvBuilder.cleanup_local_storage which will remove everything, including localfs files
@@ -194,7 +196,7 @@ class S3Storage:
             }
         )
 
-    def to_toml_inline_table(self) -> str:
+    def to_toml_dict(self) -> Dict[str, Any]:
         rv = {
             "bucket_name": self.bucket_name,
             "bucket_region": self.bucket_region,
@@ -206,7 +208,10 @@ class S3Storage:
         if self.endpoint is not None:
             rv["endpoint"] = self.endpoint
 
-        return toml.TomlEncoder().dump_inline_table(rv)
+        return rv
+
+    def to_toml_inline_table(self) -> str:
+        return toml.TomlEncoder().dump_inline_table(self.to_toml_dict())
 
     def do_cleanup(self):
         if not self.cleanup:
@@ -412,6 +417,13 @@ def default_remote_storage() -> RemoteStorageKind:
     The remote storage kind used in tests that do not specify a preference
     """
     return RemoteStorageKind.LOCAL_FS
+
+
+def remote_storage_to_toml_dict(remote_storage: RemoteStorage) -> Dict[str, Any]:
+    if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
+        raise Exception("invalid remote storage type")
+
+    return remote_storage.to_toml_dict()
 
 
 # serialize as toml inline table

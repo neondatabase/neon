@@ -10,11 +10,13 @@ use crate::{
     console::{
         errors::{GetAuthInfoError, WakeComputeError},
         locks::ApiLocks,
+        provider::ApiLockError,
         CachedNodeInfo,
     },
     context::RequestMonitoring,
     error::{ErrorKind, ReportableError, UserFacingError},
     proxy::{connect_compute::ConnectMechanism, retry::ShouldRetry},
+    rate_limiter::EndpointRateLimiter,
     Host,
 };
 
@@ -23,6 +25,7 @@ use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool};
 pub struct PoolingBackend {
     pub pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub config: &'static ProxyConfig,
+    pub endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
 impl PoolingBackend {
@@ -37,6 +40,12 @@ impl PoolingBackend {
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
         if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr));
+        }
+        if !self
+            .endpoint_rate_limiter
+            .check(conn_info.user_info.endpoint.clone().into(), 1)
+        {
+            return Err(AuthError::too_many_connections());
         }
         let cached_secret = match maybe_secret {
             Some(secret) => secret,
@@ -131,6 +140,8 @@ pub enum HttpConnError {
     AuthError(#[from] AuthError),
     #[error("wake_compute returned error")]
     WakeCompute(#[from] WakeComputeError),
+    #[error("error acquiring resource permit: {0}")]
+    TooManyConnectionAttempts(#[from] ApiLockError),
 }
 
 impl ReportableError for HttpConnError {
@@ -141,6 +152,7 @@ impl ReportableError for HttpConnError {
             HttpConnError::GetAuthInfo(a) => a.get_error_kind(),
             HttpConnError::AuthError(a) => a.get_error_kind(),
             HttpConnError::WakeCompute(w) => w.get_error_kind(),
+            HttpConnError::TooManyConnectionAttempts(w) => w.get_error_kind(),
         }
     }
 }
@@ -153,6 +165,9 @@ impl UserFacingError for HttpConnError {
             HttpConnError::GetAuthInfo(c) => c.to_string_client(),
             HttpConnError::AuthError(c) => c.to_string_client(),
             HttpConnError::WakeCompute(c) => c.to_string_client(),
+            HttpConnError::TooManyConnectionAttempts(_) => {
+                "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
+            }
         }
     }
 }
@@ -165,6 +180,15 @@ impl ShouldRetry for HttpConnError {
             HttpConnError::GetAuthInfo(_) => false,
             HttpConnError::AuthError(_) => false,
             HttpConnError::WakeCompute(_) => false,
+            HttpConnError::TooManyConnectionAttempts(_) => false,
+        }
+    }
+    fn should_retry_database_address(&self) -> bool {
+        match self {
+            HttpConnError::ConnectionError(e) => e.should_retry_database_address(),
+            // we never checked cache validity
+            HttpConnError::TooManyConnectionAttempts(_) => false,
+            _ => true,
         }
     }
 }

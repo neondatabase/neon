@@ -5,6 +5,7 @@ use crate::{
     error::{io_error, ReportableError},
     metrics::Metrics,
     proxy::{handle_client, ClientMode},
+    rate_limiter::EndpointRateLimiter,
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream};
@@ -134,6 +135,7 @@ pub async fn serve_websocket(
     mut ctx: RequestMonitoring,
     websocket: HyperWebsocket,
     cancellation_handler: Arc<CancellationHandlerMain>,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     hostname: Option<String>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
@@ -148,6 +150,7 @@ pub async fn serve_websocket(
         cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
+        endpoint_rate_limiter,
         conn_gauge,
     )
     .await;

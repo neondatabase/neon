@@ -284,14 +284,19 @@ typedef struct PageserverFeedback
 
 typedef struct WalproposerShmemState
 {
+	pg_atomic_uint64 propEpochStartLsn;
+	char		donor_name[64];
+	char		donor_conninfo[MAXCONNINFO];
+	XLogRecPtr	donor_lsn;
+
 	slock_t		mutex;
-	term_t		mineLastElectedTerm;
+	pg_atomic_uint64 mineLastElectedTerm;
 	pg_atomic_uint64 backpressureThrottlingTime;
 	pg_atomic_uint64 currentClusterSize;
 
 	/* last feedback from each shard */
 	PageserverFeedback shard_ps_feedback[MAX_SHARDS];
-	int num_shards;
+	int			num_shards;
 
 	/* aggregated feedback with min LSNs across shards */
 	PageserverFeedback min_ps_feedback;
@@ -465,6 +470,9 @@ typedef struct walproposer_api
 	/* Get pointer to the latest available WAL. */
 	XLogRecPtr	(*get_flush_rec_ptr) (WalProposer *wp);
 
+	/* Update current donor info in WalProposer Shmem */
+	void		(*update_donor) (WalProposer *wp, Safekeeper *donor, XLogRecPtr donor_lsn);
+
 	/* Get current time. */
 	TimestampTz (*get_current_timestamp) (WalProposer *wp);
 
@@ -497,7 +505,7 @@ typedef struct walproposer_api
 	 *
 	 * On success, the data is placed in *buf. It is valid until the next call
 	 * to this function.
-	 * 
+	 *
 	 * Returns PG_ASYNC_READ_FAIL on closed connection.
 	 */
 	PGAsyncReadResult (*conn_async_read) (Safekeeper *sk, char **buf, int *amount);
@@ -545,13 +553,14 @@ typedef struct walproposer_api
 	 * Returns 0 if timeout is reached, 1 if some event happened. Updates
 	 * events mask to indicate events and sets sk to the safekeeper which has
 	 * an event.
-	 * 
+	 *
 	 * On timeout, events is set to WL_NO_EVENTS. On socket event, events is
 	 * set to WL_SOCKET_READABLE and/or WL_SOCKET_WRITEABLE. When socket is
 	 * closed, events is set to WL_SOCKET_READABLE.
-	 * 
-	 * WL_SOCKET_WRITEABLE is usually set only when we need to flush the buffer.
-	 * It can be returned only if caller asked for this event in the last *_event_set call.
+	 *
+	 * WL_SOCKET_WRITEABLE is usually set only when we need to flush the
+	 * buffer. It can be returned only if caller asked for this event in the
+	 * last *_event_set call.
 	 */
 	int			(*wait_event_set) (WalProposer *wp, long timeout, Safekeeper **sk, uint32 *events);
 
@@ -571,9 +580,9 @@ typedef struct walproposer_api
 	void		(*finish_sync_safekeepers) (WalProposer *wp, XLogRecPtr lsn);
 
 	/*
-	 * Called after every AppendResponse from the safekeeper. Used to propagate
-	 * backpressure feedback and to confirm WAL persistence (has been commited
-	 * on the quorum of safekeepers).
+	 * Called after every AppendResponse from the safekeeper. Used to
+	 * propagate backpressure feedback and to confirm WAL persistence (has
+	 * been commited on the quorum of safekeepers).
 	 */
 	void		(*process_safekeeper_feedback) (WalProposer *wp, Safekeeper *sk);
 
@@ -716,12 +725,14 @@ extern void WalProposerBroadcast(WalProposer *wp, XLogRecPtr startpos, XLogRecPt
 extern void WalProposerPoll(WalProposer *wp);
 extern void WalProposerFree(WalProposer *wp);
 
+extern WalproposerShmemState *GetWalpropShmemState();
+
 /*
  * WaitEventSet API doesn't allow to remove socket, so walproposer_pg uses it to
  * recreate set from scratch, hence the export.
  */
 extern void SafekeeperStateDesiredEvents(Safekeeper *sk, uint32 *sk_events, uint32 *nwr_events);
-extern Safekeeper *GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn);
+extern TimeLineID walprop_pg_get_timeline_id(void);
 
 
 #define WPEVENT		1337		/* special log level for walproposer internal

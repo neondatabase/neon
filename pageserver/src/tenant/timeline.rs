@@ -1,5 +1,6 @@
 mod compaction;
 pub mod delete;
+pub(crate) mod detach_ancestor;
 mod eviction_task;
 mod init;
 pub mod layer_manager;
@@ -22,8 +23,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
-        CompactionAlgorithm, DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-        EvictionPolicy, InMemoryLayerInfo, LayerMapInfo, TimelineState,
+        AuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
+        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
+        TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -58,6 +60,7 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::tenant::timeline::init::LocalLayerFileMetadata;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
     metadata::TimelineMetadata,
@@ -72,7 +75,7 @@ use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
         AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
-        LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
+        LayerAccessStatsReset, LayerName, ResidentLayer, ValueReconstructResult,
         ValueReconstructState, ValuesReconstructState,
     },
 };
@@ -862,9 +865,13 @@ impl Timeline {
                 // Initialise the reconstruct state for the key with the cache
                 // entry returned above.
                 let mut reconstruct_state = ValuesReconstructState::new();
-                let mut key_state = VectoredValueReconstructState::default();
-                key_state.img = cached_page_img;
-                reconstruct_state.keys.insert(key, Ok(key_state));
+
+                // Only add the cached image to the reconstruct state when it exists.
+                if cached_page_img.is_some() {
+                    let mut key_state = VectoredValueReconstructState::default();
+                    key_state.img = cached_page_img;
+                    reconstruct_state.keys.insert(key, Ok(key_state));
+                }
 
                 let vectored_res = self
                     .get_vectored_impl(keyspace.clone(), lsn, reconstruct_state, ctx)
@@ -1076,7 +1083,7 @@ impl Timeline {
         // We should generalize this into Keyspace::contains in the future.
         for range in &keyspace.ranges {
             if range.start.field1 < METADATA_KEY_BEGIN_PREFIX
-                || range.end.field1 >= METADATA_KEY_END_PREFIX
+                || range.end.field1 > METADATA_KEY_END_PREFIX
             {
                 return Err(GetVectoredError::Other(anyhow::anyhow!(
                     "only metadata keyspace can be scanned"
@@ -1213,11 +1220,17 @@ impl Timeline {
         }
         reconstruct_timer.stop_and_record();
 
-        // Note that this is an approximation. Tracking the exact number of layers visited
-        // per key requires virtually unbounded memory usage and is inefficient
-        // (i.e. segment tree tracking each range queried from a layer)
-        crate::metrics::VEC_READ_NUM_LAYERS_VISITED
-            .observe(layers_visited as f64 / results.len() as f64);
+        // For aux file keys (v1 or v2) the vectored read path does not return an error
+        // when they're missing. Instead they are omitted from the resulting btree
+        // (this is a requirement, not a bug). Skip updating the metric in these cases
+        // to avoid infinite results.
+        if !results.is_empty() {
+            // Note that this is an approximation. Tracking the exact number of layers visited
+            // per key requires virtually unbounded memory usage and is inefficient
+            // (i.e. segment tree tracking each range queried from a layer)
+            crate::metrics::VEC_READ_NUM_LAYERS_VISITED
+                .observe(layers_visited as f64 / results.len() as f64);
+        }
 
         Ok(results)
     }
@@ -1494,15 +1507,21 @@ impl Timeline {
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub(crate) async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+        self.freeze_and_flush0().await
+    }
+
+    // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
+    // polluting the span hierarchy.
+    pub(crate) async fn freeze_and_flush0(&self) -> anyhow::Result<()> {
         let to_lsn = self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
 
-    /// If there is no writer, and conditions for rolling the latest layer are met, then freeze it.
-    ///
-    /// This is for use in background housekeeping, to provide guarantees of layers closing eventually
-    /// even if there are no ongoing writes to drive that.
-    async fn maybe_freeze_ephemeral_layer(&self) {
+    // Check if an open ephemeral layer should be closed: this provides
+    // background enforcement of checkpoint interval if there is no active WAL receiver, to avoid keeping
+    // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
+    // ephemeral layer bytes has been breached.
+    pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
         let Ok(_write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
@@ -1529,13 +1548,11 @@ impl Timeline {
                 // we are a sharded tenant and have skipped some WAL
                 let last_freeze_ts = *self.last_freeze_ts.read().unwrap();
                 if last_freeze_ts.elapsed() >= self.get_checkpoint_timeout() {
-                    // This should be somewhat rare, so we log it at INFO level.
-                    //
-                    // We checked for checkpoint timeout so that a shard without any
-                    // data ingested (yet) doesn't write a remote index as soon as it
+                    // Only do this if have been layer-less longer than get_checkpoint_timeout, so that a shard
+                    // without any data ingested (yet) doesn't write a remote index as soon as it
                     // sees its LSN advance: we only do this if we've been layer-less
                     // for some time.
-                    tracing::info!(
+                    tracing::debug!(
                         "Advancing disk_consistent_lsn past WAL ingest gap {} -> {}",
                         disk_consistent_lsn,
                         last_record_lsn
@@ -1624,11 +1641,6 @@ impl Timeline {
 
             (guard, permit)
         };
-
-        // Prior to compaction, check if an open ephemeral layer should be closed: this provides
-        // background enforcement of checkpoint interval if there is no active WAL receiver, to avoid keeping
-        // an ephemeral layer open forever when idle.
-        self.maybe_freeze_ephemeral_layer().await;
 
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
@@ -1899,7 +1911,7 @@ impl Timeline {
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     pub(crate) async fn download_layer(
         &self,
-        layer_file_name: &str,
+        layer_file_name: &LayerName,
     ) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
@@ -1917,7 +1929,10 @@ impl Timeline {
     /// Evict just one layer.
     ///
     /// Returns `Ok(None)` in the case where the layer could not be found by its `layer_file_name`.
-    pub(crate) async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+    pub(crate) async fn evict_layer(
+        &self,
+        layer_file_name: &LayerName,
+    ) -> anyhow::Result<Option<bool>> {
         let _gate = self
             .gate
             .enter()
@@ -1991,13 +2006,12 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
-    #[allow(dead_code)]
-    pub(crate) fn get_switch_to_aux_file_v2(&self) -> bool {
+    pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
             .tenant_conf
-            .switch_to_aux_file_v2
-            .unwrap_or(self.conf.default_tenant_conf.switch_to_aux_file_v2)
+            .switch_aux_file_policy
+            .unwrap_or(self.conf.default_tenant_conf.switch_aux_file_policy)
     }
 
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
@@ -2379,13 +2393,13 @@ impl Timeline {
         index_part: Option<IndexPart>,
     ) -> anyhow::Result<()> {
         use init::{Decision::*, Discovered, DismissedLayer};
-        use LayerFileName::*;
+        use LayerName::*;
 
         let mut guard = self.layers.write().await;
 
         let timer = self.metrics.load_layer_map_histo.start_timer();
 
-        // Scan timeline directory and create ImageFileName and DeltaFilename
+        // Scan timeline directory and create ImageLayerName and DeltaFilename
         // structs representing all files on disk
         let timeline_path = self
             .conf
@@ -2409,8 +2423,8 @@ impl Timeline {
 
                 for discovered in discovered {
                     let (name, kind) = match discovered {
-                        Discovered::Layer(file_name, file_size) => {
-                            discovered_layers.push((file_name, file_size));
+                        Discovered::Layer(layer_file_name, local_path, file_size) => {
+                            discovered_layers.push((layer_file_name, local_path, file_size));
                             continue;
                         }
                         Discovered::Metadata => {
@@ -2460,31 +2474,30 @@ impl Timeline {
                         Ok(UseRemote { local, remote }) => {
                             // Remote is authoritative, but we may still choose to retain
                             // the local file if the contents appear to match
-                            if local.file_size() == remote.file_size() {
+                            if local.metadata.file_size() == remote.file_size() {
                                 // Use the local file, but take the remote metadata so that we pick up
                                 // the correct generation.
-                                UseLocal(remote)
+                                UseLocal(
+                                    LocalLayerFileMetadata {
+                                        metadata: remote,
+                                        local_path: local.local_path
+                                    }
+                                )
                             } else {
-                                path.push(name.file_name());
-                                init::cleanup_local_file_for_remote(&path, &local, &remote)?;
-                                path.pop();
+                                init::cleanup_local_file_for_remote(&local, &remote)?;
                                 UseRemote { local, remote }
                             }
                         }
                         Ok(decision) => decision,
                         Err(DismissedLayer::Future { local }) => {
-                            if local.is_some() {
-                                path.push(name.file_name());
-                                init::cleanup_future_layer(&path, &name, disk_consistent_lsn)?;
-                                path.pop();
+                            if let Some(local) = local {
+                                init::cleanup_future_layer(&local.local_path, &name, disk_consistent_lsn)?;
                             }
                             needs_cleanup.push(name);
                             continue;
                         }
                         Err(DismissedLayer::LocalOnly(local)) => {
-                            path.push(name.file_name());
-                            init::cleanup_local_only_file(&path, &name, &local)?;
-                            path.pop();
+                            init::cleanup_local_only_file(&name, &local)?;
                             // this file never existed remotely, we will have to do rework
                             continue;
                         }
@@ -2498,9 +2511,9 @@ impl Timeline {
                     tracing::debug!(layer=%name, ?decision, "applied");
 
                     let layer = match decision {
-                        UseLocal(m) => {
-                            total_physical_size += m.file_size();
-                            Layer::for_resident(conf, &this, name, m).drop_eviction_guard()
+                        UseLocal(local) => {
+                            total_physical_size += local.metadata.file_size();
+                            Layer::for_resident(conf, &this, local.local_path, name, local.metadata).drop_eviction_guard()
                         }
                         Evicted(remote) | UseRemote { remote, .. } => {
                             Layer::for_evicted(conf, &this, name, remote)
@@ -2981,11 +2994,11 @@ impl Timeline {
         }
     }
 
-    async fn find_layer(&self, layer_file_name: &str) -> Option<Layer> {
+    async fn find_layer(&self, layer_name: &LayerName) -> Option<Layer> {
         let guard = self.layers.read().await;
         for historic_layer in guard.layer_map().iter_historic_layers() {
-            let historic_layer_name = historic_layer.filename().file_name();
-            if layer_file_name == historic_layer_name {
+            let historic_layer_name = historic_layer.layer_name();
+            if layer_name == &historic_layer_name {
                 return Some(guard.get_from_desc(&historic_layer));
             }
         }
@@ -3014,8 +3027,8 @@ impl Timeline {
             let last_activity_ts = layer.access_stats().latest_activity_or_now();
 
             HeatMapLayer::new(
-                layer.layer_desc().filename(),
-                layer.metadata().into(),
+                layer.layer_desc().layer_name(),
+                (&layer.metadata()).into(),
                 last_activity_ts,
             )
         });
@@ -3023,6 +3036,18 @@ impl Timeline {
         let layers = resident.collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
+    }
+
+    /// Returns true if the given lsn is or was an ancestor branchpoint.
+    pub(crate) fn is_ancestor_lsn(&self, lsn: Lsn) -> bool {
+        // upon timeline detach, we set the ancestor_lsn to Lsn::INVALID and the store the original
+        // branchpoint in the value in IndexPart::lineage
+        self.ancestor_lsn == lsn
+            || (self.ancestor_lsn == Lsn::INVALID
+                && self
+                    .remote_client
+                    .as_ref()
+                    .is_some_and(|rtc| rtc.is_previous_ancestor_lsn(lsn)))
     }
 }
 
@@ -3161,7 +3186,7 @@ impl Timeline {
             if let Some(open_layer) = &layers.open_layer {
                 let start_lsn = open_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
+                    //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.layer_name().display());
                     // Get all the data needed to reconstruct the page version from this layer.
                     // But if we have an older cached page image, no need to go past that.
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
@@ -3190,7 +3215,7 @@ impl Timeline {
             for frozen_layer in layers.frozen_layers.iter().rev() {
                 let start_lsn = frozen_layer.get_lsn_range().start;
                 if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
+                    //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.layer_name().display());
                     let lsn_floor = max(cached_lsn + 1, start_lsn);
 
                     let frozen_layer = frozen_layer.clone();
@@ -3517,7 +3542,7 @@ impl Timeline {
         Ok(ancestor)
     }
 
-    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
+    pub(crate) fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
         let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
             format!(
                 "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
@@ -4217,7 +4242,7 @@ impl Timeline {
 
                     // Maybe flush `key_rest_accum`
                     if key_request_accum.raw_size() >= Timeline::MAX_GET_VECTORED_KEYS
-                        || last_key_in_range
+                        || (last_key_in_range && key_request_accum.raw_size() > 0)
                     {
                         let results = self
                             .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
@@ -4333,6 +4358,48 @@ impl Timeline {
             _ = self.cancel.cancelled() => {}
         )
     }
+
+    /// Detach this timeline from its ancestor by copying all of ancestors layers as this
+    /// Timelines layers up to the ancestor_lsn.
+    ///
+    /// Requires a timeline that:
+    /// - has an ancestor to detach from
+    /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
+    /// a technical requirement
+    ///
+    /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
+    /// polled again until completion.
+    ///
+    /// During the operation all timelines sharing the data with this timeline will be reparented
+    /// from our ancestor to be branches of this timeline.
+    pub(crate) async fn prepare_to_detach_from_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        options: detach_ancestor::Options,
+        ctx: &RequestContext,
+    ) -> Result<
+        (
+            completion::Completion,
+            detach_ancestor::PreparedTimelineDetach,
+        ),
+        detach_ancestor::Error,
+    > {
+        detach_ancestor::prepare(self, tenant, options, ctx).await
+    }
+
+    /// Completes the ancestor detach. This method is to be called while holding the
+    /// TenantManager's tenant slot, so during this method we cannot be deleted nor can any
+    /// timeline be deleted. After this method returns successfully, tenant must be reloaded.
+    ///
+    /// Pageserver receiving a SIGKILL during this operation is not supported (yet).
+    pub(crate) async fn complete_detaching_timeline_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        prepared: detach_ancestor::PreparedTimelineDetach,
+        ctx: &RequestContext,
+    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+        detach_ancestor::complete(self, tenant, prepared, ctx).await
+    }
 }
 
 /// Top-level failure to compact.
@@ -4437,6 +4504,24 @@ impl Timeline {
         }
 
         drop_wlock(guard);
+
+        Ok(())
+    }
+
+    async fn rewrite_layers(
+        self: &Arc<Self>,
+        replace_layers: Vec<(Layer, ResidentLayer)>,
+        drop_layers: Vec<Layer>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.layers.write().await;
+
+        guard.rewrite_layers(&replace_layers, &drop_layers, &self.metrics);
+
+        let upload_layers: Vec<_> = replace_layers.into_iter().map(|r| r.1).collect();
+
+        if let Some(remote_client) = self.remote_client.as_ref() {
+            remote_client.schedule_compaction_update(&drop_layers, &upload_layers)?;
+        }
 
         Ok(())
     }
@@ -4599,6 +4684,8 @@ impl Timeline {
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
     ) -> anyhow::Result<GcResult> {
+        // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
+
         let now = SystemTime::now();
         let mut result: GcResult = GcResult::default();
 
@@ -4652,7 +4739,7 @@ impl Timeline {
             if l.get_lsn_range().end > horizon_cutoff {
                 debug!(
                     "keeping {} because it's newer than horizon_cutoff {}",
-                    l.filename(),
+                    l.layer_name(),
                     horizon_cutoff,
                 );
                 result.layers_needed_by_cutoff += 1;
@@ -4663,7 +4750,7 @@ impl Timeline {
             if l.get_lsn_range().end > pitr_cutoff {
                 debug!(
                     "keeping {} because it's newer than pitr_cutoff {}",
-                    l.filename(),
+                    l.layer_name(),
                     pitr_cutoff,
                 );
                 result.layers_needed_by_pitr += 1;
@@ -4682,7 +4769,7 @@ impl Timeline {
                 if &l.get_lsn_range().start <= retain_lsn {
                     debug!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
-                        l.filename(),
+                        l.layer_name(),
                         retain_lsn,
                         l.is_incremental(),
                     );
@@ -4713,7 +4800,7 @@ impl Timeline {
             if !layers
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
             {
-                debug!("keeping {} because it is the latest layer", l.filename());
+                debug!("keeping {} because it is the latest layer", l.layer_name());
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
@@ -4721,7 +4808,7 @@ impl Timeline {
             // We didn't find any reason to keep this file, so remove it.
             debug!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
-                l.filename(),
+                l.layer_name(),
                 l.is_incremental(),
             );
             layers_to_remove.push(l);

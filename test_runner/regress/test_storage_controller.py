@@ -290,9 +290,12 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     # This is the pageserver where we'll initially create the tenant.  Run it in emergency
     # mode so that it doesn't talk to storage controller, and do not register it.
     env.pageservers[0].allowed_errors.append(".*Emergency mode!.*")
-    env.pageservers[0].start(
-        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
+    env.pageservers[0].patch_config_toml_nonrecursive(
+        {
+            "control_plane_emergency_mode": True,
+        }
     )
+    env.pageservers[0].start()
     origin_ps = env.pageservers[0]
 
     # These are the pageservers managed by the sharding service, where the tenant

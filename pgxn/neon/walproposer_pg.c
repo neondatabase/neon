@@ -85,7 +85,6 @@ static void walprop_pg_init_standalone_sync_safekeepers(void);
 static void walprop_pg_init_walsender(void);
 static void walprop_pg_init_bgworker(void);
 static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
-static TimeLineID walprop_pg_get_timeline_id(void);
 static void walprop_pg_load_libpqwalreceiver(void);
 
 static process_interrupts_callback_t PrevProcessInterruptsCallback;
@@ -94,6 +93,8 @@ static shmem_startup_hook_type prev_shmem_startup_hook_type;
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static void walproposer_shmem_request(void);
 #endif
+static void WalproposerShmemInit_SyncSafekeeper(void);
+
 
 static void StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd);
 static void WalSndLoop(WalProposer *wp);
@@ -136,6 +137,7 @@ WalProposerSync(int argc, char *argv[])
 	WalProposer *wp;
 
 	init_walprop_config(true);
+	WalproposerShmemInit_SyncSafekeeper();
 	walprop_pg_init_standalone_sync_safekeepers();
 	walprop_pg_load_libpqwalreceiver();
 
@@ -281,12 +283,25 @@ WalproposerShmemInit(void)
 	{
 		memset(walprop_shared, 0, WalproposerShmemSize());
 		SpinLockInit(&walprop_shared->mutex);
+		pg_atomic_init_u64(&walprop_shared->propEpochStartLsn, 0);
+		pg_atomic_init_u64(&walprop_shared->mineLastElectedTerm, 0);
 		pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
 		pg_atomic_init_u64(&walprop_shared->currentClusterSize, 0);
 	}
 	LWLockRelease(AddinShmemInitLock);
 
 	return found;
+}
+
+static void
+WalproposerShmemInit_SyncSafekeeper(void)
+{
+	walprop_shared = palloc(WalproposerShmemSize());
+	memset(walprop_shared, 0, WalproposerShmemSize());
+	SpinLockInit(&walprop_shared->mutex);
+	pg_atomic_init_u64(&walprop_shared->propEpochStartLsn, 0);
+	pg_atomic_init_u64(&walprop_shared->mineLastElectedTerm, 0);
+	pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
 }
 
 #define BACK_PRESSURE_DELAY 10000L // 0.01 sec
@@ -399,6 +414,13 @@ nwp_shmem_startup_hook(void)
 	WalproposerShmemInit();
 }
 
+WalproposerShmemState *
+GetWalpropShmemState()
+{
+	Assert(walprop_shared != NULL);
+	return walprop_shared;
+}
+
 static WalproposerShmemState *
 walprop_pg_get_shmem_state(WalProposer *wp)
 {
@@ -431,14 +453,15 @@ record_pageserver_feedback(PageserverFeedback *ps_feedback)
 	for (int i = 0; i < walprop_shared->num_shards; i++)
 	{
 		PageserverFeedback *feedback = &walprop_shared->shard_ps_feedback[i];
+
 		if (feedback->present)
 		{
 			if (min_feedback.last_received_lsn == InvalidXLogRecPtr || feedback->last_received_lsn < min_feedback.last_received_lsn)
 				min_feedback.last_received_lsn = feedback->last_received_lsn;
-			
+
 			if (min_feedback.disk_consistent_lsn == InvalidXLogRecPtr || feedback->disk_consistent_lsn < min_feedback.disk_consistent_lsn)
 				min_feedback.disk_consistent_lsn = feedback->disk_consistent_lsn;
-			
+
 			if (min_feedback.remote_consistent_lsn == InvalidXLogRecPtr || feedback->remote_consistent_lsn < min_feedback.remote_consistent_lsn)
 				min_feedback.remote_consistent_lsn = feedback->remote_consistent_lsn;
 		}
@@ -551,6 +574,7 @@ static void
 walprop_sigusr2(SIGNAL_ARGS)
 {
 	int			save_errno = errno;
+
 	got_SIGUSR2 = true;
 	SetLatch(MyLatch);
 	errno = save_errno;
@@ -598,7 +622,7 @@ walprop_pg_get_current_timestamp(WalProposer *wp)
 	return GetCurrentTimestamp();
 }
 
-static TimeLineID
+TimeLineID
 walprop_pg_get_timeline_id(void)
 {
 #if PG_VERSION_NUM >= 150000
@@ -615,6 +639,20 @@ walprop_pg_load_libpqwalreceiver(void)
 	load_file("libpqwalreceiver", false);
 	if (WalReceiverFunctions == NULL)
 		wpg_log(ERROR, "libpqwalreceiver didn't initialize correctly");
+}
+
+static void
+walprop_pg_update_donor(WalProposer *wp, Safekeeper *donor, XLogRecPtr donor_lsn)
+{
+	WalproposerShmemState *wps = wp->api.get_shmem_state(wp);
+	char		donor_name[64];
+
+	pg_snprintf(donor_name, sizeof(donor_name), "%s:%s", donor->host, donor->port);
+	SpinLockAcquire(&wps->mutex);
+	memcpy(wps->donor_name, donor_name, sizeof(donor_name));
+	memcpy(wps->donor_conninfo, donor->conninfo, sizeof(donor->conninfo));
+	wps->donor_lsn = donor_lsn;
+	SpinLockRelease(&wps->mutex);
 }
 
 /* Helper function */
@@ -717,7 +755,6 @@ walprop_connect_start(Safekeeper *sk)
 {
 	Assert(sk->conn == NULL);
 	sk->conn = libpqwp_connect_start(sk->conninfo);
-
 }
 
 static WalProposerConnectPollStatusType
@@ -1091,7 +1128,7 @@ static void
 StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 {
 	XLogRecPtr	FlushPtr;
-	 __attribute__((unused)) TimeLineID	currTLI;
+	__attribute__((unused)) TimeLineID currTLI;
 
 #if PG_VERSION_NUM < 150000
 	if (ThisTimeLineID == 0)
@@ -1295,116 +1332,13 @@ XLogBroadcastWalProposer(WalProposer *wp)
 	}
 }
 
-/* Download WAL before basebackup for logical walsenders from sk, if needed */
+/*
+  Used to download WAL before basebackup for logical walsenders from sk, no longer
+  needed because walsender always uses neon_walreader.
+ */
 static bool
 WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 {
-	char	   *err;
-	WalReceiverConn *wrconn;
-	WalRcvStreamOptions options;
-	char		conninfo[MAXCONNINFO];
-	TimeLineID	timeline;
-	XLogRecPtr	startpos;
-	XLogRecPtr	endpos;
-
-	startpos = GetLogRepRestartLSN(wp);
-	if (startpos == InvalidXLogRecPtr)
-		return true;			/* recovery not needed */
-	endpos = wp->propEpochStartLsn;
-
-	timeline = wp->greetRequest.timeline;
-
-	if (!neon_auth_token)
-	{
-		memcpy(conninfo, sk->conninfo, MAXCONNINFO);
-	}
-	else
-	{
-		int			written = 0;
-
-		written = snprintf((char *) conninfo, MAXCONNINFO, "password=%s %s", neon_auth_token, sk->conninfo);
-		if (written > MAXCONNINFO || written < 0)
-			wpg_log(FATAL, "could not append password to the safekeeper connection string");
-	}
-
-#if PG_MAJORVERSION_NUM < 16
-	wrconn = walrcv_connect(conninfo, false, "wal_proposer_recovery", &err);
-#else
-	wrconn = walrcv_connect(conninfo, false, false, "wal_proposer_recovery", &err);
-#endif
-
-	if (!wrconn)
-	{
-		ereport(WARNING,
-				(errmsg("could not connect to WAL acceptor %s:%s: %s",
-						sk->host, sk->port,
-						err)));
-		return false;
-	}
-	wpg_log(LOG,
-			"start recovery for logical replication from %s:%s starting from %X/%08X till %X/%08X timeline "
-			"%d",
-			sk->host, sk->port, (uint32) (startpos >> 32),
-			(uint32) startpos, (uint32) (endpos >> 32), (uint32) endpos, timeline);
-
-	options.logical = false;
-	options.startpoint = startpos;
-	options.slotname = NULL;
-	options.proto.physical.startpointTLI = timeline;
-
-	if (walrcv_startstreaming(wrconn, &options))
-	{
-		XLogRecPtr	rec_start_lsn;
-		XLogRecPtr	rec_end_lsn = 0;
-		int			len;
-		char	   *buf;
-		pgsocket	wait_fd = PGINVALID_SOCKET;
-
-		while ((len = walrcv_receive(wrconn, &buf, &wait_fd)) >= 0)
-		{
-			if (len == 0)
-			{
-				(void) WaitLatchOrSocket(
-										 MyLatch, WL_EXIT_ON_PM_DEATH | WL_SOCKET_READABLE, wait_fd,
-										 -1, WAIT_EVENT_WAL_RECEIVER_MAIN);
-			}
-			else
-			{
-				Assert(buf[0] == 'w' || buf[0] == 'k');
-				if (buf[0] == 'k')
-					continue;	/* keepalive */
-				memcpy(&rec_start_lsn, &buf[XLOG_HDR_START_POS],
-					   sizeof rec_start_lsn);
-				rec_start_lsn = pg_ntoh64(rec_start_lsn);
-				rec_end_lsn = rec_start_lsn + len - XLOG_HDR_SIZE;
-
-				/* write WAL to disk */
-				XLogWalPropWrite(sk->wp, &buf[XLOG_HDR_SIZE], len - XLOG_HDR_SIZE, rec_start_lsn);
-
-				ereport(DEBUG1,
-						(errmsg("Recover message %X/%X length %d",
-								LSN_FORMAT_ARGS(rec_start_lsn), len)));
-				if (rec_end_lsn >= endpos)
-					break;
-			}
-		}
-		ereport(LOG,
-				(errmsg("end of replication stream at %X/%X: %m",
-						LSN_FORMAT_ARGS(rec_end_lsn))));
-		walrcv_disconnect(wrconn);
-
-		/* failed to receive all WAL till endpos */
-		if (rec_end_lsn < endpos)
-			return false;
-	}
-	else
-	{
-		ereport(LOG,
-				(errmsg("primary server contains no more WAL on requested timeline %u LSN %X/%08X",
-						timeline, (uint32) (startpos >> 32), (uint32) startpos)));
-		return false;
-	}
-
 	return true;
 }
 
@@ -1545,7 +1479,7 @@ walprop_pg_wal_reader_allocate(Safekeeper *sk)
 
 	snprintf(log_prefix, sizeof(log_prefix), WP_LOG_PREFIX "sk %s:%s nwr: ", sk->host, sk->port);
 	Assert(!sk->xlogreader);
-	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn, sk->wp, log_prefix);
+	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn, log_prefix);
 	if (sk->xlogreader == NULL)
 		wpg_log(FATAL, "failed to allocate xlog reader");
 }
@@ -1960,8 +1894,8 @@ CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
 static void
 walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 {
-	HotStandbyFeedback	hsFeedback;
-	bool				needToAdvanceSlot = false;
+	HotStandbyFeedback hsFeedback;
+	bool		needToAdvanceSlot = false;
 
 	if (wp->config->syncSafekeepers)
 		return;
@@ -2095,22 +2029,25 @@ GetLogRepRestartLSN(WalProposer *wp)
 	return lrRestartLsn;
 }
 
-void SetNeonCurrentClusterSize(uint64 size)
+void
+SetNeonCurrentClusterSize(uint64 size)
 {
 	pg_atomic_write_u64(&walprop_shared->currentClusterSize, size);
 }
 
-uint64 GetNeonCurrentClusterSize(void)
+uint64
+GetNeonCurrentClusterSize(void)
 {
 	return pg_atomic_read_u64(&walprop_shared->currentClusterSize);
 }
-uint64 GetNeonCurrentClusterSize(void);
+uint64		GetNeonCurrentClusterSize(void);
 
 
 static const walproposer_api walprop_pg = {
 	.get_shmem_state = walprop_pg_get_shmem_state,
 	.start_streaming = walprop_pg_start_streaming,
 	.get_flush_rec_ptr = walprop_pg_get_flush_rec_ptr,
+	.update_donor = walprop_pg_update_donor,
 	.get_current_timestamp = walprop_pg_get_current_timestamp,
 	.conn_error_message = walprop_error_message,
 	.conn_status = walprop_status,

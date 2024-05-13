@@ -322,6 +322,9 @@ pub struct Tenant {
     /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
     pub(crate) timeline_get_throttle:
         Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
+
+    /// An ongoing timeline detach must be checked during attempts to GC or compact a timeline.
+    ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -1676,6 +1679,34 @@ impl Tenant {
         Ok(())
     }
 
+    // Call through to all timelines to freeze ephemeral layers if needed.  Usually
+    // this happens during ingest: this background housekeeping is for freezing layers
+    // that are open but haven't been written to for some time.
+    async fn ingest_housekeeping(&self) {
+        // Scan through the hashmap and collect a list of all the timelines,
+        // while holding the lock. Then drop the lock and actually perform the
+        // compactions.  We don't want to block everything else while the
+        // compaction runs.
+        let timelines = {
+            self.timelines
+                .lock()
+                .unwrap()
+                .values()
+                .filter_map(|timeline| {
+                    if timeline.is_active() {
+                        Some(timeline.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for timeline in &timelines {
+            timeline.maybe_freeze_ephemeral_layer().await;
+        }
+    }
+
     pub fn current_state(&self) -> TenantState {
         self.state.borrow().clone()
     }
@@ -2529,6 +2560,7 @@ impl Tenant {
                 &crate::metrics::tenant_throttling::TIMELINE_GET,
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
+            ongoing_timeline_detach: std::sync::Mutex::default(),
         }
     }
 
@@ -3726,7 +3758,7 @@ pub(crate) mod harness {
                 image_layer_creation_check_threshold: Some(
                     tenant_conf.image_layer_creation_check_threshold,
                 ),
-                switch_to_aux_file_v2: Some(tenant_conf.switch_to_aux_file_v2),
+                switch_aux_file_policy: Some(tenant_conf.switch_aux_file_policy),
             }
         }
     }

@@ -19,6 +19,7 @@ use crate::{
     metrics::{Metrics, NumClientConnectionsGuard},
     protocol2::read_proxy_protocol,
     proxy::handshake::{handshake, HandshakeData},
+    rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
     EndpointCacheKey,
 };
@@ -61,6 +62,7 @@ pub async fn task_main(
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("proxy has shut down");
@@ -86,6 +88,7 @@ pub async fn task_main(
         let cancellation_handler = Arc::clone(&cancellation_handler);
 
         tracing::info!(protocol = "tcp", %session_id, "accepted new TCP connection");
+        let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
 
         connections.spawn(async move {
             let (socket, peer_addr) = match read_proxy_protocol(socket).await{
@@ -123,6 +126,7 @@ pub async fn task_main(
                 cancellation_handler,
                 socket,
                 ClientMode::Tcp,
+                endpoint_rate_limiter2,
                 conn_gauge,
             )
             .instrument(span.clone())
@@ -234,6 +238,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     mode: ClientMode,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
     info!(
@@ -243,7 +248,6 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let metrics = &Metrics::get().proxy;
     let proto = ctx.protocol;
-    // let _client_gauge = metrics.client_connections.guard(proto);
     let _request_gauge = metrics.connection_requests.guard(proto);
 
     let tls = config.tls_config.as_ref();
@@ -286,6 +290,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             &mut stream,
             mode.allow_cleartext(),
             &config.authentication_config,
+            endpoint_rate_limiter,
         )
         .await
     {

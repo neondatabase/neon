@@ -63,6 +63,7 @@ use crate::tenant::remote_timeline_client::list_remote_timelines;
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
+use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::SpawnMode;
@@ -1228,13 +1229,15 @@ async fn layer_download_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let layer_name = LayerName::from_str(layer_file_name)
+        .map_err(|s| ApiError::BadRequest(anyhow::anyhow!(s)))?;
     let state = get_state(&request);
 
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
     let downloaded = timeline
-        .download_layer(layer_file_name)
+        .download_layer(&layer_name)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1258,11 +1261,14 @@ async fn evict_timeline_layer_handler(
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
     let state = get_state(&request);
 
+    let layer_name = LayerName::from_str(layer_file_name)
+        .map_err(|s| ApiError::BadRequest(anyhow::anyhow!(s)))?;
+
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
     let evicted = timeline
-        .evict_layer(layer_file_name)
+        .evict_layer(&layer_name)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1825,6 +1831,75 @@ async fn timeline_download_remote_layers_handler_get(
         .context("task never started since last pageserver process start")
         .map_err(|e| ApiError::NotFound(e.into()))?;
     json_response(StatusCode::OK, info)
+}
+
+async fn timeline_detach_ancestor_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    use crate::tenant::timeline::detach_ancestor::Options;
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
+
+    async move {
+        let mut options = Options::default();
+
+        let rewrite_concurrency =
+            parse_query_param::<_, std::num::NonZeroUsize>(&request, "rewrite_concurrency")?;
+        let copy_concurrency =
+            parse_query_param::<_, std::num::NonZeroUsize>(&request, "copy_concurrency")?;
+
+        [
+            (&mut options.rewrite_concurrency, rewrite_concurrency),
+            (&mut options.copy_concurrency, copy_concurrency),
+        ]
+        .into_iter()
+        .filter_map(|(target, val)| val.map(|val| (target, val)))
+        .for_each(|(target, val)| *target = val);
+
+        let state = get_state(&request);
+
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+        let ctx = RequestContext::new(TaskKind::DetachAncestor, DownloadBehavior::Download);
+        let ctx = &ctx;
+
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(|e| ApiError::NotFound(e.into()))?;
+
+        let (_guard, prepared) = timeline
+            .prepare_to_detach_from_ancestor(&tenant, options, ctx)
+            .await
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+        let res = state
+            .tenant_manager
+            .complete_detaching_timeline_ancestor(tenant_shard_id, timeline_id, prepared, ctx)
+            .await;
+
+        match res {
+            Ok(reparented_timelines) => {
+                let resp = pageserver_api::models::detach_ancestor::AncestorDetached {
+                    reparented_timelines,
+                };
+
+                json_response(StatusCode::OK, resp)
+            }
+            Err(e) => Err(ApiError::InternalServerError(
+                e.context("timeline detach completion"),
+            )),
+        }
+    }
+    .instrument(span)
+    .await
 }
 
 async fn deletion_queue_flush(
@@ -2514,6 +2589,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_remote_layers",
             |r| api_handler(r, timeline_download_remote_layers_handler_get),
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/detach_ancestor",
+            |r| api_handler(r, timeline_detach_ancestor_handler),
         )
         .delete("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_delete_handler)

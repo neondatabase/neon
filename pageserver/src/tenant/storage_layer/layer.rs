@@ -4,12 +4,13 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::ShardIndex;
+use pageserver_api::shard::{ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 use tracing::Instrument;
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
@@ -24,7 +25,7 @@ use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 use super::delta_layer::{self, DeltaEntry};
 use super::image_layer;
 use super::{
-    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerFileName, PersistentLayerDesc,
+    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerName, PersistentLayerDesc,
     ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
 };
 
@@ -123,14 +124,42 @@ impl PartialEq for Layer {
     }
 }
 
+pub(crate) fn local_layer_path(
+    conf: &PageServerConf,
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+    layer_file_name: &LayerName,
+    _generation: &Generation,
+) -> Utf8PathBuf {
+    let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
+
+    timeline_path.join(layer_file_name.to_string())
+
+    // TODO: switch to enabling new-style layer paths after next release
+    // if generation.is_none() {
+    //     // Without a generation, we may only use legacy path style
+    //     timeline_path.join(layer_file_name.to_string())
+    // } else {
+    //     timeline_path.join(format!("{}-v1{}", layer_file_name, generation.get_suffix()))
+    // }
+}
+
 impl Layer {
     /// Creates a layer value for a file we know to not be resident.
     pub(crate) fn for_evicted(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
-        file_name: LayerFileName,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> Self {
+        let local_path = local_layer_path(
+            conf,
+            &timeline.tenant_shard_id,
+            &timeline.timeline_id,
+            &file_name,
+            &metadata.generation,
+        );
+
         let desc = PersistentLayerDesc::from_filename(
             timeline.tenant_shard_id,
             timeline.timeline_id,
@@ -143,6 +172,7 @@ impl Layer {
         let owner = Layer(Arc::new(LayerInner::new(
             conf,
             timeline,
+            local_path,
             access_stats,
             desc,
             None,
@@ -159,7 +189,8 @@ impl Layer {
     pub(crate) fn for_resident(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
-        file_name: LayerFileName,
+        local_path: Utf8PathBuf,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> ResidentLayer {
         let desc = PersistentLayerDesc::from_filename(
@@ -184,6 +215,7 @@ impl Layer {
             LayerInner::new(
                 conf,
                 timeline,
+                local_path,
                 access_stats,
                 desc,
                 Some(inner),
@@ -225,9 +257,19 @@ impl Layer {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
+
+            let local_path = local_layer_path(
+                conf,
+                &timeline.tenant_shard_id,
+                &timeline.timeline_id,
+                &desc.layer_name(),
+                &timeline.generation,
+            );
+
             LayerInner::new(
                 conf,
                 timeline,
+                local_path,
                 access_stats,
                 desc,
                 Some(inner),
@@ -408,6 +450,13 @@ impl Layer {
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.0.metadata()
+    }
+
+    pub(crate) fn get_timeline_id(&self) -> Option<TimelineId> {
+        self.0
+            .timeline
+            .upgrade()
+            .map(|timeline| timeline.timeline_id)
     }
 
     /// Traditional debug dumping facility
@@ -641,7 +690,7 @@ impl Drop for LayerInner {
         let span = tracing::info_span!(parent: None, "layer_delete", tenant_id = %self.layer_desc().tenant_shard_id.tenant_id, shard_id=%self.layer_desc().tenant_shard_id.shard_slug(), timeline_id = %self.layer_desc().timeline_id);
 
         let path = std::mem::take(&mut self.path);
-        let file_name = self.layer_desc().filename();
+        let file_name = self.layer_desc().layer_name();
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
         let meta = self.metadata();
@@ -709,19 +758,17 @@ impl Drop for LayerInner {
 }
 
 impl LayerInner {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
+        local_path: Utf8PathBuf,
         access_stats: LayerAccessStats,
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
         shard: ShardIndex,
     ) -> Self {
-        let path = conf
-            .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id)
-            .join(desc.filename().to_string());
-
         let (inner, version, init_status) = if let Some(inner) = downloaded {
             let version = inner.version;
             let resident = ResidentOrWantedEvicted::Resident(inner);
@@ -736,8 +783,10 @@ impl LayerInner {
 
         LayerInner {
             conf,
-            debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
-            path,
+            debug_str: {
+                format!("timelines/{}/{}", timeline.timeline_id, desc.layer_name()).into()
+            },
+            path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
             have_remote_client: timeline.remote_client.is_some(),
@@ -1074,7 +1123,7 @@ impl LayerInner {
 
         let result = client
             .download_layer_file(
-                &self.desc.filename(),
+                &self.desc.layer_name(),
                 &self.metadata(),
                 &timeline.cancel,
                 ctx,
@@ -1211,7 +1260,7 @@ impl LayerInner {
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.desc.filename().file_name();
+        let layer_name = self.desc.layer_name().to_string();
 
         let resident = self
             .inner
@@ -1225,7 +1274,7 @@ impl LayerInner {
             let lsn_range = &self.desc.lsn_range;
 
             HistoricLayerInfo::Delta {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
@@ -1236,7 +1285,7 @@ impl LayerInner {
             let lsn = self.desc.image_layer_lsn();
 
             HistoricLayerInfo::Image {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn,
                 remote: !resident,
@@ -1797,25 +1846,23 @@ impl ResidentLayer {
         }
     }
 
-    /// FIXME: truncate is bad name because we are not truncating anything, but copying the
-    /// filtered parts.
-    #[cfg(test)]
-    pub(super) async fn copy_delta_prefix(
+    /// Returns the amount of keys and values written to the writer.
+    pub(crate) async fn copy_delta_prefix(
         &self,
         writer: &mut super::delta_layer::DeltaLayerWriter,
-        truncate_at: Lsn,
+        until: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         use LayerKind::*;
 
         let owner = &self.owner.0;
 
         match self.downloaded.get(owner, ctx).await? {
             Delta(ref d) => d
-                .copy_prefix(writer, truncate_at, ctx)
+                .copy_prefix(writer, until, ctx)
                 .await
-                .with_context(|| format!("truncate {self}")),
-            Image(_) => anyhow::bail!(format!("cannot truncate image layer {self}")),
+                .with_context(|| format!("copy_delta_prefix until {until} of {self}")),
+            Image(_) => anyhow::bail!(format!("cannot copy_lsn_prefix of image layer {self}")),
         }
     }
 

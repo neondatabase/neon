@@ -88,7 +88,9 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Flushed oversized open layer with size.*",
     # During teardown, we stop the storage controller before the pageservers, so pageservers
     # can experience connection errors doing background deletion queue work.
-    ".*WARN deletion backend: calling control plane generation validation API failed.*Connection refused.*",
+    ".*WARN deletion backend: calling control plane generation validation API failed.*error sending request.*",
+    # Can happen when the test shuts down the storage controller while it is calling the utilization API
+    ".*WARN.*path=/v1/utilization .*request was dropped before completing",
 )
 
 

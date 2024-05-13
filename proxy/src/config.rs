@@ -2,7 +2,7 @@ use crate::{
     auth::{self, backend::AuthRateLimiter},
     console::locks::ApiLocks,
     rate_limiter::RateBucketInfo,
-    serverless::GlobalConnPoolOptions,
+    serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
     Host,
 };
 use anyhow::{bail, ensure, Context, Ok};
@@ -56,6 +56,8 @@ pub struct TlsConfig {
 pub struct HttpConfig {
     pub request_timeout: tokio::time::Duration,
     pub pool_options: GlobalConnPoolOptions,
+    pub cancel_set: CancelSet,
+    pub client_conn_threshold: u64,
 }
 
 pub struct AuthenticationConfig {
@@ -536,9 +538,9 @@ pub struct RetryConfig {
 impl RetryConfig {
     /// Default options for RetryConfig.
 
-    /// Total delay for 8 retries with 100ms base delay and 1.6 backoff factor is about 7s.
+    /// Total delay for 5 retries with 200ms base delay and 2 backoff factor is about 6s.
     pub const CONNECT_TO_COMPUTE_DEFAULT_VALUES: &'static str =
-        "num_retries=8,base_retry_wait_duration=100ms,retry_wait_exponent_base=1.6";
+        "num_retries=5,base_retry_wait_duration=200ms,retry_wait_exponent_base=2";
     /// Total delay for 8 retries with 100ms base delay and 1.6 backoff factor is about 7s.
     /// Cplane has timeout of 60s on each request. 8m7s in total.
     pub const WAKE_COMPUTE_DEFAULT_VALUES: &'static str =
@@ -592,7 +594,7 @@ impl ConcurrencyLockOptions {
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
     /// Default options for [`crate::console::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
-        "shards=64,permits=50,epoch=10m,timeout=500ms";
+        "shards=64,permits=10,epoch=10m,timeout=10ms";
 
     // pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "shards=32,permits=4,epoch=10m,timeout=1s";
 

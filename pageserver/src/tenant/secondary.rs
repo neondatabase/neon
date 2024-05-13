@@ -21,8 +21,9 @@ use self::{
 use super::{
     config::{SecondaryLocationConfig, TenantConfOpt},
     mgr::TenantManager,
+    remote_timeline_client::LayerFileMetadata,
     span::debug_assert_current_span_has_tenant_id,
-    storage_layer::LayerFileName,
+    storage_layer::{layer::local_layer_path, LayerName},
 };
 
 use pageserver_api::{
@@ -181,7 +182,8 @@ impl SecondaryTenant {
         self: &Arc<Self>,
         conf: &PageServerConf,
         timeline_id: TimelineId,
-        name: LayerFileName,
+        name: LayerName,
+        metadata: LayerFileMetadata,
     ) {
         debug_assert_current_span_has_tenant_id();
 
@@ -195,9 +197,13 @@ impl SecondaryTenant {
 
         let now = SystemTime::now();
 
-        let path = conf
-            .timeline_path(&self.tenant_shard_id, &timeline_id)
-            .join(name.file_name());
+        let local_path = local_layer_path(
+            conf,
+            &self.tenant_shard_id,
+            &timeline_id,
+            &name,
+            &metadata.generation,
+        );
 
         let this = self.clone();
 
@@ -208,7 +214,7 @@ impl SecondaryTenant {
             // it, the secondary downloader could have seen an updated heatmap that
             // resulted in a layer being deleted.
             // Other local I/O errors are process-fatal: these should never happen.
-            let deleted = std::fs::remove_file(path);
+            let deleted = std::fs::remove_file(local_path);
 
             let not_found = deleted
                 .as_ref()
