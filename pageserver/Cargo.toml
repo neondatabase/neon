@@ -29,6 +29,7 @@ crossbeam-utils.workspace = true
 either.workspace = true
 flate2.workspace = true
 fail.workspace = true
+fnv.workspace = true
 futures.workspace = true
 git-version.workspace = true
 hex.workspace = true

@@ -3676,6 +3676,7 @@ dependencies = [
  "enumset",
  "fail",
  "flate2",
+ "fnv",
  "futures",
  "git-version",
  "hex",
