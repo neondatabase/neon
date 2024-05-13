@@ -623,15 +623,16 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
             ratio = count_now / original_count
             abs_diff = abs(ratio - expected_ratio)
             assert original_count > count_now
-            log.info(
-                f"tenant {tenant_id} layer count {original_count} -> {count_now}, ratio: {ratio}, expecting {abs_diff} < 0.1"
-            )
 
+            expectation = 0.06
+            log.info(
+                f"tenant {tenant_id} layer count {original_count} -> {count_now}, ratio: {ratio}, expecting {abs_diff} < {expectation}"
+            )
             # in this test case both relative_spare and relative_equal produce
             # the same outcomes; this must be a quantization effect of similar
             # sizes (-s4 and -s6) and small (5MB) layer size.
             # for pg15 and pg16 the absdiff is < 0.01, for pg14 it is closer to 0.02
-            assert abs_diff < 0.05
+            assert abs_diff < expectation
 
 
 @pytest.mark.parametrize(
