@@ -2630,6 +2630,7 @@ impl Timeline {
                             // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
                             // Don't make noise.
                         } else {
+                            debug_assert!(false);
                             warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
                         }
                     }
@@ -4371,7 +4372,8 @@ impl Timeline {
             // the logical size cancellation to skip the concurrency limit semaphore.
             // TODO: this is an unexpected case.  We should restructure so that it
             // can't happen.
-            tracing::info!(
+            debug_assert!(false);
+            tracing::warn!(
                 "await_initial_logical_size: can't get semaphore cancel token, skipping"
             );
         }
