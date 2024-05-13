@@ -474,7 +474,7 @@ impl ImageLayerInner {
             .await
             .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state)
+        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
 
         Ok(())
@@ -537,6 +537,7 @@ impl ImageLayerInner {
         &self,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
     ) {
         let max_vectored_read_bytes = self
             .max_vectored_read_bytes
@@ -565,7 +566,7 @@ impl ImageLayerInner {
             }
 
             let buf = BytesMut::with_capacity(buf_size);
-            let res = vectored_blob_reader.read_blobs(&read, buf).await;
+            let res = vectored_blob_reader.read_blobs(&read, buf, ctx).await;
 
             match res {
                 Ok(blobs_buf) => {

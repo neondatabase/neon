@@ -908,7 +908,7 @@ impl DeltaLayerInner {
         .await
         .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state)
+        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
 
         reconstruct_state.on_lsn_advanced(&keyspace, self.lsn_range.start);
@@ -1012,6 +1012,7 @@ impl DeltaLayerInner {
         &self,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
     ) {
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
         let mut ignore_key_with_err = None;
@@ -1029,7 +1030,7 @@ impl DeltaLayerInner {
         // track when a key is done.
         for read in reads.into_iter().rev() {
             let res = vectored_blob_reader
-                .read_blobs(&read, buf.take().expect("Should have a buffer"))
+                .read_blobs(&read, buf.take().expect("Should have a buffer"), ctx)
                 .await;
 
             let blobs_buf = match res {
@@ -1274,7 +1275,7 @@ impl DeltaLayerInner {
 
                 buf.clear();
                 buf.reserve(read.size());
-                let res = reader.read_blobs(&read, buf).await?;
+                let res = reader.read_blobs(&read, buf, ctx).await?;
 
                 for blob in res.blobs {
                     let key = blob.meta.key;
@@ -1848,7 +1849,7 @@ mod test {
 
             for read in vectored_reads {
                 let blobs_buf = vectored_blob_reader
-                    .read_blobs(&read, buf.take().expect("Should have a buffer"))
+                    .read_blobs(&read, buf.take().expect("Should have a buffer"), &ctx)
                     .await?;
                 for meta in blobs_buf.blobs.iter() {
                     let value = &blobs_buf.buf[meta.start..meta.end];

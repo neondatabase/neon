@@ -1,14 +1,19 @@
 import datetime
 import enum
+import tarfile
+import time
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
+from pathlib import Path
 from queue import Empty, Queue
 from threading import Barrier
-from typing import List
+from typing import IO, List, Set, Tuple, Union
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    PgBin,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import HistoricLayerInfo
@@ -53,6 +58,8 @@ class Branchpoint(str, enum.Enum):
 SHUTDOWN_ALLOWED_ERRORS = [
     ".*initial size calculation failed: downloading failed, possibly for shutdown",
     ".*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+    ".*logical_size_calculation_task:panic.*: Sequential get failed with Bad state \\(not active\\).*",
+    ".*Task 'initial size calculation' .* panicked.*",
 ]
 
 
@@ -60,7 +67,10 @@ SHUTDOWN_ALLOWED_ERRORS = [
 @pytest.mark.parametrize("restart_after", [True, False])
 @pytest.mark.parametrize("write_to_branch_first", [True, False])
 def test_ancestor_detach_branched_from(
+    test_output_dir,
+    pg_distrib_dir,
     neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
     branchpoint: Branchpoint,
     restart_after: bool,
     write_to_branch_first: bool,
@@ -70,6 +80,7 @@ def test_ancestor_detach_branched_from(
     """
     env = neon_env_builder.init_start()
 
+    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
     client = env.pageserver.http_client()
@@ -146,6 +157,20 @@ def test_ancestor_detach_branched_from(
     else:
         branch_layers = set()
 
+    # run fullbackup to make sure there are no off by one errors
+    # take this on the parent
+    fullbackup_before = test_output_dir / "fullbackup-before.tar"
+    cmd = [
+        "psql",
+        "--no-psqlrc",
+        env.pageserver.connstr(),
+        "-c",
+        f"fullbackup {env.initial_tenant} {env.initial_timeline} {branch_at}",
+        "-o",
+        str(fullbackup_before),
+    ]
+    pg_bin.run_capture(cmd, env=psql_env)
+
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
     assert all_reparented == set()
 
@@ -173,8 +198,72 @@ def test_ancestor_detach_branched_from(
     # but if nothing was copied, then there is no nice rule.
     # there could be a hole in LSNs between copied from the "old main" and the first branch layer.
 
+    # take this on the detached, at same lsn
+    fullbackup_after = test_output_dir / "fullbackup-after.tar"
+    cmd = [
+        "psql",
+        "--no-psqlrc",
+        env.pageserver.connstr(),
+        "-c",
+        f"fullbackup {env.initial_tenant} {timeline_id} {branch_at}",
+        "-o",
+        str(fullbackup_after),
+    ]
+    pg_bin.run_capture(cmd, env=psql_env)
+
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
+
+    # because we do the fullbackup from ancestor at the branch_lsn, the zenith.signal is always different
+    # as there is always "PREV_LSN: invalid" for "before"
+    skip_files = {"zenith.signal"}
+
+    tar_cmp(fullbackup_before, fullbackup_after, skip_files)
+
+
+def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
+    """
+    This is essentially:
+
+    lines=$(comm -3 \
+        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        | wc -l)
+    [ "$lines" = "0" ]
+
+    But in a more mac friendly fashion.
+    """
+    started_at = time.time()
+
+    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
+        assert reader is not None
+        digest = sha256(usedforsecurity=False)
+        while True:
+            buf = reader.read(64 * 1024)
+            if not buf:
+                break
+            digest.update(buf)
+        return digest.digest()
+
+    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
+        with tarfile.open(p) as f:
+            matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
+            ret = list(
+                map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files)
+            )
+            ret.sort(key=lambda t: t[0])
+            return ret
+
+    left_list, right_list = map(build_hash_list, [left, right])
+
+    try:
+        assert len(left_list) == len(right_list)
+
+        for left_tuple, right_tuple in zip(left_list, right_list):
+            assert left_tuple == right_tuple
+    finally:
+        elapsed = time.time() - started_at
+        log.info(f"tar_cmp completed in {elapsed}s")
 
 
 def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
