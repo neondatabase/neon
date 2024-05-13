@@ -81,4 +81,20 @@ impl HeatMapTenant {
 
         stats
     }
+
+    pub(crate) fn strip_atimes(self) -> Self {
+        Self {
+            timelines: self
+                .timelines
+                .into_iter()
+                .map(|mut tl| {
+                    for layer in &mut tl.layers {
+                        layer.access_time = SystemTime::UNIX_EPOCH;
+                    }
+                    tl
+                })
+                .collect(),
+            generation: self.generation,
+        }
+    }
 }
