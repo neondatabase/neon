@@ -255,6 +255,18 @@ typedef struct
 	 * the pageserver, as long as 'not_modified_since' has arrived.
 	 */
 	XLogRecPtr not_modified_since;
+
+	/*
+	 * 'effective_request_lsn' is not included in the request that's sent to
+	 * the pageserver, but is used to keep track of the latest LSN of when the
+	 * request was made. In a standby server, this is always the same as the
+	 * 'request_lsn', but in the primary we use UINT64_MAX as the
+	 * 'request_lsn' to request the latest page version, so we need this
+	 * separate field to remember that latest LSN was when the request was
+	 * made. It's needed to manage prefetch request, to verify if the response
+	 * to a prefetched request is still valid.
+	 */
+	XLogRecPtr effective_request_lsn;
 } neon_request_lsns;
 
 #if PG_MAJORVERSION_NUM < 16
