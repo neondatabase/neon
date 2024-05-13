@@ -3,7 +3,7 @@ import time
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
-from fixtures.pageserver.types import (
+from fixtures.pageserver.common_types import (
     DeltaLayerName,
     ImageLayerName,
     is_future_layer,

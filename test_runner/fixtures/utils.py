@@ -25,7 +25,7 @@ import zstandard
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
-from fixtures.pageserver.types import (
+from fixtures.pageserver.common_types import (
     parse_delta_layer,
     parse_image_layer,
 )

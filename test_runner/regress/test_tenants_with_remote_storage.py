@@ -19,7 +19,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     last_flush_lsn_upload,
 )
-from fixtures.pageserver.types import parse_layer_file_name
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,

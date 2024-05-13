@@ -8,7 +8,7 @@ import pytest
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
-from fixtures.pageserver.types import parse_layer_file_name
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
     poll_for_remote_storage_iterations,

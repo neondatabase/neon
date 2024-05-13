@@ -2,7 +2,7 @@ import time
 
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
-from fixtures.pageserver.types import parse_layer_file_name
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload_queue_empty,

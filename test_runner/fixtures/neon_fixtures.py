@@ -54,8 +54,8 @@ from fixtures.pageserver.allowed_errors import (
     DEFAULT_PAGESERVER_ALLOWED_ERRORS,
     DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
+from fixtures.pageserver.common_types import IndexPartDump, LayerName, parse_layer_file_name
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.types import IndexPartDump, LayerName, parse_layer_file_name
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,

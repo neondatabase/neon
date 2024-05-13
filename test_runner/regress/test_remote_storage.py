@@ -12,8 +12,8 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
-from fixtures.pageserver.types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
