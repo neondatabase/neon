@@ -24,7 +24,9 @@ use tracing::{debug, info};
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
-use crate::helpers::{accum_key_values, keyspace_total_size, merge_delta_keys, overlaps_with};
+use crate::helpers::{
+    accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with,
+};
 use crate::interface::*;
 use utils::lsn::Lsn;
 
@@ -104,7 +106,13 @@ pub async fn compact_tiered<E: CompactionJobExecutor>(
             ctx,
         )
         .await?;
-        if target_file_size == u64::MAX {
+        if current_level_target_height == u64::MAX {
+            // our target height includes all possible lsns
+            info!(
+                level = current_level_no,
+                depth = depth,
+                "compaction loop reached max current_level_target_height"
+            );
             break;
         }
         current_level_no += 1;
@@ -535,7 +543,10 @@ where
             }
         }
         // Open stream
-        let key_value_stream = std::pin::pin!(merge_delta_keys::<E>(deltas.as_slice(), ctx));
+        let key_value_stream =
+            std::pin::pin!(merge_delta_keys_buffered::<E>(deltas.as_slice(), ctx)
+                .await?
+                .map(Result::<_, anyhow::Error>::Ok));
         let mut new_jobs = Vec::new();
 
         // Slide a window through the keyspace

@@ -1,17 +1,24 @@
+import datetime
 import enum
+import tarfile
+import time
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
+from pathlib import Path
 from queue import Empty, Queue
 from threading import Barrier
-from typing import List
+from typing import IO, List, Set, Tuple, Union
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    PgBin,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import HistoricLayerInfo
 from fixtures.pageserver.utils import wait_timeline_detail_404
+from fixtures.remote_storage import LocalFsStorage
 from fixtures.types import Lsn, TimelineId
 
 
@@ -51,22 +58,29 @@ class Branchpoint(str, enum.Enum):
 SHUTDOWN_ALLOWED_ERRORS = [
     ".*initial size calculation failed: downloading failed, possibly for shutdown",
     ".*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+    ".*logical_size_calculation_task:panic.*: Sequential get failed with Bad state \\(not active\\).*",
+    ".*Task 'initial size calculation' .* panicked.*",
 ]
 
 
 @pytest.mark.parametrize("branchpoint", Branchpoint.all())
 @pytest.mark.parametrize("restart_after", [True, False])
+@pytest.mark.parametrize("write_to_branch_first", [True, False])
 def test_ancestor_detach_branched_from(
-    neon_env_builder: NeonEnvBuilder, branchpoint: Branchpoint, restart_after: bool
+    test_output_dir,
+    pg_distrib_dir,
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+    branchpoint: Branchpoint,
+    restart_after: bool,
+    write_to_branch_first: bool,
 ):
     """
     Creates a branch relative to L0 lsn boundary according to Branchpoint. Later the timeline is detached.
     """
-    # TODO: parametrize; currently unimplemented over at pageserver
-    write_to_branch_first = True
-
     env = neon_env_builder.init_start()
 
+    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
     client = env.pageserver.http_client()
@@ -143,6 +157,20 @@ def test_ancestor_detach_branched_from(
     else:
         branch_layers = set()
 
+    # run fullbackup to make sure there are no off by one errors
+    # take this on the parent
+    fullbackup_before = test_output_dir / "fullbackup-before.tar"
+    cmd = [
+        "psql",
+        "--no-psqlrc",
+        env.pageserver.connstr(),
+        "-c",
+        f"fullbackup {env.initial_tenant} {env.initial_timeline} {branch_at}",
+        "-o",
+        str(fullbackup_before),
+    ]
+    pg_bin.run_capture(cmd, env=psql_env)
+
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
     assert all_reparented == set()
 
@@ -170,12 +198,75 @@ def test_ancestor_detach_branched_from(
     # but if nothing was copied, then there is no nice rule.
     # there could be a hole in LSNs between copied from the "old main" and the first branch layer.
 
+    # take this on the detached, at same lsn
+    fullbackup_after = test_output_dir / "fullbackup-after.tar"
+    cmd = [
+        "psql",
+        "--no-psqlrc",
+        env.pageserver.connstr(),
+        "-c",
+        f"fullbackup {env.initial_tenant} {timeline_id} {branch_at}",
+        "-o",
+        str(fullbackup_after),
+    ]
+    pg_bin.run_capture(cmd, env=psql_env)
+
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
 
+    # because we do the fullbackup from ancestor at the branch_lsn, the zenith.signal is always different
+    # as there is always "PREV_LSN: invalid" for "before"
+    skip_files = {"zenith.signal"}
 
-@pytest.mark.parametrize("restart_after", [True, False])
-def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, restart_after: bool):
+    tar_cmp(fullbackup_before, fullbackup_after, skip_files)
+
+
+def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
+    """
+    This is essentially:
+
+    lines=$(comm -3 \
+        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        | wc -l)
+    [ "$lines" = "0" ]
+
+    But in a more mac friendly fashion.
+    """
+    started_at = time.time()
+
+    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
+        assert reader is not None
+        digest = sha256(usedforsecurity=False)
+        while True:
+            buf = reader.read(64 * 1024)
+            if not buf:
+                break
+            digest.update(buf)
+        return digest.digest()
+
+    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
+        with tarfile.open(p) as f:
+            matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
+            ret = list(
+                map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files)
+            )
+            ret.sort(key=lambda t: t[0])
+            return ret
+
+    left_list, right_list = map(build_hash_list, [left, right])
+
+    try:
+        assert len(left_list) == len(right_list)
+
+        for left_tuple, right_tuple in zip(left_list, right_list):
+            assert left_tuple == right_tuple
+    finally:
+        elapsed = time.time() - started_at
+        log.info(f"tar_cmp completed in {elapsed}s")
+
+
+def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     """
     The case from RFC:
 
@@ -203,9 +294,6 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
 
     We confirm the end result by being able to delete "old main" after deleting "after".
     """
-
-    # TODO: support not yet implemented for these
-    write_to_branch_first = True
 
     env = neon_env_builder.init_start()
 
@@ -244,22 +332,8 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
 
     after = env.neon_cli.create_branch("after", "main", env.initial_tenant, ancestor_start_lsn=None)
 
-    if write_to_branch_first:
-        with env.endpoints.create_start("new main", tenant_id=env.initial_tenant) as ep:
-            assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == 8192
-            with ep.cursor() as cur:
-                cur.execute("UPDATE audit SET starts = starts + 1")
-                assert cur.rowcount == 1
-            wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
-
-        client.timeline_checkpoint(env.initial_tenant, timeline_id)
-
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
     assert all_reparented == {reparented, same_branchpoint}
-
-    if restart_after:
-        env.pageserver.stop()
-        env.pageserver.start()
 
     env.pageserver.quiesce_tenants()
 
@@ -267,18 +341,47 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
     expected_result = [
         ("main", env.initial_timeline, None, 16384, 1),
         ("after", after, env.initial_timeline, 16384, 1),
-        ("new main", timeline_id, None, 8192, 2),
+        ("new main", timeline_id, None, 8192, 1),
         ("same_branchpoint", same_branchpoint, timeline_id, 8192, 1),
         ("reparented", reparented, timeline_id, 0, 1),
     ]
 
-    for _, timeline_id, expected_ancestor, _, _ in expected_result:
-        details = client.timeline_detail(env.initial_tenant, timeline_id)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    for _, queried_timeline, expected_ancestor, _, _ in expected_result:
+        details = client.timeline_detail(env.initial_tenant, queried_timeline)
         ancestor_timeline_id = details["ancestor_timeline_id"]
         if expected_ancestor is None:
             assert ancestor_timeline_id is None
         else:
             assert TimelineId(ancestor_timeline_id) == expected_ancestor
+
+        index_part = env.pageserver_remote_storage.index_content(
+            env.initial_tenant, queried_timeline
+        )
+        lineage = index_part["lineage"]
+        assert lineage is not None
+
+        assert lineage.get("reparenting_history_overflown", "false") == "false"
+
+        if queried_timeline == timeline_id:
+            original_ancestor = lineage["original_ancestor"]
+            assert original_ancestor is not None
+            assert original_ancestor[0] == str(env.initial_timeline)
+            assert original_ancestor[1] == str(branchpoint_x)
+
+            # this does not contain Z in the end, so fromisoformat accepts it
+            # it is to be in line with the deletion timestamp.. well, almost.
+            when = original_ancestor[2][:26]
+            when_ts = datetime.datetime.fromisoformat(when)
+            assert when_ts < datetime.datetime.now()
+            assert len(lineage.get("reparenting_history", [])) == 0
+        elif expected_ancestor == timeline_id:
+            assert len(lineage.get("original_ancestor", [])) == 0
+            assert lineage["reparenting_history"] == [str(env.initial_timeline)]
+        else:
+            assert len(lineage.get("original_ancestor", [])) == 0
+            assert len(lineage.get("reparenting_history", [])) == 0
 
     for name, _, _, rows, starts in expected_result:
         with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
@@ -293,14 +396,10 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder, res
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
 
 
-@pytest.mark.parametrize("restart_after", [True, False])
-def test_detached_receives_flushes_while_being_detached(
-    neon_env_builder: NeonEnvBuilder, restart_after: bool
-):
+def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEnvBuilder):
     """
     Makes sure that the timeline is able to receive writes through-out the detach process.
     """
-    write_to_branch_first = True
 
     env = neon_env_builder.init_start()
 
@@ -329,12 +428,6 @@ def test_detached_receives_flushes_while_being_detached(
     log.info("starting the new main endpoint")
     ep = env.endpoints.create_start("new main", tenant_id=env.initial_tenant)
     assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
-
-    if write_to_branch_first:
-        rows += insert_rows(256, ep)
-        wait_for_last_flush_lsn(env, ep, env.initial_tenant, timeline_id)
-        client.timeline_checkpoint(env.initial_tenant, timeline_id)
-        log.info("completed {write_to_branch_first=}")
 
     def small_txs(ep, queue: Queue[str], barrier):
         extra_rows = 0
@@ -367,11 +460,6 @@ def test_detached_receives_flushes_while_being_detached(
 
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
         assert len(reparented) == 0
-
-        if restart_after:
-            # ep and row production is kept alive on purpose
-            env.pageserver.stop()
-            env.pageserver.start()
 
         env.pageserver.quiesce_tenants()
 

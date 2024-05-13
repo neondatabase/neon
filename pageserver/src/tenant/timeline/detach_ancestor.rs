@@ -22,8 +22,6 @@ pub(crate) enum Error {
     TooManyAncestors,
     #[error("shutting down, please retry later")]
     ShuttingDown,
-    #[error("detached timeline must receive writes before the operation")]
-    DetachedTimelineNeedsWrites,
     #[error("flushing failed")]
     FlushAncestor(#[source] anyhow::Error),
     #[error("layer download failed")]
@@ -92,14 +90,6 @@ pub(super) async fn prepare(
         // non-technical requirement; we could flatten N ancestors just as easily but we chose
         // not to
         return Err(TooManyAncestors);
-    }
-
-    if detached.get_prev_record_lsn() == Lsn::INVALID
-        || detached.disk_consistent_lsn.load() == ancestor_lsn
-    {
-        // this is to avoid a problem that after detaching we would be unable to start up the
-        // compute because of "PREV_LSN: invalid".
-        return Err(DetachedTimelineNeedsWrites);
     }
 
     // before we acquire the gate, we must mark the ancestor as having a detach operation
