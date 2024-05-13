@@ -77,6 +77,21 @@ class SafekeeperHttpClient(requests.Session):
         assert res_json is None
         return res_json
 
+    def set_pause(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        pause: bool,
+    ):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/pause",
+            json={
+                "pause": pause,
+            },
+        )
+        res.raise_for_status()
+        return res.json()
+
     def debug_dump(self, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         params = params or {}
         res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)

@@ -313,6 +313,8 @@ impl SharedState {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TimelineError {
+    #[error("Timeline {0} is paused")]
+    Paused(TenantTimelineId),
     #[error("Timeline {0} was cancelled and cannot be used anymore")]
     Cancelled(TenantTimelineId),
     #[error("Timeline {0} was not found in global map")]
@@ -508,6 +510,27 @@ impl Timeline {
         }
     }
 
+    /// Pause timeline, forbidding writes to it, or resume after it has been paused.
+    pub async fn set_pause(&self, paused: bool) -> Result<()> {
+        {
+            let mut ss = self.write_shared_state(true).await?;
+            if paused && !ss.sk.state.paused {
+                let mut persistent_state = ss.sk.state.start_change();
+                persistent_state.paused = true;
+                ss.sk.state.finish_change(&persistent_state).await?;
+                info!("paused timeline {}", self.ttid);
+            }
+            if !paused && ss.sk.state.paused {
+                let mut persistent_state = ss.sk.state.start_change();
+                persistent_state.paused = false;
+                ss.sk.state.finish_change(&persistent_state).await?;
+                info!("resumed timeline {}", self.ttid);
+            }
+        }
+        self.update_status_notify().await?;
+        Ok(())
+    }
+
     /// Delete timeline from disk completely, by removing timeline directory.
     /// Background timeline activities will stop eventually.
     ///
@@ -569,23 +592,30 @@ impl Timeline {
     /// Take a writing mutual exclusive lock on timeline shared_state.
     ///
     /// Unless allowed_cancelled is true errors out if timeline is cancelled (deleted).
+    /// Unless allow_paused is true errors out if timeline is paused: so far pause
+    /// immediately forbids only compute writes, but we might want to pause other
+    /// activites in the future.
     async fn write_shared_state_internal(
         &self,
         allow_cancelled: bool,
+        allow_paused: bool,
     ) -> Result<MutexGuard<SharedState>> {
         let state = self.mutex.lock().await;
         if !allow_cancelled && self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
+        if !allow_paused && state.sk.state.paused {
+            bail!(TimelineError::Paused(self.ttid));
+        }
         Ok(state)
     }
 
-    pub async fn write_shared_state(&self) -> Result<MutexGuard<SharedState>> {
-        self.write_shared_state_internal(false).await
+    pub async fn write_shared_state(&self, allow_paused: bool) -> Result<MutexGuard<SharedState>> {
+        self.write_shared_state_internal(false, allow_paused).await
     }
 
     pub async fn write_shared_state_allow_cancelled(&self) -> MutexGuard<SharedState> {
-        self.write_shared_state_internal(true)
+        self.write_shared_state_internal(true, true)
             .await
             .expect("timeline is cancelled and allow_cancelled is false")
     }
@@ -599,7 +629,7 @@ impl Timeline {
     /// Update timeline status and kick wal backup launcher to stop/start offloading if needed.
     pub async fn update_status_notify(&self) -> Result<()> {
         let is_wal_backup_action_pending: bool = {
-            let mut shared_state = self.write_shared_state().await?;
+            let mut shared_state = self.write_shared_state_allow_cancelled().await;
             self.update_status(&mut shared_state).await
         };
         if is_wal_backup_action_pending {
@@ -615,7 +645,7 @@ impl Timeline {
     /// remote_consistent_lsn update through replication feedback, and we want
     /// to stop pushing to the broker if pageserver is fully caughtup.
     pub async fn should_walsender_stop(&self, reported_remote_consistent_lsn: Lsn) -> bool {
-        let shared_state = match self.write_shared_state().await {
+        let shared_state = match self.write_shared_state(false).await {
             Ok(state) => state,
             Err(_) => return true,
         };
@@ -626,9 +656,9 @@ impl Timeline {
         false
     }
 
-    /// Ensure thht current term is t, erroring otherwise, and lock the state.
+    /// Ensure that current term is t, erroring otherwise, and lock the state.
     pub async fn acquire_term(&self, t: Term) -> Result<MutexGuard<SharedState>> {
-        let ss = self.write_shared_state().await?;
+        let ss = self.write_shared_state(false).await?;
         if ss.sk.state.acceptor_state.term != t {
             bail!(
                 "failed to acquire term {}, current term {}",
@@ -642,10 +672,12 @@ impl Timeline {
     /// Returns whether s3 offloading is required and sets current status as
     /// matching it.
     pub async fn wal_backup_attend(&self) -> bool {
-        match self.write_shared_state().await {
-            Ok(mut state) => state.wal_backup_attend(self.walreceivers.get_num()),
-            Err(_) => false,
+        let mut ss = self.write_shared_state_allow_cancelled().await;
+        if self.is_cancelled() || ss.sk.state.paused {
+            ss.wal_backup_active = false;
+            return false;
         }
+        ss.wal_backup_attend(self.walreceivers.get_num())
     }
 
     /// Returns commit_lsn watch channel.
@@ -667,7 +699,7 @@ impl Timeline {
         let commit_lsn: Lsn;
         let term_flush_lsn: TermLsn;
         {
-            let mut shared_state = self.write_shared_state().await?;
+            let mut shared_state = self.write_shared_state(false).await?;
             rmsg = shared_state.sk.process_msg(msg).await?;
 
             // if this is AppendResponse, fill in proper hot standby feedback.
@@ -693,7 +725,7 @@ impl Timeline {
 
     /// Returns true only if the timeline is loaded and active.
     pub async fn is_active(&self) -> bool {
-        match self.write_shared_state().await {
+        match self.write_shared_state(false).await {
             Ok(state) => state.active,
             Err(_) => false,
         }
@@ -717,7 +749,7 @@ impl Timeline {
 
     /// Sets backup_lsn to the given value.
     pub async fn set_wal_backup_lsn(&self, backup_lsn: Lsn) -> Result<()> {
-        let mut state = self.write_shared_state().await?;
+        let mut state = self.write_shared_state(true).await?;
         state.sk.state.inmem.backup_lsn = max(state.sk.state.inmem.backup_lsn, backup_lsn);
         // we should check whether to shut down offloader, but this will be done
         // soon by peer communication anyway.
@@ -872,7 +904,7 @@ impl Timeline {
 
         let horizon_segno: XLogSegNo;
         let remover = {
-            let shared_state = self.write_shared_state().await?;
+            let shared_state = self.write_shared_state(true).await?;
             horizon_segno =
                 shared_state.get_horizon_segno(wal_backup_enabled, replication_horizon_lsn);
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
@@ -897,7 +929,7 @@ impl Timeline {
     /// to date so that storage nodes restart doesn't cause many pageserver ->
     /// safekeeper reconnections.
     pub async fn maybe_persist_control_file(&self) -> Result<()> {
-        self.write_shared_state()
+        self.write_shared_state(true)
             .await?
             .sk
             .maybe_persist_inmem_control_file()
