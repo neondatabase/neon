@@ -356,7 +356,7 @@ compact_prefetch_buffers(void)
 		source_slot->response = NULL;
 		source_slot->my_ring_index = 0;
 		source_slot->request_lsns = (neon_request_lsns) {
-			InvalidXLogRecPtr, InvalidXLogRecPtr
+			InvalidXLogRecPtr, InvalidXLogRecPtr, InvalidXLogRecPtr
 		};
 
 		/* update bookkeeping */
@@ -1529,6 +1529,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
 		/* Request the page at the last replayed LSN. */
 		result.request_lsn = GetXLogReplayRecPtr(NULL);
 		result.not_modified_since = last_written_lsn;
+		result.effective_request_lsn = result.request_lsn;
 		Assert(last_written_lsn <= result.request_lsn);
 
 		neon_log(DEBUG1, "neon_get_request_lsns request lsn %X/%X, not_modified_since %X/%X",
@@ -1570,15 +1571,30 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
 		}
 
 		/*
-		 * Request the latest version of the page. The most up-to-date request
-		 * LSN we could use would be the current insert LSN, but to avoid the
-		 * overhead of looking it up, use 'flushlsn' instead. This relies on
-		 * the assumption that if the page was modified since the last WAL
-		 * flush, it should still be in the buffer cache, and we wouldn't be
-		 * requesting it.
+		 * Request the very latest version of the page. In principle we
+		 * want to read the page at the current insert LSN, and we could
+		 * use that value in the request. However, there's a corner case
+		 * with pageserver's garbage collection. If the GC horizon is
+		 * set to a very small value, it's possible that by the time
+		 * that the pageserver processes our request, the GC horizon has
+		 * already moved past the LSN we calculate here. Standby servers
+		 * always have that problem as the can always lag behind the
+		 * primary, but for the primary we can avoid it by always
+		 * requesting the latest page, by setting request LSN to
+		 * UINT64_MAX.
+		 *
+		 * Remember the current LSN, however, so that we can later
+		 * correctly determine if the response to the request is still
+		 * valid. The most up-to-date LSN we could use for that purpose
+		 * would be the current insert LSN, but to avoid the overhead of
+		 * looking it up, use 'flushlsn' instead. This relies on the
+		 * assumption that if the page was modified since the last WAL
+		 * flush, it should still be in the buffer cache, and we
+		 * wouldn't be requesting it.
 		 */
-		result.request_lsn = flushlsn;
+		result.request_lsn = UINT64_MAX;
 		result.not_modified_since = last_written_lsn;
+		result.effective_request_lsn = flushlsn;
 	}
 
 	return result;
@@ -1596,7 +1612,11 @@ neon_prefetch_response_usable(neon_request_lsns request_lsns,
 {
 	/* sanity check the LSN's on the old and the new request */
 	Assert(request_lsns.request_lsn >= request_lsns.not_modified_since);
+	Assert(request_lsns.effective_request_lsn >= request_lsns.not_modified_since);
+	Assert(request_lsns.effective_request_lsn <= request_lsns.request_lsn);
 	Assert(slot->request_lsns.request_lsn >= slot->request_lsns.not_modified_since);
+	Assert(slot->request_lsns.effective_request_lsn >= slot->request_lsns.not_modified_since);
+	Assert(slot->request_lsns.effective_request_lsn <= slot->request_lsns.request_lsn);
 	Assert(slot->status != PRFS_UNUSED);
 
 	/*
@@ -1614,27 +1634,40 @@ neon_prefetch_response_usable(neon_request_lsns request_lsns,
 	 * calculate LSNs "out of order" with each other, but the prefetch queue
 	 * is backend-private at the moment.)
 	 */
-	if (request_lsns.request_lsn < slot->request_lsns.request_lsn ||
+	if (request_lsns.effective_request_lsn < slot->request_lsns.effective_request_lsn ||
 		request_lsns.not_modified_since < slot->request_lsns.not_modified_since)
 	{
 		ereport(LOG,
 				(errcode(ERRCODE_IO_ERROR),
 				 errmsg(NEON_TAG "request with unexpected LSN after prefetch"),
 				 errdetail("Request %X/%X not_modified_since %X/%X, prefetch %X/%X not_modified_since %X/%X)",
-						   LSN_FORMAT_ARGS(request_lsns.request_lsn), LSN_FORMAT_ARGS(request_lsns.not_modified_since),
-						   LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since))));
+						   LSN_FORMAT_ARGS(request_lsns.effective_request_lsn),
+						   LSN_FORMAT_ARGS(request_lsns.not_modified_since),
+						   LSN_FORMAT_ARGS(slot->request_lsns.effective_request_lsn),
+						   LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since))));
 		return false;
 	}
 
 	/*---
-	 * Each request to the pageserver carries two LSN values:
-	 * `not_modified_since` and `request_lsn`. The (not_modified_since,
-	 * request_lsn] range of each request is effectively a claim that the page
-	 * has not been modified between those LSNs.  If the range of the old
-	 * request in the queue overlaps with the new request, we know that the
-	 * page hasn't been modified in the union of the ranges. We can use the
-	 * response to old request to satisfy the new request in that case. For
-	 * example:
+	 * Each request to the pageserver has three LSN values associated with it:
+	 * `not_modified_since`, `request_lsn`, and 'effective_request_lsn'.
+	 * `not_modified_since` and `request_lsn` are sent to the pageserver, but
+	 * in the primary node, we always use UINT64_MAX as the `request_lsn`, so
+	 * we remember `effective_request_lsn` separately. In a primary,
+	 * `effective_request_lsn` is the last flush WAL position when the request
+	 * was sent to the pageserver. That's logically the LSN that we are
+	 * requesting the page at, but we send UINT64_MAX to the pageserver so
+	 * that if the GC horizon advances past that position, we still get a
+	 * valid response instead of an error.
+	 *
+	 * To determine whether a response to a GetPage request issued earlier is
+	 * still valid to satisfy a new page read, we look at the
+	 * (not_modified_since, effective_request_lsn] range of the request. It is
+	 * effectively a claim that the page has not been modified between those
+	 * LSNs.  If the range of the old request in the queue overlaps with the
+	 * new request, we know that the page hasn't been modified in the union of
+	 * the ranges. We can use the response to old request to satisfy the new
+	 * request in that case. For example:
 	 *
 	 *              100      500
 	 * Old request:  +--------+
@@ -1663,9 +1696,9 @@ neon_prefetch_response_usable(neon_request_lsns request_lsns,
 	 */
 
 	/* this follows from the checks above */
-	Assert(request_lsns.request_lsn >= slot->request_lsns.not_modified_since);
+	Assert(request_lsns.effective_request_lsn >= slot->request_lsns.not_modified_since);
 
-	return request_lsns.not_modified_since <= slot->request_lsns.request_lsn;
+	return request_lsns.not_modified_since <= slot->request_lsns.effective_request_lsn;
 }
 
 /*
@@ -1757,7 +1790,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 					 errmsg(NEON_TAG "could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forkNum,
-							LSN_FORMAT_ARGS(request_lsns.request_lsn)),
+							LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
@@ -2296,7 +2329,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 							slot->shard_no, blkno,
 							RelFileInfoFmt(rinfo),
 							forkNum,
-							LSN_FORMAT_ARGS(request_lsns.request_lsn)),
+							LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
@@ -2566,7 +2599,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 					 errmsg(NEON_TAG "could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum,
-							LSN_FORMAT_ARGS(request_lsns.request_lsn)),
+							LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
@@ -2579,7 +2612,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	neon_log(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
 			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 			 forknum,
-			 LSN_FORMAT_ARGS(request_lsns.request_lsn),
+			 LSN_FORMAT_ARGS(request_lsns.effective_request_lsn),
 			 n_blocks);
 
 	pfree(resp);
@@ -2619,7 +2652,7 @@ neon_dbsize(Oid dbNode)
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
 					 errmsg(NEON_TAG "could not read db size of db %u from page server at lsn %X/%08X",
-							dbNode, LSN_FORMAT_ARGS(request_lsns.request_lsn)),
+							dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
@@ -2629,7 +2662,7 @@ neon_dbsize(Oid dbNode)
 	}
 
 	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
-			 dbNode, LSN_FORMAT_ARGS(request_lsns.request_lsn), db_size);
+			 dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn), db_size);
 
 	pfree(resp);
 	return db_size;
@@ -2874,6 +2907,10 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	XLogRecPtr request_lsn,
 		not_modified_since;
 
+	/*
+	 * Compute a request LSN to use, similar to neon_get_request_lsns() but the
+	 * logic is a bit simpler.
+	 */
 	if (RecoveryInProgress())
 	{
 		request_lsn = GetXLogReplayRecPtr(NULL);
@@ -2885,10 +2922,10 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 			 */
 			request_lsn = GetRedoStartLsn();
 		}
+		request_lsn = nm_adjust_lsn(request_lsn);
 	}
 	else
-		request_lsn = GetXLogInsertRecPtr();
-	request_lsn = nm_adjust_lsn(request_lsn);
+		request_lsn = UINT64_MAX;
 
 	/*
 	 * GetRedoStartLsn() returns LSN of basebackup. We know that the SLRU
