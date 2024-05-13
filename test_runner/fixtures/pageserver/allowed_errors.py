@@ -132,7 +132,7 @@ if __name__ == "__main__":
         "--input",
         type=argparse.FileType("r"),
         help="Pageserver logs file. Use '-' for stdin.",
-        required=True
+        required=True,
     )
 
     args = parser.parse_args()
