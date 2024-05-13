@@ -10,7 +10,7 @@ from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import s3_storage
 
 
-@pytest.mark.parametrize("duration", [30])
+@pytest.mark.parametrize("duration", [120])
 @pytest.mark.parametrize("io_engine", ["tokio-epoll-uring", "std-fs"])
 @pytest.mark.parametrize("concurrency_per_target", [1, 10, 100])
 @pytest.mark.timeout(1000)
