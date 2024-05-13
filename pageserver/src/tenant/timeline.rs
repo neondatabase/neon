@@ -4355,6 +4355,11 @@ impl Timeline {
     /// this Timeline is shut down.  Calling this function will cause the initial
     /// logical size calculation to skip waiting for the background jobs barrier.
     pub(crate) async fn await_initial_logical_size(self: Arc<Self>) {
+        if !self.shard_identity.is_shard_zero() {
+            // We don't populate logical size on shard >0: skip waiting for it.
+            return;
+        }
+
         if let Some(await_bg_cancel) = self
             .current_logical_size
             .cancel_wait_for_background_loop_concurrency_limit_semaphore
