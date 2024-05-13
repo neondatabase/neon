@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pytest
 import requests
 
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.types import Lsn, TenantId, TimelineId
 
 
 # Walreceiver as returned by sk's timeline status endpoint.

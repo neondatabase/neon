@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 from typing import Any, DefaultDict, Dict, Tuple
 
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -21,7 +22,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
 )
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn
 from fixtures.utils import query_scalar, wait_until
 
 

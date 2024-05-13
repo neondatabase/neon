@@ -5,8 +5,8 @@ import pytest
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
+from fixtures.common_types import TenantId
 from fixtures.log_helper import log
-from fixtures.types import TenantId
 
 
 class ComputeReconfigure:

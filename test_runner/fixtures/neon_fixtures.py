@@ -47,6 +47,7 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pageserver.allowed_errors import (
@@ -72,7 +73,6 @@ from fixtures.remote_storage import (
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     allure_add_grafana_links,

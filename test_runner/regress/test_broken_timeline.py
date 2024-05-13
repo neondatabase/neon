@@ -3,6 +3,7 @@ import os
 from typing import List, Tuple
 
 import pytest
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -11,7 +12,6 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.types import TenantId, TimelineId
 
 
 # Test restarting page server, while safekeeper and compute node keep

@@ -32,7 +32,7 @@ from fixtures.pageserver.types import (
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import PgBin
-from fixtures.types import TimelineId
+from fixtures.common_types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 

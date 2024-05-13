@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Tuple
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -16,7 +17,6 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"

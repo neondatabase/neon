@@ -2,10 +2,10 @@ from contextlib import closing
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport
+from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare, PgCompare
 from fixtures.pageserver.utils import wait_tenant_status_404
 from fixtures.pg_version import PgVersion
-from fixtures.types import Lsn
 
 
 #

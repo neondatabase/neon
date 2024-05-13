@@ -6,6 +6,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -25,7 +26,6 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     available_remote_storages,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     assert_eq,
     assert_ge,

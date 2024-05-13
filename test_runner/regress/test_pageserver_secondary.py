@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, Optional
 
 import pytest
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
 from fixtures.pageserver.types import parse_layer_file_name
@@ -15,7 +16,6 @@ from fixtures.pageserver.utils import (
     wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage
-from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 

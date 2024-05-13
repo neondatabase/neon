@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Union
 
 import pytest
+from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -25,7 +26,6 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
-from fixtures.types import TenantId, TenantShardId, TimelineId
 from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
 from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (

@@ -18,6 +18,7 @@ import psycopg2.errors
 import psycopg2.extras
 import pytest
 from fixtures.broker import NeonBroker
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
@@ -47,7 +48,6 @@ from fixtures.remote_storage import (
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
 
 

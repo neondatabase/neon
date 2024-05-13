@@ -1,6 +1,6 @@
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.safekeeper.http import SafekeeperHttpClient
-from fixtures.types import TenantId, TimelineId
 
 
 def are_walreceivers_absent(
