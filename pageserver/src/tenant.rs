@@ -2233,18 +2233,10 @@ impl Tenant {
         for timeline in timelines {
             result.resident_size += timeline.metrics.resident_physical_size_gauge.get();
 
-            // FIXME: it's too expensive to take a mutex in this loop
             result.physical_size += timeline
                 .remote_client
                 .as_ref()
-                .and_then(|c| {
-                    c.metrics
-                        .remote_physical_size_gauge
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .map(|g| g.get())
-                })
+                .map(|c| c.metrics.remote_physical_size_gauge.get())
                 .unwrap_or(0);
             result.max_logical_size = std::cmp::max(
                 result.max_logical_size,

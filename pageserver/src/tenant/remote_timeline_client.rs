@@ -461,11 +461,11 @@ impl RemoteTimelineClient {
         } else {
             0
         };
-        self.metrics.remote_physical_size_set(size);
+        self.metrics.remote_physical_size_gauge.set(size);
     }
 
     pub fn get_remote_physical_size(&self) -> u64 {
-        self.metrics.remote_physical_size_get()
+        self.metrics.remote_physical_size_gauge.get()
     }
 
     //
