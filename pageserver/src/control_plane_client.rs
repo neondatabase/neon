@@ -12,12 +12,10 @@ use pageserver_api::{
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use utils::{backoff, generation::Generation, id::NodeId};
+use utils::{backoff, failpoint_support, generation::Generation, id::NodeId};
 
-use crate::{
-    config::{NodeMetadata, PageServerConf},
-    virtual_file::on_fatal_io_error,
-};
+use crate::{config::PageServerConf, virtual_file::on_fatal_io_error};
+use pageserver_api::config::NodeMetadata;
 
 /// The Pageserver's client for using the control plane API: this is a small subset
 /// of the overall control plane API, for dealing with generations (see docs/rfcs/025-generation-numbers.md)
@@ -65,7 +63,7 @@ impl ControlPlaneClient {
         let mut client = reqwest::ClientBuilder::new();
 
         if let Some(jwt) = &conf.control_plane_api_token {
-            let mut headers = hyper::HeaderMap::new();
+            let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(
                 "Authorization",
                 format!("Bearer {}", jwt.get_contents()).parse().unwrap(),
@@ -210,7 +208,10 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
                 .collect(),
         };
 
-        fail::fail_point!("control-plane-client-validate");
+        failpoint_support::sleep_millis_async!("control-plane-client-validate-sleep", &self.cancel);
+        if self.cancel.is_cancelled() {
+            return Err(RetryForeverError::ShuttingDown);
+        }
 
         let response: ValidateResponse = self.retry_http_forever(&re_attach_path, request).await?;
 

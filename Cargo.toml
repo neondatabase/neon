@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "compute_tools",
     "control_plane",
-    "control_plane/attachment_service",
+    "control_plane/storcon_cli",
     "pageserver",
     "pageserver/compaction",
     "pageserver/ctl",
@@ -12,6 +12,7 @@ members = [
     "proxy",
     "safekeeper",
     "storage_broker",
+    "storage_controller",
     "s3_scrubber",
     "workspace_hack",
     "trace",
@@ -43,19 +44,22 @@ license = "Apache-2.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
-azure_core = "0.18"
-azure_identity = "0.18"
-azure_storage = "0.18"
-azure_storage_blobs = "0.18"
+atomic-take = "1.1.0"
+azure_core = "0.19"
+azure_identity = "0.19"
+azure_storage = "0.19"
+azure_storage_blobs = "0.19"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
-aws-config = { version = "1.1.4", default-features = false, features=["rustls"] }
-aws-sdk-s3 = "1.14"
-aws-sdk-secretsmanager = { version = "1.14.0" }
-aws-smithy-async = { version = "1.1.4", default-features = false, features=["rt-tokio"] }
-aws-smithy-types = "1.1.4"
-aws-credential-types = "1.1.4"
+aws-config = { version = "1.3", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "1.26"
+aws-sdk-iam = "1.15.0"
+aws-smithy-async = { version = "1.2.1", default-features = false, features=["rt-tokio"] }
+aws-smithy-types = "1.1.9"
+aws-credential-types = "1.2.0"
+aws-sigv4 = { version = "1.2.1", features = ["sign-http"] }
+aws-types = "1.2.0"
 axum = { version = "0.6.20", features = ["ws"] }
 base64 = "0.13.0"
 bincode = "1.3"
@@ -76,6 +80,7 @@ either = "1.8"
 enum-map = "2.4.2"
 enumset = "1.0.12"
 fail = "0.5.0"
+fallible-iterator = "0.2"
 fs2 = "0.4.3"
 futures = "0.3"
 futures-core = "0.3"
@@ -88,11 +93,13 @@ hex = "0.4"
 hex-literal = "0.4"
 hmac = "0.12.1"
 hostname = "0.3.1"
+http = {version = "1.1.0", features = ["std"]}
 http-types = { version = "2", default-features = false }
 humantime = "2.1"
 humantime-serde = "1.1.1"
 hyper = "0.14"
-hyper-tungstenite = "0.11"
+hyper-tungstenite = "0.13.0"
+indexmap = "2"
 inotify = "0.10.2"
 ipnet = "2.9.0"
 itertools = "0.10"
@@ -101,7 +108,8 @@ lasso = "0.7"
 leaky-bucket = "1.0.1"
 libc = "0.2"
 md5 = "0.7.0"
-measured = { version = "0.0.13", features=["default", "lasso"] }
+measured = { version = "0.0.21", features=["lasso"] }
+measured-process = { version = "0.0.21" }
 memoffset = "0.8"
 native-tls = "0.2"
 nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
@@ -121,12 +129,12 @@ procfs = "0.14"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
-redis = { version = "0.24.0", features = ["tokio-rustls-comp", "keep-alive"] }
+redis = { version = "0.25.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.4.7", features = ["opentelemetry_0_20"] }
-reqwest-middleware = "0.2.0"
-reqwest-retry = "0.2.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_20"] }
+reqwest-middleware = "0.3.0"
+reqwest-retry = "0.5"
 routerify = "3"
 rpds = "0.13"
 rustc-hash = "1.1.0"
@@ -136,7 +144,7 @@ rustls-split = "0.3"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
 sd-notify = "0.4.1"
-sentry = { version = "0.31", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
+sentry = { version = "0.32", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
@@ -150,11 +158,12 @@ socket2 = "0.5"
 strum = "0.24"
 strum_macros = "0.24"
 "subtle"  = "2.5.0"
-svg_fmt = "0.4.1"
+# https://github.com/nical/rust_debug/pull/4
+svg_fmt = { git = "https://github.com/neondatabase/fork--nical--rust_debug", branch = "neon" }
 sync_wrapper = "0.1.2"
 tar = "0.4"
 task-local-extensions = "0.1.4"
-test-context = "0.1"
+test-context = "0.3"
 thiserror = "1.0"
 tikv-jemallocator = "0.5"
 tikv-jemalloc-ctl = "0.5"
@@ -169,10 +178,11 @@ tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.7"
 toml_edit = "0.19"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
+tower-service = "0.3.2"
 tracing = "0.1"
 tracing-error = "0.2.0"
-tracing-opentelemetry = "0.20.0"
-tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
+tracing-opentelemetry = "0.21.0"
+tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json", "ansi"] }
 twox-hash = { version = "1.6.3", default-features = false }
 url = "2.2"
 urlencoding = "2.1"

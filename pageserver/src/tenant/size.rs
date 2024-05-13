@@ -189,7 +189,9 @@ pub(super) async fn gather_inputs(
         // than a space bound (horizon cutoff).  This means that if someone drops a database and waits for their
         // PITR interval, they will see synthetic size decrease, even if we are still storing data inside
         // horizon_cutoff.
-        let mut next_gc_cutoff = gc_info.pitr_cutoff;
+        let pitr_cutoff = gc_info.cutoffs.pitr;
+        let horizon_cutoff = gc_info.cutoffs.horizon;
+        let mut next_gc_cutoff = pitr_cutoff;
 
         // If the caller provided a shorter retention period, use that instead of the GC cutoff.
         let retention_param_cutoff = if let Some(max_retention_period) = max_retention_period {
@@ -215,6 +217,8 @@ pub(super) async fn gather_inputs(
             // this assumes there are no other retain_lsns than the branchpoints
             .map(|lsn| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
+
+        drop(gc_info);
 
         // Add branch points we collected earlier, just in case there were any that were
         // not present in retain_lsns. We will remove any duplicates below later.
@@ -294,8 +298,8 @@ pub(super) async fn gather_inputs(
             last_record: last_record_lsn,
             // this is not used above, because it might not have updated recently enough
             latest_gc_cutoff: *timeline.get_latest_gc_cutoff_lsn(),
-            horizon_cutoff: gc_info.horizon_cutoff,
-            pitr_cutoff: gc_info.pitr_cutoff,
+            horizon_cutoff,
+            pitr_cutoff,
             next_gc_cutoff,
             retention_param_cutoff,
         });

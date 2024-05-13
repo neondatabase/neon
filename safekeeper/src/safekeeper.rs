@@ -725,6 +725,18 @@ where
             self.state.inmem.commit_lsn
         );
 
+        // Before first WAL write initialize its segment. It makes first segment
+        // pg_waldump'able because stream from compute doesn't include its
+        // segment and page headers.
+        //
+        // If we fail before first WAL write flush this action would be
+        // repeated, that's ok because it is idempotent.
+        if self.wal_store.flush_lsn() == Lsn::INVALID {
+            self.wal_store
+                .initialize_first_segment(msg.start_streaming_at)
+                .await?;
+        }
+
         // TODO: cross check divergence point, check if msg.start_streaming_at corresponds to
         // intersection of our history and history from msg
 
@@ -1007,6 +1019,10 @@ mod tests {
             self.lsn
         }
 
+        async fn initialize_first_segment(&mut self, _init_lsn: Lsn) -> Result<()> {
+            Ok(())
+        }
+
         async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
             self.lsn = startpos + buf.len() as u64;
             Ok(())
@@ -1221,6 +1237,7 @@ mod tests {
                     commit_lsn: Lsn(1234567600),
                 },
             )]),
+            partial_backup: crate::wal_backup_partial::State::default(),
         };
 
         let ser = state.ser().unwrap();
@@ -1266,6 +1283,8 @@ mod tests {
             0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x70, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
             0xb0, 0x01, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
+            // partial_backup
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
 
         assert_eq!(Hex(&ser), Hex(&expected));

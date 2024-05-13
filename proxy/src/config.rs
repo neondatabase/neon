@@ -1,6 +1,13 @@
-use crate::{auth, rate_limiter::RateBucketInfo, serverless::GlobalConnPoolOptions};
+use crate::{
+    auth::{self, backend::AuthRateLimiter},
+    console::locks::ApiLocks,
+    rate_limiter::RateBucketInfo,
+    serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
+    Host,
+};
 use anyhow::{bail, ensure, Context, Ok};
 use itertools::Itertools;
+use remote_storage::RemoteStorageConfig;
 use rustls::{
     crypto::ring::sign,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -24,16 +31,20 @@ pub struct ProxyConfig {
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
     pub disable_ip_check_for_http: bool,
-    pub endpoint_rps_limit: Vec<RateBucketInfo>,
     pub redis_rps_limit: Vec<RateBucketInfo>,
     pub region: String,
     pub handshake_timeout: Duration,
+    pub aws_region: String,
+    pub wake_compute_retry_config: RetryConfig,
+    pub connect_compute_locks: ApiLocks<Host>,
+    pub connect_to_compute_retry_config: RetryConfig,
 }
 
 #[derive(Debug)]
 pub struct MetricCollectionConfig {
     pub endpoint: reqwest::Url,
     pub interval: Duration,
+    pub backup_metric_collection_config: MetricBackupCollectionConfig,
 }
 
 pub struct TlsConfig {
@@ -45,10 +56,15 @@ pub struct TlsConfig {
 pub struct HttpConfig {
     pub request_timeout: tokio::time::Duration,
     pub pool_options: GlobalConnPoolOptions,
+    pub cancel_set: CancelSet,
+    pub client_conn_threshold: u64,
 }
 
 pub struct AuthenticationConfig {
     pub scram_protocol_timeout: tokio::time::Duration,
+    pub rate_limiter_enabled: bool,
+    pub rate_limiter: AuthRateLimiter,
+    pub rate_limit_ip_subnet: u8,
 }
 
 impl TlsConfig {
@@ -304,6 +320,95 @@ impl CertResolver {
     }
 }
 
+#[derive(Debug)]
+pub struct EndpointCacheConfig {
+    /// Batch size to receive all endpoints on the startup.
+    pub initial_batch_size: usize,
+    /// Batch size to receive endpoints.
+    pub default_batch_size: usize,
+    /// Timeouts for the stream read operation.
+    pub xread_timeout: Duration,
+    /// Stream name to read from.
+    pub stream_name: String,
+    /// Limiter info (to distinguish when to enable cache).
+    pub limiter_info: Vec<RateBucketInfo>,
+    /// Disable cache.
+    /// If true, cache is ignored, but reports all statistics.
+    pub disable_cache: bool,
+    /// Retry interval for the stream read operation.
+    pub retry_interval: Duration,
+}
+
+impl EndpointCacheConfig {
+    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    /// Notice that by default the limiter is empty, which means that cache is disabled.
+    pub const CACHE_DEFAULT_OPTIONS: &'static str =
+        "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
+
+    /// Parse cache options passed via cmdline.
+    /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
+    fn parse(options: &str) -> anyhow::Result<Self> {
+        let mut initial_batch_size = None;
+        let mut default_batch_size = None;
+        let mut xread_timeout = None;
+        let mut stream_name = None;
+        let mut limiter_info = vec![];
+        let mut disable_cache = false;
+        let mut retry_interval = None;
+
+        for option in options.split(',') {
+            let (key, value) = option
+                .split_once('=')
+                .with_context(|| format!("bad key-value pair: {option}"))?;
+
+            match key {
+                "initial_batch_size" => initial_batch_size = Some(value.parse()?),
+                "default_batch_size" => default_batch_size = Some(value.parse()?),
+                "xread_timeout" => xread_timeout = Some(humantime::parse_duration(value)?),
+                "stream_name" => stream_name = Some(value.to_string()),
+                "limiter_info" => limiter_info.push(RateBucketInfo::from_str(value)?),
+                "disable_cache" => disable_cache = value.parse()?,
+                "retry_interval" => retry_interval = Some(humantime::parse_duration(value)?),
+                unknown => bail!("unknown key: {unknown}"),
+            }
+        }
+        RateBucketInfo::validate(&mut limiter_info)?;
+
+        Ok(Self {
+            initial_batch_size: initial_batch_size.context("missing `initial_batch_size`")?,
+            default_batch_size: default_batch_size.context("missing `default_batch_size`")?,
+            xread_timeout: xread_timeout.context("missing `xread_timeout`")?,
+            stream_name: stream_name.context("missing `stream_name`")?,
+            disable_cache,
+            limiter_info,
+            retry_interval: retry_interval.context("missing `retry_interval`")?,
+        })
+    }
+}
+
+impl FromStr for EndpointCacheConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(options: &str) -> Result<Self, Self::Err> {
+        let error = || format!("failed to parse endpoint cache options '{options}'");
+        Self::parse(options).with_context(error)
+    }
+}
+#[derive(Debug)]
+pub struct MetricBackupCollectionConfig {
+    pub interval: Duration,
+    pub remote_storage_config: OptRemoteStorageConfig,
+    pub chunk_size: usize,
+}
+
+/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
+/// runtime type errors from the value parser we use.
+pub type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
+
+pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
+    RemoteStorageConfig::from_toml(&s.parse()?)
+}
+
 /// Helper for cmdline cache options parsing.
 #[derive(Debug)]
 pub struct CacheOptions {
@@ -419,8 +524,61 @@ impl FromStr for ProjectInfoCacheOptions {
     }
 }
 
+/// This is a config for connect to compute and wake compute.
+#[derive(Clone, Copy, Debug)]
+pub struct RetryConfig {
+    /// Number of times we should retry.
+    pub max_retries: u32,
+    /// Retry duration is base_delay * backoff_factor ^ n, where n starts at 0
+    pub base_delay: tokio::time::Duration,
+    /// Exponential base for retry wait duration
+    pub backoff_factor: f64,
+}
+
+impl RetryConfig {
+    /// Default options for RetryConfig.
+
+    /// Total delay for 5 retries with 200ms base delay and 2 backoff factor is about 6s.
+    pub const CONNECT_TO_COMPUTE_DEFAULT_VALUES: &'static str =
+        "num_retries=5,base_retry_wait_duration=200ms,retry_wait_exponent_base=2";
+    /// Total delay for 8 retries with 100ms base delay and 1.6 backoff factor is about 7s.
+    /// Cplane has timeout of 60s on each request. 8m7s in total.
+    pub const WAKE_COMPUTE_DEFAULT_VALUES: &'static str =
+        "num_retries=8,base_retry_wait_duration=100ms,retry_wait_exponent_base=1.6";
+
+    /// Parse retry options passed via cmdline.
+    /// Example: [`Self::CONNECT_TO_COMPUTE_DEFAULT_VALUES`].
+    pub fn parse(options: &str) -> anyhow::Result<Self> {
+        let mut num_retries = None;
+        let mut base_retry_wait_duration = None;
+        let mut retry_wait_exponent_base = None;
+
+        for option in options.split(',') {
+            let (key, value) = option
+                .split_once('=')
+                .with_context(|| format!("bad key-value pair: {option}"))?;
+
+            match key {
+                "num_retries" => num_retries = Some(value.parse()?),
+                "base_retry_wait_duration" => {
+                    base_retry_wait_duration = Some(humantime::parse_duration(value)?)
+                }
+                "retry_wait_exponent_base" => retry_wait_exponent_base = Some(value.parse()?),
+                unknown => bail!("unknown key: {unknown}"),
+            }
+        }
+
+        Ok(Self {
+            max_retries: num_retries.context("missing `num_retries`")?,
+            base_delay: base_retry_wait_duration.context("missing `base_retry_wait_duration`")?,
+            backoff_factor: retry_wait_exponent_base
+                .context("missing `retry_wait_exponent_base`")?,
+        })
+    }
+}
+
 /// Helper for cmdline cache options parsing.
-pub struct WakeComputeLockOptions {
+pub struct ConcurrencyLockOptions {
     /// The number of shards the lock map should have
     pub shards: usize,
     /// The number of allowed concurrent requests for each endpoitn
@@ -431,9 +589,12 @@ pub struct WakeComputeLockOptions {
     pub timeout: Duration,
 }
 
-impl WakeComputeLockOptions {
+impl ConcurrencyLockOptions {
     /// Default options for [`crate::console::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
+    /// Default options for [`crate::console::provider::ApiLocks`].
+    pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
+        "shards=64,permits=10,epoch=10m,timeout=10ms";
 
     // pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "shards=32,permits=4,epoch=10m,timeout=1s";
 
@@ -483,7 +644,7 @@ impl WakeComputeLockOptions {
     }
 }
 
-impl FromStr for WakeComputeLockOptions {
+impl FromStr for ConcurrencyLockOptions {
     type Err = anyhow::Error;
 
     fn from_str(options: &str) -> Result<Self, Self::Err> {
@@ -519,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_parse_lock_options() -> anyhow::Result<()> {
-        let WakeComputeLockOptions {
+        let ConcurrencyLockOptions {
             epoch,
             permits,
             shards,
@@ -530,7 +691,7 @@ mod tests {
         assert_eq!(shards, 32);
         assert_eq!(permits, 4);
 
-        let WakeComputeLockOptions {
+        let ConcurrencyLockOptions {
             epoch,
             permits,
             shards,
@@ -541,7 +702,7 @@ mod tests {
         assert_eq!(shards, 16);
         assert_eq!(permits, 8);
 
-        let WakeComputeLockOptions {
+        let ConcurrencyLockOptions {
             epoch,
             permits,
             shards,

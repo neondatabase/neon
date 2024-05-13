@@ -1,16 +1,18 @@
 import json
 import os
 import random
-from pathlib import Path
+import time
 from typing import Any, Dict, Optional
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
+from fixtures.pageserver.types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
     poll_for_remote_storage_iterations,
     tenant_delete_wait_completed,
+    wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage
 from fixtures.types import TenantId, TimelineId
@@ -49,9 +51,13 @@ def evict_random_layers(
         if "ephemeral" in layer.name or "temp_download" in layer.name:
             continue
 
+        layer_name = parse_layer_file_name(layer.name)
+
         if rng.choice([True, False]):
-            log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer.name}")
-            client.evict_layer(tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer.name)
+            log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer_name.to_str()}")
+            client.evict_layer(
+                tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer_name.to_str()
+            )
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
@@ -89,6 +95,8 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
                 # this shutdown case is logged at WARN severity by the time it bubbles up to logical size calculation code
                 # WARN ...: initial size calculation failed: downloading failed, possibly for shutdown
                 ".*downloading failed, possibly for shutdown",
+                # {tenant_id=... timeline_id=...}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1664/0/1260 blkno=0 req_lsn=0/149F0D8}: error reading relation or page version: Not found: will not become active.  Current state: Stopping\n'
+                ".*page_service.*will not become active.*",
             ]
         )
 
@@ -398,32 +406,6 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
     validate_heatmap(heatmap_second)
 
 
-def list_layers(pageserver, tenant_id: TenantId, timeline_id: TimelineId) -> list[Path]:
-    """
-    Inspect local storage on a pageserver to discover which layer files are present.
-
-    :return: list of relative paths to layers, from the timeline root.
-    """
-    timeline_path = pageserver.timeline_dir(tenant_id, timeline_id)
-
-    def relative(p: Path) -> Path:
-        return p.relative_to(timeline_path)
-
-    return sorted(
-        list(
-            map(
-                relative,
-                filter(
-                    lambda path: path.name != "metadata"
-                    and "ephemeral" not in path.name
-                    and "temp" not in path.name,
-                    timeline_path.glob("*"),
-                ),
-            )
-        )
-    )
-
-
 def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     """
     Test the overall data flow in secondary mode:
@@ -472,10 +454,14 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     log.info("Synchronizing after initial write...")
     ps_attached.http_client().tenant_heatmap_upload(tenant_id)
 
+    # Ensure that everything which appears in the heatmap is also present in S3: heatmap writers
+    # are allowed to upload heatmaps that reference layers which are only enqueued for upload
+    wait_for_upload_queue_empty(ps_attached.http_client(), tenant_id, timeline_id)
+
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-    assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
-        ps_secondary, tenant_id, timeline_id
+    assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
+        tenant_id, timeline_id
     )
 
     # Make changes on attached pageserver, check secondary downloads them
@@ -484,11 +470,26 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     workload.churn_rows(128, ps_attached.id)
 
     ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+
+    # Ensure that everything which appears in the heatmap is also present in S3: heatmap writers
+    # are allowed to upload heatmaps that reference layers which are only enqueued for upload
+    wait_for_upload_queue_empty(ps_attached.http_client(), tenant_id, timeline_id)
+
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-    assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
-        ps_secondary, tenant_id, timeline_id
-    )
+    try:
+        assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
+            tenant_id, timeline_id
+        )
+    except:
+        # Do a full listing of the secondary location on errors, to help debug of
+        # https://github.com/neondatabase/neon/issues/6966
+        timeline_path = ps_secondary.timeline_dir(tenant_id, timeline_id)
+        for path, _dirs, files in os.walk(timeline_path):
+            for f in files:
+                log.info(f"Secondary file: {os.path.join(path, f)}")
+
+        raise
 
     # FIXME: this sleep is needed to avoid on-demand promotion of the layers we evict, while
     # walreceiver is still doing something.
@@ -500,8 +501,8 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # ==================================================================
     try:
         log.info("Evicting a layer...")
-        layer_to_evict = list_layers(ps_attached, tenant_id, timeline_id)[0]
-        some_other_layer = list_layers(ps_attached, tenant_id, timeline_id)[1]
+        layer_to_evict = ps_attached.list_layers(tenant_id, timeline_id)[0]
+        some_other_layer = ps_attached.list_layers(tenant_id, timeline_id)[1]
         log.info(f"Victim layer: {layer_to_evict.name}")
         ps_attached.http_client().evict_layer(
             tenant_id, timeline_id, layer_name=layer_to_evict.name
@@ -514,13 +515,13 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
             layer["name"] for layer in heatmap_after_eviction["timelines"][0]["layers"]
         )
         assert layer_to_evict.name not in heatmap_layers
-        assert some_other_layer.name in heatmap_layers
+        assert parse_layer_file_name(some_other_layer.name).to_str() in heatmap_layers
 
         ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-        assert layer_to_evict not in list_layers(ps_attached, tenant_id, timeline_id)
-        assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
-            ps_secondary, tenant_id, timeline_id
+        assert layer_to_evict not in ps_attached.list_layers(tenant_id, timeline_id)
+        assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
+            tenant_id, timeline_id
         )
     except:
         # On assertion failures, log some details to help with debugging
@@ -558,6 +559,91 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
             )
         ),
     )
+
+
+def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
+    """
+    Slow test that runs in realtime, checks that the background scheduling of secondary
+    downloads happens as expected.
+    """
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    # Create this many tenants, each with two timelines
+    tenant_count = 4
+    tenant_timelines = {}
+
+    # This mirrors a constant in `downloader.rs`
+    freshen_interval_secs = 60
+
+    for _i in range(0, tenant_count):
+        tenant_id = TenantId.generate()
+        timeline_a = TimelineId.generate()
+        timeline_b = TimelineId.generate()
+        env.neon_cli.create_tenant(
+            tenant_id,
+            timeline_a,
+            placement_policy='{"Attached":1}',
+            # Run with a low heatmap period so that we can avoid having to do synthetic API calls
+            # to trigger the upload promptly.
+            conf={"heatmap_period": "1s"},
+        )
+        env.neon_cli.create_timeline("main2", tenant_id, timeline_b)
+
+        tenant_timelines[tenant_id] = [timeline_a, timeline_b]
+
+    t_start = time.time()
+
+    # Wait long enough that the background downloads should happen; we expect all the inital layers
+    # of all the initial timelines to show up on the secondary location of each tenant.
+    time.sleep(freshen_interval_secs * 1.5)
+
+    for tenant_id, timelines in tenant_timelines.items():
+        attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
+        ps_attached = env.get_pageserver(attached_to_id)
+        # We only have two: the other one must be secondary
+        ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+        for timeline_id in timelines:
+            log.info(f"Checking for secondary timeline {timeline_id} on node {ps_secondary.id}")
+            # One or more layers should be present for all timelines
+            assert ps_secondary.list_layers(tenant_id, timeline_id)
+
+        # Delete the second timeline: this should be reflected later on the secondary
+        env.storage_controller.pageserver_api().timeline_delete(tenant_id, timelines[1])
+
+    # Wait long enough for the secondary locations to see the deletion
+    time.sleep(freshen_interval_secs * 1.5)
+
+    for tenant_id, timelines in tenant_timelines.items():
+        attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
+        ps_attached = env.get_pageserver(attached_to_id)
+        # We only have two: the other one must be secondary
+        ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+        # This one was not deleted
+        assert ps_secondary.list_layers(tenant_id, timelines[0])
+
+        # This one was deleted
+        assert not ps_secondary.list_layers(tenant_id, timelines[1])
+
+    t_end = time.time()
+
+    # Measure how many heatmap downloads we did in total: this checks that we succeeded with
+    # proper scheduling, and not some bug that just runs downloads in a loop.
+    total_heatmap_downloads = 0
+    for ps in env.pageservers:
+        v = ps.http_client().get_metric_value("pageserver_secondary_download_heatmap_total")
+        assert v is not None
+        total_heatmap_downloads += int(v)
+
+    download_rate = (total_heatmap_downloads / tenant_count) / (t_end - t_start)
+
+    expect_download_rate = 1.0 / freshen_interval_secs
+    log.info(f"Download rate: {download_rate * 60}/min vs expected {expect_download_rate * 60}/min")
+
+    assert download_rate < expect_download_rate * 2
 
 
 @pytest.mark.skipif(os.environ.get("BUILD_TYPE") == "debug", reason="only run with release build")
@@ -600,7 +686,7 @@ def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controll
     ps_attached.http_client().timeline_checkpoint(tenant_id, timeline_id)
 
     # Expect lots of layers
-    assert len(list_layers(ps_attached, tenant_id, timeline_id)) > 10
+    assert len(ps_attached.list_layers(tenant_id, timeline_id)) > 10
 
     # Simulate large data by making layer downloads artifically slow
     for ps in env.pageservers:

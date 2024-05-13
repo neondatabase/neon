@@ -14,17 +14,17 @@ requests = "^2.31.0"
 pytest-xdist = "^3.3.1"
 asyncpg = "^0.29.0"
 aiopg = "^1.4.0"
-Jinja2 = "^3.1.3"
+Jinja2 = "^3.1.4"
 types-requests = "^2.31.0.0"
 types-psycopg2 = "^2.9.21.10"
 boto3 = "^1.34.11"
 boto3-stubs = {extras = ["s3"], version = "^1.26.16"}
-moto = {extras = ["server"], version = "^4.1.2"}
+moto = {extras = ["server"], version = "^5.0.6"}
 backoff = "^2.2.1"
 pytest-lazy-fixture = "^0.6.3"
 prometheus-client = "^0.14.1"
 pytest-timeout = "^2.1.0"
-Werkzeug = "^3.0.1"
+Werkzeug = "^3.0.3"
 pytest-order = "^1.1.0"
 allure-pytest = "^2.13.2"
 pytest-asyncio = "^0.21.0"
@@ -33,7 +33,7 @@ psutil = "^5.9.4"
 types-psutil = "^5.9.5.12"
 types-toml = "^0.10.8.6"
 pytest-httpserver = "^1.0.8"
-aiohttp = "3.9.2"
+aiohttp = "3.9.4"
 pytest-rerunfailures = "^13.0"
 types-pytest-lazy-fixture = "^0.6.3.3"
 pytest-split = "^0.8.1"
@@ -94,4 +94,5 @@ select = [
     "I", # isort
     "W", # pycodestyle
     "B", # bugbear
+    "UP032", # f-string
 ]

@@ -21,6 +21,7 @@ defaults:
 
 concurrency:
   group: build-build-tools-image-${{ inputs.image-tag }}
+  cancel-in-progress: false
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
@@ -38,7 +39,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "dev", "{0}"]', matrix.arch)) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     env:
       IMAGE_TAG: ${{ inputs.image-tag }}

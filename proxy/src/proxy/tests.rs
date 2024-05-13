@@ -10,13 +10,14 @@ use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
 };
-use crate::config::CertResolver;
+use crate::config::{CertResolver, RetryConfig};
 use crate::console::caches::NodeInfoCache;
+use crate::console::messages::MetricsAuxInfo;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
-use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
-use crate::{http, sasl, scram};
+use crate::proxy::retry::retry_after;
+use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use rstest::rstest;
@@ -142,8 +143,8 @@ impl Scram {
         Ok(Scram(secret))
     }
 
-    fn mock(user: &str) -> Self {
-        Scram(scram::ServerSecret::mock(user, rand::random()))
+    fn mock() -> Self {
+        Scram(scram::ServerSecret::mock(rand::random()))
     }
 }
 
@@ -173,8 +174,8 @@ async fn dummy_proxy(
     tls: Option<TlsConfig>,
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
-    let client = WithClientIp::new(client);
-    let mut stream = match handshake(client, tls.as_ref()).await? {
+    let (client, _) = read_proxy_protocol(client).await?;
+    let mut stream = match handshake(client, tls.as_ref(), false).await? {
         HandshakeData::Startup(stream, _) => stream,
         HandshakeData::Cancel(_) => bail!("cancellation not supported"),
     };
@@ -330,11 +331,7 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
 
     let (client_config, server_config) =
         generate_tls_config("generic-project-name.localhost", "localhost")?;
-    let proxy = tokio::spawn(dummy_proxy(
-        client,
-        Some(server_config),
-        Scram::mock("user"),
-    ));
+    let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), Scram::mock()));
 
     use rand::{distributions::Alphanumeric, Rng};
     let password: String = rand::thread_rng()
@@ -364,11 +361,15 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
 #[test]
 fn connect_compute_total_wait() {
     let mut total_wait = tokio::time::Duration::ZERO;
-    for num_retries in 1..NUM_RETRIES_CONNECT {
-        total_wait += retry_after(num_retries);
+    let config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+    for num_retries in 1..config.max_retries {
+        total_wait += retry_after(num_retries, config);
     }
-    assert!(total_wait < tokio::time::Duration::from_secs(12));
-    assert!(total_wait > tokio::time::Duration::from_secs(10));
+    assert!(f64::abs(total_wait.as_secs_f64() - 15.0) < 0.1);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -516,7 +517,12 @@ impl TestBackend for TestConnectMechanism {
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = NodeInfo {
         config: compute::ConnCfg::new(),
-        aux: Default::default(),
+        aux: MetricsAuxInfo {
+            endpoint_id: (&EndpointId::from("endpoint")).into(),
+            project_id: (&ProjectId::from("project")).into(),
+            branch_id: (&BranchId::from("branch")).into(),
+            cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+        },
         allow_self_signed_compute: false,
     };
     let (_, node) = cache.insert("key".into(), node);
@@ -547,7 +553,12 @@ async fn connect_to_compute_success() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    let config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -560,7 +571,12 @@ async fn connect_to_compute_retry() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    let config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -574,7 +590,12 @@ async fn connect_to_compute_non_retry_1() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Retry, Wake, Fail]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    let config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -588,7 +609,12 @@ async fn connect_to_compute_non_retry_2() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Wake, Fail, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    let config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -598,17 +624,32 @@ async fn connect_to_compute_non_retry_2() {
 #[tokio::test]
 async fn connect_to_compute_non_retry_3() {
     let _ = env_logger::try_init();
-    assert_eq!(NUM_RETRIES_CONNECT, 16);
+    tokio::time::pause();
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
-    let mechanism = TestConnectMechanism::new(vec![
-        Wake, Retry, Wake, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry,
-        Retry, Retry, Retry, Retry, Retry, /* the 17th time */ Retry,
-    ]);
+    let mechanism =
+        TestConnectMechanism::new(vec![Wake, Retry, Wake, Retry, Retry, Retry, Retry, Retry]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
-        .await
-        .unwrap_err();
+    let wake_compute_retry_config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 1,
+        backoff_factor: 2.0,
+    };
+    let connect_to_compute_retry_config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+    connect_to_compute(
+        &mut ctx,
+        &mechanism,
+        &user_info,
+        false,
+        wake_compute_retry_config,
+        connect_to_compute_retry_config,
+    )
+    .await
+    .unwrap_err();
     mechanism.verify();
 }
 
@@ -620,7 +661,12 @@ async fn wake_retry() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, Wake, Connect]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    let config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -634,7 +680,12 @@ async fn wake_non_retry() {
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![WakeRetry, WakeFail]);
     let user_info = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false)
+    let config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
         .await
         .unwrap_err();
     mechanism.verify();

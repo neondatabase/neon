@@ -21,11 +21,13 @@ use std::{
     fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
+    str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use anyhow::{bail, Context};
+use aws_sdk_s3::types::StorageClass;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
@@ -53,11 +55,11 @@ pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
 /// <https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/>
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
-/// We set this a little bit low as we currently buffer the entire file into RAM
+/// Set this limit analogously to the S3 limit
 ///
 /// Here, a limit of max 20k concurrent connections was noted.
 /// <https://learn.microsoft.com/en-us/answers/questions/1301863/is-there-any-limitation-to-concurrent-connections>
-pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 30;
+pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 100;
 /// No limits on the client side, which currenltly means 1000 for AWS S3.
 /// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
@@ -134,6 +136,11 @@ impl RemotePath {
     pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Utf8Path, std::path::StripPrefixError> {
         self.0.strip_prefix(&p.0)
     }
+
+    pub fn add_trailing_slash(&self) -> Self {
+        // Unwrap safety inputs are guararnteed to be valid UTF-8
+        Self(format!("{}/", self.0).try_into().unwrap())
+    }
 }
 
 /// We don't need callers to be able to pass arbitrary delimiters: just control
@@ -157,47 +164,21 @@ pub struct Listing {
 /// providing basic CRUD operations for storage files.
 #[allow(async_fn_in_trait)]
 pub trait RemoteStorage: Send + Sync + 'static {
-    /// Lists all top level subdirectories for a given prefix
-    /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
-    /// which already takes into account any kind of global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)
-    /// so this method doesnt need to.
-    async fn list_prefixes(
-        &self,
-        prefix: Option<&RemotePath>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        let result = self
-            .list(prefix, ListingMode::WithDelimiter, None, cancel)
-            .await?
-            .prefixes;
-        Ok(result)
-    }
-    /// Lists all files in directory "recursively"
-    /// (not really recursively, because AWS has a flat namespace)
-    /// Note: This is subtely different than list_prefixes,
-    /// because it is for listing files instead of listing
-    /// names sharing common prefixes.
-    /// For example,
-    /// list_files("foo/bar") = ["foo/bar/cat123.txt",
-    /// "foo/bar/cat567.txt", "foo/bar/dog123.txt", "foo/bar/dog456.txt"]
-    /// whereas,
-    /// list_prefixes("foo/bar/") = ["cat", "dog"]
-    /// See `test_real_s3.rs` for more details.
+    /// List objects in remote storage, with semantics matching AWS S3's ListObjectsV2.
+    /// (see `<https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>`)
     ///
-    /// max_keys limits max number of keys returned; None means unlimited.
-    async fn list_files(
-        &self,
-        prefix: Option<&RemotePath>,
-        max_keys: Option<NonZeroU32>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        let result = self
-            .list(prefix, ListingMode::NoDelimiter, max_keys, cancel)
-            .await?
-            .keys;
-        Ok(result)
-    }
-
+    /// Note that the prefix is relative to any `prefix_in_bucket` configured for the client, not
+    /// from the absolute root of the bucket.
+    ///
+    /// `mode` configures whether to use a delimiter.  Without a delimiter all keys
+    /// within the prefix are listed in the `keys` of the result.  With a delimiter, any "directories" at the top level of
+    /// the prefix are returned in the `prefixes` of the result, and keys in the top level of the prefix are
+    /// returned in `keys` ().
+    ///
+    /// `max_keys` controls the maximum number of keys that will be returned.  If this is None, this function
+    /// will iteratively call listobjects until it runs out of keys.  Note that this is not safe to use on
+    /// unlimted size buckets, as the full list of objects is allocated into a monolithic data structure.
+    ///
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
@@ -333,41 +314,6 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::AzureBlob(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::Unreliable(s) => s.list(prefix, mode, max_keys, cancel).await,
-        }
-    }
-
-    // A function for listing all the files in a "directory"
-    // Example:
-    // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
-    //
-    // max_keys limits max number of keys returned; None means unlimited.
-    pub async fn list_files(
-        &self,
-        folder: Option<&RemotePath>,
-        max_keys: Option<NonZeroU32>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        match self {
-            Self::LocalFs(s) => s.list_files(folder, max_keys, cancel).await,
-            Self::AwsS3(s) => s.list_files(folder, max_keys, cancel).await,
-            Self::AzureBlob(s) => s.list_files(folder, max_keys, cancel).await,
-            Self::Unreliable(s) => s.list_files(folder, max_keys, cancel).await,
-        }
-    }
-
-    // lists common *prefixes*, if any of files
-    // Example:
-    // list_prefixes("foo123","foo567","bar123","bar432") = ["foo", "bar"]
-    pub async fn list_prefixes(
-        &self,
-        prefix: Option<&RemotePath>,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        match self {
-            Self::LocalFs(s) => s.list_prefixes(prefix, cancel).await,
-            Self::AwsS3(s) => s.list_prefixes(prefix, cancel).await,
-            Self::AzureBlob(s) => s.list_prefixes(prefix, cancel).await,
-            Self::Unreliable(s) => s.list_prefixes(prefix, cancel).await,
         }
     }
 
@@ -565,6 +511,16 @@ impl GenericRemoteStorage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageMetadata(HashMap<String, String>);
 
+impl<const N: usize> From<[(&str, &str); N]> for StorageMetadata {
+    fn from(arr: [(&str, &str); N]) -> Self {
+        let map: HashMap<String, String> = arr
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Self(map)
+    }
+}
+
 /// External backup storage configuration, enough for creating a client for that storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteStorageConfig {
@@ -609,6 +565,7 @@ pub struct S3Config {
     /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
     pub concurrency_limit: NonZeroUsize,
     pub max_keys_per_list_response: Option<i32>,
+    pub upload_storage_class: Option<StorageClass>,
 }
 
 impl Debug for S3Config {
@@ -737,6 +694,18 @@ impl RemoteStorageConfig {
                     endpoint,
                     concurrency_limit,
                     max_keys_per_list_response,
+                    upload_storage_class: toml
+                        .get("upload_storage_class")
+                        .map(|prefix_in_bucket| -> anyhow::Result<_> {
+                            let s = parse_toml_string("upload_storage_class", prefix_in_bucket)?;
+                            let storage_class = StorageClass::from_str(&s).expect("infallible");
+                            #[allow(deprecated)]
+                            if matches!(storage_class, StorageClass::Unknown(_)) {
+                                bail!("Specified storage class unknown to SDK: '{s}'. Allowed values: {:?}", StorageClass::values());
+                            }
+                            Ok(storage_class)
+                        })
+                        .transpose()?,
                 })
             }
             (_, _, _, Some(_), None) => {

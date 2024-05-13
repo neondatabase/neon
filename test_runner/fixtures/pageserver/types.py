@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Union
 
@@ -11,7 +12,7 @@ class IndexLayerMetadata:
 
 
 @dataclass(frozen=True)
-class ImageLayerFileName:
+class ImageLayerName:
     lsn: Lsn
     key_start: Key
     key_end: Key
@@ -25,7 +26,7 @@ class ImageLayerFileName:
 
 
 @dataclass(frozen=True)
-class DeltaLayerFileName:
+class DeltaLayerName:
     lsn_start: Lsn
     lsn_end: Lsn
     key_start: Key
@@ -40,65 +41,57 @@ class DeltaLayerFileName:
         return ret
 
 
-LayerFileName = Union[ImageLayerFileName, DeltaLayerFileName]
+LayerName = Union[ImageLayerName, DeltaLayerName]
 
 
 class InvalidFileName(Exception):
     pass
 
 
+IMAGE_LAYER_FILE_NAME = re.compile(
+    "^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})(-v1-[a-f0-9]{8})?$"
+)
+
+
 def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
     """Parse an image layer file name. Return key start, key end, and snapshot lsn"""
-    parts = f_name.split("__")
-    if len(parts) != 2:
-        raise InvalidFileName(f"expecting two parts separated by '__', got: {parts}")
-    key_parts = parts[0].split("-")
-    if len(key_parts) != 2:
-        raise InvalidFileName(
-            f"expecting two key parts separated by '--' in parts[0], got: {key_parts}"
-        )
-    try:
-        return int(key_parts[0], 16), int(key_parts[1], 16), int(parts[1], 16)
-    except ValueError as e:
-        raise InvalidFileName(f"conversion error: {f_name}") from e
+
+    match = IMAGE_LAYER_FILE_NAME.match(f_name)
+    if match is None:
+        raise InvalidFileName(f"'{f_name}' is not an image layer filename")
+
+    return int(match.group(1), 16), int(match.group(2), 16), int(match.group(3), 16)
+
+
+DELTA_LAYER_FILE_NAME = re.compile(
+    "^([A-F0-9]{36})-([A-F0-9]{36})__([A-F0-9]{16})-([A-F0-9]{16})(-v1-[a-f0-9]{8})?$"
+)
 
 
 def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
     """Parse a delta layer file name. Return key start, key end, lsn start, and lsn end"""
-    parts = f_name.split("__")
-    if len(parts) != 2:
-        raise InvalidFileName(f"expecting two parts separated by '__', got: {parts}")
-    key_parts = parts[0].split("-")
-    if len(key_parts) != 2:
-        raise InvalidFileName(
-            f"expecting two key parts separated by '--' in parts[0], got: {key_parts}"
-        )
-    lsn_parts = parts[1].split("-")
-    if len(lsn_parts) != 2:
-        raise InvalidFileName(
-            f"expecting two lsn parts separated by '--' in parts[1], got: {lsn_parts}"
-        )
-    try:
-        return (
-            int(key_parts[0], 16),
-            int(key_parts[1], 16),
-            int(lsn_parts[0], 16),
-            int(lsn_parts[1], 16),
-        )
-    except ValueError as e:
-        raise InvalidFileName(f"conversion error: {f_name}") from e
+    match = DELTA_LAYER_FILE_NAME.match(f_name)
+    if match is None:
+        raise InvalidFileName(f"'{f_name}' is not an delta layer filename")
+
+    return (
+        int(match.group(1), 16),
+        int(match.group(2), 16),
+        int(match.group(3), 16),
+        int(match.group(4), 16),
+    )
 
 
-def parse_layer_file_name(file_name: str) -> LayerFileName:
+def parse_layer_file_name(file_name: str) -> LayerName:
     try:
         key_start, key_end, lsn = parse_image_layer(file_name)
-        return ImageLayerFileName(lsn=Lsn(lsn), key_start=Key(key_start), key_end=Key(key_end))
+        return ImageLayerName(lsn=Lsn(lsn), key_start=Key(key_start), key_end=Key(key_end))
     except InvalidFileName:
         pass
 
     try:
         key_start, key_end, lsn_start, lsn_end = parse_delta_layer(file_name)
-        return DeltaLayerFileName(
+        return DeltaLayerName(
             lsn_start=Lsn(lsn_start),
             lsn_end=Lsn(lsn_end),
             key_start=Key(key_start),
@@ -110,18 +103,15 @@ def parse_layer_file_name(file_name: str) -> LayerFileName:
     raise InvalidFileName("neither image nor delta layer")
 
 
-def is_future_layer(layer_file_name: LayerFileName, disk_consistent_lsn: Lsn):
+def is_future_layer(layer_file_name: LayerName, disk_consistent_lsn: Lsn):
     """
     Determines if this layer file is considered to be in future meaning we will discard these
     layers during timeline initialization from the given disk_consistent_lsn.
     """
-    if (
-        isinstance(layer_file_name, ImageLayerFileName)
-        and layer_file_name.lsn > disk_consistent_lsn
-    ):
+    if isinstance(layer_file_name, ImageLayerName) and layer_file_name.lsn > disk_consistent_lsn:
         return True
     elif (
-        isinstance(layer_file_name, DeltaLayerFileName)
+        isinstance(layer_file_name, DeltaLayerName)
         and layer_file_name.lsn_end > disk_consistent_lsn + 1
     ):
         return True
@@ -131,7 +121,7 @@ def is_future_layer(layer_file_name: LayerFileName, disk_consistent_lsn: Lsn):
 
 @dataclass
 class IndexPartDump:
-    layer_metadata: Dict[LayerFileName, IndexLayerMetadata]
+    layer_metadata: Dict[LayerName, IndexLayerMetadata]
     disk_consistent_lsn: Lsn
 
     @classmethod

@@ -12,7 +12,7 @@
 //!
 //! The endpoint is managed by the `compute_ctl` binary. When an endpoint is
 //! started, we launch `compute_ctl` It synchronizes the safekeepers, downloads
-//! the basebackup from the pageserver to initialize the the data directory, and
+//! the basebackup from the pageserver to initialize the data directory, and
 //! finally launches the PostgreSQL process. It watches the PostgreSQL process
 //! until it exits.
 //!
@@ -554,6 +554,7 @@ impl Endpoint {
             format_version: 1.0,
             operation_uuid: None,
             features: self.features.clone(),
+            swap_size_bytes: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used

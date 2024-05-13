@@ -6,7 +6,9 @@ from string import ascii_lowercase
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    AuxFileStore,
     NeonEnv,
+    NeonEnvBuilder,
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
@@ -18,6 +20,19 @@ def random_string(n: int):
     return "".join([choice(ascii_lowercase) for _ in range(n)])
 
 
+@pytest.mark.parametrize(
+    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.V2, AuxFileStore.CrossValidation]
+)
+def test_aux_file_v2_flag(neon_simple_env: NeonEnv, pageserver_aux_file_policy: AuxFileStore):
+    env = neon_simple_env
+    with env.pageserver.http_client() as client:
+        tenant_config = client.tenant_config(env.initial_tenant).effective_config
+        assert pageserver_aux_file_policy == tenant_config["switch_aux_file_policy"]
+
+
+@pytest.mark.parametrize(
+    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+)
 def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
@@ -159,6 +174,9 @@ COMMIT;
 
 
 # Test that neon.logical_replication_max_snap_files works
+@pytest.mark.parametrize(
+    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+)
 def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
     def slot_removed(ep):
         assert (
@@ -203,8 +221,86 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
     wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
 
 
+# Tests that walsender correctly blocks until WAL is downloaded from safekeepers
+def test_lr_with_slow_safekeeper(neon_env_builder: NeonEnvBuilder, vanilla_pg):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch("init")
+    endpoint = env.endpoints.create_start("init")
+
+    with endpoint.connect().cursor() as cur:
+        cur.execute("create table wal_generator (id serial primary key, data text)")
+        cur.execute(
+            """
+INSERT INTO wal_generator (data)
+SELECT repeat('A', 1024) -- Generates a kilobyte of data per row
+FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of data
+"""
+        )
+        cur.execute("create table t(a int)")
+        cur.execute("create publication pub for table t")
+        cur.execute("insert into t values (1)")
+
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create table t(a int)")
+    connstr = endpoint.connstr().replace("'", "''")
+    vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub")
+    logical_replication_sync(vanilla_pg, endpoint)
+    vanilla_pg.stop()
+
+    # Pause the safekeepers so that they can't send WAL (except to pageserver)
+    for sk in env.safekeepers:
+        sk_http = sk.http_client()
+        sk_http.configure_failpoints([("sk-pause-send", "return")])
+
+    # Insert a 2
+    with endpoint.connect().cursor() as cur:
+        cur.execute("insert into t values (2)")
+
+    endpoint.stop_and_destroy()
+
+    # This new endpoint should contain [1, 2], but it can't access WAL from safekeeper
+    endpoint = env.endpoints.create_start("init")
+    with endpoint.connect().cursor() as cur:
+        cur.execute("select * from t")
+        res = [r[0] for r in cur.fetchall()]
+        assert res == [1, 2]
+
+    # Reconnect subscriber
+    vanilla_pg.start()
+    connstr = endpoint.connstr().replace("'", "''")
+    vanilla_pg.safe_psql(f"alter subscription sub1 connection '{connstr}'")
+
+    time.sleep(5)
+    # Make sure the 2 isn't replicated
+    assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1]
+
+    # Re-enable WAL download
+    for sk in env.safekeepers:
+        sk_http = sk.http_client()
+        sk_http.configure_failpoints([("sk-pause-send", "off")])
+
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1, 2]
+
+    # Check that local reads also work
+    with endpoint.connect().cursor() as cur:
+        cur.execute("insert into t values (3)")
+    logical_replication_sync(vanilla_pg, endpoint)
+    assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1, 2, 3]
+
+    log_path = vanilla_pg.pgdatadir / "pg.log"
+    with open(log_path, "r") as log_file:
+        logs = log_file.read()
+        assert "could not receive data from WAL stream" not in logs
+
+
 # Test compute start at LSN page of which starts with contrecord
 # https://github.com/neondatabase/neon/issues/5749
+@pytest.mark.parametrize(
+    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+)
 def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
@@ -295,6 +391,9 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
 # logical replication bug as such, but without logical replication,
 # records passed ot the WAL redo process are never large enough to hit
 # the bug.
+@pytest.mark.parametrize(
+    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+)
 def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
@@ -364,3 +463,70 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     # Check that we can create slot with the same name
     ws_cur = ws_branch.connect().cursor()
     ws_cur.execute("select pg_create_logical_replication_slot('my_slot', 'pgoutput')")
+
+
+@pytest.mark.parametrize(
+    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+)
+def test_replication_shutdown(neon_simple_env: NeonEnv):
+    # Ensure Postgres can exit without stuck when a replication job is active + neon extension installed
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_replication_shutdown_publisher", "empty")
+    pub = env.endpoints.create("test_replication_shutdown_publisher")
+
+    env.neon_cli.create_branch("test_replication_shutdown_subscriber")
+    sub = env.endpoints.create("test_replication_shutdown_subscriber")
+
+    pub.respec(skip_pg_catalog_updates=False)
+    pub.start()
+
+    sub.respec(skip_pg_catalog_updates=False)
+    sub.start()
+
+    pub.wait_for_migrations()
+    sub.wait_for_migrations()
+
+    with pub.cursor() as cur:
+        cur.execute(
+            "CREATE ROLE mr_whiskers WITH PASSWORD 'cat' LOGIN INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser"
+        )
+        cur.execute("CREATE DATABASE neondb WITH OWNER mr_whiskers")
+        cur.execute("GRANT ALL PRIVILEGES ON DATABASE neondb TO neon_superuser")
+
+        # If we don't do this, creating the subscription will fail later on PG16
+        pub.edit_hba(["host all mr_whiskers 0.0.0.0/0 md5"])
+
+    with sub.cursor() as cur:
+        cur.execute(
+            "CREATE ROLE mr_whiskers WITH PASSWORD 'cat' LOGIN INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser"
+        )
+        cur.execute("CREATE DATABASE neondb WITH OWNER mr_whiskers")
+        cur.execute("GRANT ALL PRIVILEGES ON DATABASE neondb TO neon_superuser")
+
+    with pub.cursor(dbname="neondb", user="mr_whiskers", password="cat") as cur:
+        cur.execute("CREATE PUBLICATION pub FOR ALL TABLES")
+        cur.execute("CREATE TABLE t (a int)")
+        cur.execute("INSERT INTO t VALUES (10), (20)")
+        cur.execute("SELECT * from t")
+        res = cur.fetchall()
+        assert [r[0] for r in res] == [10, 20]
+
+    with sub.cursor(dbname="neondb", user="mr_whiskers", password="cat") as cur:
+        cur.execute("CREATE TABLE t (a int)")
+
+        pub_conn = f"host=localhost port={pub.pg_port} dbname=neondb user=mr_whiskers password=cat"
+        query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_conn}' PUBLICATION pub"
+        log.info(f"Creating subscription: {query}")
+        cur.execute(query)
+
+        with pub.cursor(dbname="neondb", user="mr_whiskers", password="cat") as pcur:
+            pcur.execute("INSERT INTO t VALUES (30), (40)")
+
+        def check_that_changes_propagated():
+            cur.execute("SELECT * FROM t")
+            res = cur.fetchall()
+            log.info(res)
+            assert len(res) == 4
+            assert [r[0] for r in res] == [10, 20, 30, 40]
+
+        wait_until(10, 0.5, check_that_changes_propagated)

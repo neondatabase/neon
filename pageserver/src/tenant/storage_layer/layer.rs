@@ -4,26 +4,28 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::ShardIndex;
+use pageserver_api::shard::{ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 use tracing::Instrument;
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::repository::Key;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self, DeltaEntry};
 use super::image_layer;
 use super::{
-    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerFileName, PersistentLayerDesc,
+    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerName, PersistentLayerDesc,
     ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
 };
 
@@ -116,14 +118,48 @@ impl AsLayerDesc for Layer {
     }
 }
 
+impl PartialEq for Layer {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::as_ptr(&self.0) == Arc::as_ptr(&other.0)
+    }
+}
+
+pub(crate) fn local_layer_path(
+    conf: &PageServerConf,
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+    layer_file_name: &LayerName,
+    _generation: &Generation,
+) -> Utf8PathBuf {
+    let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
+
+    timeline_path.join(layer_file_name.to_string())
+
+    // TODO: switch to enabling new-style layer paths after next release
+    // if generation.is_none() {
+    //     // Without a generation, we may only use legacy path style
+    //     timeline_path.join(layer_file_name.to_string())
+    // } else {
+    //     timeline_path.join(format!("{}-v1{}", layer_file_name, generation.get_suffix()))
+    // }
+}
+
 impl Layer {
     /// Creates a layer value for a file we know to not be resident.
     pub(crate) fn for_evicted(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
-        file_name: LayerFileName,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> Self {
+        let local_path = local_layer_path(
+            conf,
+            &timeline.tenant_shard_id,
+            &timeline.timeline_id,
+            &file_name,
+            &metadata.generation,
+        );
+
         let desc = PersistentLayerDesc::from_filename(
             timeline.tenant_shard_id,
             timeline.timeline_id,
@@ -136,6 +172,7 @@ impl Layer {
         let owner = Layer(Arc::new(LayerInner::new(
             conf,
             timeline,
+            local_path,
             access_stats,
             desc,
             None,
@@ -152,7 +189,8 @@ impl Layer {
     pub(crate) fn for_resident(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
-        file_name: LayerFileName,
+        local_path: Utf8PathBuf,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> ResidentLayer {
         let desc = PersistentLayerDesc::from_filename(
@@ -177,6 +215,7 @@ impl Layer {
             LayerInner::new(
                 conf,
                 timeline,
+                local_path,
                 access_stats,
                 desc,
                 Some(inner),
@@ -218,9 +257,19 @@ impl Layer {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
+
+            let local_path = local_layer_path(
+                conf,
+                &timeline.tenant_shard_id,
+                &timeline.timeline_id,
+                &desc.layer_name(),
+                &timeline.generation,
+            );
+
             LayerInner::new(
                 conf,
                 timeline,
+                local_path,
                 access_stats,
                 desc,
                 Some(inner),
@@ -330,6 +379,12 @@ impl Layer {
             .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
+            .map_err(|err| match err {
+                GetVectoredError::Other(err) => GetVectoredError::Other(
+                    err.context(format!("get_values_reconstruct_data for layer {self}")),
+                ),
+                err => err,
+            })
     }
 
     /// Download the layer if evicted.
@@ -389,8 +444,19 @@ impl Layer {
         &self.0.path
     }
 
+    pub(crate) fn debug_str(&self) -> &Arc<str> {
+        &self.0.debug_str
+    }
+
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.0.metadata()
+    }
+
+    pub(crate) fn get_timeline_id(&self) -> Option<TimelineId> {
+        self.0
+            .timeline
+            .upgrade()
+            .map(|timeline| timeline.timeline_id)
     }
 
     /// Traditional debug dumping facility
@@ -511,6 +577,9 @@ struct LayerInner {
     /// Full path to the file; unclear if this should exist anymore.
     path: Utf8PathBuf,
 
+    /// String representation of the layer, used for traversal id.
+    debug_str: Arc<str>,
+
     desc: PersistentLayerDesc,
 
     /// Timeline access is needed for remote timeline client and metrics.
@@ -604,16 +673,24 @@ enum Status {
 
 impl Drop for LayerInner {
     fn drop(&mut self) {
+        // if there was a pending eviction, mark it cancelled here to balance metrics
+        if let Some((ResidentOrWantedEvicted::WantedEvicted(..), _)) = self.inner.take_and_deinit()
+        {
+            // eviction has already been started
+            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
+
+            // eviction request is intentionally not honored as no one is present to wait for it
+            // and we could be delaying shutdown for nothing.
+        }
+
         if !*self.wanted_deleted.get_mut() {
-            // should we try to evict if the last wish was for eviction? seems more like a hazard
-            // than a clear win.
             return;
         }
 
         let span = tracing::info_span!(parent: None, "layer_delete", tenant_id = %self.layer_desc().tenant_shard_id.tenant_id, shard_id=%self.layer_desc().tenant_shard_id.shard_slug(), timeline_id = %self.layer_desc().timeline_id);
 
         let path = std::mem::take(&mut self.path);
-        let file_name = self.layer_desc().filename();
+        let file_name = self.layer_desc().layer_name();
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
         let meta = self.metadata();
@@ -681,19 +758,17 @@ impl Drop for LayerInner {
 }
 
 impl LayerInner {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
+        local_path: Utf8PathBuf,
         access_stats: LayerAccessStats,
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
         shard: ShardIndex,
     ) -> Self {
-        let path = conf
-            .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id)
-            .join(desc.filename().to_string());
-
         let (inner, version, init_status) = if let Some(inner) = downloaded {
             let version = inner.version;
             let resident = ResidentOrWantedEvicted::Resident(inner);
@@ -708,7 +783,10 @@ impl LayerInner {
 
         LayerInner {
             conf,
-            path,
+            debug_str: {
+                format!("timelines/{}/{}", timeline.timeline_id, desc.layer_name()).into()
+            },
+            path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
             have_remote_client: timeline.remote_client.is_some(),
@@ -911,11 +989,20 @@ impl LayerInner {
             return Err(DownloadError::DownloadRequired);
         }
 
+        let download_ctx = ctx
+            .map(|ctx| ctx.detached_child(TaskKind::LayerDownload, DownloadBehavior::Download))
+            .unwrap_or(RequestContext::new(
+                TaskKind::LayerDownload,
+                DownloadBehavior::Download,
+            ));
+
         async move {
             tracing::info!(%reason, "downloading on-demand");
 
             let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
-            let res = self.download_init_and_wait(timeline, permit).await?;
+            let res = self
+                .download_init_and_wait(timeline, permit, download_ctx)
+                .await?;
             scopeguard::ScopeGuard::into_inner(init_cancelled);
             Ok(res)
         }
@@ -954,6 +1041,7 @@ impl LayerInner {
         self: &Arc<Self>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: RequestContext,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -983,7 +1071,7 @@ impl LayerInner {
                     .await
                     .unwrap();
 
-                let res = this.download_and_init(timeline, permit).await;
+                let res = this.download_and_init(timeline, permit, &ctx).await;
 
                 if let Err(res) = tx.send(res) {
                     match res {
@@ -1026,6 +1114,7 @@ impl LayerInner {
         self: &Arc<LayerInner>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Arc<DownloadedLayer>> {
         let client = timeline
             .remote_client
@@ -1033,7 +1122,12 @@ impl LayerInner {
             .expect("checked before download_init_and_wait");
 
         let result = client
-            .download_layer_file(&self.desc.filename(), &self.metadata(), &timeline.cancel)
+            .download_layer_file(
+                &self.desc.layer_name(),
+                &self.metadata(),
+                &timeline.cancel,
+                ctx,
+            )
             .await;
 
         match result {
@@ -1166,7 +1260,7 @@ impl LayerInner {
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.desc.filename().file_name();
+        let layer_name = self.desc.layer_name().to_string();
 
         let resident = self
             .inner
@@ -1180,7 +1274,7 @@ impl LayerInner {
             let lsn_range = &self.desc.lsn_range;
 
             HistoricLayerInfo::Delta {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
@@ -1191,7 +1285,7 @@ impl LayerInner {
             let lsn = self.desc.image_layer_lsn();
 
             HistoricLayerInfo::Image {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn,
                 remote: !resident,
@@ -1552,8 +1646,8 @@ impl Drop for DownloadedLayer {
         if let Some(owner) = self.owner.upgrade() {
             owner.on_downloaded_layer_drop(self.version);
         } else {
-            // no need to do anything, we are shutting down
-            LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
+            // Layer::drop will handle cancelling the eviction; because of drop order and
+            // `DownloadedLayer` never leaking, we cannot know here if eviction was requested.
         }
     }
 }
@@ -1752,12 +1846,44 @@ impl ResidentLayer {
         }
     }
 
+    /// Returns the amount of keys and values written to the writer.
+    pub(crate) async fn copy_delta_prefix(
+        &self,
+        writer: &mut super::delta_layer::DeltaLayerWriter,
+        until: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<usize> {
+        use LayerKind::*;
+
+        let owner = &self.owner.0;
+
+        match self.downloaded.get(owner, ctx).await? {
+            Delta(ref d) => d
+                .copy_prefix(writer, until, ctx)
+                .await
+                .with_context(|| format!("copy_delta_prefix until {until} of {self}")),
+            Image(_) => anyhow::bail!(format!("cannot copy_lsn_prefix of image layer {self}")),
+        }
+    }
+
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.owner.0.path
     }
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
         self.owner.metadata()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn as_delta(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
+        use LayerKind::*;
+        match self.downloaded.get(&self.owner.0, ctx).await? {
+            Delta(ref d) => Ok(d),
+            Image(_) => Err(anyhow::anyhow!("image layer")),
+        }
     }
 }
 

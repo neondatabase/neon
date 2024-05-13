@@ -293,7 +293,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         lazy: Optional[bool] = None,
     ):
         body = location_conf.copy()
-        body["tenant_id"] = str(tenant_id)
 
         params = {}
         if flush_ms is not None:
@@ -308,6 +307,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             params=params,
         )
         self.verbose_error(res)
+        return res.json()
 
     def tenant_list_locations(self):
         res = self.get(
@@ -341,8 +341,21 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/ignore")
         self.verbose_error(res)
 
-    def tenant_status(self, tenant_id: Union[TenantId, TenantShardId]) -> Dict[Any, Any]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
+    def tenant_status(
+        self, tenant_id: Union[TenantId, TenantShardId], activate: bool = False
+    ) -> Dict[Any, Any]:
+        """
+        :activate: hint the server not to accelerate activation of this tenant in response
+        to this query.  False by default for tests, because they generally want to observed the
+        system rather than interfering with it.  This is true  by default on the server side,
+        because in the field if the control plane is GET'ing a tenant it's a sign that it wants
+        to do something with it.
+        """
+        params = {}
+        if not activate:
+            params["activate"] = "false"
+
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}", params=params)
         self.verbose_error(res)
         res_json = res.json()
         assert isinstance(res_json, dict)
@@ -805,6 +818,23 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             if not layer.remote:
                 continue
             self.download_layer(tenant_id, timeline_id, layer.layer_file_name)
+
+    def detach_ancestor(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timeline_id: TimelineId,
+        batch_size: int | None = None,
+    ) -> Set[TimelineId]:
+        params = {}
+        if batch_size is not None:
+            params["batch_size"] = batch_size
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
+            params=params,
+        )
+        self.verbose_error(res)
+        json = res.json()
+        return set(map(TimelineId, json["reparented_timelines"]))
 
     def evict_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str

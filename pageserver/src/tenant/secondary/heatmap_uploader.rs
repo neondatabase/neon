@@ -9,6 +9,7 @@ use crate::{
     metrics::SECONDARY_MODE,
     tenant::{
         config::AttachmentMode,
+        mgr::GetTenantError,
         mgr::TenantManager,
         remote_timeline_client::remote_heatmap_path,
         span::debug_assert_current_span_has_tenant_id,
@@ -19,12 +20,14 @@ use crate::{
 
 use futures::Future;
 use pageserver_api::shard::TenantShardId;
-use rand::Rng;
 use remote_storage::{GenericRemoteStorage, TimeoutOrCancel};
 
 use super::{
     heatmap::HeatMapTenant,
-    scheduler::{self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs},
+    scheduler::{
+        self, period_jitter, period_warmup, JobGenerator, RunningJob, SchedulingResult,
+        TenantBackgroundJobs,
+    },
     CommandRequest, UploadCommand,
 };
 use tokio_util::sync::CancellationToken;
@@ -180,15 +183,11 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             let state = self
                 .tenants
                 .entry(*tenant.get_tenant_shard_id())
-                .or_insert_with(|| {
-                    let jittered_period = rand::thread_rng().gen_range(Duration::ZERO..period);
-
-                    UploaderTenantState {
-                        tenant: Arc::downgrade(&tenant),
-                        last_upload: None,
-                        next_upload: Some(now.checked_add(jittered_period).unwrap_or(now)),
-                        last_digest: None,
-                    }
+                .or_insert_with(|| UploaderTenantState {
+                    tenant: Arc::downgrade(&tenant),
+                    last_upload: None,
+                    next_upload: Some(now.checked_add(period_warmup(period)).unwrap_or(now)),
+                    last_digest: None,
                 });
 
             // Decline to do the upload if insufficient time has passed
@@ -273,7 +272,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
 
             let next_upload = tenant
                 .get_heatmap_period()
-                .and_then(|period| now.checked_add(period));
+                .and_then(|period| now.checked_add(period_jitter(period, 5)));
 
             WriteComplete {
                     tenant_shard_id: *tenant.get_tenant_shard_id(),
@@ -292,8 +291,11 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             "Starting heatmap write on command");
         let tenant = self
             .tenant_manager
-            .get_attached_tenant_shard(*tenant_shard_id, true)
+            .get_attached_tenant_shard(*tenant_shard_id)
             .map_err(|e| anyhow::anyhow!(e))?;
+        if !tenant.is_active() {
+            return Err(GetTenantError::NotActive(*tenant_shard_id).into());
+        }
 
         Ok(UploadPending {
             // Ignore our state for last digest: this forces an upload even if nothing has changed

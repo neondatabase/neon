@@ -23,6 +23,7 @@
 !s3_scrubber/
 !safekeeper/
 !storage_broker/
+!storage_controller/
 !trace/
 !vendor/postgres-*/
 !workspace_hack/

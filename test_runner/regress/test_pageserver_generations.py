@@ -9,8 +9,8 @@ of the pageserver are:
 - Updates to remote_consistent_lsn may only be made visible after validating generation
 """
 
-
 import enum
+import os
 import re
 import time
 from typing import Optional
@@ -23,6 +23,7 @@ from fixtures.neon_fixtures import (
     NeonPageserver,
     PgBin,
     S3Scrubber,
+    flush_ep_to_pageserver,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -31,6 +32,7 @@ from fixtures.pageserver.utils import (
     list_prefix,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import (
     RemoteStorageKind,
@@ -53,6 +55,7 @@ TENANT_CONF = {
     "compaction_period": "0s",
     # create image layers eagerly, so that GC can remove some layers
     "image_creation_threshold": "1",
+    "image_layer_creation_check_threshold": "0",
 }
 
 
@@ -111,7 +114,6 @@ def generate_uploads_and_deletions(
             last_flush_lsn_upload(
                 env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
             )
-            ps_http.timeline_checkpoint(tenant_id, timeline_id)
 
         # Compaction should generate some GC-elegible layers
         for i in range(0, 2):
@@ -120,6 +122,17 @@ def generate_uploads_and_deletions(
         gc_result = ps_http.timeline_gc(tenant_id, timeline_id, 0)
         print_gc_result(gc_result)
         assert gc_result["layers_removed"] > 0
+
+        # Stop endpoint and flush all data to pageserver, then checkpoint it: this
+        # ensures that the pageserver is in a fully idle state: there will be no more
+        # background ingest, no more uploads pending, and therefore no non-determinism
+        # in subsequent actions like pageserver restarts.
+        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id)
+        # Finish uploads
+        wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
+        # Finish all remote writes (including deletions)
+        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
 
 def read_all(
@@ -208,7 +221,12 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
     env.storage_controller.node_register(env.pageserver)
 
-    env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
+    replaced_config = env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "control_plane_api": "",
+        }
+    )
+    env.pageserver.start()
     env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
     env.neon_cli.create_tenant(
@@ -239,8 +257,8 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
         assert parse_generation_suffix(key) is None
 
     env.pageserver.stop()
-
     # Starting without the override that disabled control_plane_api
+    env.pageserver.patch_config_toml_nonrecursive(replaced_config)
     env.pageserver.start()
 
     generate_uploads_and_deletions(env, pageserver=env.pageserver, init=False)
@@ -385,9 +403,8 @@ def test_deletion_queue_recovery(
     if validate_before == ValidateBefore.NO_VALIDATE:
         failpoints.append(
             # Prevent deletion lists from being validated, we will test that they are
-            # dropped properly during recovery.  'pause' is okay here because we kill
-            # the pageserver with immediate=true
-            ("control-plane-client-validate", "pause")
+            # dropped properly during recovery.  This is such a long sleep as to be equivalent to "never"
+            ("control-plane-client-validate", "return(3600000)")
         )
 
     ps_http.configure_failpoints(failpoints)
@@ -514,9 +531,12 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # incident, but it might be unavoidable: if so, we want to be able to start up
     # and serve clients.
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
-    env.pageserver.start(
-        overrides=("--pageserver-config-override=control_plane_emergency_mode=true",),
+    replaced = env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "control_plane_emergency_mode": True,
+        }
     )
+    env.pageserver.start()
 
     # The pageserver should provide service to clients
     generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)
@@ -538,6 +558,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     # The pageserver should work fine when subsequently restarted in non-emergency mode
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
+    env.pageserver.patch_config_toml_nonrecursive(replaced)
     env.pageserver.start()
 
     generate_uploads_and_deletions(env, init=False, pageserver=env.pageserver)
@@ -680,3 +701,50 @@ def test_multi_attach(
 
     # All data we wrote while multi-attached remains readable
     workload.validate(pageservers[2].id)
+
+
+@pytest.mark.skip(reason="To be enabled after release with new local path style")
+def test_upgrade_generationless_local_file_paths(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Test pageserver behavior when startup up with local layer paths without
+    generation numbers: it should accept these layer files, and avoid doing
+    a delete/download cycle on them.
+    """
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(1000)
+
+    env.pageserver.stop()
+
+    # Rename the local paths to legacy format, to simulate what
+    # we would see when upgrading
+    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
+    files_renamed = 0
+    for filename in os.listdir(timeline_dir):
+        path = os.path.join(timeline_dir, filename)
+        log.info(f"Found file {path}")
+        if path.endswith("-v1-00000001"):
+            new_path = path[:-12]
+            os.rename(path, new_path)
+            log.info(f"Renamed {path} -> {new_path}")
+            files_renamed += 1
+
+    assert files_renamed > 0
+
+    env.pageserver.start()
+
+    workload.validate()
+
+    # Assert that there were no on-demand downloads
+    assert (
+        env.pageserver.http_client().get_metric_value(
+            "pageserver_remote_ondemand_downloaded_layers_total"
+        )
+        == 0
+    )

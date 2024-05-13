@@ -12,17 +12,12 @@ use tokio_util::sync::CancellationToken;
 use utils::backoff;
 
 use super::Generation;
-use crate::{
-    config::PageServerConf,
-    tenant::remote_timeline_client::{
-        index::IndexPart, remote_index_path, remote_initdb_archive_path,
-        remote_initdb_preserved_archive_path, remote_path,
-    },
+use crate::tenant::remote_timeline_client::{
+    index::IndexPart, remote_index_path, remote_initdb_archive_path,
+    remote_initdb_preserved_archive_path,
 };
-use remote_storage::{GenericRemoteStorage, TimeTravelError};
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeTravelError};
 use utils::id::{TenantId, TimelineId};
-
-use super::index::LayerFileMetadata;
 
 use tracing::info;
 
@@ -65,11 +60,10 @@ pub(crate) async fn upload_index_part<'a>(
 ///
 /// On an error, bumps the retries count and reschedules the entire task.
 pub(super) async fn upload_timeline_layer<'a>(
-    conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
-    source_path: &'a Utf8Path,
-    known_metadata: &'a LayerFileMetadata,
-    generation: Generation,
+    local_path: &'a Utf8Path,
+    remote_path: &'a RemotePath,
+    metadata_size: u64,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
@@ -78,8 +72,7 @@ pub(super) async fn upload_timeline_layer<'a>(
 
     pausable_failpoint!("before-upload-layer-pausable");
 
-    let storage_path = remote_path(conf, source_path, generation)?;
-    let source_file_res = fs::File::open(&source_path).await;
+    let source_file_res = fs::File::open(&local_path).await;
     let source_file = match source_file_res {
         Ok(source_file) => source_file,
         Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -90,34 +83,49 @@ pub(super) async fn upload_timeline_layer<'a>(
             // it has been written to disk yet.
             //
             // This is tested against `test_compaction_delete_before_upload`
-            info!(path = %source_path, "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
+            info!(path = %local_path, "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
             return Ok(());
         }
-        Err(e) => {
-            Err(e).with_context(|| format!("open a source file for layer {source_path:?}"))?
-        }
+        Err(e) => Err(e).with_context(|| format!("open a source file for layer {local_path:?}"))?,
     };
 
     let fs_size = source_file
         .metadata()
         .await
-        .with_context(|| format!("get the source file metadata for layer {source_path:?}"))?
+        .with_context(|| format!("get the source file metadata for layer {local_path:?}"))?
         .len();
 
-    let metadata_size = known_metadata.file_size();
     if metadata_size != fs_size {
-        bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
+        bail!("File {local_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
     }
 
     let fs_size = usize::try_from(fs_size)
-        .with_context(|| format!("convert {source_path:?} size {fs_size} usize"))?;
+        .with_context(|| format!("convert {local_path:?} size {fs_size} usize"))?;
 
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
     storage
-        .upload(reader, fs_size, &storage_path, None, cancel)
+        .upload(reader, fs_size, remote_path, None, cancel)
         .await
-        .with_context(|| format!("upload layer from local path '{source_path}'"))
+        .with_context(|| format!("upload layer from local path '{local_path}'"))
+}
+
+pub(super) async fn copy_timeline_layer(
+    storage: &GenericRemoteStorage,
+    source_path: &RemotePath,
+    target_path: &RemotePath,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    fail_point!("before-copy-layer", |_| {
+        bail!("failpoint before-copy-layer")
+    });
+
+    pausable_failpoint!("before-copy-layer-pausable");
+
+    storage
+        .copy_object(source_path, target_path, cancel)
+        .await
+        .with_context(|| format!("copy layer {source_path} to {target_path}"))
 }
 
 /// Uploads the given `initdb` data to the remote storage.
@@ -167,7 +175,7 @@ pub(crate) async fn time_travel_recover_tenant(
     let warn_after = 3;
     let max_attempts = 10;
     let mut prefixes = Vec::with_capacity(2);
-    if tenant_shard_id.is_zero() {
+    if tenant_shard_id.is_shard_zero() {
         // Also recover the unsharded prefix for a shard of zero:
         // - if the tenant is totally unsharded, the unsharded prefix contains all the data
         // - if the tenant is sharded, we still want to recover the initdb data, but we only

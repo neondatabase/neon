@@ -1,6 +1,7 @@
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 import pytest
@@ -84,11 +85,11 @@ def test_branching_with_pgbench(
             threads = []
 
         if ty == "cascade":
-            env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(i), tenant_id=tenant)
+            env.neon_cli.create_branch(f"b{i + 1}", f"b{i}", tenant_id=tenant)
         else:
-            env.neon_cli.create_branch("b{}".format(i + 1), "b0", tenant_id=tenant)
+            env.neon_cli.create_branch(f"b{i + 1}", "b0", tenant_id=tenant)
 
-        endpoints.append(env.endpoints.create_start("b{}".format(i + 1), tenant_id=tenant))
+        endpoints.append(env.endpoints.create_start(f"b{i + 1}", tenant_id=tenant))
 
         threads.append(
             threading.Thread(target=run_pgbench, args=(endpoints[-1].connstr(),), daemon=True)
@@ -403,6 +404,29 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
 
     # The one successfully created timeline should still be there.
     assert len(ps_http.timeline_list(tenant_id=env.initial_tenant)) == 1
+
+
+def test_branching_while_stuck_find_gc_cutoffs(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    client = env.pageserver.http_client()
+
+    failpoint = "Timeline::find_gc_cutoffs-pausable"
+
+    client.configure_failpoints((failpoint, "pause"))
+
+    with ThreadPoolExecutor(max_workers=1) as exec:
+        completion = exec.submit(client.timeline_gc, env.initial_tenant, env.initial_timeline, None)
+
+        wait_until_paused(env, failpoint)
+
+        env.neon_cli.create_branch(
+            tenant_id=env.initial_tenant, ancestor_branch_name="main", new_branch_name="branch"
+        )
+
+        client.configure_failpoints((failpoint, "off"))
+
+        completion.result()
 
 
 def wait_until_paused(env: NeonEnv, failpoint: str):

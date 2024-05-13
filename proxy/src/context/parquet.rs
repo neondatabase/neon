@@ -13,11 +13,16 @@ use parquet::{
     },
     record::RecordWriter,
 };
-use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
+use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
 use utils::backoff;
+
+use crate::{
+    config::{remote_storage_from_toml, OptRemoteStorageConfig},
+    context::LOG_CHAN_DISCONNECT,
+};
 
 use super::{RequestMonitoring, LOG_CHAN};
 
@@ -28,6 +33,9 @@ pub struct ParquetUploadArgs {
     /// `{bucket_name='the-bucket',bucket_region='us-east-1',prefix_in_bucket='proxy',endpoint='http://minio:9000'}`
     #[clap(long, default_value = "{}", value_parser = remote_storage_from_toml)]
     parquet_upload_remote_storage: OptRemoteStorageConfig,
+
+    #[clap(long, default_value = "{}", value_parser = remote_storage_from_toml)]
+    parquet_upload_disconnect_events_remote_storage: OptRemoteStorageConfig,
 
     /// How many rows to include in a row group
     #[clap(long, default_value_t = 8192)]
@@ -50,21 +58,13 @@ pub struct ParquetUploadArgs {
     parquet_upload_compression: Compression,
 }
 
-/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
-/// runtime type errors from the value parser we use.
-type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
-
-fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
-    RemoteStorageConfig::from_toml(&s.parse()?)
-}
-
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a upload fails, we log it at info-level, and retry.
 // But after FAILED_UPLOAD_WARN_THRESHOLD retries, we start to log it at WARN
 // level instead, as repeated failures can mean a more serious problem. If it
 // fails more than FAILED_UPLOAD_RETRIES times, we give up
-pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
-pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
+pub const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+pub const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 // the parquet crate leaves a lot to be desired...
 // what follows is an attempt to write parquet files with minimal allocs.
@@ -93,10 +93,12 @@ pub struct RequestData {
     /// Or if we make it to proxy_pass
     success: bool,
     /// Indicates if the cplane started the new compute node for this request.
-    cold_start_info: Option<&'static str>,
+    cold_start_info: &'static str,
     /// Tracks time from session start (HTTP request/libpq TCP handshake)
     /// Through to success/failure
     duration_us: u64,
+    /// If the session was successful after the disconnect, will be created one more event with filled `disconnect_timestamp`.
+    disconnect_timestamp: Option<chrono::NaiveDateTime>,
 }
 
 impl From<&RequestMonitoring> for RequestData {
@@ -117,20 +119,16 @@ impl From<&RequestMonitoring> for RequestData {
                 super::AuthMethod::ScramSha256Plus => "scram_sha_256_plus",
                 super::AuthMethod::Cleartext => "cleartext",
             }),
-            protocol: value.protocol,
+            protocol: value.protocol.as_str(),
             region: value.region,
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
-            cold_start_info: value.cold_start_info.as_ref().map(|x| match x {
-                crate::console::messages::ColdStartInfo::Unknown => "unknown",
-                crate::console::messages::ColdStartInfo::Warm => "warm",
-                crate::console::messages::ColdStartInfo::PoolHit => "pool_hit",
-                crate::console::messages::ColdStartInfo::PoolMiss => "pool_miss",
-            }),
+            cold_start_info: value.cold_start_info.as_str(),
             duration_us: SystemTime::from(value.first_packet)
                 .elapsed()
                 .unwrap_or_default()
                 .as_micros() as u64, // 584 millenia... good enough
+            disconnect_timestamp: value.disconnect_timestamp.map(|x| x.naive_utc()),
         }
     }
 }
@@ -152,8 +150,9 @@ pub async fn worker(
     LOG_CHAN.set(tx.downgrade()).unwrap();
 
     // setup row stream that will close on cancellation
+    let cancellation_token2 = cancellation_token.clone();
     tokio::spawn(async move {
-        cancellation_token.cancelled().await;
+        cancellation_token2.cancelled().await;
         // dropping this sender will cause the channel to close only once
         // all the remaining inflight requests have been completed.
         drop(tx);
@@ -178,9 +177,38 @@ pub async fn worker(
         test_remote_failures: 0,
     };
 
-    worker_inner(storage, rx, parquet_config).await
+    // TODO(anna): consider moving this to a separate function.
+    if let Some(disconnect_events_storage_config) =
+        config.parquet_upload_disconnect_events_remote_storage
+    {
+        let (tx_disconnect, mut rx_disconnect) = mpsc::unbounded_channel();
+        LOG_CHAN_DISCONNECT.set(tx_disconnect.downgrade()).unwrap();
+
+        // setup row stream that will close on cancellation
+        tokio::spawn(async move {
+            cancellation_token.cancelled().await;
+            // dropping this sender will cause the channel to close only once
+            // all the remaining inflight requests have been completed.
+            drop(tx_disconnect);
+        });
+        let rx_disconnect = futures::stream::poll_fn(move |cx| rx_disconnect.poll_recv(cx));
+        let rx_disconnect = rx_disconnect.map(RequestData::from);
+
+        let storage_disconnect =
+            GenericRemoteStorage::from_config(&disconnect_events_storage_config)
+                .context("remote storage for disconnect events init")?;
+        let parquet_config_disconnect = parquet_config.clone();
+        tokio::try_join!(
+            worker_inner(storage, rx, parquet_config),
+            worker_inner(storage_disconnect, rx_disconnect, parquet_config_disconnect)
+        )
+        .map(|_| ())
+    } else {
+        worker_inner(storage, rx, parquet_config).await
+    }
 }
 
+#[derive(Clone, Debug)]
 struct ParquetConfig {
     propeties: WriterPropertiesPtr,
     rows_per_group: usize,
@@ -424,6 +452,7 @@ mod tests {
                     )
                     .unwrap(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+                    upload_storage_class: None,
                 }),
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             })
@@ -460,8 +489,9 @@ mod tests {
             region: "us-east-1",
             error: None,
             success: rng.gen(),
-            cold_start_info: Some("no"),
+            cold_start_info: "no",
             duration_us: rng.gen_range(0..30_000_000),
+            disconnect_timestamp: None,
         }
     }
 
@@ -530,15 +560,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1314406, 3, 6000),
-                (1314399, 3, 6000),
-                (1314459, 3, 6000),
-                (1314416, 3, 6000),
-                (1314546, 3, 6000),
-                (1314388, 3, 6000),
-                (1314180, 3, 6000),
-                (1314416, 3, 6000),
-                (438359, 1, 2000)
+                (1315008, 3, 6000),
+                (1315001, 3, 6000),
+                (1315061, 3, 6000),
+                (1315018, 3, 6000),
+                (1315148, 3, 6000),
+                (1314990, 3, 6000),
+                (1314782, 3, 6000),
+                (1315018, 3, 6000),
+                (438575, 1, 2000)
             ]
         );
 
@@ -568,11 +598,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1220668, 5, 10000),
-                (1226818, 5, 10000),
-                (1228612, 5, 10000),
-                (1227974, 5, 10000),
-                (1219252, 5, 10000)
+                (1221738, 5, 10000),
+                (1227888, 5, 10000),
+                (1229682, 5, 10000),
+                (1229044, 5, 10000),
+                (1220322, 5, 10000)
             ]
         );
 
@@ -604,11 +634,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1206315, 5, 10000),
-                (1206046, 5, 10000),
-                (1206339, 5, 10000),
-                (1206327, 5, 10000),
-                (1206582, 5, 10000)
+                (1207385, 5, 10000),
+                (1207116, 5, 10000),
+                (1207409, 5, 10000),
+                (1207397, 5, 10000),
+                (1207652, 5, 10000)
             ]
         );
 
@@ -633,15 +663,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1314406, 3, 6000),
-                (1314399, 3, 6000),
-                (1314459, 3, 6000),
-                (1314416, 3, 6000),
-                (1314546, 3, 6000),
-                (1314388, 3, 6000),
-                (1314180, 3, 6000),
-                (1314416, 3, 6000),
-                (438359, 1, 2000)
+                (1315008, 3, 6000),
+                (1315001, 3, 6000),
+                (1315061, 3, 6000),
+                (1315018, 3, 6000),
+                (1315148, 3, 6000),
+                (1314990, 3, 6000),
+                (1314782, 3, 6000),
+                (1315018, 3, 6000),
+                (438575, 1, 2000)
             ]
         );
 
@@ -678,7 +708,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(658837, 2, 3001), (658551, 2, 3000), (658347, 2, 2999)]
+            [(659240, 2, 3001), (658954, 2, 3000), (658750, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

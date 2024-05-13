@@ -19,6 +19,8 @@ use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
+use pageserver_api::models::TenantScanRemoteStorageResponse;
+use pageserver_api::models::TenantScanRemoteStorageShard;
 use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
@@ -29,6 +31,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
+use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
 use tenant_size_model::{SizeResult, StorageModel};
@@ -49,14 +52,18 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::{
-    GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
-    TenantSlotError, TenantSlotUpsertError, TenantStateError,
+    GetTenantError, TenantManager, TenantMapError, TenantMapInsertError, TenantSlotError,
+    TenantSlotUpsertError, TenantStateError,
 };
 use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
 use crate::tenant::remote_timeline_client;
+use crate::tenant::remote_timeline_client::download_index_part;
+use crate::tenant::remote_timeline_client::list_remote_tenant_shards;
+use crate::tenant::remote_timeline_client::list_remote_timelines;
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
+use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::SpawnMode;
@@ -160,6 +167,9 @@ impl From<PageReconstructError> for ApiError {
     fn from(pre: PageReconstructError) -> ApiError {
         match pre {
             PageReconstructError::Other(pre) => ApiError::InternalServerError(pre),
+            PageReconstructError::MissingKey(e) => {
+                ApiError::InternalServerError(anyhow::anyhow!("{e}"))
+            }
             PageReconstructError::Cancelled => {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
             }
@@ -249,16 +259,11 @@ impl From<GetTenantError> for ApiError {
     fn from(tse: GetTenantError) -> ApiError {
         match tse {
             GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            GetTenantError::Broken(reason) => {
-                ApiError::InternalServerError(anyhow!("tenant is broken: {}", reason))
-            }
             GetTenantError::NotActive(_) => {
                 // Why is this not `ApiError::NotFound`?
                 // Because we must be careful to never return 404 for a tenant if it does
                 // in fact exist locally. If we did, the caller could draw the conclusion
                 // that it can attach the tenant to another PS and we'd be in split-brain.
-                //
-                // (We can produce this variant only in `mgr::get_tenant(..., active=true)` calls).
                 ApiError::ResourceUnavailable("Tenant not yet active".into())
             }
             GetTenantError::MapState(e) => ApiError::ResourceUnavailable(format!("{e}").into()),
@@ -269,24 +274,14 @@ impl From<GetTenantError> for ApiError {
 impl From<GetActiveTenantError> for ApiError {
     fn from(e: GetActiveTenantError) -> ApiError {
         match e {
+            GetActiveTenantError::Broken(reason) => {
+                ApiError::InternalServerError(anyhow!("tenant is broken: {}", reason))
+            }
             GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{}", e)),
             GetActiveTenantError::Cancelled => ApiError::ShuttingDown,
             GetActiveTenantError::NotFound(gte) => gte.into(),
             GetActiveTenantError::WaitForActiveTimeout { .. } => {
                 ApiError::ResourceUnavailable(format!("{}", e).into())
-            }
-        }
-    }
-}
-
-impl From<SetNewTenantConfigError> for ApiError {
-    fn from(e: SetNewTenantConfigError) -> ApiError {
-        match e {
-            SetNewTenantConfigError::GetTenant(tid) => {
-                ApiError::NotFound(anyhow!("tenant {}", tid).into())
-            }
-            e @ (SetNewTenantConfigError::Persist(_) | SetNewTenantConfigError::Other(_)) => {
-                ApiError::InternalServerError(anyhow::Error::new(e))
             }
         }
     }
@@ -472,8 +467,12 @@ async fn reload_auth_validation_keys_handler(
             json_response(StatusCode::OK, ())
         }
         Err(e) => {
+            let err_msg = "Error reloading public keys";
             warn!("Error reloading public keys from {key_path:?}: {e:}");
-            json_response(StatusCode::INTERNAL_SERVER_ERROR, ())
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HttpErrorBody::from_msg(err_msg.to_string()),
+            )
         }
     }
 }
@@ -495,7 +494,7 @@ async fn timeline_create_handler(
     async {
         let tenant = state
             .tenant_manager
-            .get_attached_tenant_shard(tenant_shard_id, false)?;
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -535,10 +534,13 @@ async fn timeline_create_handler(
                     HttpErrorBody::from_msg("Tenant shutting down".to_string()),
                 )
             }
-            Err(
-                e @ tenant::CreateTimelineError::Conflict
-                | e @ tenant::CreateTimelineError::AlreadyCreating,
-            ) => json_response(StatusCode::CONFLICT, HttpErrorBody::from_msg(e.to_string())),
+            Err(e @ tenant::CreateTimelineError::Conflict) => {
+                json_response(StatusCode::CONFLICT, HttpErrorBody::from_msg(e.to_string()))
+            }
+            Err(e @ tenant::CreateTimelineError::AlreadyCreating) => json_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
             Err(tenant::CreateTimelineError::AncestorLsn(err)) => json_response(
                 StatusCode::NOT_ACCEPTABLE,
                 HttpErrorBody::from_msg(format!("{err:#}")),
@@ -581,7 +583,7 @@ async fn timeline_list_handler(
     let response_data = async {
         let tenant = state
             .tenant_manager
-            .get_attached_tenant_shard(tenant_shard_id, false)?;
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -619,6 +621,7 @@ async fn timeline_preserve_initdb_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
     // Part of the process for disaster recovery from safekeeper-stored WAL:
     // If we don't recover into a new timeline but want to keep the timeline ID,
@@ -626,7 +629,9 @@ async fn timeline_preserve_initdb_handler(
     // location where timeline recreation cand find it.
 
     async {
-        let tenant = mgr::get_tenant(tenant_shard_id, false)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -668,7 +673,7 @@ async fn timeline_detail_handler(
     let timeline_info = async {
         let tenant = state
             .tenant_manager
-            .get_attached_tenant_shard(tenant_shard_id, false)?;
+            .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -705,7 +710,7 @@ async fn get_lsn_by_timestamp_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -756,7 +761,7 @@ async fn get_timestamp_of_lsn_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         // Requires SLRU contents, which are only stored on shard zero
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
@@ -781,7 +786,9 @@ async fn get_timestamp_of_lsn_handler(
             let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
             json_response(StatusCode::OK, time)
         }
-        None => json_response(StatusCode::NOT_FOUND, ()),
+        None => Err(ApiError::NotFound(
+            anyhow::anyhow!("Timestamp for lsn {} not found", lsn).into(),
+        )),
     }
 }
 
@@ -855,7 +862,7 @@ async fn timeline_delete_handler(
 
     let tenant = state
         .tenant_manager
-        .get_attached_tenant_shard(tenant_shard_id, false)
+        .get_attached_tenant_shard(tenant_shard_id)
         .map_err(|e| {
             match e {
                 // GetTenantError has a built-in conversion to ApiError, but in this context we don't
@@ -973,10 +980,11 @@ async fn tenant_list_handler(
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
+    let state = get_state(&request);
 
-    let response_data = mgr::list_tenants()
-        .instrument(info_span!("tenant_list"))
-        .await
+    let response_data = state
+        .tenant_manager
+        .list_tenants()
         .map_err(|_| {
             ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".into())
         })?
@@ -999,9 +1007,27 @@ async fn tenant_status(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
+
+    // In tests, sometimes we want to query the state of a tenant without auto-activating it if it's currently waiting.
+    let activate = true;
+    #[cfg(feature = "testing")]
+    let activate = parse_query_param(&request, "activate")?.unwrap_or(activate);
 
     let tenant_info = async {
-        let tenant = mgr::get_tenant(tenant_shard_id, false)?;
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        if activate {
+            // This is advisory: we prefer to let the tenant activate on-demand when this function is
+            // called, but it is still valid to return 200 and describe the current state of the tenant
+            // if it doesn't make it into an active state.
+            tenant
+                .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
+                .await
+                .ok();
+        }
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
@@ -1074,15 +1100,19 @@ async fn tenant_size_handler(
     let inputs_only: Option<bool> = parse_query_param(&request, "inputs_only")?;
     let retention_period: Option<u64> = parse_query_param(&request, "retention_period")?;
     let headers = request.headers();
+    let state = get_state(&request);
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let tenant = mgr::get_tenant(tenant_shard_id, true)?;
-
-    if !tenant_shard_id.is_zero() {
+    if !tenant_shard_id.is_shard_zero() {
         return Err(ApiError::BadRequest(anyhow!(
             "Size calculations are only available on shard zero"
         )));
     }
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
     // this can be long operation
     let inputs = tenant
@@ -1152,10 +1182,15 @@ async fn tenant_shard_split_handler(
     let state = get_state(&request);
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
     let new_shards = state
         .tenant_manager
         .shard_split(
-            tenant_shard_id,
+            tenant,
             ShardCount::new(req.new_shard_count),
             req.new_stripe_size,
             &ctx,
@@ -1194,13 +1229,15 @@ async fn layer_download_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let layer_name = LayerName::from_str(layer_file_name)
+        .map_err(|s| ApiError::BadRequest(anyhow::anyhow!(s)))?;
     let state = get_state(&request);
 
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
     let downloaded = timeline
-        .download_layer(layer_file_name)
+        .download_layer(&layer_name)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1224,11 +1261,14 @@ async fn evict_timeline_layer_handler(
     let layer_file_name = get_request_param(&request, "layer_file_name")?;
     let state = get_state(&request);
 
+    let layer_name = LayerName::from_str(layer_file_name)
+        .map_err(|s| ApiError::BadRequest(anyhow::anyhow!(s)))?;
+
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
     let evicted = timeline
-        .evict_layer(layer_file_name)
+        .evict_layer(&layer_name)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1373,8 +1413,11 @@ async fn get_tenant_config_handler(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
 
-    let tenant = mgr::get_tenant(tenant_shard_id, false)?;
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
 
     let response = HashMap::from([
         (
@@ -1402,15 +1445,31 @@ async fn update_tenant_config_handler(
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant_conf =
+    let new_tenant_conf =
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
     let state = get_state(&request);
-    state
+
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
+    let tenant = state
         .tenant_manager
-        .set_new_tenant_config(tenant_conf, tenant_id)
-        .instrument(info_span!("tenant_config", %tenant_id))
-        .await?;
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+    // This is a legacy API that only operates on attached tenants: the preferred
+    // API to use is the location_config/ endpoint, which lets the caller provide
+    // the full LocationConf.
+    let location_conf = LocationConf::attached_single(
+        new_tenant_conf.clone(),
+        tenant.get_generation(),
+        &ShardParameters::default(),
+    );
+
+    crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    tenant.set_new_tenant_config(new_tenant_conf);
 
     json_response(StatusCode::OK, ())
 }
@@ -1634,10 +1693,12 @@ async fn handle_tenant_break(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&r, "tenant_shard_id")?;
 
-    let tenant = crate::tenant::mgr::get_tenant(tenant_shard_id, true)
-        .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
-
-    tenant.set_broken("broken from test".to_owned()).await;
+    let state = get_state(&r);
+    state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?
+        .set_broken("broken from test".to_owned())
+        .await;
 
     json_response(StatusCode::OK, ())
 }
@@ -1772,6 +1833,75 @@ async fn timeline_download_remote_layers_handler_get(
     json_response(StatusCode::OK, info)
 }
 
+async fn timeline_detach_ancestor_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    use crate::tenant::timeline::detach_ancestor::Options;
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
+
+    async move {
+        let mut options = Options::default();
+
+        let rewrite_concurrency =
+            parse_query_param::<_, std::num::NonZeroUsize>(&request, "rewrite_concurrency")?;
+        let copy_concurrency =
+            parse_query_param::<_, std::num::NonZeroUsize>(&request, "copy_concurrency")?;
+
+        [
+            (&mut options.rewrite_concurrency, rewrite_concurrency),
+            (&mut options.copy_concurrency, copy_concurrency),
+        ]
+        .into_iter()
+        .filter_map(|(target, val)| val.map(|val| (target, val)))
+        .for_each(|(target, val)| *target = val);
+
+        let state = get_state(&request);
+
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+        let ctx = RequestContext::new(TaskKind::DetachAncestor, DownloadBehavior::Download);
+        let ctx = &ctx;
+
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(|e| ApiError::NotFound(e.into()))?;
+
+        let (_guard, prepared) = timeline
+            .prepare_to_detach_from_ancestor(&tenant, options, ctx)
+            .await
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+        let res = state
+            .tenant_manager
+            .complete_detaching_timeline_ancestor(tenant_shard_id, timeline_id, prepared, ctx)
+            .await;
+
+        match res {
+            Ok(reparented_timelines) => {
+                let resp = pageserver_api::models::detach_ancestor::AncestorDetached {
+                    reparented_timelines,
+                };
+
+                json_response(StatusCode::OK, resp)
+            }
+            Err(e) => Err(ApiError::InternalServerError(
+                e.context("timeline detach completion"),
+            )),
+        }
+    }
+    .instrument(span)
+    .await
+}
+
 async fn deletion_queue_flush(
     r: Request<Body>,
     cancel: CancellationToken,
@@ -1863,12 +1993,14 @@ async fn timeline_collect_keyspace(
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
         let at_lsn = at_lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
-        let keys = timeline
+        let (dense_ks, sparse_ks) = timeline
             .collect_keyspace(at_lsn, &ctx)
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
-        let res = pageserver_api::models::partitioning::Partitioning { keys, at_lsn };
+        // This API is currently used by pagebench. Pagebench will iterate all keys within the keyspace.
+        // Therefore, we split dense/sparse keys in this API.
+        let res = pageserver_api::models::partitioning::Partitioning { keys: dense_ks, sparse_keys: sparse_ks, at_lsn };
 
         json_response(StatusCode::OK, res)
     }
@@ -1881,7 +2013,7 @@ async fn active_timeline_of_active_tenant(
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
 ) -> Result<Arc<Timeline>, ApiError> {
-    let tenant = tenant_manager.get_attached_tenant_shard(tenant_shard_id, false)?;
+    let tenant = tenant_manager.get_attached_tenant_shard(tenant_shard_id)?;
 
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
@@ -1986,6 +2118,79 @@ async fn secondary_upload_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn tenant_scan_remote_handler(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+
+    let Some(remote_storage) = state.remote_storage.as_ref() else {
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "Remote storage not configured"
+        )));
+    };
+
+    let mut response = TenantScanRemoteStorageResponse::default();
+
+    let (shards, _other_keys) =
+        list_remote_tenant_shards(remote_storage, tenant_id, cancel.clone())
+            .await
+            .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
+
+    for tenant_shard_id in shards {
+        let (timeline_ids, _other_keys) =
+            list_remote_timelines(remote_storage, tenant_shard_id, cancel.clone())
+                .await
+                .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
+
+        let mut generation = Generation::none();
+        for timeline_id in timeline_ids {
+            match download_index_part(
+                remote_storage,
+                &tenant_shard_id,
+                &timeline_id,
+                Generation::MAX,
+                &cancel,
+            )
+            .instrument(info_span!("download_index_part",
+                         tenant_id=%tenant_shard_id.tenant_id,
+                         shard_id=%tenant_shard_id.shard_slug(),
+                         %timeline_id))
+            .await
+            {
+                Ok((index_part, index_generation)) => {
+                    tracing::info!("Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
+                        index_part.layer_metadata.len(), index_part.get_disk_consistent_lsn());
+                    generation = std::cmp::max(generation, index_generation);
+                }
+                Err(DownloadError::NotFound) => {
+                    // This is normal for tenants that were created with multiple shards: they have an unsharded path
+                    // containing the timeline's initdb tarball but no index.  Otherwise it is a bit strange.
+                    tracing::info!("Timeline path {tenant_shard_id}/{timeline_id} exists in remote storage but has no index, skipping");
+                    continue;
+                }
+                Err(e) => {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
+                }
+            };
+        }
+
+        response.shards.push(TenantScanRemoteStorageShard {
+            tenant_shard_id,
+            generation: generation.into(),
+        });
+    }
+
+    if response.shards.is_empty() {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("No shards found for tenant ID {tenant_id}").into(),
+        ));
+    }
+
+    json_response(StatusCode::OK, response)
+}
+
 async fn secondary_download_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -2028,6 +2233,27 @@ async fn secondary_download_handler(
     let progress = secondary_tenant.progress.lock().unwrap().clone();
 
     json_response(status, progress)
+}
+
+async fn secondary_status_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+
+    let Some(secondary_tenant) = state
+        .tenant_manager
+        .get_secondary_tenant_shard(tenant_shard_id)
+    else {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Shard {} not found", tenant_shard_id).into(),
+        ));
+    };
+
+    let progress = secondary_tenant.progress.lock().unwrap().clone();
+
+    json_response(StatusCode::OK, progress)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -2364,6 +2590,10 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/download_remote_layers",
             |r| api_handler(r, timeline_download_remote_layers_handler_get),
         )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/detach_ancestor",
+            |r| api_handler(r, timeline_detach_ancestor_handler),
+        )
         .delete("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_delete_handler)
         })
@@ -2382,11 +2612,17 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_shard_id/heatmap_upload", |r| {
             api_handler(r, secondary_upload_handler)
         })
+        .get("/v1/tenant/:tenant_id/scan_remote_storage", |r| {
+            api_handler(r, tenant_scan_remote_handler)
+        })
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
         })
         .put("/v1/deletion_queue/flush", |r| {
             api_handler(r, deletion_queue_flush)
+        })
+        .get("/v1/tenant/:tenant_shard_id/secondary/status", |r| {
+            api_handler(r, secondary_status_handler)
         })
         .post("/v1/tenant/:tenant_shard_id/secondary/download", |r| {
             api_handler(r, secondary_download_handler)

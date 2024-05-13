@@ -51,6 +51,7 @@ pub struct EvictionTaskTenantState {
 impl Timeline {
     pub(super) fn launch_eviction_task(
         self: &Arc<Self>,
+        parent: Arc<Tenant>,
         background_tasks_can_start: Option<&completion::Barrier>,
     ) {
         let self_clone = Arc::clone(self);
@@ -66,20 +67,19 @@ impl Timeline {
             ),
             false,
             async move {
-                let cancel = task_mgr::shutdown_token();
                 tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()); }
+                    _ = self_clone.cancel.cancelled() => { return Ok(()); }
                     _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
                 };
 
-                self_clone.eviction_task(cancel).await;
+                self_clone.eviction_task(parent).await;
                 Ok(())
             },
         );
     }
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
-    async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
+    async fn eviction_task(self: Arc<Self>, tenant: Arc<Tenant>) {
         use crate::tenant::tasks::random_init_delay;
 
         // acquire the gate guard only once within a useful span
@@ -94,7 +94,7 @@ impl Timeline {
                 EvictionPolicy::OnlyImitiate(lat) => lat.period,
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
-            if random_init_delay(period, &cancel).await.is_err() {
+            if random_init_delay(period, &self.cancel).await.is_err() {
                 return;
             }
         }
@@ -103,13 +103,13 @@ impl Timeline {
         loop {
             let policy = self.get_eviction_policy();
             let cf = self
-                .eviction_iteration(&policy, &cancel, &guard, &ctx)
+                .eviction_iteration(&tenant, &policy, &self.cancel, &guard, &ctx)
                 .await;
 
             match cf {
                 ControlFlow::Break(()) => break,
                 ControlFlow::Continue(sleep_until) => {
-                    if tokio::time::timeout_at(sleep_until, cancel.cancelled())
+                    if tokio::time::timeout_at(sleep_until, self.cancel.cancelled())
                         .await
                         .is_ok()
                     {
@@ -123,6 +123,7 @@ impl Timeline {
     #[instrument(skip_all, fields(policy_kind = policy.discriminant_str()))]
     async fn eviction_iteration(
         self: &Arc<Self>,
+        tenant: &Tenant,
         policy: &EvictionPolicy,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -137,7 +138,7 @@ impl Timeline {
             }
             EvictionPolicy::LayerAccessThreshold(p) => {
                 match self
-                    .eviction_iteration_threshold(p, cancel, gate, ctx)
+                    .eviction_iteration_threshold(tenant, p, cancel, gate, ctx)
                     .await
                 {
                     ControlFlow::Break(()) => return ControlFlow::Break(()),
@@ -146,7 +147,11 @@ impl Timeline {
                 (p.period, p.threshold)
             }
             EvictionPolicy::OnlyImitiate(p) => {
-                if self.imitiate_only(p, cancel, gate, ctx).await.is_break() {
+                if self
+                    .imitiate_only(tenant, p, cancel, gate, ctx)
+                    .await
+                    .is_break()
+                {
                     return ControlFlow::Break(());
                 }
                 (p.period, p.threshold)
@@ -175,6 +180,7 @@ impl Timeline {
 
     async fn eviction_iteration_threshold(
         self: &Arc<Self>,
+        tenant: &Tenant,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
@@ -182,21 +188,10 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
-        let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
-            BackgroundLoopKind::Eviction,
-            ctx,
-        );
+        let permit = self.acquire_imitation_permit(cancel, ctx).await?;
 
-        let _permit = tokio::select! {
-            permit = acquire_permit => permit,
-            _ = cancel.cancelled() => return ControlFlow::Break(()),
-            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
-        };
-
-        match self.imitate_layer_accesses(p, cancel, gate, ctx).await {
-            ControlFlow::Break(()) => return ControlFlow::Break(()),
-            ControlFlow::Continue(()) => (),
-        }
+        self.imitate_layer_accesses(tenant, p, cancel, gate, permit, ctx)
+            .await?;
 
         #[derive(Debug, Default)]
         struct EvictionStats {
@@ -315,23 +310,33 @@ impl Timeline {
     /// disk usage based eviction task.
     async fn imitiate_only(
         self: &Arc<Self>,
+        tenant: &Tenant,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
+        let permit = self.acquire_imitation_permit(cancel, ctx).await?;
+
+        self.imitate_layer_accesses(tenant, p, cancel, gate, permit, ctx)
+            .await
+    }
+
+    async fn acquire_imitation_permit(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> ControlFlow<(), tokio::sync::SemaphorePermit<'static>> {
         let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
             BackgroundLoopKind::Eviction,
             ctx,
         );
 
-        let _permit = tokio::select! {
-            permit = acquire_permit => permit,
-            _ = cancel.cancelled() => return ControlFlow::Break(()),
-            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
-        };
-
-        self.imitate_layer_accesses(p, cancel, gate, ctx).await
+        tokio::select! {
+            permit = acquire_permit => ControlFlow::Continue(permit),
+            _ = cancel.cancelled() => ControlFlow::Break(()),
+            _ = self.cancel.cancelled() => ControlFlow::Break(()),
+        }
     }
 
     /// If we evict layers but keep cached values derived from those layers, then
@@ -361,12 +366,14 @@ impl Timeline {
     #[instrument(skip_all)]
     async fn imitate_layer_accesses(
         &self,
+        tenant: &Tenant,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
+        permit: tokio::sync::SemaphorePermit<'static>,
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
-        if !self.tenant_shard_id.is_zero() {
+        if !self.tenant_shard_id.is_shard_zero() {
             // Shards !=0 do not maintain accurate relation sizes, and do not need to calculate logical size
             // for consumption metrics (consumption metrics are only sent from shard 0).  We may therefore
             // skip imitating logical size accesses for eviction purposes.
@@ -396,17 +403,32 @@ impl Timeline {
         // Make one of the tenant's timelines draw the short straw and run the calculation.
         // The others wait until the calculation is done so that they take into account the
         // imitated accesses that the winner made.
-        let tenant = match crate::tenant::mgr::get_tenant(self.tenant_shard_id, true) {
-            Ok(t) => t,
-            Err(_) => {
-                return ControlFlow::Break(());
+        let (mut state, _permit) = {
+            if let Ok(locked) = tenant.eviction_task_tenant_state.try_lock() {
+                (locked, permit)
+            } else {
+                // we might need to wait for a long time here in case of pathological synthetic
+                // size calculation performance
+                drop(permit);
+                let locked = tokio::select! {
+                    locked = tenant.eviction_task_tenant_state.lock() => locked,
+                    _ = self.cancel.cancelled() => {
+                        return ControlFlow::Break(())
+                    },
+                    _ = cancel.cancelled() => {
+                        return ControlFlow::Break(())
+                    }
+                };
+                // then reacquire -- this will be bad if there is a lot of traffic, but because we
+                // released the permit, the overall latency will be much better.
+                let permit = self.acquire_imitation_permit(cancel, ctx).await?;
+                (locked, permit)
             }
         };
-        let mut state = tenant.eviction_task_tenant_state.lock().await;
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_synthetic_size_calculation_worker(&tenant, cancel, ctx)
+                self.imitate_synthetic_size_calculation_worker(tenant, cancel, ctx)
                     .await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now());
             }
@@ -480,7 +502,7 @@ impl Timeline {
     #[instrument(skip_all)]
     async fn imitate_synthetic_size_calculation_worker(
         &self,
-        tenant: &Arc<Tenant>,
+        tenant: &Tenant,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) {

@@ -10,6 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
+use crate::context::RequestContext;
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
 use crate::page_cache::PageWriteGuard;
@@ -32,11 +33,11 @@ pub use io_engine::feature_test as io_engine_feature_test;
 pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
+use self::owned_buffers_io::write::OwnedAsyncWriter;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
     //!
@@ -615,6 +616,7 @@ impl VirtualFile {
         &self,
         buf: B,
         mut offset: u64,
+        ctx: &RequestContext,
     ) -> (B::Buf, Result<(), Error>) {
         let buf_len = buf.bytes_init();
         if buf_len == 0 {
@@ -623,7 +625,7 @@ impl VirtualFile {
         let mut buf = buf.slice(0..buf_len);
         while !buf.is_empty() {
             let res;
-            (buf, res) = self.write_at(buf, offset).await;
+            (buf, res) = self.write_at(buf, offset, ctx).await;
             match res {
                 Ok(0) => {
                     return (
@@ -652,6 +654,7 @@ impl VirtualFile {
     pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
+        ctx: &RequestContext,
     ) -> (B::Buf, Result<usize, Error>) {
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
@@ -660,7 +663,7 @@ impl VirtualFile {
         let mut buf = buf.slice(0..nbytes);
         while !buf.is_empty() {
             let res;
-            (buf, res) = self.write(buf).await;
+            (buf, res) = self.write(buf, ctx).await;
             match res {
                 Ok(0) => {
                     return (
@@ -684,9 +687,10 @@ impl VirtualFile {
     async fn write<B: IoBuf + Send>(
         &mut self,
         buf: Slice<B>,
+        ctx: &RequestContext,
     ) -> (Slice<B>, Result<usize, std::io::Error>) {
         let pos = self.pos;
-        let (buf, res) = self.write_at(buf, pos).await;
+        let (buf, res) = self.write_at(buf, pos, ctx).await;
         let n = match res {
             Ok(n) => n,
             Err(e) => return (buf, Err(e)),
@@ -724,6 +728,7 @@ impl VirtualFile {
         &self,
         buf: Slice<B>,
         offset: u64,
+        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
     ) -> (Slice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
@@ -782,7 +787,7 @@ where
         }
     }
     // NB: don't use `buf.is_empty()` here; it is from the
-    // `impl Deref for Slice { Target = [u8] }`; the the &[u8]
+    // `impl Deref for Slice { Target = [u8] }`; the &[u8]
     // returned by it only covers the initialized portion of `buf`.
     // Whereas we're interested in ensuring that we filled the entire
     // buffer that the user passed in.
@@ -1083,6 +1088,18 @@ impl Drop for VirtualFile {
     }
 }
 
+impl OwnedAsyncWriter for VirtualFile {
+    #[inline(always)]
+    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        buf: B,
+        ctx: &RequestContext,
+    ) -> std::io::Result<(usize, B::Buf)> {
+        let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
+        res.map(move |v| (v, buf))
+    }
+}
+
 impl OpenFiles {
     fn new(num_slots: usize) -> OpenFiles {
         let mut slots = Box::new(Vec::with_capacity(num_slots));
@@ -1135,6 +1152,9 @@ fn get_open_files() -> &'static OpenFiles {
 
 #[cfg(test)]
 mod tests {
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+
     use super::*;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
@@ -1166,10 +1186,11 @@ mod tests {
             &self,
             buf: B,
             offset: u64,
+            ctx: &RequestContext,
         ) -> Result<(), Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
-                    let (_buf, res) = file.write_all_at(buf, offset).await;
+                    let (_buf, res) = file.write_all_at(buf, offset, ctx).await;
                     res
                 }
                 MaybeVirtualFile::File(file) => {
@@ -1190,10 +1211,11 @@ mod tests {
         async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
             &mut self,
             buf: B,
+            ctx: &RequestContext,
         ) -> Result<(), Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
-                    let (_buf, res) = file.write_all(buf).await;
+                    let (_buf, res) = file.write_all(buf, ctx).await;
                     res.map(|_| ())
                 }
                 MaybeVirtualFile::File(file) => {
@@ -1264,6 +1286,7 @@ mod tests {
         OF: Fn(Utf8PathBuf, OpenOptions) -> FT,
         FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
     {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
@@ -1277,7 +1300,7 @@ mod tests {
                 .to_owned(),
         )
         .await?;
-        file_a.write_all(b"foobar".to_vec()).await?;
+        file_a.write_all(b"foobar".to_vec(), &ctx).await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string().await.unwrap_err();
@@ -1286,7 +1309,7 @@ mod tests {
         let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a.write_all(b"bar".to_vec()).await.unwrap_err();
+        let _ = file_a.write_all(b"bar".to_vec(), &ctx).await.unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string().await?);
@@ -1328,8 +1351,8 @@ mod tests {
                 .to_owned(),
         )
         .await?;
-        file_b.write_all_at(b"BAR".to_vec(), 3).await?;
-        file_b.write_all_at(b"FOO".to_vec(), 0).await?;
+        file_b.write_all_at(b"BAR".to_vec(), 3, &ctx).await?;
+        file_b.write_all_at(b"FOO".to_vec(), 0, &ctx).await?;
 
         assert_eq!(file_b.read_string_at(2, 3).await?, "OBA");
 

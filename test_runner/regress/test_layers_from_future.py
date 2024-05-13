@@ -3,8 +3,8 @@ import time
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
 from fixtures.pageserver.types import (
-    DeltaLayerFileName,
-    ImageLayerFileName,
+    DeltaLayerName,
+    ImageLayerName,
     is_future_layer,
 )
 from fixtures.pageserver.utils import (
@@ -53,6 +53,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         "checkpoint_timeout": "24h",  # something we won't reach
         "checkpoint_distance": f"{50 * (1024**2)}",  # something we won't reach, we checkpoint manually
         "image_creation_threshold": "100",  # we want to control when image is created
+        "image_layer_creation_check_threshold": "0",
         "compaction_threshold": f"{l0_l1_threshold}",
         "compaction_target_size": f"{128 * (1024**3)}",  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
     }
@@ -80,7 +81,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     current = get_index_part()
     assert len(set(current.layer_metadata.keys())) == 1
     layer_file_name = list(current.layer_metadata.keys())[0]
-    assert isinstance(layer_file_name, DeltaLayerFileName)
+    assert isinstance(layer_file_name, DeltaLayerName)
     assert layer_file_name.is_l0(), f"{layer_file_name}"
 
     log.info("force image layer creation in the future by writing some data into in-memory layer")
@@ -145,7 +146,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     future_layers = get_future_layers()
     assert len(future_layers) == 1
     future_layer = future_layers[0]
-    assert isinstance(future_layer, ImageLayerFileName)
+    assert isinstance(future_layer, ImageLayerName)
     assert future_layer.lsn == last_record_lsn
     log.info(
         f"got layer from the future: lsn={future_layer.lsn} disk_consistent_lsn={ip.disk_consistent_lsn} last_record_lsn={last_record_lsn}"

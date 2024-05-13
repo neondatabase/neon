@@ -1,3 +1,4 @@
+pub mod detach_ancestor;
 pub mod partitioning;
 pub mod utilization;
 
@@ -8,6 +9,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
+    str::FromStr,
     time::{Duration, SystemTime},
 };
 
@@ -20,6 +22,7 @@ use utils::{
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
+    serde_system_time,
 };
 
 use crate::controller_api::PlacementPolicy;
@@ -301,6 +304,32 @@ pub struct TenantConfig {
     pub heatmap_period: Option<String>,
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
+    pub image_layer_creation_check_threshold: Option<u8>,
+    pub switch_aux_file_policy: Option<AuxFilePolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuxFilePolicy {
+    V1,
+    V2,
+    CrossValidation,
+}
+
+impl FromStr for AuxFilePolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.to_lowercase();
+        if s == "v1" {
+            Ok(Self::V1)
+        } else if s == "v2" {
+            Ok(Self::V2)
+        } else if s == "crossvalidation" || s == "cross_validation" {
+            Ok(Self::CrossValidation)
+        } else {
+            anyhow::bail!("cannot parse {} to aux file policy", s)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,7 +456,6 @@ pub struct StatusResponse {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantLocationConfigRequest {
-    pub tenant_id: Option<TenantShardId>,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -746,9 +774,17 @@ pub struct TimelineGcRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalRedoManagerProcessStatus {
+    pub pid: u32,
+    /// The strum-generated `into::<&'static str>()` for `pageserver::walredo::ProcessKind`.
+    /// `ProcessKind` are a transitory thing, so, they have no enum representation in `pageserver_api`.
+    pub kind: Cow<'static, str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRedoManagerStatus {
     pub last_redo_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub pid: Option<u32>,
+    pub process: Option<WalRedoManagerProcessStatus>,
 }
 
 /// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating
@@ -757,11 +793,7 @@ pub struct WalRedoManagerStatus {
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct SecondaryProgress {
     /// The remote storage LastModified time of the heatmap object we last downloaded.
-    #[serde(
-        serialize_with = "opt_ser_rfc3339_millis",
-        deserialize_with = "opt_deser_rfc3339_millis"
-    )]
-    pub heatmap_mtime: Option<SystemTime>,
+    pub heatmap_mtime: Option<serde_system_time::SystemTime>,
 
     /// The number of layers currently on-disk
     pub layers_downloaded: usize,
@@ -774,27 +806,15 @@ pub struct SecondaryProgress {
     pub bytes_total: u64,
 }
 
-fn opt_ser_rfc3339_millis<S: serde::Serializer>(
-    ts: &Option<SystemTime>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    match ts {
-        Some(ts) => serializer.collect_str(&humantime::format_rfc3339_millis(*ts)),
-        None => serializer.serialize_none(),
-    }
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantScanRemoteStorageShard {
+    pub tenant_shard_id: TenantShardId,
+    pub generation: Option<u32>,
 }
 
-fn opt_deser_rfc3339_millis<'de, D>(deserializer: D) -> Result<Option<SystemTime>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    let s: Option<String> = serde::de::Deserialize::deserialize(deserializer)?;
-    match s {
-        None => Ok(None),
-        Some(s) => humantime::parse_rfc3339(&s)
-            .map_err(serde::de::Error::custom)
-            .map(Some),
-    }
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct TenantScanRemoteStorageResponse {
+    pub shards: Vec<TenantScanRemoteStorageShard>,
 }
 
 pub mod virtual_file {
@@ -864,39 +884,72 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
     }
 }
 
+// In the V2 protocol version, a GetPage request contains two LSN values:
+//
+// request_lsn: Get the page version at this point in time.  Lsn::Max is a special value that means
+// "get the latest version present". It's used by the primary server, which knows that no one else
+// is writing WAL. 'not_modified_since' must be set to a proper value even if request_lsn is
+// Lsn::Max. Standby servers use the current replay LSN as the request LSN.
+//
+// not_modified_since: Hint to the pageserver that the client knows that the page has not been
+// modified between 'not_modified_since' and the request LSN. It's always correct to set
+// 'not_modified_since equal' to 'request_lsn' (unless Lsn::Max is used as the 'request_lsn'), but
+// passing an earlier LSN can speed up the request, by allowing the pageserver to process the
+// request without waiting for 'request_lsn' to arrive.
+//
+// The legacy V1 interface contained only one LSN, and a boolean 'latest' flag. The V1 interface was
+// sufficient for the primary; the 'lsn' was equivalent to the 'not_modified_since' value, and
+// 'latest' was set to true. The V2 interface was added because there was no correct way for a
+// standby to request a page at a particular non-latest LSN, and also include the
+// 'not_modified_since' hint. That led to an awkward choice of either using an old LSN in the
+// request, if the standby knows that the page hasn't been modified since, and risk getting an error
+// if that LSN has fallen behind the GC horizon, or requesting the current replay LSN, which could
+// require the pageserver unnecessarily to wait for the WAL to arrive up to that point. The new V2
+// interface allows sending both LSNs, and let the pageserver do the right thing. There is no
+// difference in the responses between V1 and V2.
+//
+// The Request structs below reflect the V2 interface. If V1 is used, the parse function
+// maps the old format requests to the new format.
+//
+#[derive(Clone, Copy)]
+pub enum PagestreamProtocolVersion {
+    V1,
+    V2,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamExistsRequest {
-    pub latest: bool,
-    pub lsn: Lsn,
+    pub request_lsn: Lsn,
+    pub not_modified_since: Lsn,
     pub rel: RelTag,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamNblocksRequest {
-    pub latest: bool,
-    pub lsn: Lsn,
+    pub request_lsn: Lsn,
+    pub not_modified_since: Lsn,
     pub rel: RelTag,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamGetPageRequest {
-    pub latest: bool,
-    pub lsn: Lsn,
+    pub request_lsn: Lsn,
+    pub not_modified_since: Lsn,
     pub rel: RelTag,
     pub blkno: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamDbSizeRequest {
-    pub latest: bool,
-    pub lsn: Lsn,
+    pub request_lsn: Lsn,
+    pub not_modified_since: Lsn,
     pub dbnode: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamGetSlruSegmentRequest {
-    pub latest: bool,
-    pub lsn: Lsn,
+    pub request_lsn: Lsn,
+    pub not_modified_since: Lsn,
     pub kind: u8,
     pub segno: u32,
 }
@@ -943,14 +996,16 @@ pub struct TenantHistorySize {
 }
 
 impl PagestreamFeMessage {
+    /// Serialize a compute -> pageserver message. This is currently only used in testing
+    /// tools. Always uses protocol version 2.
     pub fn serialize(&self) -> Bytes {
         let mut bytes = BytesMut::new();
 
         match self {
             Self::Exists(req) => {
                 bytes.put_u8(0);
-                bytes.put_u8(u8::from(req.latest));
-                bytes.put_u64(req.lsn.0);
+                bytes.put_u64(req.request_lsn.0);
+                bytes.put_u64(req.not_modified_since.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
@@ -959,8 +1014,8 @@ impl PagestreamFeMessage {
 
             Self::Nblocks(req) => {
                 bytes.put_u8(1);
-                bytes.put_u8(u8::from(req.latest));
-                bytes.put_u64(req.lsn.0);
+                bytes.put_u64(req.request_lsn.0);
+                bytes.put_u64(req.not_modified_since.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
@@ -969,8 +1024,8 @@ impl PagestreamFeMessage {
 
             Self::GetPage(req) => {
                 bytes.put_u8(2);
-                bytes.put_u8(u8::from(req.latest));
-                bytes.put_u64(req.lsn.0);
+                bytes.put_u64(req.request_lsn.0);
+                bytes.put_u64(req.not_modified_since.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
                 bytes.put_u32(req.rel.relnode);
@@ -980,15 +1035,15 @@ impl PagestreamFeMessage {
 
             Self::DbSize(req) => {
                 bytes.put_u8(3);
-                bytes.put_u8(u8::from(req.latest));
-                bytes.put_u64(req.lsn.0);
+                bytes.put_u64(req.request_lsn.0);
+                bytes.put_u64(req.not_modified_since.0);
                 bytes.put_u32(req.dbnode);
             }
 
             Self::GetSlruSegment(req) => {
                 bytes.put_u8(4);
-                bytes.put_u8(u8::from(req.latest));
-                bytes.put_u64(req.lsn.0);
+                bytes.put_u64(req.request_lsn.0);
+                bytes.put_u64(req.not_modified_since.0);
                 bytes.put_u8(req.kind);
                 bytes.put_u32(req.segno);
             }
@@ -997,18 +1052,40 @@ impl PagestreamFeMessage {
         bytes.into()
     }
 
-    pub fn parse<R: std::io::Read>(body: &mut R) -> anyhow::Result<PagestreamFeMessage> {
-        // TODO these gets can fail
-
+    pub fn parse<R: std::io::Read>(
+        body: &mut R,
+        protocol_version: PagestreamProtocolVersion,
+    ) -> anyhow::Result<PagestreamFeMessage> {
         // these correspond to the NeonMessageTag enum in pagestore_client.h
         //
         // TODO: consider using protobuf or serde bincode for less error prone
         // serialization.
         let msg_tag = body.read_u8()?;
+
+        let (request_lsn, not_modified_since) = match protocol_version {
+            PagestreamProtocolVersion::V2 => (
+                Lsn::from(body.read_u64::<BigEndian>()?),
+                Lsn::from(body.read_u64::<BigEndian>()?),
+            ),
+            PagestreamProtocolVersion::V1 => {
+                // In the old protocol, each message starts with a boolean 'latest' flag,
+                // followed by 'lsn'. Convert that to the two LSNs, 'request_lsn' and
+                // 'not_modified_since', used in the new protocol version.
+                let latest = body.read_u8()? != 0;
+                let request_lsn = Lsn::from(body.read_u64::<BigEndian>()?);
+                if latest {
+                    (Lsn::MAX, request_lsn) // get latest version
+                } else {
+                    (request_lsn, request_lsn) // get version at specified LSN
+                }
+            }
+        };
+
+        // The rest of the messages are the same between V1 and V2
         match msg_tag {
             0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                latest: body.read_u8()? != 0,
-                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                request_lsn,
+                not_modified_since,
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -1017,8 +1094,8 @@ impl PagestreamFeMessage {
                 },
             })),
             1 => Ok(PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                latest: body.read_u8()? != 0,
-                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                request_lsn,
+                not_modified_since,
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -1027,8 +1104,8 @@ impl PagestreamFeMessage {
                 },
             })),
             2 => Ok(PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                latest: body.read_u8()? != 0,
-                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                request_lsn,
+                not_modified_since,
                 rel: RelTag {
                     spcnode: body.read_u32::<BigEndian>()?,
                     dbnode: body.read_u32::<BigEndian>()?,
@@ -1038,14 +1115,14 @@ impl PagestreamFeMessage {
                 blkno: body.read_u32::<BigEndian>()?,
             })),
             3 => Ok(PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                latest: body.read_u8()? != 0,
-                lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                request_lsn,
+                not_modified_since,
                 dbnode: body.read_u32::<BigEndian>()?,
             })),
             4 => Ok(PagestreamFeMessage::GetSlruSegment(
                 PagestreamGetSlruSegmentRequest {
-                    latest: body.read_u8()? != 0,
-                    lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                    request_lsn,
+                    not_modified_since,
                     kind: body.read_u8()?,
                     segno: body.read_u32::<BigEndian>()?,
                 },
@@ -1173,8 +1250,8 @@ mod tests {
         // Test serialization/deserialization of PagestreamFeMessage
         let messages = vec![
             PagestreamFeMessage::Exists(PagestreamExistsRequest {
-                latest: true,
-                lsn: Lsn(4),
+                request_lsn: Lsn(4),
+                not_modified_since: Lsn(3),
                 rel: RelTag {
                     forknum: 1,
                     spcnode: 2,
@@ -1183,8 +1260,8 @@ mod tests {
                 },
             }),
             PagestreamFeMessage::Nblocks(PagestreamNblocksRequest {
-                latest: false,
-                lsn: Lsn(4),
+                request_lsn: Lsn(4),
+                not_modified_since: Lsn(4),
                 rel: RelTag {
                     forknum: 1,
                     spcnode: 2,
@@ -1193,8 +1270,8 @@ mod tests {
                 },
             }),
             PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
-                latest: true,
-                lsn: Lsn(4),
+                request_lsn: Lsn(4),
+                not_modified_since: Lsn(3),
                 rel: RelTag {
                     forknum: 1,
                     spcnode: 2,
@@ -1204,14 +1281,16 @@ mod tests {
                 blkno: 7,
             }),
             PagestreamFeMessage::DbSize(PagestreamDbSizeRequest {
-                latest: true,
-                lsn: Lsn(4),
+                request_lsn: Lsn(4),
+                not_modified_since: Lsn(3),
                 dbnode: 7,
             }),
         ];
         for msg in messages {
             let bytes = msg.serialize();
-            let reconstructed = PagestreamFeMessage::parse(&mut bytes.reader()).unwrap();
+            let reconstructed =
+                PagestreamFeMessage::parse(&mut bytes.reader(), PagestreamProtocolVersion::V2)
+                    .unwrap();
             assert!(msg == reconstructed);
         }
     }

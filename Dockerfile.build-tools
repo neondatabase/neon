@@ -58,8 +58,14 @@ RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v$
     && mv protoc/include/google /usr/local/include/google \
     && rm -rf protoc.zip protoc
 
+# s5cmd
+ENV S5CMD_VERSION=2.2.2
+RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-$(uname -m | sed 's/x86_64/64bit/g' | sed 's/aarch64/arm64/g').tar.gz" | tar zxvf - s5cmd \
+    && chmod +x s5cmd \
+    && mv s5cmd /usr/local/bin/s5cmd
+
 # LLVM
-ENV LLVM_VERSION=17
+ENV LLVM_VERSION=18
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
     && echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
@@ -135,7 +141,7 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.76.0
+ENV RUSTC_VERSION=1.78.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
@@ -149,7 +155,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo install --git https://github.com/paritytech/cachepot && \
     cargo install rustfilt && \
     cargo install cargo-hakari && \
-    cargo install cargo-deny && \
+    cargo install cargo-deny --locked && \
     cargo install cargo-hack && \
     cargo install cargo-nextest && \
     rm -rf /home/nonroot/.cargo/registry && \

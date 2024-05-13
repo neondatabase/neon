@@ -51,6 +51,9 @@ pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "gc")]
     Gc,
 
+    #[strum(serialize = "find gc cutoffs")]
+    FindGcCutoffs,
+
     #[strum(serialize = "create tenant")]
     CreateTenant,
 }
@@ -86,41 +89,58 @@ pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static READ_NUM_FS_LAYERS: Lazy<Histogram> = Lazy::new(|| {
+pub(crate) static READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
-        "pageserver_read_num_fs_layers",
-        "Number of persistent layers accessed for processing a read request, including those in the cache",
-        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 50.0, 100.0],
+        "pageserver_layers_visited_per_read_global",
+        "Number of layers visited to reconstruct one key",
+        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static VEC_READ_NUM_LAYERS_VISITED: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_layers_visited_per_vectored_read_global",
+        "Average number of layers visited to reconstruct one key",
+        vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
     )
     .expect("failed to define a metric")
 });
 
 // Metrics collected on operations on the storage repository.
+#[derive(
+    Clone, Copy, enum_map::Enum, strum_macros::EnumString, strum_macros::Display, IntoStaticStr,
+)]
+pub(crate) enum GetKind {
+    Singular,
+    Vectored,
+}
 
 pub(crate) struct ReconstructTimeMetrics {
-    ok: Histogram,
-    err: Histogram,
+    singular: Histogram,
+    vectored: Histogram,
 }
 
 pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
     let inner = register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value (reconstruct a page from deltas)",
-        &["result"],
+        &["get_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric");
+
     ReconstructTimeMetrics {
-        ok: inner.get_metric_with_label_values(&["ok"]).unwrap(),
-        err: inner.get_metric_with_label_values(&["err"]).unwrap(),
+        singular: inner.with_label_values(&[GetKind::Singular.into()]),
+        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
     }
 });
 
 impl ReconstructTimeMetrics {
-    pub(crate) fn for_result<T, E>(&self, result: &Result<T, E>) -> &Histogram {
-        match result {
-            Ok(_) => &self.ok,
-            Err(_) => &self.err,
+    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
+        match get_kind {
+            GetKind::Singular => &self.singular,
+            GetKind::Vectored => &self.vectored,
         }
     }
 }
@@ -133,13 +153,33 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::n
     .expect("failed to define a metric")
 });
 
-pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+pub(crate) struct ReconstructDataTimeMetrics {
+    singular: Histogram,
+    vectored: Histogram,
+}
+
+impl ReconstructDataTimeMetrics {
+    pub(crate) fn for_get_kind(&self, get_kind: GetKind) -> &Histogram {
+        match get_kind {
+            GetKind::Singular => &self.singular,
+            GetKind::Vectored => &self.vectored,
+        }
+    }
+}
+
+pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<ReconstructDataTimeMetrics> = Lazy::new(|| {
+    let inner = register_histogram_vec!(
         "pageserver_getpage_get_reconstruct_data_seconds",
         "Time spent in get_reconstruct_value_data",
+        &["get_kind"],
         CRITICAL_OP_BUCKETS.into(),
     )
-    .expect("failed to define a metric")
+    .expect("failed to define a metric");
+
+    ReconstructDataTimeMetrics {
+        singular: inner.with_label_values(&[GetKind::Singular.into()]),
+        vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
+    }
 });
 
 pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
@@ -154,6 +194,11 @@ pub(crate) struct GetVectoredLatency {
     map: EnumMap<TaskKind, Option<Histogram>>,
 }
 
+#[allow(dead_code)]
+pub(crate) struct ScanLatency {
+    map: EnumMap<TaskKind, Option<Histogram>>,
+}
+
 impl GetVectoredLatency {
     // Only these task types perform vectored gets. Filter all other tasks out to reduce total
     // cardinality of the metric.
@@ -161,6 +206,48 @@ impl GetVectoredLatency {
 
     pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
         self.map[task_kind].as_ref()
+    }
+}
+
+impl ScanLatency {
+    // Only these task types perform vectored gets. Filter all other tasks out to reduce total
+    // cardinality of the metric.
+    const TRACKED_TASK_KINDS: [TaskKind; 1] = [TaskKind::PageRequestHandler];
+
+    pub(crate) fn for_task_kind(&self, task_kind: TaskKind) -> Option<&Histogram> {
+        self.map[task_kind].as_ref()
+    }
+}
+
+pub(crate) struct ScanLatencyOngoingRecording<'a> {
+    parent: &'a Histogram,
+    start: std::time::Instant,
+}
+
+impl<'a> ScanLatencyOngoingRecording<'a> {
+    pub(crate) fn start_recording(parent: &'a Histogram) -> ScanLatencyOngoingRecording<'a> {
+        let start = Instant::now();
+        ScanLatencyOngoingRecording { parent, start }
+    }
+
+    pub(crate) fn observe(self, throttled: Option<Duration>) {
+        let elapsed = self.start.elapsed();
+        let ex_throttled = if let Some(throttled) = throttled {
+            elapsed.checked_sub(throttled)
+        } else {
+            Some(elapsed)
+        };
+        if let Some(ex_throttled) = ex_throttled {
+            self.parent.observe(ex_throttled.as_secs_f64());
+        } else {
+            use utils::rate_limit::RateLimit;
+            static LOGGED: Lazy<Mutex<RateLimit>> =
+                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+            let mut rate_limit = LOGGED.lock().unwrap();
+            rate_limit.call(|| {
+                warn!("error deducting time spent throttled; this message is logged at a global rate limit");
+            });
+        }
     }
 }
 
@@ -178,6 +265,29 @@ pub(crate) static GET_VECTORED_LATENCY: Lazy<GetVectoredLatency> = Lazy::new(|| 
             let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
 
             if GetVectoredLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
+                let task_kind = task_kind.into();
+                Some(inner.with_label_values(&[task_kind]))
+            } else {
+                None
+            }
+        })),
+    }
+});
+
+pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
+    let inner = register_histogram_vec!(
+        "pageserver_scan_seconds",
+        "Time spent in scan, excluding time spent in timeline_get_throttle.",
+        &["task_kind"],
+        CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric");
+
+    ScanLatency {
+        map: EnumMap::from_array(std::array::from_fn(|task_kind_idx| {
+            let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind_idx);
+
+            if ScanLatency::TRACKED_TASK_KINDS.contains(&task_kind) {
                 let task_kind = task_kind.into();
                 Some(inner.with_label_values(&[task_kind]))
             } else {
@@ -435,7 +545,7 @@ pub(crate) static RESIDENT_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| 
 static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_remote_physical_size",
-        "The size of the layer files present in the remote storage that are listed in the the remote index_part.json.",
+        "The size of the layer files present in the remote storage that are listed in the remote index_part.json.",
         // Corollary: If any files are missing from the index part, they won't be included here.
         &["tenant_id", "shard_id", "timeline_id"]
     )
@@ -697,6 +807,14 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
         "1 while in initial startup load of tenants, 0 at other times"
     )
     .expect("Failed to register pageserver_startup_is_loading")
+});
+
+pub(crate) static TIMELINE_EPHEMERAL_BYTES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_timeline_ephemeral_bytes",
+        "Total number of bytes in ephemeral layers, summed for all timelines.  Approximate, lazily updated."
+    )
+    .expect("Failed to register metric")
 });
 
 /// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
@@ -1394,29 +1512,80 @@ static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy
 });
 
 pub(crate) struct TenantManagerMetrics {
-    pub(crate) tenant_slots: UIntGauge,
+    tenant_slots_attached: UIntGauge,
+    tenant_slots_secondary: UIntGauge,
+    tenant_slots_inprogress: UIntGauge,
     pub(crate) tenant_slot_writes: IntCounter,
     pub(crate) unexpected_errors: IntCounter,
 }
 
+impl TenantManagerMetrics {
+    /// Helpers for tracking slots.  Note that these do not track the lifetime of TenantSlot objects
+    /// exactly: they track the lifetime of the slots _in the tenant map_.
+    pub(crate) fn slot_inserted(&self, slot: &TenantSlot) {
+        match slot {
+            TenantSlot::Attached(_) => {
+                self.tenant_slots_attached.inc();
+            }
+            TenantSlot::Secondary(_) => {
+                self.tenant_slots_secondary.inc();
+            }
+            TenantSlot::InProgress(_) => {
+                self.tenant_slots_inprogress.inc();
+            }
+        }
+    }
+
+    pub(crate) fn slot_removed(&self, slot: &TenantSlot) {
+        match slot {
+            TenantSlot::Attached(_) => {
+                self.tenant_slots_attached.dec();
+            }
+            TenantSlot::Secondary(_) => {
+                self.tenant_slots_secondary.dec();
+            }
+            TenantSlot::InProgress(_) => {
+                self.tenant_slots_inprogress.dec();
+            }
+        }
+    }
+
+    #[cfg(all(debug_assertions, not(test)))]
+    pub(crate) fn slots_total(&self) -> u64 {
+        self.tenant_slots_attached.get()
+            + self.tenant_slots_secondary.get()
+            + self.tenant_slots_inprogress.get()
+    }
+}
+
 pub(crate) static TENANT_MANAGER: Lazy<TenantManagerMetrics> = Lazy::new(|| {
-    TenantManagerMetrics {
-    tenant_slots: register_uint_gauge!(
+    let tenant_slots = register_uint_gauge_vec!(
         "pageserver_tenant_manager_slots",
         "How many slots currently exist, including all attached, secondary and in-progress operations",
+        &["mode"]
     )
-    .expect("failed to define a metric"),
-    tenant_slot_writes: register_int_counter!(
-        "pageserver_tenant_manager_slot_writes",
-        "Writes to a tenant slot, including all of create/attach/detach/delete"
-    )
-    .expect("failed to define a metric"),
-    unexpected_errors: register_int_counter!(
-        "pageserver_tenant_manager_unexpected_errors_total",
-        "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
-    )
-    .expect("failed to define a metric"),
-}
+    .expect("failed to define a metric");
+    TenantManagerMetrics {
+        tenant_slots_attached: tenant_slots
+            .get_metric_with_label_values(&["attached"])
+            .unwrap(),
+        tenant_slots_secondary: tenant_slots
+            .get_metric_with_label_values(&["secondary"])
+            .unwrap(),
+        tenant_slots_inprogress: tenant_slots
+            .get_metric_with_label_values(&["inprogress"])
+            .unwrap(),
+        tenant_slot_writes: register_int_counter!(
+            "pageserver_tenant_manager_slot_writes",
+            "Writes to a tenant slot, including all of create/attach/detach/delete"
+        )
+        .expect("failed to define a metric"),
+        unexpected_errors: register_int_counter!(
+            "pageserver_tenant_manager_unexpected_errors_total",
+            "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
+        )
+        .expect("failed to define a metric"),
+    }
 });
 
 pub(crate) struct DeletionQueueMetrics {
@@ -1474,29 +1643,6 @@ pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
 }
 });
 
-pub(crate) struct WalIngestMetrics {
-    pub(crate) records_received: IntCounter,
-    pub(crate) records_committed: IntCounter,
-    pub(crate) records_filtered: IntCounter,
-}
-
-pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
-    records_received: register_int_counter!(
-        "pageserver_wal_ingest_records_received",
-        "Number of WAL records received from safekeepers"
-    )
-    .expect("failed to define a metric"),
-    records_committed: register_int_counter!(
-        "pageserver_wal_ingest_records_committed",
-        "Number of WAL records which resulted in writes to pageserver storage"
-    )
-    .expect("failed to define a metric"),
-    records_filtered: register_int_counter!(
-        "pageserver_wal_ingest_records_filtered",
-        "Number of WAL records filtered out due to sharding"
-    )
-    .expect("failed to define a metric"),
-});
 pub(crate) struct SecondaryModeMetrics {
     pub(crate) upload_heatmap: IntCounter,
     pub(crate) upload_heatmap_errors: IntCounter,
@@ -1504,7 +1650,8 @@ pub(crate) struct SecondaryModeMetrics {
     pub(crate) download_heatmap: IntCounter,
     pub(crate) download_layer: IntCounter,
 }
-pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
+    SecondaryModeMetrics {
     upload_heatmap: register_int_counter!(
         "pageserver_secondary_upload_heatmap",
         "Number of heatmaps written to remote storage by attached tenants"
@@ -1522,7 +1669,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
     .expect("failed to define a metric"),
     download_heatmap: register_int_counter!(
         "pageserver_secondary_download_heatmap",
-        "Number of downloads of heatmaps by secondary mode locations"
+        "Number of downloads of heatmaps by secondary mode locations, including when it hasn't changed"
     )
     .expect("failed to define a metric"),
     download_layer: register_int_counter!(
@@ -1530,6 +1677,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
         "Number of downloads of layers by secondary mode locations"
     )
     .expect("failed to define a metric"),
+}
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1696,6 +1844,43 @@ macro_rules! redo_bytes_histogram_count_buckets {
     };
 }
 
+pub(crate) struct WalIngestMetrics {
+    pub(crate) bytes_received: IntCounter,
+    pub(crate) records_received: IntCounter,
+    pub(crate) records_committed: IntCounter,
+    pub(crate) records_filtered: IntCounter,
+    pub(crate) time_spent_on_ingest: Histogram,
+}
+
+pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
+    bytes_received: register_int_counter!(
+        "pageserver_wal_ingest_bytes_received",
+        "Bytes of WAL ingested from safekeepers",
+    )
+    .unwrap(),
+    records_received: register_int_counter!(
+        "pageserver_wal_ingest_records_received",
+        "Number of WAL records received from safekeepers"
+    )
+    .expect("failed to define a metric"),
+    records_committed: register_int_counter!(
+        "pageserver_wal_ingest_records_committed",
+        "Number of WAL records which resulted in writes to pageserver storage"
+    )
+    .expect("failed to define a metric"),
+    records_filtered: register_int_counter!(
+        "pageserver_wal_ingest_records_filtered",
+        "Number of WAL records filtered out due to sharding"
+    )
+    .expect("failed to define a metric"),
+    time_spent_on_ingest: register_histogram!(
+        "pageserver_wal_ingest_put_value_seconds",
+        "Actual time spent on ingesting a record",
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric"),
+});
+
 pub(crate) static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_seconds",
@@ -1805,6 +1990,29 @@ impl Default for WalRedoProcessCounters {
 pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
     Lazy::new(WalRedoProcessCounters::default);
 
+#[cfg(not(test))]
+pub mod wal_redo {
+    use super::*;
+
+    static PROCESS_KIND: Lazy<std::sync::Mutex<UIntGaugeVec>> = Lazy::new(|| {
+        std::sync::Mutex::new(
+            register_uint_gauge_vec!(
+                "pageserver_wal_redo_process_kind",
+                "The configured process kind for walredo",
+                &["kind"],
+            )
+            .unwrap(),
+        )
+    });
+
+    pub fn set_process_kind_metric(kind: crate::walredo::ProcessKind) {
+        // use guard to avoid races around the next two steps
+        let guard = PROCESS_KIND.lock().unwrap();
+        guard.reset();
+        guard.with_label_values(&[&format!("{kind}")]).set(1);
+    }
+}
+
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
@@ -1825,6 +2033,22 @@ impl StorageTimeMetricsTimer {
         self.metrics.timeline_sum.inc_by(duration);
         self.metrics.timeline_count.inc();
         self.metrics.global_histogram.observe(duration);
+    }
+
+    /// Turns this timer into a timer, which will always record -- usually this means recording
+    /// regardless an early `?` path was taken in a function.
+    pub(crate) fn record_on_drop(self) -> AlwaysRecordingStorageTimeMetricsTimer {
+        AlwaysRecordingStorageTimeMetricsTimer(Some(self))
+    }
+}
+
+pub(crate) struct AlwaysRecordingStorageTimeMetricsTimer(Option<StorageTimeMetricsTimer>);
+
+impl Drop for AlwaysRecordingStorageTimeMetricsTimer {
+    fn drop(&mut self) {
+        if let Some(inner) = self.0.take() {
+            inner.stop_and_record();
+        }
     }
 }
 
@@ -1886,6 +2110,7 @@ pub(crate) struct TimelineMetrics {
     pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
+    pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -1946,6 +2171,12 @@ impl TimelineMetrics {
             &shard_id,
             &timeline_id,
         );
+        let find_gc_cutoffs_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::FindGcCutoffs,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -1988,6 +2219,7 @@ impl TimelineMetrics {
             logical_size_histo,
             imitate_logical_size_histo,
             garbage_collect_histo,
+            find_gc_cutoffs_histo,
             load_layer_map_histo,
             last_record_gauge,
             resident_physical_size_gauge,
@@ -2075,7 +2307,7 @@ impl TimelineMetrics {
 
 pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
     // Only shard zero deals in synthetic sizes
-    if tenant_shard_id.is_zero() {
+    if tenant_shard_id.is_shard_zero() {
         let tid = tenant_shard_id.tenant_id.to_string();
         let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
     }
@@ -2086,6 +2318,7 @@ pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
 use futures::Future;
 use pin_project_lite::pin_project;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -2093,6 +2326,7 @@ use std::time::{Duration, Instant};
 
 use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
+use crate::tenant::mgr::TenantSlot;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
 struct PerTimelineRemotePhysicalSizeGauge {
@@ -2655,6 +2889,26 @@ pub(crate) mod disk_usage_based_eviction {
     pub(crate) static METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
 }
 
+static TOKIO_EXECUTOR_THREAD_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_tokio_executor_thread_configured_count",
+        "Total number of configued tokio executor threads in the process.
+         The `setup` label denotes whether we're running with multiple runtimes or a single runtime.",
+        &["setup"],
+    )
+    .unwrap()
+});
+
+pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SERIALIZE.lock().unwrap();
+    TOKIO_EXECUTOR_THREAD_COUNT.reset();
+    TOKIO_EXECUTOR_THREAD_COUNT
+        .get_metric_with_label_values(&[setup])
+        .unwrap()
+        .set(u64::try_from(num_threads.get()).unwrap());
+}
+
 pub fn preinitialize_metrics() {
     // Python tests need these and on some we do alerting.
     //
@@ -2675,6 +2929,8 @@ pub fn preinitialize_metrics() {
         &WALRECEIVER_CANDIDATES_REMOVED,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_FAILURES,
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_SUCCESSES,
+        &REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
+        &REMOTE_ONDEMAND_DOWNLOADED_BYTES,
     ]
     .into_iter()
     .for_each(|c| {
@@ -2711,7 +2967,8 @@ pub fn preinitialize_metrics() {
 
     // histograms
     [
-        &READ_NUM_FS_LAYERS,
+        &READ_NUM_LAYERS_VISITED,
+        &VEC_READ_NUM_LAYERS_VISITED,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,

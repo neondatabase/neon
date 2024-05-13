@@ -3,9 +3,8 @@
 //!
 //! All the heavy lifting is done by the create_image and create_delta
 //! functions that the implementor provides.
-use async_trait::async_trait;
 use futures::Future;
-use pageserver_api::{key::Key, keyspace::key_range_size};
+use pageserver_api::{key::Key, keyspace::ShardedRange, shard::ShardIdentity};
 use std::ops::Range;
 use utils::lsn::Lsn;
 
@@ -32,6 +31,8 @@ pub trait CompactionJobExecutor {
     // ----
     // Functions that the planner uses to support its decisions
     // ----
+
+    fn get_shard_identity(&self) -> &ShardIdentity;
 
     /// Return all layers that overlap the given bounding box.
     fn get_layers(
@@ -99,7 +100,7 @@ pub trait CompactionKey: std::cmp::Ord + Clone + Copy + std::fmt::Display {
     ///
     /// This returns u32, for compatibility with Repository::key. If the
     /// distance is larger, return u32::MAX.
-    fn key_range_size(key_range: &Range<Self>) -> u32;
+    fn key_range_size(key_range: &Range<Self>, shard_identity: &ShardIdentity) -> u32;
 
     // return "self + 1"
     fn next(&self) -> Self;
@@ -114,8 +115,8 @@ impl CompactionKey for Key {
     const MIN: Self = Self::MIN;
     const MAX: Self = Self::MAX;
 
-    fn key_range_size(r: &std::ops::Range<Self>) -> u32 {
-        key_range_size(r)
+    fn key_range_size(r: &std::ops::Range<Self>, shard_identity: &ShardIdentity) -> u32 {
+        ShardedRange::new(r.clone(), shard_identity).page_count()
     }
     fn next(&self) -> Key {
         (self as &Key).next()
@@ -141,18 +142,16 @@ pub trait CompactionLayer<K: CompactionKey + ?Sized> {
 
     fn is_delta(&self) -> bool;
 }
-
-#[async_trait]
 pub trait CompactionDeltaLayer<E: CompactionJobExecutor + ?Sized>: CompactionLayer<E::Key> {
     type DeltaEntry<'a>: CompactionDeltaEntry<'a, E::Key>
     where
         Self: 'a;
 
     /// Return all keys in this delta layer.
-    async fn load_keys<'a>(
+    fn load_keys<'a>(
         &self,
         ctx: &E::RequestContext,
-    ) -> anyhow::Result<Vec<Self::DeltaEntry<'_>>>;
+    ) -> impl Future<Output = anyhow::Result<Vec<Self::DeltaEntry<'_>>>> + Send;
 }
 
 pub trait CompactionImageLayer<E: CompactionJobExecutor + ?Sized>: CompactionLayer<E::Key> {}

@@ -1,9 +1,10 @@
+use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::auth::IpPattern;
 
-use crate::{BranchId, EndpointId, ProjectId};
+use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
@@ -18,7 +19,7 @@ pub struct ConsoleError {
 pub struct GetRoleSecret {
     pub role_secret: Box<str>,
     pub allowed_ips: Option<Vec<IpPattern>>,
-    pub project_id: Option<ProjectId>,
+    pub project_id: Option<ProjectIdInt>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -93,22 +94,49 @@ impl fmt::Debug for DatabaseInfo {
 
 /// Various labels for prometheus metrics.
 /// Also known as `ProxyMetricsAuxInfo` in the console.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct MetricsAuxInfo {
-    pub endpoint_id: EndpointId,
-    pub project_id: ProjectId,
-    pub branch_id: BranchId,
-    pub cold_start_info: Option<ColdStartInfo>,
+    pub endpoint_id: EndpointIdInt,
+    pub project_id: ProjectIdInt,
+    pub branch_id: BranchIdInt,
+    #[serde(default)]
+    pub cold_start_info: ColdStartInfo,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, FixedCardinalityLabel)]
 #[serde(rename_all = "snake_case")]
 pub enum ColdStartInfo {
     #[default]
-    Unknown = 0,
-    Warm = 1,
-    PoolHit = 2,
-    PoolMiss = 3,
+    Unknown,
+    /// Compute was already running
+    Warm,
+    #[serde(rename = "pool_hit")]
+    #[label(rename = "pool_hit")]
+    /// Compute was not running but there was an available VM
+    VmPoolHit,
+    #[serde(rename = "pool_miss")]
+    #[label(rename = "pool_miss")]
+    /// Compute was not running and there were no VMs available
+    VmPoolMiss,
+
+    // not provided by control plane
+    /// Connection available from HTTP pool
+    HttpPoolHit,
+    /// Cached connection info
+    WarmCached,
+}
+
+impl ColdStartInfo {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ColdStartInfo::Unknown => "unknown",
+            ColdStartInfo::Warm => "warm",
+            ColdStartInfo::VmPoolHit => "pool_hit",
+            ColdStartInfo::VmPoolMiss => "pool_miss",
+            ColdStartInfo::HttpPoolHit => "http_pool_hit",
+            ColdStartInfo::WarmCached => "warm_cached",
+        }
+    }
 }
 
 #[cfg(test)]

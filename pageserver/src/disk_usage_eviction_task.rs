@@ -61,11 +61,10 @@ use crate::{
     metrics::disk_usage_based_eviction::METRICS,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
-        self,
         mgr::TenantManager,
         remote_timeline_client::LayerFileMetadata,
         secondary::SecondaryTenant,
-        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerFileName},
+        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName},
     },
 };
 
@@ -541,7 +540,12 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                     js.spawn(async move {
                         layer
                             .secondary_tenant
-                            .evict_layer(tenant_manager.get_conf(), layer.timeline_id, layer.name)
+                            .evict_layer(
+                                tenant_manager.get_conf(),
+                                layer.timeline_id,
+                                layer.name,
+                                layer.metadata,
+                            )
                             .await;
                         Ok(file_size)
                     });
@@ -600,7 +604,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 pub(crate) struct EvictionSecondaryLayer {
     pub(crate) secondary_tenant: Arc<SecondaryTenant>,
     pub(crate) timeline_id: TimelineId,
-    pub(crate) name: LayerFileName,
+    pub(crate) name: LayerName,
     pub(crate) metadata: LayerFileMetadata,
 }
 
@@ -633,9 +637,9 @@ impl EvictionLayer {
         }
     }
 
-    pub(crate) fn get_name(&self) -> LayerFileName {
+    pub(crate) fn get_name(&self) -> LayerName {
         match self {
-            Self::Attached(l) => l.layer_desc().filename(),
+            Self::Attached(l) => l.layer_desc().layer_name(),
             Self::Secondary(sl) => sl.name.clone(),
         }
     }
@@ -814,8 +818,8 @@ async fn collect_eviction_candidates(
     const LOG_DURATION_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(10);
 
     // get a snapshot of the list of tenants
-    let tenants = tenant::mgr::list_tenants()
-        .await
+    let tenants = tenant_manager
+        .list_tenants()
         .context("get list of tenants")?;
 
     // TODO: avoid listing every layer in every tenant: this loop can block the executor,
@@ -827,8 +831,12 @@ async fn collect_eviction_candidates(
         if cancel.is_cancelled() {
             return Ok(EvictionCandidates::Cancelled);
         }
-        let tenant = match tenant::mgr::get_tenant(tenant_id, true) {
-            Ok(tenant) => tenant,
+        let tenant = match tenant_manager.get_attached_tenant_shard(tenant_id) {
+            Ok(tenant) if tenant.is_active() => tenant,
+            Ok(_) => {
+                debug!(tenant_id=%tenant_id.tenant_id, shard_id=%tenant_id.shard_slug(), "Tenant shard is not active");
+                continue;
+            }
             Err(e) => {
                 // this can happen if tenant has lifecycle transition after we fetched it
                 debug!("failed to get tenant: {e:#}");

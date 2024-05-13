@@ -6,7 +6,7 @@ use std::{
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
-use tracing::{debug, error, info, instrument, Instrument};
+use tracing::{error, info, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId};
 
 use crate::{
@@ -14,80 +14,13 @@ use crate::{
     deletion_queue::DeletionQueueClient,
     task_mgr::{self, TaskKind},
     tenant::{
-        debug_assert_current_span_has_tenant_and_timeline_id,
         metadata::TimelineMetadata,
-        remote_timeline_client::{
-            self, PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
-        },
+        remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
         CreateTimelineCause, DeleteTimelineError, Tenant,
     },
 };
 
 use super::{Timeline, TimelineResources};
-
-/// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
-async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
-    debug_assert_current_span_has_tenant_and_timeline_id();
-    // Notify any timeline work to drop out of loops/requests
-    tracing::debug!("Cancelling CancellationToken");
-    timeline.cancel.cancel();
-
-    // Stop the walreceiver first.
-    debug!("waiting for wal receiver to shutdown");
-    let maybe_started_walreceiver = { timeline.walreceiver.lock().unwrap().take() };
-    if let Some(walreceiver) = maybe_started_walreceiver {
-        walreceiver.stop().await;
-    }
-    debug!("wal receiver shutdown confirmed");
-
-    // Shut down the layer flush task before the remote client, as one depends on the other
-    task_mgr::shutdown_tasks(
-        Some(TaskKind::LayerFlushTask),
-        Some(timeline.tenant_shard_id),
-        Some(timeline.timeline_id),
-    )
-    .await;
-
-    // Prevent new uploads from starting.
-    if let Some(remote_client) = timeline.remote_client.as_ref() {
-        let res = remote_client.stop();
-        match res {
-            Ok(()) => {}
-            Err(e) => match e {
-                remote_timeline_client::StopError::QueueUninitialized => {
-                    // This case shouldn't happen currently because the
-                    // load and attach code bails out if _any_ of the timeline fails to fetch its IndexPart.
-                    // That is, before we declare the Tenant as Active.
-                    // But we only allow calls to delete_timeline on Active tenants.
-                    return Err(DeleteTimelineError::Other(anyhow::anyhow!("upload queue is uninitialized, likely the timeline was in Broken state prior to this call because it failed to fetch IndexPart during load or attach, check the logs")));
-                }
-            },
-        }
-    }
-
-    // Stop & wait for the remaining timeline tasks, including upload tasks.
-    // NB: This and other delete_timeline calls do not run as a task_mgr task,
-    //     so, they are not affected by this shutdown_tasks() call.
-    info!("waiting for timeline tasks to shutdown");
-    task_mgr::shutdown_tasks(
-        None,
-        Some(timeline.tenant_shard_id),
-        Some(timeline.timeline_id),
-    )
-    .await;
-
-    fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
-        Err(anyhow::anyhow!(
-            "failpoint: timeline-delete-before-index-deleted-at"
-        ))?
-    });
-
-    tracing::debug!("Waiting for gate...");
-    timeline.gate.close().await;
-    tracing::debug!("Shutdown complete");
-
-    Ok(())
-}
 
 /// Mark timeline as deleted in S3 so we won't pick it up next time
 /// during attach or pageserver restart.
@@ -282,7 +215,14 @@ impl DeleteTimelineFlow {
 
         guard.mark_in_progress()?;
 
-        stop_tasks(&timeline).await?;
+        // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
+        timeline.shutdown(super::ShutdownMode::Hard).await;
+
+        fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-before-index-deleted-at"
+            ))?
+        });
 
         set_deleted_in_remote_index(&timeline).await?;
 
@@ -481,6 +421,10 @@ impl DeleteTimelineFlow {
 
     pub(crate) fn is_finished(&self) -> bool {
         matches!(self, Self::Finished)
+    }
+
+    pub(crate) fn is_not_started(&self) -> bool {
+        matches!(self, Self::NotStarted)
     }
 }
 

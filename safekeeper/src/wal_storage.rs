@@ -38,6 +38,12 @@ pub trait Storage {
     /// LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn;
 
+    /// Initialize segment by creating proper long header at the beginning of
+    /// the segment and short header at the page of given LSN. This is only used
+    /// for timeline initialization because compute will stream data only since
+    /// init_lsn. Other segment headers are included in compute stream.
+    async fn initialize_first_segment(&mut self, init_lsn: Lsn) -> Result<()>;
+
     /// Write piece of WAL from buf to disk, but not necessarily sync it.
     async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()>;
 
@@ -78,6 +84,8 @@ pub struct PhysicalStorage {
 
     /// Size of WAL segment in bytes.
     wal_seg_size: usize,
+    pg_version: u32,
+    system_id: u64,
 
     /// Written to disk, but possibly still in the cache and not fully persisted.
     /// Also can be ahead of record_lsn, if happen to be in the middle of a WAL record.
@@ -169,6 +177,8 @@ impl PhysicalStorage {
             timeline_dir,
             conf: conf.clone(),
             wal_seg_size,
+            pg_version: state.server.pg_version,
+            system_id: state.server.system_id,
             write_lsn,
             write_record_lsn: write_lsn,
             flush_record_lsn: flush_lsn,
@@ -221,6 +231,7 @@ impl PhysicalStorage {
             // half initialized segment, first bake it under tmp filename and
             // then rename.
             let tmp_path = self.timeline_dir.join("waltmp");
+            #[allow(clippy::suspicious_open_options)]
             let mut file = OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -321,6 +332,20 @@ impl Storage for PhysicalStorage {
     /// flush_lsn returns LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn {
         self.flush_record_lsn
+    }
+
+    async fn initialize_first_segment(&mut self, init_lsn: Lsn) -> Result<()> {
+        let segno = init_lsn.segment_number(self.wal_seg_size);
+        let (mut file, _) = self.open_or_create(segno).await?;
+        let major_pg_version = self.pg_version / 10000;
+        let wal_seg =
+            postgres_ffi::generate_wal_segment(segno, self.system_id, major_pg_version, init_lsn)?;
+        file.seek(SeekFrom::Start(0)).await?;
+        file.write_all(&wal_seg).await?;
+        file.flush().await?;
+        info!("initialized segno {} at lsn {}", segno, init_lsn);
+        // note: file is *not* fsynced
+        Ok(())
     }
 
     /// Write WAL to disk.

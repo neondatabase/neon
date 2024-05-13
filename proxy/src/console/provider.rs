@@ -8,15 +8,17 @@ use crate::{
         backend::{ComputeCredentialKeys, ComputeUserInfo},
         IpPattern,
     },
-    cache::{project_info::ProjectInfoCacheImpl, Cached, TimedLru},
+    cache::{endpoints::EndpointsCache, project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
-    config::{CacheOptions, ProjectInfoCacheOptions},
+    config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
     context::RequestMonitoring,
-    scram, EndpointCacheKey, ProjectId,
+    error::ReportableError,
+    intern::ProjectIdInt,
+    metrics::ApiLockMetrics,
+    scram, EndpointCacheKey,
 };
-use async_trait::async_trait;
 use dashmap::DashMap;
-use std::{sync::Arc, time::Duration};
+use std::{hash::Hash, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tracing::info;
@@ -28,6 +30,8 @@ pub mod errors {
         proxy::retry::ShouldRetry,
     };
     use thiserror::Error;
+
+    use super::ApiLockError;
 
     /// A go-to error message which doesn't leak any detail.
     const REQUEST_FAILED: &str = "Console request failed";
@@ -75,7 +79,7 @@ pub mod errors {
                     }
                     http::StatusCode::LOCKED | http::StatusCode::UNPROCESSABLE_ENTITY => {
                         // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
-                        format!("{REQUEST_FAILED}: endpoint is temporary unavailable. check your quotas and/or contact our support")
+                        format!("{REQUEST_FAILED}: endpoint is temporarily unavailable. Check your quotas and/or contact our support.")
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 },
@@ -207,25 +211,17 @@ pub mod errors {
         #[error(transparent)]
         ApiError(ApiError),
 
-        #[error("Timeout waiting to acquire wake compute lock")]
-        TimeoutError,
+        #[error("Too many connections attempts")]
+        TooManyConnections,
+
+        #[error("error acquiring resource permit: {0}")]
+        TooManyConnectionAttempts(#[from] ApiLockError),
     }
 
     // This allows more useful interactions than `#[from]`.
     impl<E: Into<ApiError>> From<E> for WakeComputeError {
         fn from(e: E) -> Self {
             Self::ApiError(e.into())
-        }
-    }
-
-    impl From<tokio::sync::AcquireError> for WakeComputeError {
-        fn from(_: tokio::sync::AcquireError) -> Self {
-            WakeComputeError::TimeoutError
-        }
-    }
-    impl From<tokio::time::error::Elapsed> for WakeComputeError {
-        fn from(_: tokio::time::error::Elapsed) -> Self {
-            WakeComputeError::TimeoutError
         }
     }
 
@@ -239,7 +235,11 @@ pub mod errors {
                 // However, API might return a meaningful error.
                 ApiError(e) => e.to_string_client(),
 
-                TimeoutError => "timeout while acquiring the compute resource lock".to_owned(),
+                TooManyConnections => self.to_string(),
+
+                TooManyConnectionAttempts(_) => {
+                    "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
+                }
             }
         }
     }
@@ -249,7 +249,8 @@ pub mod errors {
             match self {
                 WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
                 WakeComputeError::ApiError(e) => e.get_error_kind(),
-                WakeComputeError::TimeoutError => crate::error::ErrorKind::ServiceRateLimit,
+                WakeComputeError::TooManyConnections => crate::error::ErrorKind::RateLimit,
+                WakeComputeError::TooManyConnectionAttempts(e) => e.get_error_kind(),
             }
         }
     }
@@ -272,7 +273,7 @@ pub struct AuthInfo {
     /// List of IP addresses allowed for the autorization.
     pub allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
-    pub project_id: Option<ProjectId>,
+    pub project_id: Option<ProjectIdInt>,
 }
 
 /// Info for establishing a connection to a compute node.
@@ -326,8 +327,7 @@ pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPatt
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
-#[async_trait]
-pub trait Api {
+pub(crate) trait Api {
     /// Get the client's auth secret for authentication.
     /// Returns option because user not found situation is special.
     /// We still have to mock the scram to avoid leaking information that user doesn't exist.
@@ -363,7 +363,6 @@ pub enum ConsoleBackend {
     Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
-#[async_trait]
 impl Api for ConsoleBackend {
     async fn get_role_secret(
         &self,
@@ -418,12 +417,15 @@ pub struct ApiCaches {
     pub node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
     pub project_info: Arc<ProjectInfoCacheImpl>,
+    /// List of all valid endpoints.
+    pub endpoints_cache: Arc<EndpointsCache>,
 }
 
 impl ApiCaches {
     pub fn new(
         wake_compute_cache_config: CacheOptions,
         project_info_cache_config: ProjectInfoCacheOptions,
+        endpoint_cache_config: EndpointCacheConfig,
     ) -> Self {
         Self {
             node_info: NodeInfoCache::new(
@@ -433,83 +435,58 @@ impl ApiCaches {
                 true,
             ),
             project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
+            endpoints_cache: Arc::new(EndpointsCache::new(endpoint_cache_config)),
         }
     }
 }
 
 /// Various caches for [`console`](super).
-pub struct ApiLocks {
+pub struct ApiLocks<K> {
     name: &'static str,
-    node_locks: DashMap<EndpointCacheKey, Arc<Semaphore>>,
+    node_locks: DashMap<K, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
-    registered: prometheus::IntCounter,
-    unregistered: prometheus::IntCounter,
-    reclamation_lag: prometheus::Histogram,
-    lock_acquire_lag: prometheus::Histogram,
+    epoch: std::time::Duration,
+    metrics: &'static ApiLockMetrics,
 }
 
-impl ApiLocks {
+#[derive(Debug, thiserror::Error)]
+pub enum ApiLockError {
+    #[error("lock was closed")]
+    AcquireError(#[from] tokio::sync::AcquireError),
+    #[error("permit could not be acquired")]
+    TimeoutError(#[from] tokio::time::error::Elapsed),
+}
+
+impl ReportableError for ApiLockError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        match self {
+            ApiLockError::AcquireError(_) => crate::error::ErrorKind::Service,
+            ApiLockError::TimeoutError(_) => crate::error::ErrorKind::RateLimit,
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone> ApiLocks<K> {
     pub fn new(
         name: &'static str,
         permits: usize,
         shards: usize,
         timeout: Duration,
+        epoch: std::time::Duration,
+        metrics: &'static ApiLockMetrics,
     ) -> prometheus::Result<Self> {
-        let registered = prometheus::IntCounter::with_opts(
-            prometheus::Opts::new(
-                "semaphores_registered",
-                "Number of semaphores registered in this api lock",
-            )
-            .namespace(name),
-        )?;
-        prometheus::register(Box::new(registered.clone()))?;
-        let unregistered = prometheus::IntCounter::with_opts(
-            prometheus::Opts::new(
-                "semaphores_unregistered",
-                "Number of semaphores unregistered in this api lock",
-            )
-            .namespace(name),
-        )?;
-        prometheus::register(Box::new(unregistered.clone()))?;
-        let reclamation_lag = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                "reclamation_lag_seconds",
-                "Time it takes to reclaim unused semaphores in the api lock",
-            )
-            .namespace(name)
-            // 1us -> 65ms
-            // benchmarks on my mac indicate it's usually in the range of 256us and 512us
-            .buckets(prometheus::exponential_buckets(1e-6, 2.0, 16)?),
-        )?;
-        prometheus::register(Box::new(reclamation_lag.clone()))?;
-        let lock_acquire_lag = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                "semaphore_acquire_seconds",
-                "Time it takes to reclaim unused semaphores in the api lock",
-            )
-            .namespace(name)
-            // 0.1ms -> 6s
-            .buckets(prometheus::exponential_buckets(1e-4, 2.0, 16)?),
-        )?;
-        prometheus::register(Box::new(lock_acquire_lag.clone()))?;
-
         Ok(Self {
             name,
             node_locks: DashMap::with_shard_amount(shards),
             permits,
             timeout,
-            lock_acquire_lag,
-            registered,
-            unregistered,
-            reclamation_lag,
+            epoch,
+            metrics,
         })
     }
 
-    pub async fn get_wake_compute_permit(
-        &self,
-        key: &EndpointCacheKey,
-    ) -> Result<WakeComputePermit, errors::WakeComputeError> {
+    pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
         if self.permits == 0 {
             return Ok(WakeComputePermit { permit: None });
         }
@@ -522,7 +499,7 @@ impl ApiLocks {
                 self.node_locks
                     .entry(key.clone())
                     .or_insert_with(|| {
-                        self.registered.inc();
+                        self.metrics.semaphores_registered.inc();
                         Arc::new(Semaphore::new(self.permits))
                     })
                     .clone()
@@ -530,20 +507,21 @@ impl ApiLocks {
         };
         let permit = tokio::time::timeout_at(now + self.timeout, semaphore.acquire_owned()).await;
 
-        self.lock_acquire_lag
-            .observe((Instant::now() - now).as_secs_f64());
+        self.metrics
+            .semaphore_acquire_seconds
+            .observe(now.elapsed().as_secs_f64());
 
         Ok(WakeComputePermit {
             permit: Some(permit??),
         })
     }
 
-    pub async fn garbage_collect_worker(&self, epoch: std::time::Duration) {
+    pub async fn garbage_collect_worker(&self) {
         if self.permits == 0 {
             return;
         }
-
-        let mut interval = tokio::time::interval(epoch / (self.node_locks.shards().len()) as u32);
+        let mut interval =
+            tokio::time::interval(self.epoch / (self.node_locks.shards().len()) as u32);
         loop {
             for (i, shard) in self.node_locks.shards().iter().enumerate() {
                 interval.tick().await;
@@ -556,13 +534,13 @@ impl ApiLocks {
                     "performing epoch reclamation on api lock"
                 );
                 let mut lock = shard.write();
-                let timer = self.reclamation_lag.start_timer();
+                let timer = self.metrics.reclamation_lag_seconds.start_timer();
                 let count = lock
                     .extract_if(|_, semaphore| Arc::strong_count(semaphore.get_mut()) == 1)
                     .count();
                 drop(lock);
-                self.unregistered.inc_by(count as u64);
-                timer.observe_duration()
+                self.metrics.semaphores_unregistered.inc_by(count as u64);
+                timer.observe();
             }
         }
     }

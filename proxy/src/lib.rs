@@ -127,6 +127,24 @@ macro_rules! smol_str_wrapper {
     };
 }
 
+const POOLER_SUFFIX: &str = "-pooler";
+
+pub trait Normalize {
+    fn normalize(&self) -> Self;
+}
+
+impl<S: Clone + AsRef<str> + From<String>> Normalize for S {
+    fn normalize(&self) -> Self {
+        if self.as_ref().ends_with(POOLER_SUFFIX) {
+            let mut s = self.as_ref().to_string();
+            s.truncate(s.len() - POOLER_SUFFIX.len());
+            s.into()
+        } else {
+            self.clone()
+        }
+    }
+}
+
 // 90% of role name strings are 20 characters or less.
 smol_str_wrapper!(RoleName);
 // 50% of endpoint strings are 23 characters or less.
@@ -140,3 +158,25 @@ smol_str_wrapper!(ProjectId);
 smol_str_wrapper!(EndpointCacheKey);
 
 smol_str_wrapper!(DbName);
+
+// postgres hostname, will likely be a port:ip addr
+smol_str_wrapper!(Host);
+
+// Endpoints are a bit tricky. Rare they might be branches or projects.
+impl EndpointId {
+    pub fn is_endpoint(&self) -> bool {
+        self.0.starts_with("ep-")
+    }
+    pub fn is_branch(&self) -> bool {
+        self.0.starts_with("br-")
+    }
+    pub fn is_project(&self) -> bool {
+        !self.is_endpoint() && !self.is_branch()
+    }
+    pub fn as_branch(&self) -> BranchId {
+        BranchId(self.0.clone())
+    }
+    pub fn as_project(&self) -> ProjectId {
+        ProjectId(self.0.clone())
+    }
+}

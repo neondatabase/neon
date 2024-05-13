@@ -14,7 +14,10 @@ use crate::{
     config::PageServerConf,
     context::RequestContext,
     task_mgr::{self, TaskKind},
-    tenant::mgr::{TenantSlot, TenantsMapRemoveResult},
+    tenant::{
+        mgr::{TenantSlot, TenantsMapRemoveResult},
+        timeline::ShutdownMode,
+    },
 };
 
 use super::{
@@ -111,6 +114,7 @@ async fn create_local_delete_mark(
     let _ = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&marker_path)
         .with_context(|| format!("could not create delete marker file {marker_path:?}"))?;
 
@@ -432,6 +436,11 @@ impl DeleteTenantFlow {
         .await
     }
 
+    /// Check whether background deletion of this tenant is currently in progress
+    pub(crate) fn is_in_progress(tenant: &Tenant) -> bool {
+        tenant.delete_progress.try_lock().is_err()
+    }
+
     async fn prepare(
         tenant: &Arc<Tenant>,
     ) -> Result<tokio::sync::OwnedMutexGuard<Self>, DeleteTenantError> {
@@ -462,7 +471,7 @@ impl DeleteTenantFlow {
         // tenant.shutdown
         // Its also bad that we're holding tenants.read here.
         // TODO relax set_stopping to be idempotent?
-        if tenant.shutdown(progress, false).await.is_err() {
+        if tenant.shutdown(progress, ShutdownMode::Hard).await.is_err() {
             return Err(DeleteTenantError::Other(anyhow::anyhow!(
                 "tenant shutdown is already in progress"
             )));
@@ -576,9 +585,20 @@ impl DeleteTenantFlow {
 
                     // FIXME: we should not be modifying this from outside of mgr.rs.
                     // This will go away when we simplify deletion (https://github.com/neondatabase/neon/issues/5080)
-                    crate::metrics::TENANT_MANAGER
-                        .tenant_slots
-                        .set(locked.len() as u64);
+
+                    // Update stats
+                    match &removed {
+                        TenantsMapRemoveResult::Occupied(slot) => {
+                            crate::metrics::TENANT_MANAGER.slot_removed(slot);
+                        }
+                        TenantsMapRemoveResult::InProgress(barrier) => {
+                            crate::metrics::TENANT_MANAGER
+                                .slot_removed(&TenantSlot::InProgress(barrier.clone()));
+                        }
+                        TenantsMapRemoveResult::Vacant => {
+                            // Nothing changed in map, no metric update
+                        }
+                    }
 
                     match removed {
                         TenantsMapRemoveResult::Occupied(TenantSlot::Attached(tenant)) => {

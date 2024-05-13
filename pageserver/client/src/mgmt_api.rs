@@ -128,12 +128,12 @@ impl Client {
 
     pub async fn timeline_info(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         force_await_logical_size: ForceAwaitLogicalSize,
     ) -> Result<pageserver_api::models::TimelineInfo> {
         let uri = format!(
-            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}",
             self.mgmt_api_endpoint
         );
 
@@ -151,11 +151,11 @@ impl Client {
 
     pub async fn keyspace(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
     ) -> Result<pageserver_api::models::partitioning::Partitioning> {
         let uri = format!(
-            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/keyspace",
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/keyspace",
             self.mgmt_api_endpoint
         );
         self.get(&uri)
@@ -243,6 +243,19 @@ impl Client {
         Ok(())
     }
 
+    pub async fn tenant_scan_remote_storage(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantScanRemoteStorageResponse> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_id}/scan_remote_storage",
+            self.mgmt_api_endpoint
+        );
+        let response = self.request(Method::GET, &uri, ()).await?;
+        let body = response.json().await.map_err(Error::ReceiveBody)?;
+        Ok(body)
+    }
+
     pub async fn tenant_config(&self, req: &TenantConfigRequest) -> Result<()> {
         let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
         self.request(Method::PUT, &uri, req).await?;
@@ -271,6 +284,34 @@ impl Client {
         Ok((status, progress))
     }
 
+    pub async fn tenant_secondary_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<SecondaryProgress> {
+        let path = reqwest::Url::parse(&format!(
+            "{}/v1/tenant/{}/secondary/status",
+            self.mgmt_api_endpoint, tenant_shard_id
+        ))
+        .expect("Cannot build URL");
+
+        self.request(Method::GET, path, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn tenant_heatmap_upload(&self, tenant_id: TenantShardId) -> Result<()> {
+        let path = reqwest::Url::parse(&format!(
+            "{}/v1/tenant/{}/heatmap_upload",
+            self.mgmt_api_endpoint, tenant_id
+        ))
+        .expect("Cannot build URL");
+
+        self.request(Method::POST, path, ()).await?;
+        Ok(())
+    }
+
     pub async fn location_config(
         &self,
         tenant_shard_id: TenantShardId,
@@ -278,10 +319,7 @@ impl Client {
         flush_ms: Option<std::time::Duration>,
         lazy: bool,
     ) -> Result<()> {
-        let req_body = TenantLocationConfigRequest {
-            tenant_id: Some(tenant_shard_id),
-            config,
-        };
+        let req_body = TenantLocationConfigRequest { config };
 
         let mut path = reqwest::Url::parse(&format!(
             "{}/v1/tenant/{}/location_config",

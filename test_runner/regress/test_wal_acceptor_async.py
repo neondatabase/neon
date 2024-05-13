@@ -10,6 +10,7 @@ import pytest
 import toml
 from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, Safekeeper
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId, TimelineId
 
 log = getLogger("root.safekeeper_async")
@@ -76,20 +77,20 @@ class WorkerStats(object):
         self.counters[worker_id] += 1
 
     def check_progress(self):
-        log.debug("Workers progress: {}".format(self.counters))
+        log.debug(f"Workers progress: {self.counters}")
 
         # every worker should finish at least one tx
         assert all(cnt > 0 for cnt in self.counters)
 
         progress = sum(self.counters)
-        log.info("All workers made {} transactions".format(progress))
+        log.info(f"All workers made {progress} transactions")
 
 
 async def run_random_worker(
     stats: WorkerStats, endpoint: Endpoint, worker_id, n_accounts, max_transfer
 ):
     pg_conn = await endpoint.connect_async()
-    log.debug("Started worker {}".format(worker_id))
+    log.debug(f"Started worker {worker_id}")
 
     while stats.running:
         from_uid = random.randint(0, n_accounts - 1)
@@ -99,9 +100,9 @@ async def run_random_worker(
         await bank_transfer(pg_conn, from_uid, to_uid, amount)
         stats.inc_progress(worker_id)
 
-        log.debug("Executed transfer({}) {} => {}".format(amount, from_uid, to_uid))
+        log.debug(f"Executed transfer({amount}) {from_uid} => {to_uid}")
 
-    log.debug("Finished worker {}".format(worker_id))
+    log.debug(f"Finished worker {worker_id}")
 
     await pg_conn.close()
 
@@ -199,7 +200,9 @@ async def run_restarts_under_load(
         # assert that at least one transaction has completed in every worker
         stats.check_progress()
 
-        victim.start()
+        # testing #6530, temporary here
+        # TODO: remove afer partial backup is enabled by default
+        victim.start(extra_opts=["--partial-backup-enabled", "--partial-backup-timeout=2s"])
 
     log.info("Iterations are finished, exiting coroutines...")
     stats.running = False
@@ -213,6 +216,7 @@ async def run_restarts_under_load(
 # Restart acceptors one by one, while executing and validating bank transactions
 def test_restarts_under_load(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_safekeepers_restarts_under_load")
@@ -250,7 +254,9 @@ def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
     )
 
 
-def endpoint_create_start(env: NeonEnv, branch: str, pgdir_name: Optional[str]):
+def endpoint_create_start(
+    env: NeonEnv, branch: str, pgdir_name: Optional[str], allow_multiple: bool = False
+):
     endpoint = Endpoint(
         env,
         tenant_id=env.initial_tenant,
@@ -264,14 +270,23 @@ def endpoint_create_start(env: NeonEnv, branch: str, pgdir_name: Optional[str]):
     # embed current time in endpoint ID
     endpoint_id = pgdir_name or f"ep-{time.time()}"
     return endpoint.create_start(
-        branch_name=branch, endpoint_id=endpoint_id, config_lines=["log_statement=all"]
+        branch_name=branch,
+        endpoint_id=endpoint_id,
+        config_lines=["log_statement=all"],
+        allow_multiple=allow_multiple,
     )
 
 
 async def exec_compute_query(
-    env: NeonEnv, branch: str, query: str, pgdir_name: Optional[str] = None
+    env: NeonEnv,
+    branch: str,
+    query: str,
+    pgdir_name: Optional[str] = None,
+    allow_multiple: bool = False,
 ):
-    with endpoint_create_start(env, branch=branch, pgdir_name=pgdir_name) as endpoint:
+    with endpoint_create_start(
+        env, branch=branch, pgdir_name=pgdir_name, allow_multiple=allow_multiple
+    ) as endpoint:
         before_conn = time.time()
         conn = await endpoint.connect_async()
         res = await conn.fetch(query)
@@ -343,6 +358,7 @@ class BackgroundCompute(object):
                     self.branch,
                     f"INSERT INTO query_log(index, verify_key) VALUES ({self.index}, {verify_key}) RETURNING verify_key",
                     pgdir_name=f"bgcompute{self.index}_key{verify_key}",
+                    allow_multiple=True,
                 )
                 log.info(f"result: {res}")
                 if len(res) != 1:

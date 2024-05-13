@@ -5,19 +5,28 @@ use crate::interface::*;
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
+use pageserver_api::shard::ShardIdentity;
 use pin_project_lite::pin_project;
 use std::collections::BinaryHeap;
 use std::collections::VecDeque;
+use std::fmt::Display;
 use std::future::Future;
 use std::ops::{DerefMut, Range};
 use std::pin::Pin;
 use std::task::{ready, Poll};
+use utils::lsn::Lsn;
 
-pub fn keyspace_total_size<K>(keyspace: &CompactionKeySpace<K>) -> u64
+pub fn keyspace_total_size<K>(
+    keyspace: &CompactionKeySpace<K>,
+    shard_identity: &ShardIdentity,
+) -> u64
 where
     K: CompactionKey,
 {
-    keyspace.iter().map(|r| K::key_range_size(r) as u64).sum()
+    keyspace
+        .iter()
+        .map(|r| K::key_range_size(r, shard_identity) as u64)
+        .sum()
 }
 
 pub fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
@@ -101,15 +110,38 @@ pub fn merge_delta_keys<'a, E: CompactionJobExecutor>(
     }
 }
 
+pub async fn merge_delta_keys_buffered<'a, E: CompactionJobExecutor + 'a>(
+    layers: &'a [E::DeltaLayer],
+    ctx: &'a E::RequestContext,
+) -> anyhow::Result<impl Stream<Item = <E::DeltaLayer as CompactionDeltaLayer<E>>::DeltaEntry<'a>>>
+{
+    let mut keys = Vec::new();
+    for l in layers {
+        // Boxing and casting to LoadFuture is required to obtain the right Sync bound.
+        // If we do l.load_keys(ctx).await? directly, there is a compilation error.
+        let load_future: LoadFuture<'a, _> = Box::pin(l.load_keys(ctx));
+        keys.extend(load_future.await?.into_iter());
+    }
+    keys.sort_by_key(|k| (k.key(), k.lsn()));
+    let stream = futures::stream::iter(keys.into_iter());
+    Ok(stream)
+}
+
 enum LazyLoadLayer<'a, E: CompactionJobExecutor> {
     Loaded(VecDeque<<E::DeltaLayer as CompactionDeltaLayer<E>>::DeltaEntry<'a>>),
     Unloaded(&'a E::DeltaLayer),
 }
 impl<'a, E: CompactionJobExecutor> LazyLoadLayer<'a, E> {
-    fn key(&self) -> E::Key {
+    fn min_key(&self) -> E::Key {
         match self {
             Self::Loaded(entries) => entries.front().unwrap().key(),
             Self::Unloaded(dl) => dl.key_range().start,
+        }
+    }
+    fn min_lsn(&self) -> Lsn {
+        match self {
+            Self::Loaded(entries) => entries.front().unwrap().lsn(),
+            Self::Unloaded(dl) => dl.lsn_range().start,
         }
     }
 }
@@ -121,12 +153,12 @@ impl<'a, E: CompactionJobExecutor> PartialOrd for LazyLoadLayer<'a, E> {
 impl<'a, E: CompactionJobExecutor> Ord for LazyLoadLayer<'a, E> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // reverse order so that we get a min-heap
-        other.key().cmp(&self.key())
+        (other.min_key(), other.min_lsn()).cmp(&(self.min_key(), self.min_lsn()))
     }
 }
 impl<'a, E: CompactionJobExecutor> PartialEq for LazyLoadLayer<'a, E> {
     fn eq(&self, other: &Self) -> bool {
-        self.key().eq(&other.key())
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 impl<'a, E: CompactionJobExecutor> Eq for LazyLoadLayer<'a, E> {}
@@ -180,7 +212,7 @@ where
                 match top.deref_mut() {
                     LazyLoadLayer::Unloaded(ref mut l) => {
                         let fut = l.load_keys(this.ctx);
-                        this.load_future.set(Some(fut));
+                        this.load_future.set(Some(Box::pin(fut)));
                         continue;
                     }
                     LazyLoadLayer::Loaded(ref mut entries) => {
@@ -207,7 +239,7 @@ pub struct KeySize<K> {
 
 pub fn accum_key_values<'a, I, K, D, E>(input: I) -> impl Stream<Item = Result<KeySize<K>, E>>
 where
-    K: Eq,
+    K: Eq + PartialOrd + Display + Copy,
     I: Stream<Item = Result<D, E>>,
     D: CompactionDeltaEntry<'a, K>,
 {
@@ -222,12 +254,15 @@ where
                 num_values: 1,
                 size: first.size(),
             };
+            let mut last_key = accum.key;
             while let Some(this) = input.next().await {
                 let this = this?;
                 if this.key() == accum.key {
                     accum.size += this.size();
                     accum.num_values += 1;
                 } else {
+                    assert!(last_key <= accum.key, "last_key={last_key} <= accum.key={}", accum.key);
+                    last_key = accum.key;
                     yield accum;
                     accum = KeySize {
                         key: this.key(),
@@ -236,6 +271,7 @@ where
                     };
                 }
             }
+            assert!(last_key <= accum.key, "last_key={last_key} <= accum.key={}", accum.key);
             yield accum;
         }
     }

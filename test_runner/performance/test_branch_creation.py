@@ -78,7 +78,7 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
         p = random.randint(0, i)
 
         timer = timeit.default_timer()
-        env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(p), tenant_id=tenant)
+        env.neon_cli.create_branch(f"b{i + 1}", f"b{p}", tenant_id=tenant)
         dur = timeit.default_timer() - timer
 
         log.info(f"Creating branch b{i+1} took {dur}s")
@@ -140,10 +140,14 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
 
     # start without gc so we can time compaction with less noise; use shorter
     # period for compaction so it starts earlier
+    def patch_default_tenant_config(config):
+        tenant_config = config.get("tenant_config", {})
+        tenant_config["compaction_period"] = "3s"
+        tenant_config["gc_period"] = "0s"
+        config["tenant_config"] = tenant_config
+
+    env.pageserver.edit_config_toml(patch_default_tenant_config)
     env.pageserver.start(
-        overrides=(
-            "--pageserver-config-override=tenant_config={ compaction_period = '3s', gc_period = '0s' }",
-        ),
         # this does print more than we want, but the number should be comparable between runs
         extra_env_vars={
             "RUST_LOG": f"[compaction_loop{{tenant_id={env.initial_tenant}}}]=debug,info"

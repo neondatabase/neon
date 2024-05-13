@@ -4,11 +4,16 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
 };
-use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
 use crate::context::RequestMonitoring;
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use crate::{auth::IpPattern, cache::Cached};
-use async_trait::async_trait;
+use crate::{
+    console::{
+        messages::MetricsAuxInfo,
+        provider::{CachedAllowedIps, CachedRoleSecret},
+    },
+    BranchId, EndpointId, ProjectId,
+};
 use futures::TryFutureExt;
 use std::{str::FromStr, sync::Arc};
 use thiserror::Error;
@@ -115,7 +120,12 @@ impl Api {
 
         let node = NodeInfo {
             config,
-            aux: Default::default(),
+            aux: MetricsAuxInfo {
+                endpoint_id: (&EndpointId::from("endpoint")).into(),
+                project_id: (&ProjectId::from("project")).into(),
+                branch_id: (&BranchId::from("branch")).into(),
+                cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+            },
             allow_self_signed_compute: false,
         };
 
@@ -144,7 +154,6 @@ async fn get_execute_postgres_query(
     Ok(Some(entry))
 }
 
-#[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(

@@ -947,6 +947,9 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
+# Create remote extension download directory
+RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
+
 # Install:
 # libreadline8 for psql
 # libicu67, locales for collations (including ICU and plpgsql_check)

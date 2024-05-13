@@ -1,3 +1,4 @@
+use crate::tenant::mgr::TenantManager;
 use crate::{context::RequestContext, tenant::timeline::logical_size::CurrentLogicalSize};
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
@@ -181,6 +182,7 @@ impl MetricsKey {
 }
 
 pub(super) async fn collect_all_metrics(
+    tenant_manager: &Arc<TenantManager>,
     cached_metrics: &Cache,
     ctx: &RequestContext,
 ) -> Vec<RawMetric> {
@@ -188,7 +190,7 @@ pub(super) async fn collect_all_metrics(
 
     let started_at = std::time::Instant::now();
 
-    let tenants = match crate::tenant::mgr::list_tenants().await {
+    let tenants = match tenant_manager.list_tenants() {
         Ok(tenants) => tenants,
         Err(err) => {
             tracing::error!("failed to list tenants: {:?}", err);
@@ -197,10 +199,11 @@ pub(super) async fn collect_all_metrics(
     };
 
     let tenants = futures::stream::iter(tenants).filter_map(|(id, state, _)| async move {
-        if state != TenantState::Active || !id.is_zero() {
+        if state != TenantState::Active || !id.is_shard_zero() {
             None
         } else {
-            crate::tenant::mgr::get_tenant(id, true)
+            tenant_manager
+                .get_attached_tenant_shard(id)
                 .ok()
                 .map(|tenant| (id.tenant_id, tenant))
         }

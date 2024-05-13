@@ -86,7 +86,10 @@ where
         .stdout(process_log_file)
         .stderr(same_file_for_stderr)
         .args(args);
-    let filled_cmd = fill_remote_storage_secrets_vars(fill_rust_env_vars(background_command));
+
+    let filled_cmd = fill_env_vars_prefixed_neon(fill_remote_storage_secrets_vars(
+        fill_rust_env_vars(background_command),
+    ));
     filled_cmd.envs(envs);
 
     let pid_file_to_check = match &initial_pid_file {
@@ -268,6 +271,15 @@ fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+fn fill_env_vars_prefixed_neon(mut cmd: &mut Command) -> &mut Command {
+    for (var, val) in std::env::vars() {
+        if var.starts_with("NEON_PAGESERVER_") {
+            cmd = cmd.env(var, val);
+        }
+    }
+    cmd
+}
+
 /// Add a `pre_exec` to the cmd that, inbetween fork() and exec(),
 /// 1. Claims a pidfile with a fcntl lock on it and
 /// 2. Sets up the pidfile's file descriptor so that it (and the lock)
@@ -294,7 +306,7 @@ where
     //      is in state 'taken' but the thread that would unlock it is
     //      not there.
     //   2. A rust object that represented some external resource in the
-    //      parent now got implicitly copied by the the fork, even though
+    //      parent now got implicitly copied by the fork, even though
     //      the object's type is not `Copy`. The parent program may use
     //      non-copyability as way to enforce unique ownership of an
     //      external resource in the typesystem. The fork breaks that

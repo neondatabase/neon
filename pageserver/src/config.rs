@@ -9,7 +9,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use serde;
 use serde::de::IntoDeserializer;
-use std::{collections::HashMap, env};
+use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
@@ -30,9 +30,9 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::tenant::config::TenantConfOpt;
 use crate::tenant::timeline::GetVectoredImpl;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
+use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
@@ -51,7 +51,7 @@ pub mod defaults {
     use crate::tenant::config::defaults::*;
     use const_format::formatcp;
 
-    pub use pageserver_api::{
+    pub use pageserver_api::config::{
         DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
         DEFAULT_PG_LISTEN_PORT,
     };
@@ -91,9 +91,15 @@ pub mod defaults {
 
     pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
 
+    pub const DEFAULT_GET_IMPL: &str = "legacy";
+
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
+
+    pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
+
+    pub const DEFAULT_WALREDO_PROCESS_KIND: &str = "sync";
 
     ///
     /// Default built-in configuration file.
@@ -134,9 +140,13 @@ pub mod defaults {
 
 #get_vectored_impl = '{DEFAULT_GET_VECTORED_IMPL}'
 
+#get_impl = '{DEFAULT_GET_IMPL}'
+
 #max_vectored_read_bytes = '{DEFAULT_MAX_VECTORED_READ_BYTES}'
 
 #validate_vectored_get = '{DEFAULT_VALIDATE_VECTORED_GET}'
+
+#walredo_process_kind = '{DEFAULT_WALREDO_PROCESS_KIND}'
 
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -155,6 +165,8 @@ pub mod defaults {
 
 #heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
 #secondary_download_concurrency = {DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY}
+
+#ephemeral_bytes_per_memory_kb = {DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB}
 
 [remote_storage]
 
@@ -234,6 +246,7 @@ pub struct PageServerConf {
     // How often to send unchanged cached metrics to the metrics endpoint.
     pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
+    pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
 
     pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
@@ -275,9 +288,20 @@ pub struct PageServerConf {
 
     pub get_vectored_impl: GetVectoredImpl,
 
+    pub get_impl: GetImpl,
+
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
     pub validate_vectored_get: bool,
+
+    /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
+    /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
+    /// of ephemeral data.
+    ///
+    /// Setting this to zero disables limits on total ephemeral layer size.
+    pub ephemeral_bytes_per_memory_kb: usize,
+
+    pub walredo_process_kind: crate::walredo::ProcessKind,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -309,26 +333,6 @@ impl<T: Clone> BuilderValue<T> {
             },
         }
     }
-}
-
-// Certain metadata (e.g. externally-addressable name, AZ) is delivered
-// as a separate structure.  This information is not neeed by the pageserver
-// itself, it is only used for registering the pageserver with the control
-// plane and/or storage controller.
-//
-#[derive(serde::Deserialize)]
-pub(crate) struct NodeMetadata {
-    #[serde(rename = "host")]
-    pub(crate) postgres_host: String,
-    #[serde(rename = "port")]
-    pub(crate) postgres_port: u16,
-    pub(crate) http_host: String,
-    pub(crate) http_port: u16,
-
-    // Deployment tools may write fields to the metadata file beyond what we
-    // use in this type: this type intentionally only names fields that require.
-    #[serde(flatten)]
-    pub(crate) other: HashMap<String, serde_json::Value>,
 }
 
 // needed to simplify config construction
@@ -373,6 +377,7 @@ struct PageServerConfigBuilder {
     cached_metric_collection_interval: BuilderValue<Duration>,
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
+    metric_collection_bucket: BuilderValue<Option<RemoteStorageConfig>>,
 
     disk_usage_based_eviction: BuilderValue<Option<DiskUsageEvictionTaskConfig>>,
 
@@ -395,9 +400,15 @@ struct PageServerConfigBuilder {
 
     get_vectored_impl: BuilderValue<GetVectoredImpl>,
 
+    get_impl: BuilderValue<GetImpl>,
+
     max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
 
     validate_vectored_get: BuilderValue<bool>,
+
+    ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
+
+    walredo_process_kind: BuilderValue<crate::walredo::ProcessKind>,
 }
 
 impl PageServerConfigBuilder {
@@ -455,6 +466,8 @@ impl PageServerConfigBuilder {
             .expect("cannot parse default synthetic size calculation interval")),
             metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
 
+            metric_collection_bucket: Set(None),
+
             disk_usage_based_eviction: Set(None),
 
             test_remote_failures: Set(0),
@@ -478,10 +491,14 @@ impl PageServerConfigBuilder {
             virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
 
             get_vectored_impl: Set(DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
+            get_impl: Set(DEFAULT_GET_IMPL.parse().unwrap()),
             max_vectored_read_bytes: Set(MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
+            ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
+
+            walredo_process_kind: Set(DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap()),
         }
     }
 }
@@ -586,6 +603,13 @@ impl PageServerConfigBuilder {
         self.metric_collection_endpoint = BuilderValue::Set(metric_collection_endpoint)
     }
 
+    pub fn metric_collection_bucket(
+        &mut self,
+        metric_collection_bucket: Option<RemoteStorageConfig>,
+    ) {
+        self.metric_collection_bucket = BuilderValue::Set(metric_collection_bucket)
+    }
+
     pub fn synthetic_size_calculation_interval(
         &mut self,
         synthetic_size_calculation_interval: Duration,
@@ -646,12 +670,24 @@ impl PageServerConfigBuilder {
         self.get_vectored_impl = BuilderValue::Set(value);
     }
 
+    pub fn get_impl(&mut self, value: GetImpl) {
+        self.get_impl = BuilderValue::Set(value);
+    }
+
     pub fn get_max_vectored_read_bytes(&mut self, value: MaxVectoredReadBytes) {
         self.max_vectored_read_bytes = BuilderValue::Set(value);
     }
 
     pub fn get_validate_vectored_get(&mut self, value: bool) {
         self.validate_vectored_get = BuilderValue::Set(value);
+    }
+
+    pub fn get_ephemeral_bytes_per_memory_kb(&mut self, value: usize) {
+        self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
+    }
+
+    pub fn get_walredo_process_kind(&mut self, value: crate::walredo::ProcessKind) {
+        self.walredo_process_kind = BuilderValue::Set(value);
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
@@ -694,6 +730,7 @@ impl PageServerConfigBuilder {
                 metric_collection_interval,
                 cached_metric_collection_interval,
                 metric_collection_endpoint,
+                metric_collection_bucket,
                 synthetic_size_calculation_interval,
                 disk_usage_based_eviction,
                 test_remote_failures,
@@ -706,8 +743,11 @@ impl PageServerConfigBuilder {
                 secondary_download_concurrency,
                 ingest_batch_size,
                 get_vectored_impl,
+                get_impl,
                 max_vectored_read_bytes,
                 validate_vectored_get,
+                ephemeral_bytes_per_memory_kb,
+                walredo_process_kind,
             }
             CUSTOM LOGIC
             {
@@ -942,6 +982,9 @@ impl PageServerConf {
                     let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
                     builder.metric_collection_endpoint(Some(endpoint));
                 },
+                "metric_collection_bucket" => {
+                    builder.metric_collection_bucket(RemoteStorageConfig::from_toml(item)?)
+                }
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
@@ -986,6 +1029,9 @@ impl PageServerConf {
                 "get_vectored_impl" => {
                     builder.get_vectored_impl(parse_toml_from_str("get_vectored_impl", item)?)
                 }
+                "get_impl" => {
+                    builder.get_impl(parse_toml_from_str("get_impl", item)?)
+                }
                 "max_vectored_read_bytes" => {
                     let bytes = parse_toml_u64("max_vectored_read_bytes", item)? as usize;
                     builder.get_max_vectored_read_bytes(
@@ -994,6 +1040,12 @@ impl PageServerConf {
                 }
                 "validate_vectored_get" => {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
+                }
+                "ephemeral_bytes_per_memory_kb" => {
+                    builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
+                }
+                "walredo_process_kind" => {
+                    builder.get_walredo_process_kind(parse_toml_from_str("walredo_process_kind", item)?)
                 }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
@@ -1057,6 +1109,7 @@ impl PageServerConf {
             metric_collection_interval: Duration::from_secs(60),
             cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+            metric_collection_bucket: None,
             synthetic_size_calculation_interval: Duration::from_secs(60),
             disk_usage_based_eviction: None,
             test_remote_failures: 0,
@@ -1070,11 +1123,14 @@ impl PageServerConf {
             ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
             virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
             get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
+            get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
             max_vectored_read_bytes: MaxVectoredReadBytes(
                 NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                     .expect("Invalid default constant"),
             ),
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+            ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+            walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
         }
     }
 }
@@ -1289,6 +1345,7 @@ background_task_maximum_delay = '334 s'
                     defaults::DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL
                 )?,
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
+                metric_collection_bucket: None,
                 synthetic_size_calculation_interval: humantime::parse_duration(
                     defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
                 )?,
@@ -1306,11 +1363,14 @@ background_task_maximum_delay = '334 s'
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
+                get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1363,6 +1423,7 @@ background_task_maximum_delay = '334 s'
                 metric_collection_interval: Duration::from_secs(222),
                 cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
+                metric_collection_bucket: None,
                 synthetic_size_calculation_interval: Duration::from_secs(333),
                 disk_usage_based_eviction: None,
                 test_remote_failures: 0,
@@ -1376,11 +1437,14 @@ background_task_maximum_delay = '334 s'
                 ingest_batch_size: 100,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
                 get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
+                get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -1493,6 +1557,7 @@ broker_endpoint = '{broker_endpoint}'
                         endpoint: Some(endpoint.clone()),
                         concurrency_limit: s3_concurrency_limit,
                         max_keys_per_list_response: None,
+                        upload_storage_class: None,
                     }),
                     timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
                 },

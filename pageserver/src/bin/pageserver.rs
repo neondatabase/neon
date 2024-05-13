@@ -3,6 +3,7 @@
 //! Main entry point for the Page Server executable.
 
 use std::env::{var, VarError};
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, ops::ControlFlow, str::FromStr};
@@ -18,6 +19,7 @@ use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
 use pageserver::tenant::{secondary, TenantSharedResources};
 use remote_storage::GenericRemoteStorage;
+use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tracing::*;
 
@@ -120,8 +122,10 @@ fn main() -> anyhow::Result<()> {
         &[("node_id", &conf.id.to_string())],
     );
 
-    // after setting up logging, log the effective IO engine choice
+    // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
+    info!(?conf.get_impl, "starting with get page implementation");
+    info!(?conf.get_vectored_impl, "starting with vectored get page implementation");
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
@@ -148,37 +152,34 @@ fn initialize_config(
     workdir: &Utf8Path,
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
     let init = arg_matches.get_flag("init");
-    let update_config = init || arg_matches.get_flag("update-config");
 
-    let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
-        if init {
-            anyhow::bail!(
-                "Config file '{cfg_file_path}' already exists, cannot init it, use --update-config to update it",
-            );
+    let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
+        Ok(mut f) => {
+            if init {
+                anyhow::bail!("config file already exists: {cfg_file_path}");
+            }
+            let md = f.metadata().context("stat config file")?;
+            if md.is_file() {
+                let mut s = String::new();
+                f.read_to_string(&mut s).context("read config file")?;
+                Some(s.parse().context("parse config file toml")?)
+            } else {
+                anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
+            }
         }
-        // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
-            .with_context(|| format!("Failed to read pageserver config at '{cfg_file_path}'"))?;
-        (
-            cfg_file_contents
-                .parse::<toml_edit::Document>()
-                .with_context(|| {
-                    format!("Failed to parse '{cfg_file_path}' as pageserver config")
-                })?,
-            true,
-        )
-    } else if cfg_file_path.exists() {
-        anyhow::bail!("Config file '{cfg_file_path}' exists but is not a regular file");
-    } else {
-        // We're initializing the tenant, so there's no config file yet
-        (
-            DEFAULT_CONFIG_FILE
-                .parse::<toml_edit::Document>()
-                .context("could not parse built-in config file")?,
-            false,
-        )
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
+        }
     };
 
+    let mut effective_config = file_contents.unwrap_or_else(|| {
+        DEFAULT_CONFIG_FILE
+            .parse()
+            .expect("unit tests ensure this works")
+    });
+
+    // Patch with overrides from the command line
     if let Some(values) = arg_matches.get_many::<String>("config-override") {
         for option_line in values {
             let doc = toml_edit::Document::from_str(option_line).with_context(|| {
@@ -186,22 +187,21 @@ fn initialize_config(
             })?;
 
             for (key, item) in doc.iter() {
-                if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
-                    anyhow::bail!("Pageserver config file exists at '{cfg_file_path}' and has node id already, it cannot be overridden");
-                }
-                toml.insert(key, item.clone());
+                effective_config.insert(key, item.clone());
             }
         }
     }
 
-    debug!("Resulting toml: {toml}");
-    let conf = PageServerConf::parse_and_validate(&toml, workdir)
+    debug!("Resulting toml: {effective_config}");
+
+    // Construct the runtime representation
+    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
-    if update_config {
+    if init {
         info!("Writing pageserver config to '{cfg_file_path}'");
 
-        std::fs::write(cfg_file_path, toml.to_string())
+        std::fs::write(cfg_file_path, effective_config.to_string())
             .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
         info!("Config successfully written to '{cfg_file_path}'")
     }
@@ -284,6 +284,7 @@ fn start_pageserver(
     ))
     .unwrap();
     pageserver::preinitialize_metrics();
+    pageserver::metrics::wal_redo::set_process_kind_metric(conf.walredo_process_kind);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
@@ -600,32 +601,37 @@ fn start_pageserver(
             None,
             "consumption metrics collection",
             true,
-            async move {
-                // first wait until background jobs are cleared to launch.
-                //
-                // this is because we only process active tenants and timelines, and the
-                // Timeline::get_current_logical_size will spawn the logical size calculation,
-                // which will not be rate-limited.
-                let cancel = task_mgr::shutdown_token();
+            {
+                let tenant_manager = tenant_manager.clone();
+                async move {
+                    // first wait until background jobs are cleared to launch.
+                    //
+                    // this is because we only process active tenants and timelines, and the
+                    // Timeline::get_current_logical_size will spawn the logical size calculation,
+                    // which will not be rate-limited.
+                    let cancel = task_mgr::shutdown_token();
 
-                tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()); },
-                    _ = background_jobs_barrier.wait() => {}
-                };
+                    tokio::select! {
+                        _ = cancel.cancelled() => { return Ok(()); },
+                        _ = background_jobs_barrier.wait() => {}
+                    };
 
-                pageserver::consumption_metrics::collect_metrics(
-                    metric_collection_endpoint,
-                    conf.metric_collection_interval,
-                    conf.cached_metric_collection_interval,
-                    conf.synthetic_size_calculation_interval,
-                    conf.id,
-                    local_disk_storage,
-                    cancel,
-                    metrics_ctx,
-                )
-                .instrument(info_span!("metrics_collection"))
-                .await?;
-                Ok(())
+                    pageserver::consumption_metrics::collect_metrics(
+                        tenant_manager,
+                        metric_collection_endpoint,
+                        &conf.metric_collection_bucket,
+                        conf.metric_collection_interval,
+                        conf.cached_metric_collection_interval,
+                        conf.synthetic_size_calculation_interval,
+                        conf.id,
+                        local_disk_storage,
+                        cancel,
+                        metrics_ctx,
+                    )
+                    .instrument(info_span!("metrics_collection"))
+                    .await?;
+                    Ok(())
+                }
             },
         );
     }
@@ -666,42 +672,37 @@ fn start_pageserver(
     let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
     // All started up! Now just sit and wait for shutdown signal.
-    {
-        use signal_hook::consts::*;
-        let signal_handler = BACKGROUND_RUNTIME.spawn_blocking(move || {
-            let mut signals =
-                signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGQUIT]).unwrap();
-            return signals
-                .forever()
-                .next()
-                .expect("forever() never returns None unless explicitly closed");
-        });
-        let signal = BACKGROUND_RUNTIME
-            .block_on(signal_handler)
-            .expect("join error");
-        match signal {
-            SIGQUIT => {
-                info!("Got signal {signal}. Terminating in immediate shutdown mode",);
-                std::process::exit(111);
-            }
-            SIGINT | SIGTERM => {
-                info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
 
-                // This cancels the `shutdown_pageserver` cancellation tree.
-                // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
-                // The plan is to change that over time.
-                shutdown_pageserver.take();
-                let bg_remote_storage = remote_storage.clone();
-                let bg_deletion_queue = deletion_queue.clone();
-                BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
-                    &tenant_manager,
-                    bg_remote_storage.map(|_| bg_deletion_queue),
-                    0,
-                ));
-                unreachable!()
-            }
-            _ => unreachable!(),
-        }
+    {
+        BACKGROUND_RUNTIME.block_on(async move {
+            let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
+            let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
+            let mut sigquit = tokio::signal::unix::signal(SignalKind::quit()).unwrap();
+            let signal = tokio::select! {
+                _ = sigquit.recv() => {
+                    info!("Got signal SIGQUIT. Terminating in immediate shutdown mode",);
+                    std::process::exit(111);
+                }
+                _ = sigint.recv() => { "SIGINT" },
+                _ = sigterm.recv() => { "SIGTERM" },
+            };
+
+            info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
+
+            // This cancels the `shutdown_pageserver` cancellation tree.
+            // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
+            // The plan is to change that over time.
+            shutdown_pageserver.take();
+            let bg_remote_storage = remote_storage.clone();
+            let bg_deletion_queue = deletion_queue.clone();
+            pageserver::shutdown_pageserver(
+                &tenant_manager,
+                bg_remote_storage.map(|_| bg_deletion_queue),
+                0,
+            )
+            .await;
+            unreachable!()
+        })
     }
 }
 
@@ -754,17 +755,12 @@ fn cli() -> Command {
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
             Arg::new("config-override")
+                .long("config-override")
                 .short('c')
                 .num_args(1)
                 .action(ArgAction::Append)
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there). \
                 Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
-        )
-        .arg(
-            Arg::new("update-config")
-                .long("update-config")
-                .action(ArgAction::SetTrue)
-                .help("Update the config file when started"),
         )
         .arg(
             Arg::new("enabled-features")

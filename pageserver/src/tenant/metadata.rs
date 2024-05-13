@@ -207,6 +207,24 @@ impl TimelineMetadata {
         self.body.ancestor_lsn
     }
 
+    /// When reparenting, the `ancestor_lsn` does not change.
+    pub fn reparent(&mut self, timeline: &TimelineId) {
+        assert!(self.body.ancestor_timeline.is_some());
+        // no assertion for redoing this: it's fine, we may have to repeat this multiple times over
+        self.body.ancestor_timeline = Some(*timeline);
+    }
+
+    pub fn detach_from_ancestor(&mut self, branchpoint: &(TimelineId, Lsn)) {
+        if let Some(ancestor) = self.body.ancestor_timeline {
+            assert_eq!(ancestor, branchpoint.0);
+        }
+        if self.body.ancestor_lsn != Lsn(0) {
+            assert_eq!(self.body.ancestor_lsn, branchpoint.1);
+        }
+        self.body.ancestor_timeline = None;
+        self.body.ancestor_lsn = Lsn(0);
+    }
+
     pub fn latest_gc_cutoff_lsn(&self) -> Lsn {
         self.body.latest_gc_cutoff_lsn
     }
@@ -235,6 +253,12 @@ impl TimelineMetadata {
         let bytes = instance.to_bytes().unwrap();
         Self::from_bytes(&bytes).unwrap()
     }
+
+    pub(crate) fn apply(&mut self, update: &MetadataUpdate) {
+        self.body.disk_consistent_lsn = update.disk_consistent_lsn;
+        self.body.prev_record_lsn = update.prev_record_lsn;
+        self.body.latest_gc_cutoff_lsn = update.latest_gc_cutoff_lsn;
+    }
 }
 
 impl<'de> Deserialize<'de> for TimelineMetadata {
@@ -256,6 +280,27 @@ impl Serialize for TimelineMetadata {
             .to_bytes()
             .map_err(|e| serde::ser::Error::custom(format!("{e}")))?;
         bytes.serialize(serializer)
+    }
+}
+
+/// Parts of the metadata which are regularly modified.
+pub(crate) struct MetadataUpdate {
+    disk_consistent_lsn: Lsn,
+    prev_record_lsn: Option<Lsn>,
+    latest_gc_cutoff_lsn: Lsn,
+}
+
+impl MetadataUpdate {
+    pub(crate) fn new(
+        disk_consistent_lsn: Lsn,
+        prev_record_lsn: Option<Lsn>,
+        latest_gc_cutoff_lsn: Lsn,
+    ) -> Self {
+        Self {
+            disk_consistent_lsn,
+            prev_record_lsn,
+            latest_gc_cutoff_lsn,
+        }
     }
 }
 

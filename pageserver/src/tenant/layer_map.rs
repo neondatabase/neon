@@ -346,35 +346,6 @@ where
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Debug, Clone)]
-pub enum InMemoryLayerHandle {
-    Open {
-        lsn_floor: Lsn,
-        end_lsn: Lsn,
-    },
-    Frozen {
-        idx: usize,
-        lsn_floor: Lsn,
-        end_lsn: Lsn,
-    },
-}
-
-impl InMemoryLayerHandle {
-    pub fn get_lsn_floor(&self) -> Lsn {
-        match self {
-            InMemoryLayerHandle::Open { lsn_floor, .. } => *lsn_floor,
-            InMemoryLayerHandle::Frozen { lsn_floor, .. } => *lsn_floor,
-        }
-    }
-
-    pub fn get_end_lsn(&self) -> Lsn {
-        match self {
-            InMemoryLayerHandle::Open { end_lsn, .. } => *end_lsn,
-            InMemoryLayerHandle::Frozen { end_lsn, .. } => *end_lsn,
-        }
-    }
-}
-
 impl LayerMap {
     ///
     /// Find the latest layer (by lsn.end) that covers the given
@@ -576,41 +547,18 @@ impl LayerMap {
         self.historic.iter()
     }
 
-    /// Get a handle for the first in memory layer that matches the provided predicate.
-    /// The handle should be used with [`Self::get_in_memory_layer`] to retrieve the actual layer.
-    ///
-    /// Note: [`Self::find_in_memory_layer`] and [`Self::get_in_memory_layer`] should be called during
-    /// the same exclusive region established by holding the layer manager lock.
-    pub fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<InMemoryLayerHandle>
+    /// Get a ref counted pointer for the first in memory layer that matches the provided predicate.
+    pub fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<Arc<InMemoryLayer>>
     where
         Pred: FnMut(&Arc<InMemoryLayer>) -> bool,
     {
         if let Some(open) = &self.open_layer {
             if pred(open) {
-                return Some(InMemoryLayerHandle::Open {
-                    lsn_floor: open.get_lsn_range().start,
-                    end_lsn: open.get_lsn_range().end,
-                });
+                return Some(open.clone());
             }
         }
 
-        let pos = self.frozen_layers.iter().rev().position(pred);
-        pos.map(|rev_idx| {
-            let idx = self.frozen_layers.len() - 1 - rev_idx;
-            InMemoryLayerHandle::Frozen {
-                idx,
-                lsn_floor: self.frozen_layers[idx].get_lsn_range().start,
-                end_lsn: self.frozen_layers[idx].get_lsn_range().end,
-            }
-        })
-    }
-
-    /// Get the layer pointed to by the provided handle.
-    pub fn get_in_memory_layer(&self, handle: &InMemoryLayerHandle) -> Option<Arc<InMemoryLayer>> {
-        match handle {
-            InMemoryLayerHandle::Open { .. } => self.open_layer.clone(),
-            InMemoryLayerHandle::Frozen { idx, .. } => self.frozen_layers.get(*idx).cloned(),
-        }
+        self.frozen_layers.iter().rfind(|l| pred(l)).cloned()
     }
 
     ///
@@ -640,7 +588,7 @@ impl LayerMap {
             let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
             coverage.push((kr, current_val.take()));
             current_key = change_key;
-            current_val = change_val.clone();
+            current_val.clone_from(&change_val);
         }
 
         // Add the final interval
@@ -724,12 +672,12 @@ impl LayerMap {
         // Loop through the delta coverage and recurse on each part
         for (change_key, change_val) in version.delta_coverage.range(start..end) {
             // If there's a relevant delta in this part, add 1 and recurse down
-            if let Some(val) = current_val {
+            if let Some(val) = &current_val {
                 if val.get_lsn_range().end > lsn.start {
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
                     if !kr.is_empty() {
-                        let base_count = Self::is_reimage_worthy(&val, key) as usize;
+                        let base_count = Self::is_reimage_worthy(val, key) as usize;
                         let new_limit = limit.map(|l| l - base_count);
                         let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
                         max_stacked_deltas = std::cmp::max(
@@ -741,17 +689,17 @@ impl LayerMap {
             }
 
             current_key = change_key;
-            current_val = change_val.clone();
+            current_val.clone_from(&change_val);
         }
 
         // Consider the last part
-        if let Some(val) = current_val {
+        if let Some(val) = &current_val {
             if val.get_lsn_range().end > lsn.start {
                 let kr = Key::from_i128(current_key)..Key::from_i128(end);
                 let lr = lsn.start..val.get_lsn_range().start;
 
                 if !kr.is_empty() {
-                    let base_count = Self::is_reimage_worthy(&val, key) as usize;
+                    let base_count = Self::is_reimage_worthy(val, key) as usize;
                     let new_limit = limit.map(|l| l - base_count);
                     let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
                     max_stacked_deltas = std::cmp::max(
@@ -968,6 +916,7 @@ mod tests {
         assert_eq!(lhs, rhs);
     }
 
+    #[cfg(test)]
     fn brute_force_range_search(
         layer_map: &LayerMap,
         key_range: Range<Key>,

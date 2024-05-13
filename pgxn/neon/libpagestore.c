@@ -49,6 +49,8 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
+int         neon_protocol_version = 2;
+
 static int	n_reconnect_attempts = 0;
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
@@ -111,6 +113,7 @@ static PageServer page_servers[MAX_SHARDS];
 
 static bool pageserver_flush(shardno_t shard_no);
 static void pageserver_disconnect(shardno_t shard_no);
+static void pageserver_disconnect_shard(shardno_t shard_no);
 
 static bool
 PagestoreShmemIsValid(void)
@@ -378,7 +381,17 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		pfree(msg);
 		return false;
 	}
-	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
+	switch (neon_protocol_version)
+	{
+		case 2:
+			query = psprintf("pagestream_v2 %s %s", neon_tenant, neon_timeline);
+			break;
+		case 1:
+			query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
+			break;
+		default:
+			elog(ERROR, "unexpected neon_protocol_version %d", neon_protocol_version);
+	}
 	ret = PQsendQuery(conn, query);
 	pfree(query);
 	if (ret != 1)
@@ -439,7 +452,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		return false;
 	}
 
-	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s'", connstr);
+	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
 	page_servers[shard_no].conn = conn;
 	page_servers[shard_no].wes = wes;
 
@@ -487,9 +500,32 @@ retry:
 	return ret;
 }
 
-
+/*
+ * Reset prefetch and drop connection to the shard.
+ * It also drops connection to all other shards involved in prefetch.
+ */
 static void
 pageserver_disconnect(shardno_t shard_no)
+{
+	/*
+	 * If the connection to any pageserver is lost, we throw away the
+	 * whole prefetch queue, even for other pageservers. It should not
+	 * cause big problems, because connection loss is supposed to be a
+	 * rare event.
+	 *
+	 * Prefetch state should be reset even if page_servers[shard_no].conn == NULL,
+	 * because prefetch request may be registered before connection is established.
+	 */
+	prefetch_on_ps_disconnect();
+
+	pageserver_disconnect_shard(shard_no);
+}
+
+/*
+ * Disconnect from specified shard
+ */
+static void
+pageserver_disconnect_shard(shardno_t shard_no)
 {
 	/*
 	 * If anything goes wrong while we were sending a request, it's not clear
@@ -503,14 +539,6 @@ pageserver_disconnect(shardno_t shard_no)
 		neon_shard_log(shard_no, LOG, "dropping connection to page server due to error");
 		PQfinish(page_servers[shard_no].conn);
 		page_servers[shard_no].conn = NULL;
-
-		/*
-		 * If the connection to any pageserver is lost, we throw away the
-		 * whole prefetch queue, even for other pageservers. It should not
-		 * cause big problems, because connection loss is supposed to be a
-		 * rare event.
-		 */
-		prefetch_on_ps_disconnect();
 	}
 	if (page_servers[shard_no].wes != NULL)
 	{
@@ -676,7 +704,8 @@ page_server_api api =
 {
 	.send = pageserver_send,
 	.flush = pageserver_flush,
-	.receive = pageserver_receive
+	.receive = pageserver_receive,
+	.disconnect = pageserver_disconnect_shard
 };
 
 static bool
@@ -827,6 +856,16 @@ pg_init_libpagestore(void)
 							PGC_USERSET,
 							0,	/* no flags required */
 							NULL, (GucIntAssignHook) &readahead_buffer_resize, NULL);
+	DefineCustomIntVariable("neon.protocol_version",
+							"Version of compute<->page server protocol",
+							NULL,
+							&neon_protocol_version,
+							2, /* use protocol version 2 */
+							1, /* min */
+							2, /* max */
+							PGC_SU_BACKEND,
+							0,	/* no flags required */
+							NULL, NULL, NULL);
 
 	relsize_hash_init();
 

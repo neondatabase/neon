@@ -120,9 +120,10 @@ impl LayerManager {
     /// Called from `freeze_inmem_layer`, returns true if successfully frozen.
     pub(crate) async fn try_freeze_in_memory_layer(
         &mut self,
-        Lsn(last_record_lsn): Lsn,
+        lsn: Lsn,
         last_freeze_at: &AtomicLsn,
     ) {
+        let Lsn(last_record_lsn) = lsn;
         let end_lsn = Lsn(last_record_lsn + 1);
 
         if let Some(open_layer) = &self.layer_map.open_layer {
@@ -135,8 +136,11 @@ impl LayerManager {
             self.layer_map.frozen_layers.push_back(open_layer_rc);
             self.layer_map.open_layer = None;
             self.layer_map.next_open_layer_at = Some(end_lsn);
-            last_freeze_at.store(end_lsn);
         }
+
+        // Even if there was no layer to freeze, advance last_freeze_at to last_record_lsn+1: this
+        // accounts for regions in the LSN range where we might have ingested no data due to sharding.
+        last_freeze_at.store(end_lsn);
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.
@@ -196,6 +200,24 @@ impl LayerManager {
             metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         for l in compact_from {
+            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
+        }
+        updates.flush();
+    }
+
+    /// Called when compaction is completed.
+    pub(crate) fn rewrite_layers(
+        &mut self,
+        rewrite_layers: &[(Layer, ResidentLayer)],
+        drop_layers: &[Layer],
+        _metrics: &TimelineMetrics,
+    ) {
+        let mut updates = self.layer_map.batch_update();
+
+        // TODO: implement rewrites (currently this code path only used for drops)
+        assert!(rewrite_layers.is_empty());
+
+        for l in drop_layers {
             Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
@@ -272,7 +294,7 @@ impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
             .get(&desc.key())
-            .with_context(|| format!("get layer from desc: {}", desc.filename()))
+            .with_context(|| format!("get layer from desc: {}", desc.layer_name()))
             .expect("not found")
             .clone()
     }

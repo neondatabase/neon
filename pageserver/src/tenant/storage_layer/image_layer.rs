@@ -44,6 +44,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
+use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
@@ -53,6 +54,7 @@ use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
@@ -64,8 +66,10 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::ImageFileName;
-use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer, ValuesReconstructState};
+use super::layer_name::ImageLayerName;
+use super::{
+    AsLayerDesc, Layer, LayerName, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -230,7 +234,7 @@ impl ImageLayer {
         conf: &PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        fname: &ImageFileName,
+        fname: &ImageLayerName,
     ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -266,13 +270,13 @@ impl ImageLayer {
             .and_then(|res| res)?;
 
         // not production code
-        let actual_filename = path.file_name().unwrap().to_owned();
-        let expected_filename = self.layer_desc().filename().file_name();
+        let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
+        let expected_layer_name = self.layer_desc().layer_name();
 
-        if actual_filename != expected_filename {
+        if actual_layer_name != expected_layer_name {
             println!("warning: filename does not match what is expected from in-file summary");
-            println!("actual: {:?}", actual_filename);
-            println!("expected: {:?}", expected_filename);
+            println!("actual: {:?}", actual_layer_name.to_string());
+            println!("expected: {:?}", expected_layer_name.to_string());
         }
 
         Ok(loaded)
@@ -356,7 +360,7 @@ impl ImageLayer {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, ctx).await;
         res?;
         Ok(())
     }
@@ -395,6 +399,8 @@ impl ImageLayerInner {
             // production code path
             expected_summary.index_start_blk = actual_summary.index_start_blk;
             expected_summary.index_root_blk = actual_summary.index_root_blk;
+            // mask out the timeline_id, but still require the layers to be from the same tenant
+            expected_summary.timeline_id = actual_summary.timeline_id;
 
             if actual_summary != expected_summary {
                 bail!(
@@ -540,7 +546,25 @@ impl ImageLayerInner {
 
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
         for read in reads.into_iter() {
-            let buf = BytesMut::with_capacity(max_vectored_read_bytes);
+            let buf_size = read.size();
+
+            if buf_size > max_vectored_read_bytes {
+                // If the read is oversized, it should only contain one key.
+                let offenders = read
+                    .blobs_at
+                    .as_slice()
+                    .iter()
+                    .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                    .join(", ");
+                tracing::warn!(
+                    "Oversized vectored read ({} > {}) for keys {}",
+                    buf_size,
+                    max_vectored_read_bytes,
+                    offenders
+                );
+            }
+
+            let buf = BytesMut::with_capacity(buf_size);
             let res = vectored_blob_reader.read_blobs(&read, buf).await;
 
             match res {
@@ -614,7 +638,7 @@ impl ImageLayerWriterInner {
             conf,
             timeline_id,
             tenant_shard_id,
-            &ImageFileName {
+            &ImageLayerName {
                 key_range: key_range.clone(),
                 lsn,
             },
@@ -656,9 +680,14 @@ impl ImageLayerWriterInner {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
+    async fn put_image(
+        &mut self,
+        key: Key,
+        img: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(img).await;
+        let (_img, res) = self.blob_writer.write_blob(img, ctx).await;
         // TODO: re-use the buffer for `img` further upstack
         let off = res?;
 
@@ -672,7 +701,11 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    async fn finish(self, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
+    async fn finish(
+        self,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -683,7 +716,7 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf).await;
+            let (_buf, res) = file.write_all(buf, ctx).await;
             res?;
         }
 
@@ -703,7 +736,7 @@ impl ImageLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf).await;
+        let (_buf, res) = file.write_all(buf, ctx).await;
         res?;
 
         let metadata = file
@@ -785,8 +818,13 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub async fn put_image(&mut self, key: Key, img: Bytes) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_image(key, img).await
+    pub async fn put_image(
+        &mut self,
+        key: Key,
+        img: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
     ///
@@ -795,8 +833,9 @@ impl ImageLayerWriter {
     pub(crate) async fn finish(
         mut self,
         timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<super::ResidentLayer> {
-        self.inner.take().unwrap().finish(timeline).await
+        self.inner.take().unwrap().finish(timeline, ctx).await
     }
 }
 

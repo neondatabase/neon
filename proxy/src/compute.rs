@@ -1,15 +1,15 @@
 use crate::{
     auth::parse_endpoint_param,
     cancellation::CancelClosure,
-    console::{errors::WakeComputeError, messages::MetricsAuxInfo},
+    console::{errors::WakeComputeError, messages::MetricsAuxInfo, provider::ApiLockError},
     context::RequestMonitoring,
     error::{ReportableError, UserFacingError},
-    metrics::NUM_DB_CONNECTIONS_GAUGE,
+    metrics::{Metrics, NumDbConnectionsGuard},
     proxy::neon_option,
+    Host,
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
-use metrics::IntCounterPairGuard;
 use pq_proto::StartupMessageParams;
 use std::{io, net::SocketAddr, time::Duration};
 use thiserror::Error;
@@ -34,6 +34,9 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     WakeComputeError(#[from] WakeComputeError),
+
+    #[error("error acquiring resource permit: {0}")]
+    TooManyConnectionAttempts(#[from] ApiLockError),
 }
 
 impl UserFacingError for ConnectionError {
@@ -57,6 +60,9 @@ impl UserFacingError for ConnectionError {
                 None => err.to_string(),
             },
             WakeComputeError(err) => err.to_string_client(),
+            TooManyConnectionAttempts(_) => {
+                "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
+            }
             _ => COULD_NOT_CONNECT.to_owned(),
         }
     }
@@ -72,6 +78,7 @@ impl ReportableError for ConnectionError {
             ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
+            ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
         }
     }
 }
@@ -82,14 +89,13 @@ pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 /// A config for establishing a connection to compute node.
 /// Eventually, `tokio_postgres` will be replaced with something better.
 /// Newtype allows us to implement methods on top of it.
-#[derive(Clone)]
-#[repr(transparent)]
+#[derive(Clone, Default)]
 pub struct ConnCfg(Box<tokio_postgres::Config>);
 
 /// Creation and initialization routines.
 impl ConnCfg {
     pub fn new() -> Self {
-        Self(Default::default())
+        Self::default()
     }
 
     /// Reuse password or auth keys from the other config.
@@ -100,6 +106,16 @@ impl ConnCfg {
 
         if let Some(keys) = other.get_auth_keys() {
             self.auth_keys(keys);
+        }
+    }
+
+    pub fn get_host(&self) -> Result<Host, WakeComputeError> {
+        match self.0.get_hosts() {
+            [tokio_postgres::config::Host::Tcp(s)] => Ok(s.into()),
+            // we should not have multiple address or unix addresses.
+            _ => Err(WakeComputeError::BadComputeAddress(
+                "invalid compute address".into(),
+            )),
         }
     }
 
@@ -162,12 +178,6 @@ impl std::ops::Deref for ConnCfg {
 impl std::ops::DerefMut for ConnCfg {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
-    }
-}
-
-impl Default for ConnCfg {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -256,7 +266,7 @@ pub struct PostgresConnection {
     /// Labels for proxy's metrics.
     pub aux: MetricsAuxInfo,
 
-    _guage: IntCounterPairGuard,
+    _guage: NumDbConnectionsGuard<'static>,
 }
 
 impl ConnCfg {
@@ -268,7 +278,9 @@ impl ConnCfg {
         aux: MetricsAuxInfo,
         timeout: Duration,
     ) -> Result<PostgresConnection, ConnectionError> {
+        let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
+        drop(pause);
 
         let tls_connector = native_tls::TlsConnector::builder()
             .danger_accept_invalid_certs(allow_self_signed_compute)
@@ -278,11 +290,14 @@ impl ConnCfg {
         let tls = MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut mk_tls, host)?;
 
         // connect_raw() will not use TLS if sslmode is "disable"
+        let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
         let (client, connection) = self.0.connect_raw(stream, tls).await?;
+        drop(pause);
         tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
         let stream = connection.stream.into_inner();
 
         info!(
+            cold_start_info = ctx.cold_start_info.as_str(),
             "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
             self.0.get_ssl_mode()
         );
@@ -301,9 +316,7 @@ impl ConnCfg {
             params,
             cancel_closure,
             aux,
-            _guage: NUM_DB_CONNECTIONS_GAUGE
-                .with_label_values(&[ctx.protocol])
-                .guard(),
+            _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol),
         };
 
         Ok(connection)

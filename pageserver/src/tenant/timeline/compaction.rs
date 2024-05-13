@@ -9,14 +9,14 @@ use std::ops::{Deref, Range};
 use std::sync::Arc;
 
 use super::layer_manager::LayerManager;
-use super::{CompactFlags, DurationRecorder, RecordedDuration, Timeline};
+use super::{CompactFlags, DurationRecorder, ImageLayerCreationMode, RecordedDuration, Timeline};
 
 use anyhow::{anyhow, Context};
-use async_trait::async_trait;
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::keyspace::ShardedRange;
+use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
 use utils::id::TimelineId;
@@ -94,7 +94,7 @@ impl Timeline {
         // Define partitioning schema if needed
 
         // FIXME: the match should only cover repartitioning, not the next steps
-        match self
+        let partition_count = match self
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
@@ -103,7 +103,7 @@ impl Timeline {
             )
             .await
         {
-            Ok((partitioning, lsn)) => {
+            Ok(((dense_partitioning, sparse_partitioning), lsn)) => {
                 // Disables access_stats updates, so that the files we read remain candidates for eviction after we're done with them
                 let image_ctx = RequestContextBuilder::extend(ctx)
                     .access_stats_behavior(AccessStatsBehavior::Skip)
@@ -116,27 +116,38 @@ impl Timeline {
 
                 // 3. Create new image layers for partitions that have been modified
                 // "enough".
-                let layers = self
+                let dense_layers = self
                     .create_image_layers(
-                        &partitioning,
+                        &dense_partitioning,
                         lsn,
-                        flags.contains(CompactFlags::ForceImageLayerCreation),
+                        if flags.contains(CompactFlags::ForceImageLayerCreation) {
+                            ImageLayerCreationMode::Force
+                        } else {
+                            ImageLayerCreationMode::Try
+                        },
                         &image_ctx,
                     )
                     .await
                     .map_err(anyhow::Error::from)?;
-                if let Some(remote_client) = &self.remote_client {
-                    for layer in layers {
-                        remote_client.schedule_layer_file_upload(layer)?;
-                    }
-                }
 
-                if let Some(remote_client) = &self.remote_client {
-                    // should any new image layer been created, not uploading index_part will
-                    // result in a mismatch between remote_physical_size and layermap calculated
-                    // size, which will fail some tests, but should not be an issue otherwise.
-                    remote_client.schedule_index_upload_for_file_changes()?;
-                }
+                // For now, nothing will be produced...
+                let sparse_layers = self
+                    .create_image_layers(
+                        &sparse_partitioning.clone().into_dense(),
+                        lsn,
+                        if flags.contains(CompactFlags::ForceImageLayerCreation) {
+                            ImageLayerCreationMode::Force
+                        } else {
+                            ImageLayerCreationMode::Try
+                        },
+                        &image_ctx,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)?;
+                assert!(sparse_layers.is_empty());
+
+                self.upload_new_image_layers(dense_layers)?;
+                dense_partitioning.parts.len()
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -148,8 +159,149 @@ impl Timeline {
                 if !self.cancel.is_cancelled() {
                     tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
+                1
             }
         };
+
+        if self.shard_identity.count >= ShardCount::new(2) {
+            // Limit the number of layer rewrites to the number of partitions: this means its
+            // runtime should be comparable to a full round of image layer creations, rather than
+            // being potentially much longer.
+            let rewrite_max = partition_count;
+
+            self.compact_shard_ancestors(rewrite_max, ctx).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Check for layers that are elegible to be rewritten:
+    /// - Shard splitting: After a shard split, ancestor layers beyond pitr_interval, so that
+    ///   we don't indefinitely retain keys in this shard that aren't needed.
+    /// - For future use: layers beyond pitr_interval that are in formats we would
+    ///   rather not maintain compatibility with indefinitely.
+    ///
+    /// Note: this phase may read and write many gigabytes of data: use rewrite_max to bound
+    /// how much work it will try to do in each compaction pass.
+    async fn compact_shard_ancestors(
+        self: &Arc<Self>,
+        rewrite_max: usize,
+        _ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut drop_layers = Vec::new();
+        let layers_to_rewrite: Vec<Layer> = Vec::new();
+
+        // We will use the PITR cutoff as a condition for rewriting layers.
+        let pitr_cutoff = self.gc_info.read().unwrap().cutoffs.pitr;
+
+        let layers = self.layers.read().await;
+        for layer_desc in layers.layer_map().iter_historic_layers() {
+            let layer = layers.get_from_desc(&layer_desc);
+            if layer.metadata().shard.shard_count == self.shard_identity.count {
+                // This layer does not belong to a historic ancestor, no need to re-image it.
+                continue;
+            }
+
+            // This layer was created on an ancestor shard: check if it contains any data for this shard.
+            let sharded_range = ShardedRange::new(layer_desc.get_key_range(), &self.shard_identity);
+            let layer_local_page_count = sharded_range.page_count();
+            let layer_raw_page_count = ShardedRange::raw_size(&layer_desc.get_key_range());
+            if layer_local_page_count == 0 {
+                // This ancestral layer only covers keys that belong to other shards.
+                // We include the full metadata in the log: if we had some critical bug that caused
+                // us to incorrectly drop layers, this would simplify manually debugging + reinstating those layers.
+                info!(%layer, old_metadata=?layer.metadata(),
+                    "dropping layer after shard split, contains no keys for this shard.",
+                );
+
+                if cfg!(debug_assertions) {
+                    // Expensive, exhaustive check of keys in this layer: this guards against ShardedRange's calculations being
+                    // wrong.  If ShardedRange claims the local page count is zero, then no keys in this layer
+                    // should be !is_key_disposable()
+                    let range = layer_desc.get_key_range();
+                    let mut key = range.start;
+                    while key < range.end {
+                        debug_assert!(self.shard_identity.is_key_disposable(&key));
+                        key = key.next();
+                    }
+                }
+
+                drop_layers.push(layer);
+                continue;
+            } else if layer_local_page_count != u32::MAX
+                && layer_local_page_count == layer_raw_page_count
+            {
+                debug!(%layer,
+                    "layer is entirely shard local ({} keys), no need to filter it",
+                    layer_local_page_count
+                );
+                continue;
+            }
+
+            // Don't bother re-writing a layer unless it will at least halve its size
+            if layer_local_page_count != u32::MAX
+                && layer_local_page_count > layer_raw_page_count / 2
+            {
+                debug!(%layer,
+                    "layer is already mostly local ({}/{}), not rewriting",
+                    layer_local_page_count,
+                    layer_raw_page_count
+                );
+            }
+
+            // Don't bother re-writing a layer if it is within the PITR window: it will age-out eventually
+            // without incurring the I/O cost of a rewrite.
+            if layer_desc.get_lsn_range().end >= pitr_cutoff {
+                debug!(%layer, "Skipping rewrite of layer still in PITR window ({} >= {})",
+                    layer_desc.get_lsn_range().end, pitr_cutoff);
+                continue;
+            }
+
+            if layer_desc.is_delta() {
+                // We do not yet implement rewrite of delta layers
+                debug!(%layer, "Skipping rewrite of delta layer");
+                continue;
+            }
+
+            // Only rewrite layers if they would have different remote paths: either they belong to this
+            // shard but an old generation, or they belonged to another shard.  This also implicitly
+            // guarantees that the layer is persistent in remote storage (as only remote persistent
+            // layers are carried across shard splits, any local-only layer would be in the current generation)
+            if layer.metadata().generation == self.generation
+                && layer.metadata().shard.shard_count == self.shard_identity.count
+            {
+                debug!(%layer, "Skipping rewrite, is not from old generation");
+                continue;
+            }
+
+            if layers_to_rewrite.len() >= rewrite_max {
+                tracing::info!(%layer, "Will rewrite layer on a future compaction, already rewrote {}",
+                    layers_to_rewrite.len()
+                );
+                continue;
+            }
+
+            // Fall through: all our conditions for doing a rewrite passed.
+            // TODO: implement rewriting
+            tracing::debug!(%layer, "Would rewrite layer");
+        }
+
+        // Drop the layers read lock: we will acquire it for write in [`Self::rewrite_layers`]
+        drop(layers);
+
+        // TODO: collect layers to rewrite
+        let replace_layers = Vec::new();
+
+        // Update the LayerMap so that readers will use the new layers, and enqueue it for writing to remote storage
+        self.rewrite_layers(replace_layers, drop_layers).await?;
+
+        if let Some(remote_client) = self.remote_client.as_ref() {
+            // We wait for all uploads to complete before finishing this compaction stage.  This is not
+            // necessary for correctness, but it simplifies testing, and avoids proceeding with another
+            // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
+            // load.
+            remote_client.wait_completion().await?;
+        }
 
         Ok(())
     }
@@ -511,7 +663,7 @@ impl Timeline {
                             writer
                                 .take()
                                 .unwrap()
-                                .finish(prev_key.unwrap().next(), self)
+                                .finish(prev_key.unwrap().next(), self, ctx)
                                 .await?,
                         );
                         writer = None;
@@ -553,7 +705,11 @@ impl Timeline {
                     );
                 }
 
-                writer.as_mut().unwrap().put_value(key, lsn, value).await?;
+                writer
+                    .as_mut()
+                    .unwrap()
+                    .put_value(key, lsn, value, ctx)
+                    .await?;
             } else {
                 debug!(
                     "Dropping key {} during compaction (it belongs on shard {:?})",
@@ -569,7 +725,7 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next(), self).await?);
+            new_layers.push(writer.finish(prev_key.unwrap().next(), self, ctx).await?);
         }
 
         // Sync layers
@@ -769,8 +925,9 @@ impl Timeline {
             return Err(CompactionError::ShuttingDown);
         }
 
-        let keyspace = self.collect_keyspace(end_lsn, ctx).await?;
-        let mut adaptor = TimelineAdaptor::new(self, (end_lsn, keyspace));
+        let (dense_ks, _sparse_ks) = self.collect_keyspace(end_lsn, ctx).await?;
+        // TODO(chi): ignore sparse_keyspace for now, compact it in the future.
+        let mut adaptor = TimelineAdaptor::new(self, (end_lsn, dense_ks));
 
         pageserver_compaction::compact_tiered::compact_tiered(
             &mut adaptor,
@@ -818,7 +975,10 @@ impl TimelineAdaptor {
         self.timeline
             .finish_compact_batch(&self.new_deltas, &self.new_images, &layers_to_delete)
             .await?;
-        self.new_images.clear();
+
+        self.timeline
+            .upload_new_image_layers(std::mem::take(&mut self.new_images))?;
+
         self.new_deltas.clear();
         self.layers_to_delete.clear();
         Ok(())
@@ -838,6 +998,10 @@ impl CompactionJobExecutor for TimelineAdaptor {
     type ImageLayer = ResidentImageLayer;
 
     type RequestContext = crate::context::RequestContext;
+
+    fn get_shard_identity(&self) -> &ShardIdentity {
+        self.timeline.get_shard_identity()
+    }
 
     async fn get_layers(
         &mut self,
@@ -955,7 +1119,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
 
             let value = val.load(ctx).await?;
 
-            writer.put_value(key, lsn, value).await?;
+            writer.put_value(key, lsn, value, ctx).await?;
 
             prev = Some((key, lsn));
         }
@@ -971,7 +1135,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         });
 
         let new_delta_layer = writer
-            .finish(prev.unwrap().0.next(), &self.timeline)
+            .finish(prev.unwrap().0.next(), &self.timeline, ctx)
             .await?;
 
         self.new_deltas.push(new_delta_layer);
@@ -1041,11 +1205,11 @@ impl TimelineAdaptor {
                         }
                     }
                 };
-                image_layer_writer.put_image(key, img).await?;
+                image_layer_writer.put_image(key, img, ctx).await?;
                 key = key.next();
             }
         }
-        let image_layer = image_layer_writer.finish(&self.timeline).await?;
+        let image_layer = image_layer_writer.finish(&self.timeline, ctx).await?;
 
         self.new_images.push(image_layer);
 
@@ -1129,7 +1293,6 @@ impl CompactionLayer<Key> for ResidentDeltaLayer {
     }
 }
 
-#[async_trait]
 impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 

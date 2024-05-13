@@ -333,6 +333,17 @@ def test_download_remote_layers_api(
         }
     )
 
+    # This test triggers layer download failures on demand. It is possible to modify the failpoint
+    # during a `Timeline::get_vectored` right between the vectored read and it's validation read.
+    # This means that one of the reads can fail while the other one succeeds and vice versa.
+    # TODO(vlad): Remove this block once the vectored read path validation goes away.
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*initial_size_calculation.*Vectored get failed with downloading evicted layer file failed, but sequential get did not.*"
+            ".*initial_size_calculation.*Sequential get failed with downloading evicted layer file failed, but vectored get did not.*"
+        ]
+    )
+
     endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
@@ -568,6 +579,8 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
         "image_creation_threshold": 100,
         # repartitioning parameter, unused
         "compaction_target_size": 128 * 1024**2,
+        # Always check if a new image layer can be created
+        "image_layer_creation_check_threshold": 0,
         # pitr_interval and gc_horizon are not interesting because we dont run gc
     }
 
@@ -632,7 +645,8 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
     # threshold to expose image creation to downloading all of the needed
     # layers -- threshold of 2 would sound more reasonable, but keeping it as 1
     # to be less flaky
-    env.neon_cli.config_tenant(tenant_id, {"image_creation_threshold": "1"})
+    conf["image_creation_threshold"] = "1"
+    env.neon_cli.config_tenant(tenant_id, {k: str(v) for k, v in conf.items()})
 
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)

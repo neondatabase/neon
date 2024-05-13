@@ -4,13 +4,15 @@ use futures::StreamExt;
 use pq_proto::CancelKeyData;
 use redis::aio::PubSub;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::{
     cache::project_info::ProjectInfoCache,
-    cancellation::{CancelMap, CancellationHandler, NotificationsCancellationHandler},
+    cancellation::{CancelMap, CancellationHandler},
     intern::{ProjectIdInt, RoleNameInt},
-    metrics::REDIS_BROKEN_MESSAGES,
+    metrics::{Metrics, RedisErrors, RedisEventsCount},
 };
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
@@ -18,23 +20,13 @@ pub(crate) const PROXY_CHANNEL_NAME: &str = "neondb-proxy-to-proxy-updates";
 const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const INVALIDATION_LAG: std::time::Duration = std::time::Duration::from_secs(20);
 
-struct RedisConsumerClient {
-    client: redis::Client,
-}
-
-impl RedisConsumerClient {
-    pub fn new(url: &str) -> anyhow::Result<Self> {
-        let client = redis::Client::open(url)?;
-        Ok(Self { client })
-    }
-    async fn try_connect(&self) -> anyhow::Result<PubSub> {
-        let mut conn = self.client.get_async_connection().await?.into_pubsub();
-        tracing::info!("subscribing to a channel `{CPLANE_CHANNEL_NAME}`");
-        conn.subscribe(CPLANE_CHANNEL_NAME).await?;
-        tracing::info!("subscribing to a channel `{PROXY_CHANNEL_NAME}`");
-        conn.subscribe(PROXY_CHANNEL_NAME).await?;
-        Ok(conn)
-    }
+async fn try_connect(client: &ConnectionWithCredentialsProvider) -> anyhow::Result<PubSub> {
+    let mut conn = client.get_async_pubsub().await?;
+    tracing::info!("subscribing to a channel `{CPLANE_CHANNEL_NAME}`");
+    conn.subscribe(CPLANE_CHANNEL_NAME).await?;
+    tracing::info!("subscribing to a channel `{PROXY_CHANNEL_NAME}`");
+    conn.subscribe(PROXY_CHANNEL_NAME).await?;
+    Ok(conn)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -80,32 +72,39 @@ where
     serde_json::from_str(&s).map_err(<D::Error as serde::de::Error>::custom)
 }
 
-struct MessageHandler<
-    C: ProjectInfoCache + Send + Sync + 'static,
-    H: NotificationsCancellationHandler + Send + Sync + 'static,
-> {
+struct MessageHandler<C: ProjectInfoCache + Send + Sync + 'static> {
     cache: Arc<C>,
-    cancellation_handler: Arc<H>,
+    cancellation_handler: Arc<CancellationHandler<()>>,
     region_id: String,
 }
 
-impl<
-        C: ProjectInfoCache + Send + Sync + 'static,
-        H: NotificationsCancellationHandler + Send + Sync + 'static,
-    > MessageHandler<C, H>
-{
-    pub fn new(cache: Arc<C>, cancellation_handler: Arc<H>, region_id: String) -> Self {
+impl<C: ProjectInfoCache + Send + Sync + 'static> Clone for MessageHandler<C> {
+    fn clone(&self) -> Self {
+        Self {
+            cache: self.cache.clone(),
+            cancellation_handler: self.cancellation_handler.clone(),
+            region_id: self.region_id.clone(),
+        }
+    }
+}
+
+impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
+    pub fn new(
+        cache: Arc<C>,
+        cancellation_handler: Arc<CancellationHandler<()>>,
+        region_id: String,
+    ) -> Self {
         Self {
             cache,
             cancellation_handler,
             region_id,
         }
     }
-    pub fn disable_ttl(&self) {
-        self.cache.disable_ttl();
+    pub async fn increment_active_listeners(&self) {
+        self.cache.increment_active_listeners().await;
     }
-    pub fn enable_ttl(&self) {
-        self.cache.enable_ttl();
+    pub async fn decrement_active_listeners(&self) {
+        self.cache.decrement_active_listeners().await;
     }
     #[tracing::instrument(skip(self, msg), fields(session_id = tracing::field::Empty))]
     async fn handle_message(&self, msg: redis::Msg) -> anyhow::Result<()> {
@@ -116,9 +115,9 @@ impl<
         let msg: Notification = match serde_json::from_str(&payload) {
             Ok(msg) => msg,
             Err(e) => {
-                REDIS_BROKEN_MESSAGES
-                    .with_label_values(&[msg.get_channel_name()])
-                    .inc();
+                Metrics::get().proxy.redis_errors_total.inc(RedisErrors {
+                    channel: msg.get_channel_name(),
+                });
                 tracing::error!("broken message: {e}");
                 return Ok(());
             }
@@ -130,6 +129,10 @@ impl<
                     "session_id",
                     &tracing::field::display(cancel_session.session_id),
                 );
+                Metrics::get()
+                    .proxy
+                    .redis_events_count
+                    .inc(RedisEventsCount::CancelSession);
                 if let Some(cancel_region) = cancel_session.region_id {
                     // If the message is not for this region, ignore it.
                     if cancel_region != self.region_id {
@@ -139,7 +142,7 @@ impl<
                 // This instance of cancellation_handler doesn't have a RedisPublisherClient so it can't publish the message.
                 match self
                     .cancellation_handler
-                    .cancel_session_no_publish(cancel_session.cancel_key_data)
+                    .cancel_session(cancel_session.cancel_key_data, uuid::Uuid::nil())
                     .await
                 {
                     Ok(()) => {}
@@ -150,6 +153,17 @@ impl<
             }
             _ => {
                 invalidate_cache(self.cache.clone(), msg.clone());
+                if matches!(msg, AllowedIpsUpdate { .. }) {
+                    Metrics::get()
+                        .proxy
+                        .redis_events_count
+                        .inc(RedisEventsCount::AllowedIpsUpdate);
+                } else if matches!(msg, PasswordUpdate { .. }) {
+                    Metrics::get()
+                        .proxy
+                        .redis_events_count
+                        .inc(RedisEventsCount::PasswordUpdate);
+                }
                 // It might happen that the invalid entry is on the way to be cached.
                 // To make sure that the entry is invalidated, let's repeat the invalidation in INVALIDATION_LAG seconds.
                 // TODO: include the version (or the timestamp) in the message and invalidate only if the entry is cached before the message.
@@ -179,40 +193,29 @@ fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
     }
 }
 
-/// Handle console's invalidation messages.
-#[tracing::instrument(name = "console_notifications", skip_all)]
-pub async fn task_main<C>(
-    url: String,
-    cache: Arc<C>,
-    cancel_map: CancelMap,
-    region_id: String,
-) -> anyhow::Result<Infallible>
-where
-    C: ProjectInfoCache + Send + Sync + 'static,
-{
-    cache.enable_ttl();
-    let handler = MessageHandler::new(
-        cache,
-        Arc::new(CancellationHandler::new(cancel_map, None)),
-        region_id,
-    );
-
+async fn handle_messages<C: ProjectInfoCache + Send + Sync + 'static>(
+    handler: MessageHandler<C>,
+    redis: ConnectionWithCredentialsProvider,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<()> {
     loop {
-        let redis = RedisConsumerClient::new(&url)?;
-        let conn = match redis.try_connect().await {
+        if cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+        let mut conn = match try_connect(&redis).await {
             Ok(conn) => {
-                handler.disable_ttl();
+                handler.increment_active_listeners().await;
                 conn
             }
             Err(e) => {
                 tracing::error!(
-                    "failed to connect to redis: {e}, will try to reconnect in {RECONNECT_TIMEOUT:#?}"
-                );
+            "failed to connect to redis: {e}, will try to reconnect in {RECONNECT_TIMEOUT:#?}"
+        );
                 tokio::time::sleep(RECONNECT_TIMEOUT).await;
                 continue;
             }
         };
-        let mut stream = conn.into_on_message();
+        let mut stream = conn.on_message();
         while let Some(msg) = stream.next().await {
             match handler.handle_message(msg).await {
                 Ok(()) => {}
@@ -221,8 +224,47 @@ where
                     break;
                 }
             }
+            if cancellation_token.is_cancelled() {
+                handler.decrement_active_listeners().await;
+                return Ok(());
+            }
         }
-        handler.enable_ttl();
+        handler.decrement_active_listeners().await;
+    }
+}
+
+/// Handle console's invalidation messages.
+#[tracing::instrument(name = "redis_notifications", skip_all)]
+pub async fn task_main<C>(
+    redis: ConnectionWithCredentialsProvider,
+    cache: Arc<C>,
+    cancel_map: CancelMap,
+    region_id: String,
+) -> anyhow::Result<Infallible>
+where
+    C: ProjectInfoCache + Send + Sync + 'static,
+{
+    let cancellation_handler = Arc::new(CancellationHandler::<()>::new(
+        cancel_map,
+        crate::metrics::CancellationSource::FromRedis,
+    ));
+    let handler = MessageHandler::new(cache, cancellation_handler, region_id);
+    // 6h - 1m.
+    // There will be 1 minute overlap between two tasks. But at least we can be sure that no message is lost.
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60 - 60));
+    loop {
+        let cancellation_token = CancellationToken::new();
+        interval.tick().await;
+
+        tokio::spawn(handle_messages(
+            handler.clone(),
+            redis.clone(),
+            cancellation_token.clone(),
+        ));
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(6 * 60 * 60)).await; // 6h.
+            cancellation_token.cancel();
+        });
     }
 }
 

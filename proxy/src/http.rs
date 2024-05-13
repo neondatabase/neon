@@ -4,7 +4,7 @@
 
 pub mod health_server;
 
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use futures::FutureExt;
 pub use reqwest::{Request, Response, StatusCode};
@@ -13,13 +13,16 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::time::Instant;
 use tracing::trace;
 
-use crate::{metrics::CONSOLE_REQUEST_LATENCY, rate_limiter, url::ApiUrl};
+use crate::{
+    metrics::{ConsoleRequest, Metrics},
+    url::ApiUrl,
+};
 use reqwest_middleware::RequestBuilder;
 
 /// This is the preferred way to create new http clients,
 /// because it takes care of observability (OpenTelemetry).
 /// We deliberately don't want to replace this with a public static.
-pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> ClientWithMiddleware {
+pub fn new_client() -> ClientWithMiddleware {
     let client = reqwest::ClientBuilder::new()
         .dns_resolver(Arc::new(GaiResolver::default()))
         .connection_verbose(true)
@@ -28,7 +31,6 @@ pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> Clien
 
     reqwest_middleware::ClientBuilder::new(client)
         .with(reqwest_tracing::TracingMiddleware::default())
-        .with(rate_limiter::Limiter::new(rate_limiter_config))
         .build()
 }
 
@@ -90,22 +92,23 @@ impl Endpoint {
 
     /// Execute a [request](reqwest::Request).
     pub async fn execute(&self, request: Request) -> Result<Response, Error> {
-        let path = request.url().path().to_string();
-        let start = Instant::now();
-        let res = self.client.execute(request).await;
-        CONSOLE_REQUEST_LATENCY
-            .with_label_values(&[&path])
-            .observe(start.elapsed().as_secs_f64());
-        res
+        let _timer = Metrics::get()
+            .proxy
+            .console_request_latency
+            .start_timer(ConsoleRequest {
+                request: request.url().path(),
+            });
+
+        self.client.execute(request).await
     }
 }
 
-/// https://docs.rs/reqwest/0.11.18/src/reqwest/dns/gai.rs.html
-use hyper::{
-    client::connect::dns::{GaiResolver as HyperGaiResolver, Name},
-    service::Service,
+use hyper_util::client::legacy::connect::dns::{
+    GaiResolver as HyperGaiResolver, Name as HyperName,
 };
-use reqwest::dns::{Addrs, Resolve, Resolving};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+/// https://docs.rs/reqwest/0.11.18/src/reqwest/dns/gai.rs.html
+use tower_service::Service;
 #[derive(Debug)]
 pub struct GaiResolver(HyperGaiResolver);
 
@@ -118,11 +121,12 @@ impl Default for GaiResolver {
 impl Resolve for GaiResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let this = &mut self.0.clone();
+        let hyper_name = HyperName::from_str(name.as_str()).expect("name should be valid");
         let start = Instant::now();
         Box::pin(
-            Service::<Name>::call(this, name.clone()).map(move |result| {
+            Service::<HyperName>::call(this, hyper_name).map(move |result| {
                 let resolve_duration = start.elapsed();
-                trace!(duration = ?resolve_duration, addr = %name, "resolve host complete");
+                trace!(duration = ?resolve_duration, addr = %name.as_str(), "resolve host complete");
                 result
                     .map(|addrs| -> Addrs { Box::new(addrs) })
                     .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })

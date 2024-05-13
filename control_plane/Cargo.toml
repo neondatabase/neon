@@ -17,6 +17,7 @@ nix.workspace = true
 once_cell.workspace = true
 postgres.workspace = true
 hex.workspace = true
+humantime-serde.workspace = true
 hyper.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
@@ -27,6 +28,7 @@ serde_with.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 tokio-util.workspace = true

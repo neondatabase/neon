@@ -103,9 +103,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
 
     n_timelines = 3
 
-    branch_names = [
-        "test_safekeepers_many_timelines_{}".format(tlin) for tlin in range(n_timelines)
-    ]
+    branch_names = [f"test_safekeepers_many_timelines_{tlin}" for tlin in range(n_timelines)]
     # pageserver, safekeeper operate timelines via their ids (can be represented in hex as 'ad50847381e248feaac9876cc71ae418')
     # that's not really human readable, so the branch names are introduced in Neon CLI.
     # Neon CLI stores its branch <-> timeline mapping in its internals,
@@ -1136,13 +1134,13 @@ def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
         for f in mismatch:
             f1 = os.path.join(sk0.timeline_dir(tenant_id, timeline_id), f)
             f2 = os.path.join(sk.timeline_dir(tenant_id, timeline_id), f)
-            stdout_filename = "{}.filediff".format(f2)
+            stdout_filename = f"{f2}.filediff"
 
             with open(stdout_filename, "w") as stdout_f:
-                subprocess.run("xxd {} > {}.hex ".format(f1, f1), shell=True)
-                subprocess.run("xxd {} > {}.hex ".format(f2, f2), shell=True)
+                subprocess.run(f"xxd {f1} > {f1}.hex ", shell=True)
+                subprocess.run(f"xxd {f2} > {f2}.hex ", shell=True)
 
-                cmd = "diff {}.hex {}.hex".format(f1, f2)
+                cmd = f"diff {f1}.hex {f2}.hex"
                 subprocess.run([cmd], stdout=stdout_f, shell=True)
 
             assert (mismatch, not_regular) == (
@@ -1830,7 +1828,7 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_sk_auth_restart_endpoint")
+    timeline_id = env.neon_cli.create_branch("test_idle_reconnections")
 
     def collect_stats() -> Dict[str, float]:
         # we need to collect safekeeper_pg_queries_received_total metric from all safekeepers
@@ -1861,7 +1859,7 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
 
     collect_stats()
 
-    endpoint = env.endpoints.create_start("test_sk_auth_restart_endpoint")
+    endpoint = env.endpoints.create_start("test_idle_reconnections")
     # just write something to the timeline
     endpoint.safe_psql("create table t(i int)")
     collect_stats()
@@ -2009,3 +2007,47 @@ def test_patch_control_file(neon_env_builder: NeonEnvBuilder):
     )
     log.info(f"dump_control_file response: {res}")
     assert res["timelines"][0]["control_file"]["timeline_start_lsn"] == "0/1"
+
+
+# Test disables periodic pushes from safekeeper to the broker and checks that
+# pageserver can still discover safekeepers with discovery requests.
+def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch("test_broker_discovery")
+
+    endpoint = env.endpoints.create_start(
+        "test_broker_discovery",
+        config_lines=["shared_buffers=1MB"],
+    )
+    endpoint.safe_psql("create table t(i int, payload text)")
+    # Install extension containing function needed to clear buffer
+    endpoint.safe_psql("CREATE EXTENSION neon_test_utils")
+
+    def do_something():
+        time.sleep(1)
+        # generate some data to commit WAL on safekeepers
+        endpoint.safe_psql("insert into t select generate_series(1,100), 'action'")
+        # clear the buffers
+        endpoint.safe_psql("select clear_buffer_cache()")
+        # read data to fetch pages from pageserver
+        endpoint.safe_psql("select sum(i) from t")
+
+    do_something()
+    do_something()
+
+    for sk in env.safekeepers:
+        # Disable periodic broker push, so pageserver won't be able to discover
+        # safekeepers without sending a discovery request
+        sk.stop().start(extra_opts=["--disable-periodic-broker-push"])
+
+    do_something()
+    do_something()
+
+    # restart pageserver and check how everything works
+    env.pageserver.stop().start()
+
+    do_something()
+    do_something()

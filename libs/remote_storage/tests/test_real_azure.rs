@@ -57,7 +57,6 @@ enum MaybeEnabledStorage {
     Disabled,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledStorage {
     async fn setup() -> Self {
         ensure_logging_ready();
@@ -86,7 +85,6 @@ struct AzureWithTestBlobs {
     remote_blobs: HashSet<RemotePath>,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();
@@ -134,10 +132,6 @@ impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
     }
 }
 
-// NOTE: the setups for the list_prefixes test and the list_files test are very similar
-// However, they are not idential. The list_prefixes function is concerned with listing prefixes,
-// whereas the list_files function is concerned with listing files.
-// See `RemoteStorage::list_files` documentation for more details
 enum MaybeEnabledStorageWithSimpleTestBlobs {
     Enabled(AzureWithSimpleTestBlobs),
     Disabled,
@@ -148,7 +142,6 @@ struct AzureWithSimpleTestBlobs {
     remote_blobs: HashSet<RemotePath>,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();

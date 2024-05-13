@@ -1,8 +1,9 @@
-use super::storage_layer::LayerFileName;
+use super::storage_layer::LayerName;
 use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::remote_timeline_client::index::Lineage;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
@@ -45,7 +46,7 @@ pub(crate) struct UploadQueueInitialized {
 
     /// All layer files stored in the remote storage, taking into account all
     /// in-progress and queued operations
-    pub(crate) latest_files: HashMap<LayerFileName, LayerFileMetadata>,
+    pub(crate) latest_files: HashMap<LayerName, LayerFileMetadata>,
 
     /// How many file uploads or deletions been scheduled, since the
     /// last (scheduling of) metadata index upload?
@@ -55,6 +56,9 @@ pub(crate) struct UploadQueueInitialized {
     /// in-progress and queued operations.
     /// DANGER: do not return to outside world, e.g., safekeepers.
     pub(crate) latest_metadata: TimelineMetadata,
+
+    /// Part of the flattened "next" `index_part.json`.
+    pub(crate) latest_lineage: Lineage,
 
     /// `disk_consistent_lsn` from the last metadata file that was successfully
     /// uploaded. `Lsn(0)` if nothing was uploaded yet.
@@ -89,7 +93,7 @@ pub(crate) struct UploadQueueInitialized {
     /// Putting this behind a testing feature to catch problems in tests, but assuming we could have a
     /// bug causing leaks, then it's better to not leave this enabled for production builds.
     #[cfg(feature = "testing")]
-    pub(crate) dangling_files: HashMap<LayerFileName, Generation>,
+    pub(crate) dangling_files: HashMap<LayerName, Generation>,
 
     /// Set to true when we have inserted the `UploadOp::Shutdown` into the `inprogress_tasks`.
     pub(crate) shutting_down: bool,
@@ -121,9 +125,14 @@ pub(super) enum SetDeletedFlagProgress {
     Successful(NaiveDateTime),
 }
 
-pub(super) struct UploadQueueStopped {
+pub(super) struct UploadQueueStoppedDeletable {
     pub(super) upload_queue_for_deletion: UploadQueueInitialized,
     pub(super) deleted_at: SetDeletedFlagProgress,
+}
+
+pub(super) enum UploadQueueStopped {
+    Deletable(UploadQueueStoppedDeletable),
+    Uninitialized,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -166,6 +175,7 @@ impl UploadQueue {
             latest_files: HashMap::new(),
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: metadata.clone(),
+            latest_lineage: Lineage::default(),
             projected_remote_consistent_lsn: None,
             visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
             // what follows are boring default initializations
@@ -213,6 +223,7 @@ impl UploadQueue {
             latest_files: files,
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: index_part.metadata.clone(),
+            latest_lineage: index_part.lineage.clone(),
             projected_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
             visible_remote_consistent_lsn: Arc::new(
                 index_part.metadata.disk_consistent_lsn().into(),
@@ -249,12 +260,15 @@ impl UploadQueue {
         }
     }
 
-    pub(crate) fn stopped_mut(&mut self) -> anyhow::Result<&mut UploadQueueStopped> {
+    pub(crate) fn stopped_mut(&mut self) -> anyhow::Result<&mut UploadQueueStoppedDeletable> {
         match self {
             UploadQueue::Initialized(_) | UploadQueue::Uninitialized => {
                 anyhow::bail!("queue is in state {}", self.as_str())
             }
-            UploadQueue::Stopped(stopped) => Ok(stopped),
+            UploadQueue::Stopped(UploadQueueStopped::Uninitialized) => {
+                anyhow::bail!("queue is in state Stopped(Uninitialized)")
+            }
+            UploadQueue::Stopped(UploadQueueStopped::Deletable(deletable)) => Ok(deletable),
         }
     }
 }
@@ -273,7 +287,7 @@ pub(crate) struct UploadTask {
 /// for timeline deletion, which skips this queue and goes directly to DeletionQueue.
 #[derive(Debug)]
 pub(crate) struct Delete {
-    pub(crate) layers: Vec<(LayerFileName, LayerFileMetadata)>,
+    pub(crate) layers: Vec<(LayerName, LayerFileMetadata)>,
 }
 
 #[derive(Debug)]
@@ -282,7 +296,7 @@ pub(crate) enum UploadOp {
     UploadLayer(ResidentLayer, LayerFileMetadata),
 
     /// Upload the metadata file
-    UploadMetadata(IndexPart, Lsn),
+    UploadMetadata(Box<IndexPart>, Lsn),
 
     /// Delete layer files
     Delete(Delete),

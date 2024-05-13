@@ -61,18 +61,18 @@ pub struct VectoredRead {
 }
 
 impl VectoredRead {
-    fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         (self.end - self.start) as usize
     }
 }
 
 #[derive(Eq, PartialEq)]
-enum VectoredReadExtended {
+pub(crate) enum VectoredReadExtended {
     Yes,
     No,
 }
 
-struct VectoredReadBuilder {
+pub(crate) struct VectoredReadBuilder {
     start: u64,
     end: u64,
     blobs_at: VecMap<u64, BlobMeta>,
@@ -80,7 +80,17 @@ struct VectoredReadBuilder {
 }
 
 impl VectoredReadBuilder {
-    fn new(start_offset: u64, end_offset: u64, meta: BlobMeta, max_read_size: usize) -> Self {
+    /// Start building a new vectored read.
+    ///
+    /// Note that by design, this does not check against reading more than `max_read_size` to
+    /// support reading larger blobs than the configuration value. The builder will be single use
+    /// however after that.
+    pub(crate) fn new(
+        start_offset: u64,
+        end_offset: u64,
+        meta: BlobMeta,
+        max_read_size: usize,
+    ) -> Self {
         let mut blobs_at = VecMap::default();
         blobs_at
             .append(start_offset, meta)
@@ -97,7 +107,8 @@ impl VectoredReadBuilder {
     /// Attempt to extend the current read with a new blob if the start
     /// offset matches with the current end of the vectored read
     /// and the resuting size is below the max read size
-    fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
+    pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
+        tracing::trace!(start, end, "trying to extend");
         let size = (end - start) as usize;
         if self.end == start && self.size() + size <= self.max_read_size {
             self.end = end;
@@ -111,11 +122,11 @@ impl VectoredReadBuilder {
         VectoredReadExtended::No
     }
 
-    fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         (self.end - self.start) as usize
     }
 
-    fn build(self) -> VectoredRead {
+    pub(crate) fn build(self) -> VectoredRead {
         VectoredRead {
             start: self.start,
             end: self.end,
