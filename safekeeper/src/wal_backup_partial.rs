@@ -1,6 +1,6 @@
 //! Safekeeper timeline has a background task which is subscribed to `commit_lsn`
 //! and `flush_lsn` updates. After the partial segment was updated (`flush_lsn`
-//! was changed), the segment will be uploaded to S3 in about 15 minutes.
+//! was changed), the segment will be uploaded to S3 in about 3 hours.
 //!
 //! The filename format for partial segments is
 //! `Segment_Term_Flush_Commit_skNN.partial`, where:
