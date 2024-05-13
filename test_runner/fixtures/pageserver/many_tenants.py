@@ -3,6 +3,7 @@ import time
 from typing import Any, Callable, Dict, Tuple
 
 import fixtures.pageserver.remote_storage
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -12,7 +13,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.types import TenantId, TimelineId
 
 
 def single_timeline(

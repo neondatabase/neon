@@ -6,6 +6,7 @@ from typing import List
 
 import pytest
 import zstandard
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -19,7 +20,6 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import LocalFsStorage, S3Storage, s3_storage
-from fixtures.types import Lsn, TenantId, TimelineId
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )

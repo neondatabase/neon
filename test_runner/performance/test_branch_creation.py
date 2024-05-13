@@ -9,11 +9,11 @@ from typing import List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
 from fixtures.pageserver.utils import wait_for_last_record_lsn
-from fixtures.types import Lsn
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 

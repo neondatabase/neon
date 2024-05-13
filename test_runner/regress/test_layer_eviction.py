@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import (
     flush_ep_to_pageserver,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.types import parse_layer_file_name
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import wait_for_upload
 from fixtures.remote_storage import RemoteStorageKind
 

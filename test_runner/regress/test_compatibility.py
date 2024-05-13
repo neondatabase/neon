@@ -7,6 +7,7 @@ from typing import List, Optional
 
 import pytest
 import toml
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -21,7 +22,6 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.

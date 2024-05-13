@@ -8,10 +8,10 @@ from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
 
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 
 

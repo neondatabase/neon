@@ -344,16 +344,23 @@ macro_rules! with_file {
 
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
-    pub async fn open(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(path, OpenOptions::new().read(true)).await
+    pub async fn open(
+        path: &Utf8Path,
+        ctx: &RequestContext,
+    ) -> Result<VirtualFile, std::io::Error> {
+        Self::open_with_options(path, OpenOptions::new().read(true), ctx).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
-    pub async fn create(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
+    pub async fn create(
+        path: &Utf8Path,
+        ctx: &RequestContext,
+    ) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(
             path,
             OpenOptions::new().write(true).create(true).truncate(true),
+            ctx,
         )
         .await
     }
@@ -366,6 +373,7 @@ impl VirtualFile {
     pub async fn open_with_options(
         path: &Utf8Path,
         open_options: &OpenOptions,
+        _ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
     ) -> Result<VirtualFile, std::io::Error> {
         let path_str = path.to_string();
         let parts = path_str.split('/').collect::<Vec<&str>>();
@@ -576,21 +584,34 @@ impl VirtualFile {
         Ok(self.pos)
     }
 
-    pub async fn read_exact_at<B>(&self, buf: B, offset: u64) -> Result<B, Error>
+    pub async fn read_exact_at<B>(
+        &self,
+        buf: B,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> Result<B, Error>
     where
         B: IoBufMut + Send,
     {
-        let (buf, res) =
-            read_exact_at_impl(buf, offset, None, |buf, offset| self.read_at(buf, offset)).await;
+        let (buf, res) = read_exact_at_impl(buf, offset, None, |buf, offset| {
+            self.read_at(buf, offset, ctx)
+        })
+        .await;
         res.map(|()| buf)
     }
 
-    pub async fn read_exact_at_n<B>(&self, buf: B, offset: u64, count: usize) -> Result<B, Error>
+    pub async fn read_exact_at_n<B>(
+        &self,
+        buf: B,
+        offset: u64,
+        count: usize,
+        ctx: &RequestContext,
+    ) -> Result<B, Error>
     where
         B: IoBufMut + Send,
     {
         let (buf, res) = read_exact_at_impl(buf, offset, Some(count), |buf, offset| {
-            self.read_at(buf, offset)
+            self.read_at(buf, offset, ctx)
         })
         .await;
         res.map(|()| buf)
@@ -601,12 +622,13 @@ impl VirtualFile {
         &self,
         page: PageWriteGuard<'static>,
         offset: u64,
+        ctx: &RequestContext,
     ) -> Result<PageWriteGuard<'static>, Error> {
         let buf = PageWriteGuardBuf {
             page,
             init_up_to: 0,
         };
-        let res = self.read_exact_at(buf, offset).await;
+        let res = self.read_exact_at(buf, offset, ctx).await;
         res.map(|PageWriteGuardBuf { page, .. }| page)
             .map_err(|e| Error::new(ErrorKind::Other, e))
     }
@@ -699,7 +721,12 @@ impl VirtualFile {
         (buf, Ok(n))
     }
 
-    pub(crate) async fn read_at<B>(&self, buf: B, offset: u64) -> (B, Result<usize, Error>)
+    pub(crate) async fn read_at<B>(
+        &self,
+        buf: B,
+        offset: u64,
+        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+    ) -> (B, Result<usize, Error>)
     where
         B: tokio_epoll_uring::BoundedBufMut + Send,
     {
@@ -1020,20 +1047,21 @@ impl VirtualFile {
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,
+        ctx: &RequestContext,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
         let buf = vec![0; PAGE_SZ];
         let buf = self
-            .read_exact_at(buf, blknum as u64 * (PAGE_SZ as u64))
+            .read_exact_at(buf, blknum as u64 * (PAGE_SZ as u64), ctx)
             .await?;
         Ok(crate::tenant::block_io::BlockLease::Vec(buf))
     }
 
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<(), Error> {
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
         let mut tmp = vec![0; 128];
         loop {
             let res;
-            (tmp, res) = self.read_at(tmp, self.pos).await;
+            (tmp, res) = self.read_at(tmp, self.pos, ctx).await;
             match res {
                 Ok(0) => return Ok(()),
                 Ok(n) => {
@@ -1159,7 +1187,6 @@ mod tests {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
-    use std::future::Future;
     use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::sync::Arc;
@@ -1176,9 +1203,14 @@ mod tests {
     }
 
     impl MaybeVirtualFile {
-        async fn read_exact_at(&self, mut buf: Vec<u8>, offset: u64) -> Result<Vec<u8>, Error> {
+        async fn read_exact_at(
+            &self,
+            mut buf: Vec<u8>,
+            offset: u64,
+            ctx: &RequestContext,
+        ) -> Result<Vec<u8>, Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(buf, offset).await,
+                MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(buf, offset, ctx).await,
                 MaybeVirtualFile::File(file) => file.read_exact_at(&mut buf, offset).map(|()| buf),
             }
         }
@@ -1230,13 +1262,13 @@ mod tests {
 
         // Helper function to slurp contents of a file, starting at the current position,
         // into a string
-        async fn read_string(&mut self) -> Result<String, Error> {
+        async fn read_string(&mut self, ctx: &RequestContext) -> Result<String, Error> {
             use std::io::Read;
             let mut buf = String::new();
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
                     let mut buf = Vec::new();
-                    file.read_to_end(&mut buf).await?;
+                    file.read_to_end(&mut buf, ctx).await?;
                     return Ok(String::from_utf8(buf).unwrap());
                 }
                 MaybeVirtualFile::File(file) => {
@@ -1247,9 +1279,14 @@ mod tests {
         }
 
         // Helper function to slurp a portion of a file into a string
-        async fn read_string_at(&mut self, pos: u64, len: usize) -> Result<String, Error> {
+        async fn read_string_at(
+            &mut self,
+            pos: u64,
+            len: usize,
+            ctx: &RequestContext,
+        ) -> Result<String, Error> {
             let buf = vec![0; len];
-            let buf = self.read_exact_at(buf, pos).await?;
+            let buf = self.read_exact_at(buf, pos, ctx).await?;
             Ok(String::from_utf8(buf).unwrap())
         }
     }
@@ -1263,73 +1300,101 @@ mod tests {
         // results with VirtualFiles as with native Files. (Except that with
         // native files, you will run out of file descriptors if the ulimit
         // is low enough.)
-        test_files("virtual_files", |path, open_options| async move {
-            let vf = VirtualFile::open_with_options(&path, &open_options).await?;
-            Ok(MaybeVirtualFile::VirtualFile(vf))
-        })
-        .await
+        struct A;
+
+        impl Adapter for A {
+            async fn open(
+                path: Utf8PathBuf,
+                opts: OpenOptions,
+                ctx: &RequestContext,
+            ) -> Result<MaybeVirtualFile, anyhow::Error> {
+                let vf = VirtualFile::open_with_options(&path, &opts, ctx).await?;
+                Ok(MaybeVirtualFile::VirtualFile(vf))
+            }
+        }
+        test_files::<A>("virtual_files").await
     }
 
     #[tokio::test]
     async fn test_physical_files() -> anyhow::Result<()> {
-        test_files("physical_files", |path, open_options| async move {
-            Ok(MaybeVirtualFile::File({
-                let owned_fd = open_options.open(path.as_std_path()).await?;
-                File::from(owned_fd)
-            }))
-        })
-        .await
+        struct B;
+
+        impl Adapter for B {
+            async fn open(
+                path: Utf8PathBuf,
+                opts: OpenOptions,
+                _ctx: &RequestContext,
+            ) -> Result<MaybeVirtualFile, anyhow::Error> {
+                Ok(MaybeVirtualFile::File({
+                    let owned_fd = opts.open(path.as_std_path()).await?;
+                    File::from(owned_fd)
+                }))
+            }
+        }
+
+        test_files::<B>("physical_files").await
     }
 
-    async fn test_files<OF, FT>(testname: &str, openfunc: OF) -> anyhow::Result<()>
+    /// This is essentially a closure which returns a MaybeVirtualFile, but because rust edition
+    /// 2024 is not yet out with new lifetime capture or outlives rules, this is a async function
+    /// in trait which benefits from the new lifetime capture rules already.
+    trait Adapter {
+        async fn open(
+            path: Utf8PathBuf,
+            opts: OpenOptions,
+            ctx: &RequestContext,
+        ) -> Result<MaybeVirtualFile, anyhow::Error>;
+    }
+
+    async fn test_files<A>(testname: &str) -> anyhow::Result<()>
     where
-        OF: Fn(Utf8PathBuf, OpenOptions) -> FT,
-        FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
+        A: Adapter,
     {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
         let path_a = testdir.join("file_a");
-        let mut file_a = openfunc(
+        let mut file_a = A::open(
             path_a.clone(),
             OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .to_owned(),
+            &ctx,
         )
         .await?;
         file_a.write_all(b"foobar".to_vec(), &ctx).await?;
 
         // cannot read from a file opened in write-only mode
-        let _ = file_a.read_string().await.unwrap_err();
+        let _ = file_a.read_string(&ctx).await.unwrap_err();
 
         // Close the file and re-open for reading
-        let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
+        let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
         let _ = file_a.write_all(b"bar".to_vec(), &ctx).await.unwrap_err();
 
         // Try simple read
-        assert_eq!("foobar", file_a.read_string().await?);
+        assert_eq!("foobar", file_a.read_string(&ctx).await?);
 
         // It's positioned at the EOF now.
-        assert_eq!("", file_a.read_string().await?);
+        assert_eq!("", file_a.read_string(&ctx).await?);
 
         // Test seeks.
         assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
-        assert_eq!("oobar", file_a.read_string().await?);
+        assert_eq!("oobar", file_a.read_string(&ctx).await?);
 
         assert_eq!(file_a.seek(SeekFrom::End(-2)).await?, 4);
-        assert_eq!("ar", file_a.read_string().await?);
+        assert_eq!("ar", file_a.read_string(&ctx).await?);
 
         assert_eq!(file_a.seek(SeekFrom::Start(1)).await?, 1);
         assert_eq!(file_a.seek(SeekFrom::Current(2)).await?, 3);
-        assert_eq!("bar", file_a.read_string().await?);
+        assert_eq!("bar", file_a.read_string(&ctx).await?);
 
         assert_eq!(file_a.seek(SeekFrom::Current(-5)).await?, 1);
-        assert_eq!("oobar", file_a.read_string().await?);
+        assert_eq!("oobar", file_a.read_string(&ctx).await?);
 
         // Test erroneous seeks to before byte 0
         file_a.seek(SeekFrom::End(-7)).await.unwrap_err();
@@ -1337,11 +1402,11 @@ mod tests {
         file_a.seek(SeekFrom::Current(-2)).await.unwrap_err();
 
         // the erroneous seek should have left the position unchanged
-        assert_eq!("oobar", file_a.read_string().await?);
+        assert_eq!("oobar", file_a.read_string(&ctx).await?);
 
         // Create another test file, and try FileExt functions on it.
         let path_b = testdir.join("file_b");
-        let mut file_b = openfunc(
+        let mut file_b = A::open(
             path_b.clone(),
             OpenOptions::new()
                 .read(true)
@@ -1349,12 +1414,13 @@ mod tests {
                 .create(true)
                 .truncate(true)
                 .to_owned(),
+            &ctx,
         )
         .await?;
         file_b.write_all_at(b"BAR".to_vec(), 3, &ctx).await?;
         file_b.write_all_at(b"FOO".to_vec(), 0, &ctx).await?;
 
-        assert_eq!(file_b.read_string_at(2, 3).await?, "OBA");
+        assert_eq!(file_b.read_string_at(2, 3, &ctx).await?, "OBA");
 
         // Open a lot of files, enough to cause some evictions. (Or to be precise,
         // open the same file many times. The effect is the same.)
@@ -1364,9 +1430,13 @@ mod tests {
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
-            let mut vfile =
-                openfunc(path_b.clone(), OpenOptions::new().read(true).to_owned()).await?;
-            assert_eq!("FOOBAR", vfile.read_string().await?);
+            let mut vfile = A::open(
+                path_b.clone(),
+                OpenOptions::new().read(true).to_owned(),
+                &ctx,
+            )
+            .await?;
+            assert_eq!("FOOBAR", vfile.read_string(&ctx).await?);
             vfiles.push(vfile);
         }
 
@@ -1375,13 +1445,13 @@ mod tests {
 
         // The underlying file descriptor for 'file_a' should be closed now. Try to read
         // from it again. We left the file positioned at offset 1 above.
-        assert_eq!("oobar", file_a.read_string().await?);
+        assert_eq!("oobar", file_a.read_string(&ctx).await?);
 
         // Check that all the other FDs still work too. Use them in random order for
         // good measure.
         vfiles.as_mut_slice().shuffle(&mut thread_rng());
         for vfile in vfiles.iter_mut() {
-            assert_eq!("OOBAR", vfile.read_string_at(1, 5).await?);
+            assert_eq!("OOBAR", vfile.read_string_at(1, 5, &ctx).await?);
         }
 
         Ok(())
@@ -1397,6 +1467,7 @@ mod tests {
         const THREADS: usize = 100;
         const SAMPLE: [u8; SIZE] = [0xADu8; SIZE];
 
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let testdir = crate::config::PageServerConf::test_repo_dir("vfile_concurrency");
         std::fs::create_dir_all(&testdir)?;
 
@@ -1410,8 +1481,12 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFile::open_with_options(&test_file_path, OpenOptions::new().read(true))
-                .await?;
+            let f = VirtualFile::open_with_options(
+                &test_file_path,
+                OpenOptions::new().read(true),
+                &ctx,
+            )
+            .await?;
             files.push(f);
         }
         let files = Arc::new(files);
@@ -1425,12 +1500,13 @@ mod tests {
         let mut hdls = Vec::new();
         for _threadno in 0..THREADS {
             let files = files.clone();
+            let ctx = ctx.detached_child(TaskKind::UnitTest, DownloadBehavior::Error);
             let hdl = rt.spawn(async move {
                 let mut buf = vec![0u8; SIZE];
                 let mut rng = rand::rngs::OsRng;
                 for _ in 1..1000 {
                     let f = &files[rng.gen_range(0..files.len())];
-                    buf = f.read_exact_at(buf, 0).await.unwrap();
+                    buf = f.read_exact_at(buf, 0, &ctx).await.unwrap();
                     assert!(buf == SAMPLE);
                 }
             });
@@ -1446,6 +1522,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_atomic_overwrite_basic() {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let testdir = crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_basic");
         std::fs::create_dir_all(&testdir).unwrap();
 
@@ -1455,8 +1532,8 @@ mod tests {
         VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
-        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
-        let post = file.read_string().await.unwrap();
+        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
+        let post = file.read_string(&ctx).await.unwrap();
         assert_eq!(post, "foo");
         assert!(!tmp_path.exists());
         drop(file);
@@ -1464,8 +1541,8 @@ mod tests {
         VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"bar".to_vec())
             .await
             .unwrap();
-        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
-        let post = file.read_string().await.unwrap();
+        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
+        let post = file.read_string(&ctx).await.unwrap();
         assert_eq!(post, "bar");
         assert!(!tmp_path.exists());
         drop(file);
@@ -1473,6 +1550,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_atomic_overwrite_preexisting_tmp() {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let testdir =
             crate::config::PageServerConf::test_repo_dir("test_atomic_overwrite_preexisting_tmp");
         std::fs::create_dir_all(&testdir).unwrap();
@@ -1487,8 +1565,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
-        let post = file.read_string().await.unwrap();
+        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
+        let post = file.read_string(&ctx).await.unwrap();
         assert_eq!(post, "foo");
         assert!(!tmp_path.exists());
         drop(file);

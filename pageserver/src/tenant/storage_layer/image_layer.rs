@@ -343,6 +343,7 @@ impl ImageLayer {
         let mut file = VirtualFile::open_with_options(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
+            ctx,
         )
         .await
         .with_context(|| format!("Failed to open file '{}'", path))?;
@@ -377,7 +378,7 @@ impl ImageLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
-        let file = match VirtualFile::open(path).await {
+        let file = match VirtualFile::open(path, ctx).await {
             Ok(file) => file,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
         };
@@ -474,7 +475,7 @@ impl ImageLayerInner {
             .await
             .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state)
+        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
 
         Ok(())
@@ -537,6 +538,7 @@ impl ImageLayerInner {
         &self,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
     ) {
         let max_vectored_read_bytes = self
             .max_vectored_read_bytes
@@ -565,7 +567,7 @@ impl ImageLayerInner {
             }
 
             let buf = BytesMut::with_capacity(buf_size);
-            let res = vectored_blob_reader.read_blobs(&read, buf).await;
+            let res = vectored_blob_reader.read_blobs(&read, buf, ctx).await;
 
             match res {
                 Ok(blobs_buf) => {
@@ -631,6 +633,7 @@ impl ImageLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
@@ -650,6 +653,7 @@ impl ImageLayerWriterInner {
                 virtual_file::OpenOptions::new()
                     .write(true)
                     .create_new(true),
+                ctx,
             )
             .await?
         };
@@ -804,10 +808,11 @@ impl ImageLayerWriter {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn)
+                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn, ctx)
                     .await?,
             ),
         })
