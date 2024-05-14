@@ -1127,6 +1127,11 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    pub(crate) fn is_deleting(&self) -> bool {
+        let mut locked = self.upload_queue.lock().unwrap();
+        locked.stopped_mut().is_ok()
+    }
+
     pub(crate) async fn preserve_initdb_archive(
         self: &Arc<Self>,
         tenant_id: &TenantId,
