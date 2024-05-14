@@ -352,13 +352,16 @@ impl SwitchAuxFilePolicy {
         }
     }
 
-    pub fn from_usize(this: usize) -> Self {
+    pub fn try_from_usize(this: usize) -> Option<Self> {
         match this {
-            1 => Self::V1,
-            2 => Self::CrossValidation,
-            3 => Self::V2,
-            _ => unreachable!(),
+            1 => Some(Self::V1),
+            2 => Some(Self::CrossValidation),
+            3 => Some(Self::V2),
+            _ => None,
         }
+    }
+    pub fn from_usize(this: usize) -> Self {
+        Self::try_from_usize(this).unwrap()
     }
 
     pub fn to_runtime_policy(&self) -> RuntimeAuxFilePolicy {
@@ -376,14 +379,18 @@ impl RuntimeAuxFilePolicy {
         }
     }
 
-    pub fn from_usize(this: usize) -> Self {
+    pub fn try_from_usize(this: usize) -> Option<Self> {
         match this {
-            1 => Self::V1,
-            2 => Self::CrossValidation,
-            3 => Self::V2,
-            0 => Self::Unspecified,
-            _ => unreachable!(),
+            1 => Some(Self::V1),
+            2 => Some(Self::CrossValidation),
+            3 => Some(Self::V2),
+            0 => Some(Self::Unspecified),
+            _ => None,
         }
+    }
+
+    pub fn from_usize(this: usize) -> Self {
+        Self::try_from_usize(this).unwrap()
     }
 }
 
