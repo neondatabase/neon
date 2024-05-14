@@ -81,7 +81,8 @@ def pytest_generate_tests(metafunc: Metafunc):
     ) is not None:
         metafunc.parametrize(
             "pageserver_default_tenant_config_compaction_algorithm",
-            explicit_default["kind"],
+            [explicit_default],
+            ids=[explicit_default["kind"]],
         )
 
     # For performance tests, parametrize also by platform
