@@ -704,7 +704,7 @@ pub struct TimelineInfo {
     pub walreceiver_status: String,
 
     /// Whether aux file v2 is enabled
-    pub last_aux_file_policy: RuntimeAuxFilePolicy,
+    pub(crate) last_aux_file_policy: RuntimeAuxFilePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

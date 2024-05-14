@@ -413,7 +413,7 @@ pub struct Timeline {
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
 
-    /// Size estiamtor for aux file v2
+    /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
 
     /// Indicate whether aux file v2 storage is enabled.

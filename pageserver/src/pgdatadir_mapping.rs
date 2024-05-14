@@ -1497,7 +1497,7 @@ impl<'a> DatadirModification<'a> {
             }
         };
 
-        assert!(policy != RuntimeAuxFilePolicy::Unspecified);
+        assert_ne!(policy, RuntimeAuxFilePolicy::Unspecified);
 
         if let RuntimeAuxFilePolicy::V2 | RuntimeAuxFilePolicy::CrossValidation = policy {
             let key = aux_file::encode_aux_file_key(path);

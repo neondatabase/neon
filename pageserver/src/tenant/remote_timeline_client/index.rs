@@ -91,8 +91,10 @@ pub struct IndexPart {
     pub(crate) lineage: Lineage,
 
     // Added in version 6. None == RuntimeAuxFilePolicy::Unspecified. Use Option wrapper to keep forward compatibility.
+    // This flag is controlled by TenantConf::switch_aux_file_policy. When the first aux file gets written, the aux file
+    // mode will be persisted in `index_part.json`, and `switch_aux_file_policy` will be ignored.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub last_aux_file_policy: Option<RuntimeAuxFilePolicy>,
+    pub(crate) last_aux_file_policy: Option<RuntimeAuxFilePolicy>,
 }
 
 impl IndexPart {
@@ -163,11 +165,11 @@ impl IndexPart {
             example_metadata.disk_consistent_lsn(),
             example_metadata,
             Default::default(),
-            RuntimeAuxFilePolicy::V2,
+            RuntimeAuxFilePolicy::V1,
         )
     }
 
-    pub fn last_aux_file_policy(&self) -> RuntimeAuxFilePolicy {
+    pub(crate) fn last_aux_file_policy(&self) -> RuntimeAuxFilePolicy {
         self.last_aux_file_policy
             .unwrap_or(RuntimeAuxFilePolicy::Unspecified)
     }
