@@ -467,6 +467,7 @@ class NeonEnvBuilder:
         initial_timeline: Optional[TimelineId] = None,
         pageserver_virtual_file_io_engine: Optional[str] = None,
         pageserver_aux_file_policy: Optional[AuxFileStore] = None,
+        pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -507,6 +508,14 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
+        self.pageserver_default_tenant_config_compaction_algorithm: Optional[
+            Dict[str, Any]
+        ] = pageserver_default_tenant_config_compaction_algorithm
+        if self.pageserver_default_tenant_config_compaction_algorithm is not None:
+            log.debug(
+                f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
+            )
+
         self.pageserver_get_vectored_impl: Optional[str] = None
         if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
             self.pageserver_get_vectored_impl = "vectored"
@@ -521,15 +530,6 @@ class NeonEnvBuilder:
         if (validate := os.getenv("PAGESERVER_VALIDATE_VEC_GET")) is not None:
             self.pageserver_validate_vectored_get = bool(validate)
             log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
-
-        self.pageserver_default_compaction_algorithm: Optional[Dict[str, Any]] = None
-        if (
-            toml_table := os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
-        ) is not None:
-            v = toml.loads(toml_table)
-            assert isinstance(v, dict)
-            self.pageserver_default_compaction_algorithm = v
-            log.debug(f"Overriding pageserver default_compaction_algorithm config to {v}")
 
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
 
@@ -1112,11 +1112,11 @@ class NeonEnv:
                 ps_cfg["get_impl"] = config.pageserver_get_impl
             if config.pageserver_validate_vectored_get is not None:
                 ps_cfg["validate_vectored_get"] = config.pageserver_validate_vectored_get
-            if config.pageserver_default_compaction_algorithm is not None:
+            if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
                 tenant_config[
                     "compaction_algorithm"
-                ] = config.pageserver_default_compaction_algorithm
+                ] = config.pageserver_default_tenant_config_compaction_algorithm
 
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
@@ -1318,6 +1318,7 @@ def _shared_simple_env(
     pg_version: PgVersion,
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
+    pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1349,6 +1350,7 @@ def _shared_simple_env(
         test_output_dir=test_output_dir,
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
+        pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
     ) as builder:
         env = builder.init_start()
 
@@ -1389,6 +1391,7 @@ def neon_env_builder(
     top_output_dir: Path,
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore] = None,
+    pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1423,6 +1426,7 @@ def neon_env_builder(
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
+        pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
     ) as builder:
         yield builder
 
