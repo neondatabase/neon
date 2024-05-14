@@ -2421,10 +2421,6 @@ impl Timeline {
                             discovered_layers.push((layer_file_name, local_path, file_size));
                             continue;
                         }
-                        Discovered::Metadata => {
-                            warn!("found legacy metadata file, these should have been removed in load_tenant_config");
-                            continue;
-                        }
                         Discovered::IgnoredBackup => {
                             continue;
                         }
@@ -2471,12 +2467,10 @@ impl Timeline {
                             if local.metadata.file_size() == remote.file_size() {
                                 // Use the local file, but take the remote metadata so that we pick up
                                 // the correct generation.
-                                UseLocal(
-                                    LocalLayerFileMetadata {
-                                        metadata: remote,
-                                        local_path: local.local_path
-                                    }
-                                )
+                                UseLocal(LocalLayerFileMetadata {
+                                    metadata: remote,
+                                    local_path: local.local_path,
+                                })
                             } else {
                                 init::cleanup_local_file_for_remote(&local, &remote)?;
                                 UseRemote { local, remote }
@@ -2485,7 +2479,11 @@ impl Timeline {
                         Ok(decision) => decision,
                         Err(DismissedLayer::Future { local }) => {
                             if let Some(local) = local {
-                                init::cleanup_future_layer(&local.local_path, &name, disk_consistent_lsn)?;
+                                init::cleanup_future_layer(
+                                    &local.local_path,
+                                    &name,
+                                    disk_consistent_lsn,
+                                )?;
                             }
                             needs_cleanup.push(name);
                             continue;
@@ -2507,7 +2505,8 @@ impl Timeline {
                     let layer = match decision {
                         UseLocal(local) => {
                             total_physical_size += local.metadata.file_size();
-                            Layer::for_resident(conf, &this, local.local_path, name, local.metadata).drop_eviction_guard()
+                            Layer::for_resident(conf, &this, local.local_path, name, local.metadata)
+                                .drop_eviction_guard()
                         }
                         Evicted(remote) | UseRemote { remote, .. } => {
                             Layer::for_evicted(conf, &this, name, remote)

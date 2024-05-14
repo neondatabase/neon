@@ -112,10 +112,6 @@ pub async fn shutdown_pageserver(
     std::process::exit(exit_code);
 }
 
-/// The name of the metadata file pageserver creates per timeline.
-/// Full path: `tenants/<tenant_id>/timelines/<timeline_id>/metadata`.
-pub const METADATA_FILE_NAME: &str = "metadata";
-
 /// Per-tenant configuration file.
 /// Full path: `tenants/<tenant_id>/config`.
 pub(crate) const TENANT_CONFIG_NAME: &str = "config";
