@@ -2,7 +2,6 @@ mod draw;
 
 use draw::{LayerTraceEvent, LayerTraceFile, LayerTraceOp};
 
-use futures::StreamExt;
 use pageserver_api::shard::ShardIdentity;
 use rand::Rng;
 use tracing::info;
@@ -15,7 +14,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::helpers::PAGE_SZ;
-use crate::helpers::{merge_delta_keys, overlaps_with};
+use crate::helpers::overlaps_with;
+use crate::helpers::DeltaMergeIterator;
 
 use crate::interface;
 use crate::interface::CompactionLayer;
@@ -545,12 +545,11 @@ impl interface::CompactionJobExecutor for MockTimeline {
         input_layers: &[Arc<MockDeltaLayer>],
         ctx: &MockRequestContext,
     ) -> anyhow::Result<()> {
-        let mut key_value_stream =
-            std::pin::pin!(merge_delta_keys::<MockTimeline>(input_layers, ctx));
+        let mut key_value_stream = DeltaMergeIterator::<MockTimeline>::new(input_layers, ctx);
         let mut records: Vec<MockRecord> = Vec::new();
         let mut total_len = 2;
-        while let Some(delta_entry) = key_value_stream.next().await {
-            let delta_entry: MockRecord = delta_entry?;
+        while !key_value_stream.is_end() {
+            let delta_entry: MockRecord = key_value_stream.next().await?;
             if key_range.contains(&delta_entry.key) && lsn_range.contains(&delta_entry.lsn) {
                 total_len += delta_entry.len;
                 records.push(delta_entry);

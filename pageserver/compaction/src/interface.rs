@@ -92,7 +92,9 @@ pub trait CompactionJobExecutor {
     ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
-pub trait CompactionKey: std::cmp::Ord + Clone + Copy + std::fmt::Display {
+pub trait CompactionKey:
+    std::cmp::Ord + Clone + Copy + std::fmt::Display + std::fmt::Debug
+{
     const MIN: Self;
     const MAX: Self;
 
