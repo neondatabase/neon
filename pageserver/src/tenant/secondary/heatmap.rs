@@ -15,6 +15,14 @@ pub(super) struct HeatMapTenant {
     pub(super) generation: Generation,
 
     pub(super) timelines: Vec<HeatMapTimeline>,
+
+    /// Uploaders provide their own upload period in the heatmap, as a hint to downloaders
+    /// of how frequently it is worthwhile to check for updates.
+    ///
+    /// This is optional for backward compat, and because we sometimes might upload
+    /// a heatmap explicitly via API for a tenant that has no periodic upload configured.
+    #[serde(default)]
+    pub(super) upload_period_ms: Option<u128>,
 }
 
 #[serde_as]
@@ -80,5 +88,22 @@ impl HeatMapTenant {
         }
 
         stats
+    }
+
+    pub(crate) fn strip_atimes(self) -> Self {
+        Self {
+            timelines: self
+                .timelines
+                .into_iter()
+                .map(|mut tl| {
+                    for layer in &mut tl.layers {
+                        layer.access_time = SystemTime::UNIX_EPOCH;
+                    }
+                    tl
+                })
+                .collect(),
+            generation: self.generation,
+            upload_period_ms: self.upload_period_ms,
+        }
     }
 }
