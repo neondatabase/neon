@@ -1,8 +1,10 @@
 #
 # This file runs pg_regress-based tests.
 #
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.neon_fixtures import (
@@ -10,6 +12,12 @@ from fixtures.neon_fixtures import (
     check_restored_datadir_content,
 )
 from fixtures.remote_storage import s3_storage
+
+if TYPE_CHECKING:
+    from typing import Optional
+
+    from fixtures.neon_fixtures import PgBin
+    from pytest import CaptureFixture
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -19,8 +27,8 @@ def test_pg_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
     build_type: str,
-    pg_bin,
-    capsys,
+    pg_bin: PgBin,
+    capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
     shard_count: Optional[int],
@@ -86,8 +94,8 @@ def test_pg_regress(
 def test_isolation(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
-    pg_bin,
-    capsys,
+    pg_bin: PgBin,
+    capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
     shard_count: Optional[int],
@@ -142,8 +150,8 @@ def test_isolation(
 def test_sql_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
-    pg_bin,
-    capsys,
+    pg_bin: PgBin,
+    capsys: CaptureFixture[str],
     base_dir: Path,
     pg_distrib_dir: Path,
     shard_count: Optional[int],

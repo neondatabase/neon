@@ -2721,7 +2721,12 @@ class PgBin:
         env.update(env_add)
         return env
 
-    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None):
+    def run(
+        self,
+        command: List[str],
+        env: Optional[Env] = None,
+        cwd: Optional[Union[str, Path]] = None,
+    ):
         """
         Run one of the postgres binaries.
 
