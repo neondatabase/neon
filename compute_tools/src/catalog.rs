@@ -1,5 +1,5 @@
 use compute_api::{
-    responses::SchemaObjects,
+    responses::CatalogObjects,
     spec::{Database, Role},
 };
 use futures::Stream;
@@ -19,7 +19,7 @@ use crate::{
     pg_helpers::{get_existing_dbs, get_existing_roles},
 };
 
-pub async fn get_schema_objects(compute: &Arc<ComputeNode>) -> anyhow::Result<SchemaObjects> {
+pub async fn get_objects(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
     let connstr = compute.connstr.clone();
     task::spawn_blocking(move || {
         let mut client = Client::connect(connstr.as_str(), NoTls)?;
@@ -30,7 +30,7 @@ pub async fn get_schema_objects(compute: &Arc<ComputeNode>) -> anyhow::Result<Sc
         }
         let databases: Vec<Database> = get_existing_dbs(&mut client)?.values().cloned().collect();
 
-        Ok(SchemaObjects { roles, databases })
+        Ok(CatalogObjects { roles, databases })
     })
     .await?
 }

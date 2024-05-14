@@ -114,7 +114,7 @@ pub struct ComputeMetrics {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct SchemaObjects {
+pub struct CatalogObjects {
     pub roles: Vec<Role>,
     pub databases: Vec<Database>,
 }

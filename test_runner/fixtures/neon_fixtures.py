@@ -72,6 +72,7 @@ from fixtures.remote_storage import (
     default_remote_storage,
     remote_storage_to_toml_dict,
 )
+from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
 from fixtures.utils import (
@@ -3372,6 +3373,13 @@ class Endpoint(PgProtocol):
         self.check_stop_result = check_stop_result
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
+
+    def http_client(
+        self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
+    ) -> EndpointHttpClient:
+        return EndpointHttpClient(
+            port=self.http_port,
+        )
 
     def create(
         self,

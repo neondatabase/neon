@@ -68,22 +68,22 @@ paths:
               schema:
                 $ref: "#/components/schemas/Info"
 
-  /schema/objects:
+  /catalog/objects:
     get:
       tags:
         - Info
       summary: Get databases and roles in the schema.
       description: ""
-      operationId: getSchemaObjects
+      operationId: getCatalogObjects
       responses:
         200:
           description: Compute schema objects
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SchemaObjects"
+                $ref: "#/components/schemas/CatalogObjects"
 
-  /schema/ddl:
+  /catalog/database_ddl:
     get:
       tags:
         - Info
@@ -97,7 +97,7 @@ paths:
             type: string
           example: "postgres"
       description: Get schema dump in SQL format.
-      operationId: getSchemaDump
+      operationId: getCatalogDatabaseDDL
       responses:
         200:
           description: Schema dump
@@ -274,9 +274,9 @@ components:
         num_cpus:
           type: integer
 
-    SchemaObjects:
+    CatalogObjects:
       type: object
-      description: Schema Databases and Roles
+      description: Catalog Databases and Roles
       required:
         - roles
         - databases
@@ -284,15 +284,15 @@ components:
         roles:
           type: array
           items:
-            $ref: "#/components/schemas/SchemaRole"
+            $ref: "#/components/schemas/CatalogRole"
         databases:
           type: array
           items:
-            $ref: "#/components/schemas/SchemaDatabase"
+            $ref: "#/components/schemas/CatalogDatabase"
 
-    SchemaDatabase:
+    CatalogDatabase:
       type: object
-      description: Schema Database
+      description: Catalog Database
       required:
         - name
         - owner
@@ -306,13 +306,13 @@ components:
         options:
           type: array
           items:
-            $ref: "#/components/schemas/SchemaGenericOption"
+            $ref: "#/components/schemas/CatalogGenericOption"
         restrict_conn:
           type: boolean
         invalid:
           type: boolean
 
-    SchemaRole:
+    CatalogRole:
       type: object
       description: Schema Role
       required:
@@ -325,9 +325,9 @@ components:
         options:
           type: array
           items:
-            $ref: "#/components/schemas/SchemaGenericOption"
+            $ref: "#/components/schemas/CatalogGenericOption"
 
-    SchemaGenericOption:
+    CatalogGenericOption:
       type: object
       description: Schema Generic option
       required:
