@@ -776,9 +776,6 @@ pub struct TimelineGcRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRedoManagerProcessStatus {
     pub pid: u32,
-    /// The strum-generated `into::<&'static str>()` for `pageserver::walredo::ProcessKind`.
-    /// `ProcessKind` are a transitory thing, so, they have no enum representation in `pageserver_api`.
-    pub kind: Cow<'static, str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
