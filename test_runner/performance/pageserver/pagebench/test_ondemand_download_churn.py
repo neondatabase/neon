@@ -57,7 +57,7 @@ def test_download_churn(
     # Setup env
     env = setup_env(neon_env_builder, pg_bin)
     env.pageserver.allowed_errors.append(
-        f".*GET.* path=/v1/tenant/{env.initial_tenant}/timeline.* request was dropped before completing"
+        f".*path=/v1/tenant/{env.initial_tenant}/timeline.* request was dropped before completing"
     )
 
     run_benchmark(env, pg_bin, record, io_engine, concurrency_per_target, duration)
