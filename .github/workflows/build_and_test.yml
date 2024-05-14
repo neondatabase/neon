@@ -548,7 +548,7 @@ jobs:
 
   report-benchmarks-failures:
     needs: [ benchmarks, create-test-report ]
-    if: github.ref_name == 'main' && failure()
+    if: github.ref_name == 'main' && needs.benchmarks.result == 'failure'
     runs-on: ubuntu-latest
 
     steps:
