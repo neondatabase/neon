@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -245,7 +246,26 @@ def test_forward_compatibility(
             compatibility_snapshot_dir / "repo",
         )
 
+        # not using env.pageserver.version because it was initialized before
+        prev_pageserver_version_str = env.get_binary_version("pageserver")
+        prev_pageserver_version_match = re.search(
+            "Neon page server git-env:(.*) failpoints: (.*), features: (.*)",
+            prev_pageserver_version_str,
+        )
+        if prev_pageserver_version_match is not None:
+            prev_pageserver_version = prev_pageserver_version_match.group(1)
+        else:
+            raise AssertionError(
+                "cannot find git hash in the version string: " + prev_pageserver_version_str
+            )
+
+        # does not include logs from previous runs
+        assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
+
         neon_env_builder.start()
+
+        # ensure the specified pageserver is running
+        assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)
 
         check_neon_works(
             env,
@@ -253,6 +273,7 @@ def test_forward_compatibility(
             sql_dump_path=compatibility_snapshot_dir / "dump.sql",
             repo_dir=env.repo_dir,
         )
+
     except Exception:
         if breaking_changes_allowed:
             pytest.xfail(
