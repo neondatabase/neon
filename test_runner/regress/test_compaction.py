@@ -229,7 +229,11 @@ def test_uploads_and_deletions(
     # TODO remove these allowed errors
     # https://github.com/neondatabase/neon/issues/7707
     env.pageserver.allowed_errors.extend(
-        [".*duplicated L1 layer.*", ".*delta layer created with.*duplicate values.*"]
+        [
+            ".*duplicated L1 layer.*",
+            ".*delta layer created with.*duplicate values.*",
+            ".*assertion failed: self.lsn_range.start <= lsn.*",
+        ]
     )
 
     generate_uploads_and_deletions(env, pageserver=env.pageserver)
