@@ -62,14 +62,10 @@ use super::{
     CommandRequest, DownloadCommand,
 };
 
-/// For each tenant, how long must have passed since the last download_tenant call before
-/// calling it again.  This is approximately the time by which local data is allowed
-/// to fall behind remote data.
-///
-/// TODO: this should just be a default, and the actual period should be controlled
-/// via the heatmap itself
-/// `<ttps://github.com/neondatabase/neon/issues/6200>`
-const DOWNLOAD_FRESHEN_INTERVAL: Duration = Duration::from_millis(60000);
+/// For each tenant, default period for how long must have passed since the last download_tenant call before
+/// calling it again.  This default is replaced with the value of [`HeatMapTenant::upload_period_ms`] after first
+/// download, if the uploader populated it.
+const DEFAULT_DOWNLOAD_INTERVAL: Duration = Duration::from_millis(60000);
 
 /// Range of concurrency we may use when downloading layers within a timeline.  This is independent
 /// for each tenant we're downloading: the concurrency of _tenants_ is defined separately in
@@ -137,14 +133,22 @@ pub(super) struct SecondaryDetailTimeline {
     pub(super) evicted_at: HashMap<LayerName, SystemTime>,
 }
 
+// Aspects of a heatmap that we remember after downloading it
+#[derive(Clone, Debug)]
+struct DownloadSummary {
+    etag: Etag,
+    #[allow(unused)]
+    mtime: SystemTime,
+    upload_period: Duration,
+}
+
 /// This state is written by the secondary downloader, it is opaque
 /// to TenantManager
 #[derive(Debug)]
 pub(super) struct SecondaryDetail {
     pub(super) config: SecondaryLocationConfig,
 
-    last_download: Option<Instant>,
-    last_etag: Option<Etag>,
+    last_download: Option<DownloadSummary>,
     next_download: Option<Instant>,
     pub(super) timelines: HashMap<TimelineId, SecondaryDetailTimeline>,
 }
@@ -174,7 +178,6 @@ impl SecondaryDetail {
         Self {
             config,
             last_download: None,
-            last_etag: None,
             next_download: None,
             timelines: HashMap::new(),
         }
@@ -228,9 +231,8 @@ impl SecondaryDetail {
 
 struct PendingDownload {
     secondary_state: Arc<SecondaryTenant>,
-    last_download: Option<Instant>,
+    last_download: Option<DownloadSummary>,
     target_time: Option<Instant>,
-    period: Option<Duration>,
 }
 
 impl scheduler::PendingJob for PendingDownload {
@@ -280,10 +282,17 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
 
         tracing::debug!("Secondary tenant download completed");
 
-        // Update freshened_at even if there was an error: we don't want errored tenants to implicitly
-        // take priority to run again.
         let mut detail = secondary_state.detail.lock().unwrap();
-        detail.next_download = Some(Instant::now() + period_jitter(DOWNLOAD_FRESHEN_INTERVAL, 5));
+
+        let period = detail
+            .last_download
+            .as_ref()
+            .map(|d| d.upload_period)
+            .unwrap_or(DEFAULT_DOWNLOAD_INTERVAL);
+
+        // We advance next_download irrespective of errors: we don't want error cases to result in
+        // expensive busy-polling.
+        detail.next_download = Some(Instant::now() + period_jitter(period, 5));
     }
 
     async fn schedule(&mut self) -> SchedulingResult<PendingDownload> {
@@ -316,11 +325,11 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                     if detail.next_download.is_none() {
                         // Initialize randomly in the range from 0 to our interval: this uniformly spreads the start times.  Subsequent
                         // rounds will use a smaller jitter to avoid accidentally synchronizing later.
-                        detail.next_download = Some(now.checked_add(period_warmup(DOWNLOAD_FRESHEN_INTERVAL)).expect(
+                        detail.next_download = Some(now.checked_add(period_warmup(DEFAULT_DOWNLOAD_INTERVAL)).expect(
                         "Using our constant, which is known to be small compared with clock range",
                     ));
                     }
-                    (detail.last_download, detail.next_download.unwrap())
+                    (detail.last_download.clone(), detail.next_download.unwrap())
                 };
 
                 if now > next_download {
@@ -328,7 +337,6 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                         secondary_state: secondary_tenant,
                         last_download,
                         target_time: Some(next_download),
-                        period: Some(DOWNLOAD_FRESHEN_INTERVAL),
                     })
                 } else {
                     None
@@ -354,7 +362,6 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
 
         Ok(PendingDownload {
             target_time: None,
-            period: None,
             last_download: None,
             secondary_state: tenant,
         })
@@ -371,7 +378,6 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             secondary_state,
             last_download,
             target_time,
-            period,
         } = job;
 
         let (completion, barrier) = utils::completion::channel();
@@ -408,20 +414,15 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
 
             // If the job had a target execution time, we may check our final execution
             // time against that for observability purposes.
-            if let (Some(target_time), Some(period)) = (target_time, period) {
-                // Only track execution lag if this isn't our first download: otherwise, it is expected
-                // that execution will have taken longer than our configured interval, for example
-                // when starting up a pageserver and
-                if last_download.is_some() {
-                    // Elapsed time includes any scheduling lag as well as the execution of the job
-                    let elapsed = Instant::now().duration_since(target_time);
+            if let (Some(target_time), Some(last_download)) = (target_time, last_download) {
+                // Elapsed time includes any scheduling lag as well as the execution of the job
+                let elapsed = Instant::now().duration_since(target_time);
 
-                    warn_when_period_overrun(
-                        elapsed,
-                        period,
-                        BackgroundLoopKind::SecondaryDownload,
-                    );
-                }
+                warn_when_period_overrun(
+                    elapsed,
+                    last_download.upload_period,
+                    BackgroundLoopKind::SecondaryDownload,
+                );
             }
 
             CompleteDownload {
@@ -510,12 +511,12 @@ impl<'a> TenantDownloader<'a> {
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
 
         // We will use the etag from last successful download to make the download conditional on changes
-        let last_etag = self
+        let last_download = self
             .secondary_state
             .detail
             .lock()
             .unwrap()
-            .last_etag
+            .last_download
             .clone();
 
         // Download the tenant's heatmap
@@ -524,7 +525,7 @@ impl<'a> TenantDownloader<'a> {
             etag: heatmap_etag,
             bytes: heatmap_bytes,
         } = match tokio::select!(
-            bytes = self.download_heatmap(last_etag.as_ref()) => {bytes?},
+            bytes = self.download_heatmap(last_download.as_ref().map(|d| &d.etag)) => {bytes?},
             _ = self.secondary_state.cancel.cancelled() => return Ok(())
         ) {
             HeatMapDownload::Unmodified => {
@@ -584,7 +585,14 @@ impl<'a> TenantDownloader<'a> {
 
         // Only update last_etag after a full successful download: this way will not skip
         // the next download, even if the heatmap's actual etag is unchanged.
-        self.secondary_state.detail.lock().unwrap().last_etag = Some(heatmap_etag);
+        self.secondary_state.detail.lock().unwrap().last_download = Some(DownloadSummary {
+            etag: heatmap_etag,
+            mtime: heatmap_mtime,
+            upload_period: heatmap
+                .upload_period_ms
+                .map(|ms| Duration::from_millis(ms as u64))
+                .unwrap_or(DEFAULT_DOWNLOAD_INTERVAL),
+        });
 
         Ok(())
     }
