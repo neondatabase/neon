@@ -2,8 +2,8 @@ import os
 from typing import Any, Dict, Optional
 
 import pytest
-from _pytest.python import Metafunc
 import toml
+from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
 from fixtures.utils import AuxFileStore
