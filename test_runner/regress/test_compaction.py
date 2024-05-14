@@ -208,7 +208,6 @@ def test_uploads_and_deletions(
     """
     :param compaction_algorithm: the compaction algorithm to use.
     """
-    neon_env_builder.num_pageservers = 1
 
     tenant_conf = {
         # small checkpointing and compaction targets to ensure we generate many upload operations
@@ -223,7 +222,7 @@ def test_uploads_and_deletions(
         # create image layers eagerly, so that GC can remove some layers
         "image_creation_threshold": "1",
         "image_layer_creation_check_threshold": "0",
-        "compaction_algorithm": f'{{"kind": "{compaction_algorithm.value}"}}',
+        "compaction_algorithm": json.dumps({"kind": compaction_algorithm.value}),
     }
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
 
@@ -234,3 +233,5 @@ def test_uploads_and_deletions(
     )
 
     generate_uploads_and_deletions(env, pageserver=env.pageserver)
+
+    env.pageserver.assert_log_contains("duplicated L1 layer")
