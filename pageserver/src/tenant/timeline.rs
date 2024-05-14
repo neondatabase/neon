@@ -2630,8 +2630,8 @@ impl Timeline {
                             // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
                             // Don't make noise.
                         } else {
-                            debug_assert!(false);
                             warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
+                            debug_assert!(false);
                         }
                     }
                 };
@@ -4361,6 +4361,16 @@ impl Timeline {
             return;
         }
 
+        if self
+            .remote_client
+            .as_ref()
+            .map(|c| c.is_deleting())
+            .unwrap_or(false)
+        {
+            // The timeline was created in a deletion-resume state, we don't expect logical size to be populated
+            return;
+        }
+
         if let Some(await_bg_cancel) = self
             .current_logical_size
             .cancel_wait_for_background_loop_concurrency_limit_semaphore
@@ -4372,10 +4382,10 @@ impl Timeline {
             // the logical size cancellation to skip the concurrency limit semaphore.
             // TODO: this is an unexpected case.  We should restructure so that it
             // can't happen.
-            debug_assert!(false);
             tracing::warn!(
                 "await_initial_logical_size: can't get semaphore cancel token, skipping"
             );
+            debug_assert!(false);
         }
 
         tokio::select!(
