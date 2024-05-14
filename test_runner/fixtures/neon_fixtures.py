@@ -522,6 +522,15 @@ class NeonEnvBuilder:
             self.pageserver_validate_vectored_get = bool(validate)
             log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
 
+        self.pageserver_default_compaction_algorithm: Optional[Dict[str, Any]] = None
+        if (
+            toml_table := os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
+        ) is not None:
+            v = toml.loads(toml_table)
+            assert isinstance(v, dict)
+            self.pageserver_default_compaction_algorithm = v
+            log.debug(f"Overriding pageserver default_compaction_algorithm config to {v}")
+
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
 
         assert test_name.startswith(
@@ -1103,6 +1112,11 @@ class NeonEnv:
                 ps_cfg["get_impl"] = config.pageserver_get_impl
             if config.pageserver_validate_vectored_get is not None:
                 ps_cfg["validate_vectored_get"] = config.pageserver_validate_vectored_get
+            if config.pageserver_default_compaction_algorithm is not None:
+                tenant_config = ps_cfg.setdefault("tenant_config", {})
+                tenant_config[
+                    "compaction_algorithm"
+                ] = config.pageserver_default_compaction_algorithm
 
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
