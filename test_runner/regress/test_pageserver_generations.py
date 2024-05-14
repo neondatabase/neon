@@ -21,12 +21,9 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserver,
     PgBin,
     S3Scrubber,
-    flush_ep_to_pageserver,
     generate_uploads_and_deletions,
-    last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
@@ -34,12 +31,11 @@ from fixtures.pageserver.utils import (
     list_prefix,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import (
     RemoteStorageKind,
 )
-from fixtures.utils import print_gc_result, wait_until
+from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
 # A tenant configuration that is convenient for generating uploads and deletions
