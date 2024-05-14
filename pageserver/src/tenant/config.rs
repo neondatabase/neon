@@ -40,8 +40,6 @@ pub mod defaults {
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
-    pub const DEFAULT_COMPACTION_ALGORITHM: super::CompactionAlgorithm =
-        super::CompactionAlgorithm::Legacy;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
@@ -554,7 +552,13 @@ impl Default for TenantConf {
                 .expect("cannot parse default compaction period"),
             compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
             compaction_algorithm: CompactionAlgorithmSettings {
-                kind: DEFAULT_COMPACTION_ALGORITHM,
+                kind: if cfg!(test) {
+                    // Rust tests rely on a valid implicit default (TODO: fix this)
+                    CompactionAlgorithm::Legacy
+                } else {
+                    // Python tests are subject to NotSpecified handling
+                    CompactionAlgorithm::NotSpecified
+                },
             },
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)

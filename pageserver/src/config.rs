@@ -5,7 +5,7 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{models::CompactionAlgorithm, shard::TenantShardId};
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use serde;
 use serde::de::IntoDeserializer;
@@ -15,7 +15,7 @@ use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
 use utils::logging::SecretString;
 
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use reqwest::Url;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
@@ -1066,6 +1066,19 @@ impl PageServerConf {
         }
 
         conf.default_tenant_conf = t_conf.merge(TenantConf::default());
+
+        {
+            const VAR_NAME: &str = "NEON_PAGESERVER_PANIC_ON_UNSPECIFIED_COMPACTION_ALGORITHM";
+            static VAR: Lazy<Option<bool>> = Lazy::new(|| utils::env::var(VAR_NAME));
+            if VAR.unwrap_or(false)
+                && conf.default_tenant_conf.compaction_algorithm.kind
+                    == CompactionAlgorithm::NotSpecified
+            {
+                panic!(
+                        "Unspecified compaction algorithm in default tenant configuration. \
+                        Set the algorithm explicitly in the pageserver.toml's `tenant_config` field or unset the environment variable {VAR_NAME}");
+            }
+        }
 
         Ok(conf)
     }

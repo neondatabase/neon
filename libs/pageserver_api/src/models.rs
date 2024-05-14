@@ -451,6 +451,8 @@ impl EvictionPolicy {
 )]
 #[strum(serialize_all = "kebab-case")]
 pub enum CompactionAlgorithm {
+    #[strum(disabled)]
+    NotSpecified,
     Legacy,
     Tiered,
 }

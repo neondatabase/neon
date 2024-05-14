@@ -1700,6 +1700,9 @@ impl Timeline {
         }
 
         match self.get_compaction_algorithm_settings().kind {
+            CompactionAlgorithm::NotSpecified => {
+                unreachable!("should panic earlier when we construct the default tenant conf")
+            }
             CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
         }
