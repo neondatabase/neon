@@ -1,7 +1,7 @@
-import requests
-from contextlib import closing
 
+import requests
 from fixtures.neon_fixtures import NeonEnv
+
 
 def test_compute_catalog(neon_simple_env: NeonEnv):
     env = neon_simple_env
@@ -24,6 +24,6 @@ def test_compute_catalog(neon_simple_env: NeonEnv):
 
     try:
         client.catalog_schema_ddl(database='nonexistentdb')
-        assert False, "Expected HTTPError was not raised"
+        raise AssertionError("Expected HTTPError was not raised")
     except requests.exceptions.HTTPError as e:
         assert e.response.status_code == 404, f"Expected 404 status code, but got {e.response.status_code}"
