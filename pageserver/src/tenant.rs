@@ -271,7 +271,7 @@ pub struct Tenant {
     /// The remote storage generation, used to protect S3 objects from split-brain.
     /// Does not change over the lifetime of the [`Tenant`] object.
     ///
-    /// Thim duplicates the generation stored in LocationConf, but that structure is mutable:
+    /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     generation: Generation,
 
