@@ -2200,7 +2200,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
             locked.resolve_attached_shard(&tenant_id, shard_selector)
         };
         match resolved {
-            ShardResolveResult::Found(tsid) => break tsid,
+            ShardResolveResult::Found(tenant_shard) => break tenant_shard,
             ShardResolveResult::NotFound => {
                 return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
                     tenant_id,
