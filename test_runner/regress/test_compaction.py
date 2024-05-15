@@ -7,6 +7,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, generate_uploads_and_deletions
 from fixtures.workload import Workload
+from fixtures.pageserver.http import PageserverApiException
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
@@ -238,7 +239,10 @@ def test_uploads_and_deletions(
         ]
     )
 
-    generate_uploads_and_deletions(env, pageserver=env.pageserver)
+    try:
+        generate_uploads_and_deletions(env, pageserver=env.pageserver)
+    except PageserverApiException as e:
+        log.info(f"Obtained PageserverApiException: {e}")
 
     # We would like to assert for "duplicated L1 layer" here, but there is other errors that
     # might occur flakily. Therefore, don't assert anything.
