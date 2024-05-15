@@ -317,12 +317,7 @@ impl Timeline {
             let resident = layer.download_and_keep_resident().await?;
 
             let keys_written = resident
-                .rewrite(
-                    layer.layer_desc().key_range.clone(),
-                    |key| !self.shard_identity.is_key_disposable(key),
-                    &mut image_layer_writer,
-                    ctx,
-                )
+                .filter(&self.shard_identity, &mut image_layer_writer, ctx)
                 .await?;
 
             if keys_written > 0 {

@@ -4,7 +4,7 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::{ShardIndex, TenantShardId};
+use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -1842,24 +1842,22 @@ impl ResidentLayer {
         }
     }
 
-    /// Read all they keys in this layer in the given range, and write them all to
+    /// Read all they keys in this layer which match the ShardIdentity, and write them all to
     /// the provided writer.  Return the number of keys written.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(layer=%self))]
-    pub(crate) async fn rewrite<'a, F>(
+    pub(crate) async fn filter<'a>(
         &'a self,
-        range: Range<Key>,
-        filter: F,
+        shard_identity: &ShardIdentity,
         writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
-    ) -> anyhow::Result<usize>
-    where
-        F: Fn(&Key) -> bool,
-    {
+    ) -> anyhow::Result<usize> {
         use LayerKind::*;
+
+        let key_range = self.layer_desc().key_range.clone();
 
         match self.downloaded.get(&self.owner.0, ctx).await? {
             Delta(_) => anyhow::bail!(format!("cannot load_image_keys on a delta layer {self}")),
-            Image(i) => i.do_reads_and_write(range, filter, writer, ctx).await,
+            Image(i) => i.filter(key_range, shard_identity, writer, ctx).await,
         }
     }
 

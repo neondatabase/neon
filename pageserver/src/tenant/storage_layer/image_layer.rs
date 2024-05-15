@@ -47,7 +47,7 @@ use hex;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -471,7 +471,7 @@ impl ImageLayerInner {
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         let reads = self
-            .plan_reads(keyspace, |_| true, ctx)
+            .plan_reads(keyspace, None, ctx)
             .await
             .map_err(GetVectoredError::Other)?;
 
@@ -481,15 +481,17 @@ impl ImageLayerInner {
         Ok(())
     }
 
-    async fn plan_reads<F>(
+    /// Traverse the layer's index to build read operations on the overlap of the input keyspace
+    /// and the keys in this layer.
+    ///
+    /// If shard_identity is provided, it will be used to filter keys down to those stored on
+    /// this shard.
+    async fn plan_reads(
         &self,
         keyspace: KeySpace,
-        filter: F,
+        shard_identity: Option<&ShardIdentity>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<VectoredRead>>
-    where
-        F: Fn(&Key) -> bool,
-    {
+    ) -> anyhow::Result<Vec<VectoredRead>> {
         let mut planner = VectoredReadPlanner::new(
             self.max_vectored_read_bytes
                 .expect("Layer is loaded with max vectored bytes config")
@@ -505,9 +507,8 @@ impl ImageLayerInner {
             .page_content_kind(PageContentKind::ImageLayerBtreeNode)
             .build();
 
-        let mut last_key: Option<Key> = None;
-
         for range in keyspace.ranges.iter() {
+            let mut range_end_handled = false;
             let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
             range.start.write_to_byte_slice(&mut search_key);
 
@@ -520,36 +521,26 @@ impl ImageLayerInner {
                 let key = Key::from_slice(&raw_key[..KEY_SIZE]);
                 assert!(key >= range.start);
 
-                let drop = !filter(&key);
-
-                // Maybe terminate the range if we are at the end of a contiguous run of keys
-                // that pass the condition
-                if let Some(last_key_v) = last_key {
-                    if drop {
-                        last_key = None;
-                        planner.handle_range_end(offset);
-                        continue;
-                    } else if key != last_key_v.next() {
-                        planner.handle_range_end(offset);
+                let flag = if let Some(shard_identity) = shard_identity {
+                    if shard_identity.is_key_disposable(&key) {
+                        BlobFlag::Ignore
+                    } else {
+                        BlobFlag::None
                     }
-                } else if drop {
-                    continue;
-                }
+                } else {
+                    BlobFlag::None
+                };
 
                 if key >= range.end {
                     planner.handle_range_end(offset);
-                    last_key = None;
+                    range_end_handled = true;
                     break;
                 } else {
-                    planner.handle(key, self.lsn, offset, BlobFlag::None);
-                    last_key = Some(key);
+                    planner.handle(key, self.lsn, offset, flag);
                 }
             }
 
-            if last_key.is_some() {
-                // We had started a contiguous range in the planner, finish it.  Because we reached here
-                // rather than hitting the `key >= range.end` condition above, we must have reached the
-                // end of the layer, so that's what we use as the offset end of the range.
+            if !range_end_handled {
                 let payload_end = self.index_start_blk as u64 * PAGE_SZ as u64;
                 planner.handle_range_end(payload_end);
             }
@@ -558,24 +549,22 @@ impl ImageLayerInner {
         Ok(planner.finish())
     }
 
-    /// Given a key range and filter function, generate a read plan and execute it, then for
-    /// each value we read write it onwards into the writer.
-    pub(super) async fn do_reads_and_write<F>(
+    /// Given a key range, select the parts of that range that should be retained by the ShardIdentity,
+    /// then execute vectored GET operations, passing the results of all read keys into the writer.
+    pub(super) async fn filter(
         &self,
         range: Range<Key>,
-        filter: F,
+        shard_identity: &ShardIdentity,
         writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
-    ) -> anyhow::Result<usize>
-    where
-        F: Fn(&Key) -> bool,
-    {
+    ) -> anyhow::Result<usize> {
+        // Fragment the range into the regions owned by this ShardIdentity
         let plan = self
             .plan_reads(
                 KeySpace {
                     ranges: vec![range],
                 },
-                filter,
+                Some(shard_identity),
                 ctx,
             )
             .await?;
