@@ -236,7 +236,8 @@ def test_uploads_and_deletions(
         ".*assertion failed: self.lsn_range.start <= lsn.*",
         ".*HTTP request handler task panicked: task.*panicked.*",
     ]
-    env.pageserver.allowed_errors.extend(allowed_errors)
+    if compaction_algorithm == CompactionAlgorithm.TIERED:
+        env.pageserver.allowed_errors.extend(allowed_errors)
 
     try:
         generate_uploads_and_deletions(env, pageserver=env.pageserver)
@@ -245,5 +246,7 @@ def test_uploads_and_deletions(
 
     # The errors occur flakily and no error is ensured to occur,
     # however at least one of them occurs.
-    if not any(env.pageserver.log_contains(e) for e in allowed_errors):
-        raise Exception("None of the allowed_errors occured in the log")
+    if compaction_algorithm == CompactionAlgorithm.TIERED:
+        found_allowed_error = any(env.pageserver.log_contains(e) for e in allowed_errors)
+        if not found_allowed_error:
+            raise Exception("None of the allowed_errors occured in the log")
