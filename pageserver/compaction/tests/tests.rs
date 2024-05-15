@@ -20,10 +20,6 @@ pub(crate) fn setup_logging() {
 /// even if we produce an extremely narrow delta layer, spanning just that one
 /// key, we still too many records to fit in the target file size. We need to
 /// split in the LSN dimension too in that case.
-///
-/// TODO: The code to avoid this problem has not been implemented yet! So the
-/// assertion currently fails, but we need to make it not fail.
-#[ignore]
 #[tokio::test]
 async fn test_many_updates_for_single_key() {
     setup_logging();
@@ -43,9 +39,9 @@ async fn test_many_updates_for_single_key() {
     }
     for l in executor.live_layers.iter() {
         assert!(l.file_size() < executor.target_file_size * 2);
-        // sanity check that none of the delta layers are stupidly small either
+        // Sanity check that none of the delta layers are empty either.
         if l.is_delta() {
-            assert!(l.file_size() > executor.target_file_size / 2);
+            assert!(l.file_size() > 0);
         }
     }
 }

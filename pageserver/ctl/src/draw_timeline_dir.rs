@@ -52,7 +52,6 @@
 
 use anyhow::{Context, Result};
 use pageserver::repository::Key;
-use pageserver::METADATA_FILE_NAME;
 use std::cmp::Ordering;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
@@ -83,6 +82,11 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     let split: Vec<&str> = name.split("__").collect();
     let keys: Vec<&str> = split[0].split('-').collect();
     let mut lsns: Vec<&str> = split[1].split('-').collect();
+
+    if lsns.last().expect("should").len() == 8 {
+        lsns.pop();
+    }
+
     if lsns.len() == 1 {
         lsns.push(lsns[0]);
     }
@@ -154,10 +158,6 @@ pub fn main() -> Result<()> {
         let line = PathBuf::from_str(&line).unwrap();
         let filename = line.file_name().unwrap();
         let filename = filename.to_str().unwrap();
-        if filename == METADATA_FILE_NAME {
-            // Don't try and parse "metadata" like a key-lsn range
-            continue;
-        }
         let (key_range, lsn_range) = parse_filename(filename);
         files.push(Layer {
             filename: filename.to_owned(),

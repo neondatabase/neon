@@ -235,9 +235,14 @@ pub struct KeySize<K> {
     pub key: K,
     pub num_values: u64,
     pub size: u64,
+    /// The lsns to partition at (if empty then no per-lsn partitioning)
+    pub partition_lsns: Vec<(Lsn, u64)>,
 }
 
-pub fn accum_key_values<'a, I, K, D, E>(input: I) -> impl Stream<Item = Result<KeySize<K>, E>>
+pub fn accum_key_values<'a, I, K, D, E>(
+    input: I,
+    target_size: u64,
+) -> impl Stream<Item = Result<KeySize<K>, E>>
 where
     K: Eq + PartialOrd + Display + Copy,
     I: Stream<Item = Result<D, E>>,
@@ -249,25 +254,35 @@ where
 
         if let Some(first) = input.next().await {
             let first = first?;
+            let mut part_size = first.size();
             let mut accum: KeySize<K> = KeySize {
                 key: first.key(),
                 num_values: 1,
-                size: first.size(),
+                size: part_size,
+                partition_lsns: Vec::new(),
             };
             let mut last_key = accum.key;
             while let Some(this) = input.next().await {
                 let this = this?;
                 if this.key() == accum.key {
-                    accum.size += this.size();
+                    let add_size = this.size();
+                    if part_size + add_size > target_size {
+                        accum.partition_lsns.push((this.lsn(), part_size));
+                        part_size = 0;
+                    }
+                    part_size += add_size;
+                    accum.size += add_size;
                     accum.num_values += 1;
                 } else {
                     assert!(last_key <= accum.key, "last_key={last_key} <= accum.key={}", accum.key);
                     last_key = accum.key;
                     yield accum;
+                    part_size = this.size();
                     accum = KeySize {
                         key: this.key(),
                         num_values: 1,
-                        size: this.size(),
+                        size: part_size,
+                        partition_lsns: Vec::new(),
                     };
                 }
             }
