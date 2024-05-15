@@ -342,17 +342,13 @@ impl Timeline {
         // At this point, we have replaced local layer files with their rewritten form, but not yet uploaded
         // metadata to reflect that. If we restart here, the replaced layer files will look invalid (size mismatch
         // to remote index) and be removed. This is inefficient but safe.
-        fail::fail_point!("compact-shard-ancestors-localonly-kill", |_| {
-            std::process::abort()
-        });
+        fail::fail_point!("compact-shard-ancestors-localonly");
 
         // Update the LayerMap so that readers will use the new layers, and enqueue it for writing to remote storage
         self.rewrite_layers(replace_image_layers, drop_layers)
             .await?;
 
-        fail::fail_point!("compact-shard-ancestors-enqueued-kill", |_| {
-            std::process::abort()
-        });
+        fail::fail_point!("compact-shard-ancestors-enqueued");
 
         if let Some(remote_client) = self.remote_client.as_ref() {
             // We wait for all uploads to complete before finishing this compaction stage.  This is not
@@ -362,9 +358,7 @@ impl Timeline {
             remote_client.wait_completion().await?;
         }
 
-        fail::fail_point!("compact-shard-ancestors-persistent-kill", |_| {
-            std::process::abort()
-        });
+        fail::fail_point!("compact-shard-ancestors-persistent");
 
         Ok(())
     }

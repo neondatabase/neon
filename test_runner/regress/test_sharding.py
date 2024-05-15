@@ -181,9 +181,9 @@ def test_sharding_split_unsharded(
     "failpoint",
     [
         None,
-        "compact-shard-ancestors-localonly-kill",
-        "compact-shard-ancestors-enqueued-kill",
-        "compact-shard-ancestors-persistent-kill",
+        "compact-shard-ancestors-localonly",
+        "compact-shard-ancestors-enqueued",
+        "compact-shard-ancestors-persistent",
     ],
 )
 def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: Optional[str]):
@@ -271,7 +271,7 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
         # across restarts, as we will have local layer files that temporarily disagree with the remote metadata
         # for the same local layer file name.
         if failpoint is not None:
-            ps.http_client().configure_failpoints((failpoint, "return(1)"))
+            ps.http_client().configure_failpoints((failpoint, "exit"))
 
         # Do a GC to update gc_info (compaction uses this to decide whether a layer is to be rewritten)
         ps.http_client().timeline_gc(shard, timeline_id, gc_horizon=None)
@@ -289,8 +289,8 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
                 log.info(f"Compaction failed (failpoint={failpoint}): {e}")
 
             if failpoint in (
-                "compact-shard-ancestors-localonly-kill",
-                "compact-shard-ancestors-enqueued-kill",
+                "compact-shard-ancestors-localonly",
+                "compact-shard-ancestors-enqueued",
             ):
                 # If we left local files that don't match remote metadata, we expect warnings on next startup
                 env.pageserver.allowed_errors.append(
@@ -324,8 +324,8 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
         )
 
         if failpoint in (
-            "compact-shard-ancestors-localonly-kill",
-            "compact-shard-ancestors-enqueued-kill",
+            "compact-shard-ancestors-localonly",
+            "compact-shard-ancestors-enqueued",
         ):
             # If we injected a failure between local rewrite and remote upload, then after
             # restart we may end up with neither version of the file on local disk (the new file
