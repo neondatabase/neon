@@ -118,8 +118,11 @@ pub(crate) struct ValuesReconstructState {
     /// The keys will be removed after `get_vectored` completes. The caller outside `Timeline`
     /// should not expect to get anything from this hashmap.
     pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
-
+    /// The keys which are already retrieved
     keys_done: KeySpaceRandomAccum,
+
+    /// The keys covered by the image layers
+    image_keys_done: KeySpaceRandomAccum,
 
     // Statistics that are still accessible as a caller of `get_vectored_impl`.
     layers_visited: u32,
@@ -131,6 +134,7 @@ impl ValuesReconstructState {
         Self {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),
+            image_keys_done: KeySpaceRandomAccum::new(),
             layers_visited: 0,
             delta_layers_visited: 0,
         }
@@ -184,6 +188,13 @@ impl ValuesReconstructState {
                 }
             }
         }
+    }
+
+    /// On hitting image layer, we can mark all keys in this range as done, because
+    /// if the image layer does not contain a key, it is deleted/never added.
+    pub(crate) fn finish_key_range(&mut self, key_range: &Range<Key>, lsn: Lsn) {
+        let _ = lsn;
+        self.image_keys_done.add_range(key_range.clone());
     }
 
     /// Update the state collected for a given key.
@@ -248,8 +259,12 @@ impl ValuesReconstructState {
 
     /// Returns the key space describing the keys that have
     /// been marked as completed since the last call to this function.
-    pub(crate) fn consume_done_keys(&mut self) -> KeySpace {
-        self.keys_done.consume_keyspace()
+    /// Returns individual keys done, and the image layer coverage.
+    pub(crate) fn consume_done_keys(&mut self) -> (KeySpace, KeySpace) {
+        (
+            self.keys_done.consume_keyspace(),
+            self.image_keys_done.consume_keyspace(),
+        )
     }
 }
 

@@ -158,6 +158,7 @@ pub struct ImageLayerInner {
     index_start_blk: u32,
     index_root_blk: u32,
 
+    key_range: Range<Key>,
     lsn: Lsn,
 
     file: VirtualFile,
@@ -419,6 +420,7 @@ impl ImageLayerInner {
             file,
             file_id,
             max_vectored_read_bytes,
+            key_range: actual_summary.key_range,
         }))
     }
 
@@ -477,6 +479,8 @@ impl ImageLayerInner {
 
         self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
+
+        reconstruct_state.finish_key_range(&self.key_range, self.lsn);
 
         Ok(())
     }

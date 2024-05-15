@@ -3968,7 +3968,7 @@ mod tests {
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
     use crate::DEFAULT_PG_VERSION;
-    use bytes::BytesMut;
+    use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
     use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
@@ -5995,5 +5995,116 @@ mod tests {
             files.get("pg_logical/mappings/test3"),
             Some(&bytes::Bytes::from_static(b"last"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_metadata_image_creation() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_image_creation")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        const NUM_KEYS: usize = 1000;
+        const STEP: usize = 10000; // random update + scan base_key + idx * STEP
+
+        let cancel = CancellationToken::new();
+
+        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        base_key.field1 = AUX_KEY_PREFIX;
+        let mut test_key = base_key;
+        let mut lsn = Lsn(0x10);
+
+        async fn scan_with_statistics(
+            tline: &Timeline,
+            keyspace: &KeySpace,
+            lsn: Lsn,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
+            let begin_files_accessed = ctx
+                .vectored_access_delta_file_cnt
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let res = tline
+                .get_vectored_impl(
+                    keyspace.clone(),
+                    lsn,
+                    ValuesReconstructState::default(),
+                    ctx,
+                )
+                .await?;
+            Ok((
+                res,
+                ctx.vectored_access_delta_file_cnt
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    - begin_files_accessed,
+            ))
+        }
+
+        #[allow(clippy::needless_range_loop)]
+        for blknum in 0..NUM_KEYS {
+            lsn = Lsn(lsn.0 + 0x10);
+            test_key.field6 = (blknum * STEP) as u32;
+            let mut writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+        }
+
+        let keyspace = KeySpace::single(base_key..base_key.add((NUM_KEYS * STEP) as u32));
+
+        for iter in 1..=10 {
+            for _ in 0..NUM_KEYS {
+                lsn = Lsn(lsn.0 + 0x10);
+                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                test_key.field6 = (blknum * STEP) as u32;
+                let mut writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
+                    )
+                    .await?;
+                writer.finish_write(lsn);
+                drop(writer);
+            }
+
+            tline.freeze_and_flush().await?;
+
+            if iter % 5 == 0 {
+                let (_, before_delta_file_accessed) =
+                    scan_with_statistics(&tline, &keyspace, lsn, &ctx).await?;
+                tline
+                    .compact(
+                        &cancel,
+                        {
+                            let mut flags = EnumSet::new();
+                            flags.insert(CompactFlags::ForceImageLayerCreation);
+                            flags.insert(CompactFlags::ForceRepartition);
+                            flags
+                        },
+                        &ctx,
+                    )
+                    .await?;
+                let (_, after_delta_file_accessed) =
+                    scan_with_statistics(&tline, &keyspace, lsn, &ctx).await?;
+                assert!(after_delta_file_accessed < before_delta_file_accessed, "after_delta_file_accessed={after_delta_file_accessed}, before_delta_file_accessed={before_delta_file_accessed}");
+                // Given that we already produced an image layer, there should be no delta layer needed for the scan, but still setting a low threshold there for unforeseen circumstances.
+                assert!(
+                    after_delta_file_accessed <= 2,
+                    "after_delta_file_accessed={after_delta_file_accessed}"
+                );
+            }
+        }
+
+        Ok(())
     }
 }
