@@ -2506,7 +2506,7 @@ impl Timeline {
                     tracing::debug!(layer=%name, ?decision, "applied");
 
                     let layer = match decision {
-                        UseLocal{local, remote} => {
+                        Resident{local, remote} => {
                             total_physical_size += local.file_size;
                             Layer::for_resident(conf, &this, local.local_path, name, remote).drop_eviction_guard()
                         }

@@ -93,14 +93,16 @@ impl LocalLayerFileMetadata {
     }
 }
 
-/// Decision on what to do with a layer file after considering its local and remote metadata.
+/// For a layer that is present in remote metadata, this type describes how to handle
+/// it during startup: it is either Resident (and we have some metadata about a local file),
+/// or it is Evicted (and we only have remote metadata).
 #[derive(Clone, Debug)]
 pub(super) enum Decision {
     /// The layer is not present locally.
     Evicted(LayerFileMetadata),
     /// The layer is present locally, and metadata matches: we may hook up this layer to the
     /// existing file in local storage.
-    UseLocal {
+    Resident {
         local: LocalLayerFileMetadata,
         remote: LayerFileMetadata,
     },
@@ -160,7 +162,7 @@ pub(super) fn reconcile(
 
         remote_layers.insert(
             layer_name,
-            Decision::UseLocal {
+            Decision::Resident {
                 local: local_metadata,
                 remote: remote_metadata.into(),
             },
@@ -184,7 +186,7 @@ pub(super) fn reconcile(
         if name.is_in_future(disk_consistent_lsn) {
             match decision {
                 Decision::Evicted(_remote) => (name, Err(DismissedLayer::Future { local: None })),
-                Decision::UseLocal {
+                Decision::Resident {
                     local,
                     remote: _remote,
                 } => (name, Err(DismissedLayer::Future { local: Some(local) })),
