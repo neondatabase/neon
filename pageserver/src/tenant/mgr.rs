@@ -47,7 +47,7 @@ use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::timeline::ShutdownMode;
 use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
-use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TEMP_FILE_SUFFIX};
+use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext::PathExt;
@@ -391,22 +391,17 @@ async fn init_load_generations(
     // deletion list entries may still be valid.  We provide that by pushing a recovery operation into
     // the queue. Sequential processing of te queue ensures that recovery is done before any new tenant deletions
     // are processed, even though we don't block on recovery completing here.
-    //
-    // Must only do this if remote storage is enabled, otherwise deletion queue
-    // is not running and channel push will fail.
-    if resources.remote_storage.is_some() {
-        let attached_tenants = generations
-            .iter()
-            .flat_map(|(id, start_mode)| {
-                match start_mode {
-                    TenantStartupMode::Attached((_mode, generation)) => Some(generation),
-                    TenantStartupMode::Secondary => None,
-                }
-                .map(|gen| (*id, *gen))
-            })
-            .collect();
-        resources.deletion_queue_client.recover(attached_tenants)?;
-    }
+    let attached_tenants = generations
+        .iter()
+        .flat_map(|(id, start_mode)| {
+            match start_mode {
+                TenantStartupMode::Attached((_mode, generation)) => Some(generation),
+                TenantStartupMode::Secondary => None,
+            }
+            .map(|gen| (*id, *gen))
+        })
+        .collect();
+    resources.deletion_queue_client.recover(attached_tenants)?;
 
     Ok(Some(generations))
 }
@@ -459,53 +454,6 @@ fn load_tenant_config(
             return Ok(None);
         }
     };
-
-    // Clean up legacy `metadata` files.
-    // Doing it here because every single tenant directory is visited here.
-    // In any later code, there's different treatment of tenant dirs
-    // ... depending on whether the tenant is in re-attach response or not
-    // ... epending on whether the tenant is ignored or not
-    assert_eq!(
-        &conf.tenant_path(&tenant_shard_id),
-        &tenant_dir_path,
-        "later use of conf....path() methods would be dubious"
-    );
-    let timelines: Vec<TimelineId> = match conf.timelines_path(&tenant_shard_id).read_dir_utf8() {
-        Ok(iter) => {
-            let mut timelines = Vec::new();
-            for res in iter {
-                let p = res?;
-                let Some(timeline_id) = p.file_name().parse::<TimelineId>().ok() else {
-                    // skip any entries that aren't TimelineId, such as
-                    // - *.___temp dirs
-                    // - unfinished initdb uploads (test_non_uploaded_root_timeline_is_deleted_after_restart)
-                    continue;
-                };
-                timelines.push(timeline_id);
-            }
-            timelines
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
-        Err(e) => return Err(anyhow::anyhow!(e)),
-    };
-    for timeline_id in timelines {
-        let timeline_path = &conf.timeline_path(&tenant_shard_id, &timeline_id);
-        let metadata_path = timeline_path.join(METADATA_FILE_NAME);
-        match std::fs::remove_file(&metadata_path) {
-            Ok(()) => {
-                crashsafe::fsync(timeline_path)
-                    .context("fsync timeline dir after removing legacy metadata file")?;
-                info!("removed legacy metadata file at {metadata_path}");
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // something removed the file earlier, or it was never there
-                // We don't care, this software version doesn't write it again, so, we're good.
-            }
-            Err(e) => {
-                anyhow::bail!("remove legacy metadata file: {e}: {metadata_path}");
-            }
-        }
-    }
 
     let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
     if tenant_ignore_mark_file.exists() {
@@ -611,6 +559,7 @@ pub async fn init_tenant_mgr(
                     TenantSlot::Attached(Tenant::create_broken_tenant(
                         conf,
                         tenant_shard_id,
+                        resources.remote_storage.clone(),
                         format!("{}", e),
                     )),
                 );
@@ -803,6 +752,7 @@ fn tenant_spawn(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
+    let remote_storage = resources.remote_storage.clone();
     let tenant = match Tenant::spawn(
         conf,
         tenant_shard_id,
@@ -817,7 +767,7 @@ fn tenant_spawn(
         Ok(tenant) => tenant,
         Err(e) => {
             error!("Failed to spawn tenant {tenant_shard_id}, reason: {e:#}");
-            Tenant::create_broken_tenant(conf, tenant_shard_id, format!("{e:#}"))
+            Tenant::create_broken_tenant(conf, tenant_shard_id, remote_storage, format!("{e:#}"))
         }
     };
 
@@ -2276,7 +2226,7 @@ pub(crate) async fn load_tenant(
     tenant_id: TenantId,
     generation: Generation,
     broker_client: storage_broker::BrokerClientChannel,
-    remote_storage: Option<GenericRemoteStorage>,
+    remote_storage: GenericRemoteStorage,
     deletion_queue_client: DeletionQueueClient,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
@@ -2937,7 +2887,7 @@ pub(crate) async fn immediate_gc(
         }
 
         let timeline = tenant.get_timeline(timeline_id, false).ok();
-        let rtc = timeline.as_ref().and_then(|x| x.remote_client.as_ref());
+        let rtc = timeline.as_ref().map(|x| &x.remote_client);
 
         if let Some(rtc) = rtc {
             // layer drops schedule actions on remote timeline client to actually do the
