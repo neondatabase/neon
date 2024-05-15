@@ -8,7 +8,6 @@ use crate::{
         },
         storage_layer::LayerName,
     },
-    METADATA_FILE_NAME,
 };
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -28,8 +27,6 @@ pub(super) enum Discovered {
     Temporary(String),
     /// Temporary on-demand download files, should be removed
     TemporaryDownload(String),
-    /// "metadata" file we persist locally and include in `index_part.json`
-    Metadata,
     /// Backup file from previously future layers
     IgnoredBackup(Utf8PathBuf),
     /// Unrecognized, warn about these
@@ -53,9 +50,7 @@ pub(super) fn scan_timeline_dir(path: &Utf8Path) -> anyhow::Result<Vec<Discovere
                 )
             }
             Err(_) => {
-                if file_name == METADATA_FILE_NAME {
-                    Discovered::Metadata
-                } else if file_name.ends_with(".old") {
+                if file_name.ends_with(".old") {
                     // ignore these
                     Discovered::IgnoredBackup(direntry.path().to_owned())
                 } else if remote_timeline_client::is_temp_download_file(direntry.path()) {

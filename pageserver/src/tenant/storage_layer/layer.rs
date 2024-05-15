@@ -585,9 +585,6 @@ struct LayerInner {
     /// [`Timeline::gate`] at the same time.
     timeline: Weak<Timeline>,
 
-    /// Cached knowledge of [`Timeline::remote_client`] being `Some`.
-    have_remote_client: bool,
-
     access_stats: LayerAccessStats,
 
     /// This custom OnceCell is backed by std mutex, but only held for short time periods.
@@ -732,23 +729,23 @@ impl Drop for LayerInner {
             if removed {
                 timeline.metrics.resident_physical_size_sub(file_size);
             }
-            if let Some(remote_client) = timeline.remote_client.as_ref() {
-                let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
+            let res = timeline
+                .remote_client
+                .schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
-                if let Err(e) = res {
-                    // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
-                    // demonstrating this deadlock (without spawn_blocking): stop will drop
-                    // queued items, which will have ResidentLayer's, and those drops would try
-                    // to re-entrantly lock the RemoteTimelineClient inner state.
-                    if !timeline.is_active() {
-                        tracing::info!("scheduling deletion on drop failed: {e:#}");
-                    } else {
-                        tracing::warn!("scheduling deletion on drop failed: {e:#}");
-                    }
-                    LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+            if let Err(e) = res {
+                // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
+                // demonstrating this deadlock (without spawn_blocking): stop will drop
+                // queued items, which will have ResidentLayer's, and those drops would try
+                // to re-entrantly lock the RemoteTimelineClient inner state.
+                if !timeline.is_active() {
+                    tracing::info!("scheduling deletion on drop failed: {e:#}");
                 } else {
-                    LAYER_IMPL_METRICS.inc_completed_deletes();
+                    tracing::warn!("scheduling deletion on drop failed: {e:#}");
                 }
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+            } else {
+                LAYER_IMPL_METRICS.inc_completed_deletes();
             }
         });
     }
@@ -786,7 +783,6 @@ impl LayerInner {
             path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
-            have_remote_client: timeline.remote_client.is_some(),
             access_stats,
             wanted_deleted: AtomicBool::new(false),
             inner,
@@ -815,8 +811,6 @@ impl LayerInner {
     /// in a new attempt to evict OR join the previously started attempt.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, ret, err(level = tracing::Level::DEBUG), fields(layer=%self))]
     pub(crate) async fn evict_and_wait(&self, timeout: Duration) -> Result<(), EvictionError> {
-        assert!(self.have_remote_client);
-
         let mut rx = self.status.as_ref().unwrap().subscribe();
 
         {
@@ -973,10 +967,6 @@ impl LayerInner {
             return Err(DownloadError::NotFile(ft));
         }
 
-        if timeline.remote_client.as_ref().is_none() {
-            return Err(DownloadError::NoRemoteStorage);
-        }
-
         if let Some(ctx) = ctx {
             self.check_expected_download(ctx)?;
         }
@@ -1113,12 +1103,8 @@ impl LayerInner {
         permit: heavier_once_cell::InitPermit,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<DownloadedLayer>> {
-        let client = timeline
+        let result = timeline
             .remote_client
-            .as_ref()
-            .expect("checked before download_init_and_wait");
-
-        let result = client
             .download_layer_file(
                 &self.desc.layer_name(),
                 &self.metadata(),
@@ -1293,19 +1279,9 @@ impl LayerInner {
 
     /// `DownloadedLayer` is being dropped, so it calls this method.
     fn on_downloaded_layer_drop(self: Arc<LayerInner>, only_version: usize) {
-        let can_evict = self.have_remote_client;
-
         // we cannot know without inspecting LayerInner::inner if we should evict or not, even
         // though here it is very likely
         let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, version=%only_version);
-
-        if !can_evict {
-            // it would be nice to assert this case out, but we are in drop
-            span.in_scope(|| {
-                tracing::error!("bug in struct Layer: ResidentOrWantedEvicted has been downgraded while we have no remote storage");
-            });
-            return;
-        }
 
         // NOTE: this scope *must* never call `self.inner.get` because evict_and_wait might
         // drop while the `self.inner` is being locked, leading to a deadlock.
@@ -1578,8 +1554,6 @@ pub(crate) enum EvictionError {
 pub(crate) enum DownloadError {
     #[error("timeline has already shutdown")]
     TimelineShutdown,
-    #[error("no remote storage configured")]
-    NoRemoteStorage,
     #[error("context denies downloading")]
     ContextAndConfigReallyDeniesDownloads,
     #[error("downloading is really required but not allowed by this method")]

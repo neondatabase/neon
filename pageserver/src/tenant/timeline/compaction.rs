@@ -345,13 +345,11 @@ impl Timeline {
 
         fail::fail_point!("compact-shard-ancestors-enqueued");
 
-        if let Some(remote_client) = self.remote_client.as_ref() {
-            // We wait for all uploads to complete before finishing this compaction stage.  This is not
-            // necessary for correctness, but it simplifies testing, and avoids proceeding with another
-            // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
-            // load.
-            remote_client.wait_completion().await?;
-        }
+        // We wait for all uploads to complete before finishing this compaction stage.  This is not
+        // necessary for correctness, but it simplifies testing, and avoids proceeding with another
+        // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
+        // load.
+        self.remote_client.wait_completion().await?;
 
         fail::fail_point!("compact-shard-ancestors-persistent");
 
