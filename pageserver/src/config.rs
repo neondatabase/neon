@@ -1135,6 +1135,31 @@ impl PageServerConf {
     }
 }
 
+pub struct PageserverIdentity {
+    pub node_id: NodeId,
+}
+
+impl PageserverIdentity {
+    pub fn parse_and_validate(toml: &Document) -> anyhow::Result<Self> {
+        let node_id = Self::extract_node_id(toml)?;
+        Ok(PageserverIdentity { node_id })
+    }
+
+    fn extract_node_id(toml: &Document) -> anyhow::Result<NodeId> {
+        if toml.len() != 1 {
+            anyhow::bail!("Unexpected number of entries in identity file");
+        }
+
+        let (key, item) = toml.iter().next().expect("we have exactly one entry");
+        match key {
+            "id" => Ok(NodeId(parse_toml_u64(key, item)?)),
+            key => {
+                anyhow::bail!("Unexpected entry in identity file: {key}");
+            }
+        }
+    }
+}
+
 // Helper functions to parse a toml Item
 
 fn parse_toml_string(name: &str, item: &Item) -> Result<String> {

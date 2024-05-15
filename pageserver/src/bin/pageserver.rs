@@ -6,13 +6,14 @@ use std::env::{var, VarError};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, ops::ControlFlow, str::FromStr};
+use std::{env, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::config::PageserverIdentity;
 use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
@@ -81,18 +82,13 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Error opening workdir '{workdir}'"))?;
 
     let cfg_file_path = workdir.join("pageserver.toml");
+    let identity_file_path = workdir.join("identity.toml");
 
     // Set CWD to workdir for non-daemon modes
     env::set_current_dir(&workdir)
         .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
-    let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
-        ControlFlow::Continue(conf) => conf,
-        ControlFlow::Break(()) => {
-            info!("Pageserver config init successful");
-            return Ok(());
-        }
-    };
+    let conf = initialize_config(&identity_file_path, &cfg_file_path, arg_matches, &workdir)?;
 
     // Initialize logging.
     //
@@ -147,17 +143,35 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn initialize_config(
+    identity_file_path: &Utf8Path,
     cfg_file_path: &Utf8Path,
     arg_matches: clap::ArgMatches,
     workdir: &Utf8Path,
-) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
-    let init = arg_matches.get_flag("init");
+) -> anyhow::Result<&'static PageServerConf> {
+    // An identity file may be present on disk for new pageservers.
+    // If that's the case, use it as the source of truth for the node id.
+    // Otherwise, use the id from the pageserver config file.
+    let identity = match std::fs::File::open(identity_file_path) {
+        Ok(mut f) => {
+            let md = f.metadata().context("stat config file")?;
+            if !md.is_file() {
+                anyhow::bail!("Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ...");
+            }
+
+            let mut s = String::new();
+            f.read_to_string(&mut s).context("read identity file")?;
+            let doc: toml_edit::Document = s.parse().context("parse identity file toml")?;
+
+            Some(PageserverIdentity::parse_and_validate(&doc)?)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            anyhow::bail!("Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ...");
+        }
+    };
 
     let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
         Ok(mut f) => {
-            if init {
-                anyhow::bail!("config file already exists: {cfg_file_path}");
-            }
             let md = f.metadata().context("stat config file")?;
             if md.is_file() {
                 let mut s = String::new();
@@ -192,25 +206,24 @@ fn initialize_config(
         }
     }
 
+    if let Some(identity) = identity {
+        let replaced =
+            effective_config.insert("id", toml_edit::value(i64::try_from(identity.node_id.0)?));
+        if replaced.is_some() {
+            tracing::warn!(
+                "Overrode node id present in config to node id from identity file: {}",
+                identity.node_id
+            )
+        }
+    }
+
     debug!("Resulting toml: {effective_config}");
 
     // Construct the runtime representation
     let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
-    if init {
-        info!("Writing pageserver config to '{cfg_file_path}'");
-
-        std::fs::write(cfg_file_path, effective_config.to_string())
-            .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
-        info!("Config successfully written to '{cfg_file_path}'")
-    }
-
-    Ok(if init {
-        ControlFlow::Break(())
-    } else {
-        ControlFlow::Continue(Box::leak(Box::new(conf)))
-    })
+    Ok(Box::leak(Box::new(conf)))
 }
 
 struct WaitForPhaseResult<F: std::future::Future + Unpin> {
@@ -739,12 +752,6 @@ fn cli() -> Command {
     Command::new("Neon page server")
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(version())
-        .arg(
-            Arg::new("init")
-                .long("init")
-                .action(ArgAction::SetTrue)
-                .help("Initialize pageserver with all given config overrides"),
-        )
         .arg(
             Arg::new("workdir")
                 .short('D')
