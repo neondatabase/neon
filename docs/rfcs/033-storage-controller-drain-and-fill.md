@@ -34,6 +34,7 @@ as usual (with downtime).
 ## Non Goals
 
 - Integration with the control plane
+- Graceful restarts for large non-HA tenants.
 
 ## Impacted Components
 
