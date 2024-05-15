@@ -265,10 +265,9 @@ impl Timeline {
                 continue;
             }
 
-            // Only rewrite layers if they would have different remote paths: either they belong to this
-            // shard but an old generation, or they belonged to another shard.  This also implicitly
-            // guarantees that the layer is persistent in remote storage (as only remote persistent
-            // layers are carried across shard splits, any local-only layer would be in the current generation)
+            // Only rewrite layers if their generations differ.  This guarantees:
+            //  - that local rewrite is safe, as local layer paths will differ between existing layer and rewritten one
+            //  - that the layer is persistent in remote storage, as we only see old-generation'd layer via loading from remote storage
             if layer.metadata().generation == self.generation {
                 debug!(%layer, "Skipping rewrite, is not from old generation");
                 continue;
