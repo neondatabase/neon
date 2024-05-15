@@ -9,11 +9,13 @@ and `safekeeper`, and does housekeeping such as cleaning up objects for tenants 
 
 #### S3
 
-Do `aws sso login --profile dev` to get the SSO access to the bucket to clean, set the `AWS_PROFILE` environment variable for your profile.
+Do `aws sso login --profile dev` to get the SSO access to the bucket to clean.
+Also, set the following environment variables:
 
 - `AWS_PROFILE`: Profile name to use for accessing S3 buckets (e.g. `dev`)
 - `REGION`: A region where the bucket is located at.
 - `BUCKET`: Bucket name
+- `BUCKET_PREFIX` (optional): Prefix inside the bucket
 
 #### Console API
 
