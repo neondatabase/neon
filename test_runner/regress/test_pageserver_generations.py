@@ -21,11 +21,9 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserver,
     PgBin,
     S3Scrubber,
-    flush_ep_to_pageserver,
-    last_flush_lsn_upload,
+    generate_uploads_and_deletions,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
@@ -33,12 +31,11 @@ from fixtures.pageserver.utils import (
     list_prefix,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import (
     RemoteStorageKind,
 )
-from fixtures.utils import print_gc_result, wait_until
+from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
 # A tenant configuration that is convenient for generating uploads and deletions
@@ -57,82 +54,6 @@ TENANT_CONF = {
     "image_creation_threshold": "1",
     "image_layer_creation_check_threshold": "0",
 }
-
-
-def generate_uploads_and_deletions(
-    env: NeonEnv,
-    *,
-    init: bool = True,
-    tenant_id: Optional[TenantId] = None,
-    timeline_id: Optional[TimelineId] = None,
-    data: Optional[str] = None,
-    pageserver: NeonPageserver,
-):
-    """
-    Using the environment's default tenant + timeline, generate a load pattern
-    that results in some uploads and some deletions to remote storage.
-    """
-
-    if tenant_id is None:
-        tenant_id = env.initial_tenant
-    assert tenant_id is not None
-
-    if timeline_id is None:
-        timeline_id = env.initial_timeline
-    assert timeline_id is not None
-
-    ps_http = pageserver.http_client()
-
-    with env.endpoints.create_start(
-        "main", tenant_id=tenant_id, pageserver_id=pageserver.id
-    ) as endpoint:
-        if init:
-            endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
-            last_flush_lsn_upload(
-                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
-            )
-
-        def churn(data):
-            endpoint.safe_psql_many(
-                [
-                    f"""
-                INSERT INTO foo (id, val)
-                SELECT g, '{data}'
-                FROM generate_series(1, 200) g
-                ON CONFLICT (id) DO UPDATE
-                SET val = EXCLUDED.val
-                """,
-                    # to ensure that GC can actually remove some layers
-                    "VACUUM foo",
-                ]
-            )
-            assert tenant_id is not None
-            assert timeline_id is not None
-            # We are waiting for uploads as well as local flush, in order to avoid leaving the system
-            # in a state where there are "future layers" in remote storage that will generate deletions
-            # after a restart.
-            last_flush_lsn_upload(
-                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
-            )
-
-        # Compaction should generate some GC-elegible layers
-        for i in range(0, 2):
-            churn(f"{i if data is None else data}")
-
-        gc_result = ps_http.timeline_gc(tenant_id, timeline_id, 0)
-        print_gc_result(gc_result)
-        assert gc_result["layers_removed"] > 0
-
-        # Stop endpoint and flush all data to pageserver, then checkpoint it: this
-        # ensures that the pageserver is in a fully idle state: there will be no more
-        # background ingest, no more uploads pending, and therefore no non-determinism
-        # in subsequent actions like pageserver restarts.
-        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-        ps_http.timeline_checkpoint(tenant_id, timeline_id)
-        # Finish uploads
-        wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
-        # Finish all remote writes (including deletions)
-        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
 
 def read_all(
