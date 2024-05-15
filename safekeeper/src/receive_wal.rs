@@ -45,6 +45,9 @@ const DEFAULT_FEEDBACK_CAPACITY: usize = 8;
 pub struct WalReceivers {
     mutex: Mutex<WalReceiversShared>,
     pageserver_feedback_tx: tokio::sync::broadcast::Sender<PageserverFeedback>,
+
+    num_computes_tx: tokio::sync::watch::Sender<usize>,
+    num_computes_rx: tokio::sync::watch::Receiver<usize>,
 }
 
 /// Id under which walreceiver is registered in shmem.
@@ -55,16 +58,21 @@ impl WalReceivers {
         let (pageserver_feedback_tx, _) =
             tokio::sync::broadcast::channel(DEFAULT_FEEDBACK_CAPACITY);
 
+        let (num_computes_tx, num_computes_rx) = tokio::sync::watch::channel(0usize);
+
         Arc::new(WalReceivers {
             mutex: Mutex::new(WalReceiversShared { slots: Vec::new() }),
             pageserver_feedback_tx,
+            num_computes_tx,
+            num_computes_rx,
         })
     }
 
     /// Register new walreceiver. Returned guard provides access to the slot and
     /// automatically deregisters in Drop.
     pub fn register(self: &Arc<WalReceivers>, conn_id: Option<ConnectionId>) -> WalReceiverGuard {
-        let slots = &mut self.mutex.lock().slots;
+        let mut shared = self.mutex.lock();
+        let slots = &mut shared.slots;
         let walreceiver = WalReceiverState {
             conn_id,
             status: WalReceiverStatus::Voting,
@@ -78,6 +86,9 @@ impl WalReceivers {
             slots.push(Some(walreceiver));
             pos
         };
+
+        self.update_num(&shared);
+
         WalReceiverGuard {
             id: pos,
             walreceivers: self.clone(),
@@ -99,7 +110,18 @@ impl WalReceivers {
 
     /// Get number of walreceivers (compute connections).
     pub fn get_num(self: &Arc<WalReceivers>) -> usize {
-        self.mutex.lock().slots.iter().flatten().count()
+        self.mutex.lock().get_num()
+    }
+
+    /// Get number of walreceivers (compute connections).
+    pub fn get_num_rx(self: &Arc<WalReceivers>) -> tokio::sync::watch::Receiver<usize> {
+        self.num_computes_rx.clone()
+    }
+
+    /// Should get called after every update of slots.
+    fn update_num(self: &Arc<WalReceivers>, shared: &MutexGuard<WalReceiversShared>) {
+        let num = shared.get_num();
+        self.num_computes_tx.send_replace(num);
     }
 
     /// Get state of all walreceivers.
@@ -123,6 +145,7 @@ impl WalReceivers {
     fn unregister(self: &Arc<WalReceivers>, id: WalReceiverId) {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
+        self.update_num(&shared);
     }
 
     /// Broadcast pageserver feedback to connected walproposers.
@@ -135,6 +158,13 @@ impl WalReceivers {
 /// Only a few connections are expected (normally one), so store in Vec.
 struct WalReceiversShared {
     slots: Vec<Option<WalReceiverState>>,
+}
+
+impl WalReceiversShared {
+    /// Get number of walreceivers (compute connections).
+    fn get_num(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

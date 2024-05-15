@@ -12,14 +12,12 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::Sender;
 use tracing::*;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 
 struct GlobalTimelinesState {
     timelines: HashMap<TenantTimelineId, Arc<Timeline>>,
-    wal_backup_launcher_tx: Option<Sender<TenantTimelineId>>,
     conf: Option<SafeKeeperConf>,
     load_lock: Arc<tokio::sync::Mutex<TimelineLoadLock>>,
 }
@@ -36,11 +34,8 @@ impl GlobalTimelinesState {
     }
 
     /// Get dependencies for a timeline constructor.
-    fn get_dependencies(&self) -> (SafeKeeperConf, Sender<TenantTimelineId>) {
-        (
-            self.get_conf().clone(),
-            self.wal_backup_launcher_tx.as_ref().unwrap().clone(),
-        )
+    fn get_dependencies(&self) -> SafeKeeperConf {
+        self.get_conf().clone()
     }
 
     /// Insert timeline into the map. Returns error if timeline with the same id already exists.
@@ -65,7 +60,6 @@ impl GlobalTimelinesState {
 static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
     Mutex::new(GlobalTimelinesState {
         timelines: HashMap::new(),
-        wal_backup_launcher_tx: None,
         conf: None,
         load_lock: Arc::new(tokio::sync::Mutex::new(TimelineLoadLock)),
     })
@@ -76,16 +70,11 @@ pub struct GlobalTimelines;
 
 impl GlobalTimelines {
     /// Inject dependencies needed for the timeline constructors and load all timelines to memory.
-    pub async fn init(
-        conf: SafeKeeperConf,
-        wal_backup_launcher_tx: Sender<TenantTimelineId>,
-    ) -> Result<()> {
+    pub async fn init(conf: SafeKeeperConf) -> Result<()> {
         // clippy isn't smart enough to understand that drop(state) releases the
         // lock, so use explicit block
         let tenants_dir = {
             let mut state = TIMELINES_STATE.lock().unwrap();
-            assert!(state.wal_backup_launcher_tx.is_none());
-            state.wal_backup_launcher_tx = Some(wal_backup_launcher_tx);
             state.conf = Some(conf);
 
             // Iterate through all directories and load tenants for all directories
@@ -129,12 +118,9 @@ impl GlobalTimelines {
     /// this function is called during init when nothing else is running, so
     /// this is fine.
     async fn load_tenant_timelines(tenant_id: TenantId) -> Result<()> {
-        let (conf, wal_backup_launcher_tx) = {
+        let conf = {
             let state = TIMELINES_STATE.lock().unwrap();
-            (
-                state.get_conf().clone(),
-                state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
-            )
+            state.get_conf().clone()
         };
 
         let timelines_dir = conf.tenant_dir(&tenant_id);
@@ -147,7 +133,7 @@ impl GlobalTimelines {
                         TimelineId::from_str(timeline_dir_entry.file_name().to_str().unwrap_or(""))
                     {
                         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
-                        match Timeline::load_timeline(&conf, ttid, wal_backup_launcher_tx.clone()) {
+                        match Timeline::load_timeline(&conf, ttid) {
                             Ok(timeline) => {
                                 let tli = Arc::new(timeline);
                                 TIMELINES_STATE
@@ -189,9 +175,9 @@ impl GlobalTimelines {
         _guard: &tokio::sync::MutexGuard<'a, TimelineLoadLock>,
         ttid: TenantTimelineId,
     ) -> Result<Arc<Timeline>> {
-        let (conf, wal_backup_launcher_tx) = TIMELINES_STATE.lock().unwrap().get_dependencies();
+        let conf = TIMELINES_STATE.lock().unwrap().get_dependencies();
 
-        match Timeline::load_timeline(&conf, ttid, wal_backup_launcher_tx) {
+        match Timeline::load_timeline(&conf, ttid) {
             Ok(timeline) => {
                 let tli = Arc::new(timeline);
 
@@ -229,7 +215,7 @@ impl GlobalTimelines {
         commit_lsn: Lsn,
         local_start_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
-        let (conf, wal_backup_launcher_tx) = {
+        let conf = {
             let state = TIMELINES_STATE.lock().unwrap();
             if let Ok(timeline) = state.get(&ttid) {
                 // Timeline already exists, return it.
@@ -243,7 +229,6 @@ impl GlobalTimelines {
         let timeline = Arc::new(Timeline::create_empty(
             &conf,
             ttid,
-            wal_backup_launcher_tx,
             server_info,
             commit_lsn,
             local_start_lsn,
@@ -282,7 +267,6 @@ impl GlobalTimelines {
             // {} block forces release before .await
         }
         timeline.update_status_notify().await?;
-        timeline.wal_backup_launcher_tx.send(timeline.ttid).await?;
         Ok(timeline)
     }
 

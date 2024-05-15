@@ -9,7 +9,7 @@ use crate::{GlobalTimelines, SafeKeeperConf};
 
 const ALLOW_INACTIVE_TIMELINES: bool = true;
 
-pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
+pub async fn task_main(_conf: SafeKeeperConf) -> anyhow::Result<()> {
     let wal_removal_interval = Duration::from_millis(5000);
     loop {
         let now = tokio::time::Instant::now();
@@ -29,7 +29,7 @@ pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
                 if let Err(e) = tli.maybe_persist_control_file().await {
                     warn!("failed to persist control file: {e}");
                 }
-                if let Err(e) = tli.remove_old_wal(conf.wal_backup_enabled).await {
+                if let Err(e) = tli.remove_old_wal().await {
                     error!("failed to remove WAL: {}", e);
                 }
             }
