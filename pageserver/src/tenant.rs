@@ -5644,4 +5644,31 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_aux_flag_branch() -> anyhow::Result<()> {
+        let mut harness = TenantHarness::create("aux_flag_branch")?;
+        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V2;
+        let (tenant, ctx) = harness.load().await;
+        let tline: Arc<Timeline> = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        assert_eq!(tline.last_aux_file_policy.load(), None);
+        {
+            let mut modification = tline.begin_modification(Lsn(0x10));
+            modification
+                .put_file("pg_logical/mappings/test", b"test", &ctx)
+                .await?;
+            modification.commit(&ctx).await?;
+        }
+        assert_eq!(tline.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
+        let create_guard = tenant
+            .create_timeline_create_guard(NEW_TIMELINE_ID)
+            .unwrap();
+        let tline2 = tenant
+            .branch_timeline_impl(&tline, NEW_TIMELINE_ID, None, create_guard, &ctx)
+            .await?;
+        assert_eq!(tline2.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
+        Ok(())
+    }
 }

@@ -9,9 +9,9 @@
 //! may lead to a data loss.
 //!
 use anyhow::bail;
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::CompactionAlgorithm;
 use pageserver_api::models::EvictionPolicy;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::{self, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;

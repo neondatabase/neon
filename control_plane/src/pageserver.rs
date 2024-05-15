@@ -17,7 +17,7 @@ use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
 use pageserver_api::models::{
-    self, LocationConfig, ShardParameters, AuxFilePolicy, TenantHistorySize, TenantInfo,
+    self, AuxFilePolicy, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo,
     TimelineInfo,
 };
 use pageserver_api::shard::TenantShardId;
