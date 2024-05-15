@@ -146,12 +146,12 @@ impl ValuesReconstructState {
         self.layers_visited += 1;
         if let ReadableLayer::PersistentLayer(layer) = layer {
             if layer.layer_desc().is_delta() {
-                self.delta_layer_visited += 1;
+                self.delta_layers_visited += 1;
             }
         }
     }
 
-    pub(crate) fn get_delta_layers_visited(&self) -> usize {
+    pub(crate) fn get_delta_layers_visited(&self) -> u32 {
         self.delta_layers_visited
     }
 

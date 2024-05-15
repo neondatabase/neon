@@ -172,7 +172,11 @@ impl RequestContextBuilder {
                 access_stats_behavior: original.access_stats_behavior,
                 page_content_kind: original.page_content_kind,
                 micros_spent_throttled: Default::default(),
-                vectored_access_delta_file_cnt: original.vectored_access_delta_file_cnt.clone(),
+                vectored_access_delta_file_cnt: AtomicUsize::new(
+                    original
+                        .vectored_access_delta_file_cnt
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                ),
             },
         }
     }
