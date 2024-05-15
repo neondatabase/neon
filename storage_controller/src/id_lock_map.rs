@@ -11,12 +11,12 @@ const LOCK_TIMEOUT_ALERT_THRESHOLD: Duration = RECONCILE_TIMEOUT;
 /// A wrapper around `OwnedRwLockWriteGuard` used for tracking the
 /// operation that holds the lock, and print a warning if it exceeds
 /// the LOCK_TIMEOUT_ALERT_THRESHOLD time
-pub struct TracingWriteGuard<T: Display> {
+pub struct TracingExclusiveGuard<T: Display> {
     guard: tokio::sync::OwnedRwLockWriteGuard<Option<T>>,
     start: Instant,
 }
 
-impl<T: Display> TracingWriteGuard<T> {
+impl<T: Display> TracingExclusiveGuard<T> {
     pub fn new(guard: tokio::sync::OwnedRwLockWriteGuard<Option<T>>) -> Self {
         Self {
             guard,
@@ -25,7 +25,7 @@ impl<T: Display> TracingWriteGuard<T> {
     }
 }
 
-impl<T: Display> Drop for TracingWriteGuard<T> {
+impl<T: Display> Drop for TracingExclusiveGuard<T> {
     fn drop(&mut self) {
         let duration = self.start.elapsed();
         if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
@@ -42,13 +42,13 @@ impl<T: Display> Drop for TracingWriteGuard<T> {
 // A wrapper around `OwnedRwLockReadGuard` used for tracking the
 /// operation that holds the lock, and print a warning if it exceeds
 /// the LOCK_TIMEOUT_ALERT_THRESHOLD time
-pub struct TracingReadGuard<T: Display> {
+pub struct TracingSharedGuard<T: Display> {
     _guard: tokio::sync::OwnedRwLockReadGuard<Option<T>>,
     operation: T,
     start: Instant,
 }
 
-impl<T: Display> TracingReadGuard<T> {
+impl<T: Display> TracingSharedGuard<T> {
     pub fn new(guard: tokio::sync::OwnedRwLockReadGuard<Option<T>>, operation: T) -> Self {
         Self {
             _guard: guard,
@@ -58,7 +58,7 @@ impl<T: Display> TracingReadGuard<T> {
     }
 }
 
-impl<T: Display> Drop for TracingReadGuard<T> {
+impl<T: Display> Drop for TracingSharedGuard<T> {
     fn drop(&mut self) {
         let duration = self.start.elapsed();
         if duration > LOCK_TIMEOUT_ALERT_THRESHOLD {
@@ -92,21 +92,21 @@ where
         &self,
         key: T,
         operation: I,
-    ) -> impl std::future::Future<Output = TracingReadGuard<I>> {
+    ) -> impl std::future::Future<Output = TracingSharedGuard<I>> {
         let mut locked = self.entities.lock().unwrap();
         let entry = locked.entry(key).or_default().clone();
-        async move { TracingReadGuard::new(entry.read_owned().await, operation) }
+        async move { TracingSharedGuard::new(entry.read_owned().await, operation) }
     }
 
     pub(crate) fn exclusive(
         &self,
         key: T,
         operation: I,
-    ) -> impl std::future::Future<Output = TracingWriteGuard<I>> {
+    ) -> impl std::future::Future<Output = TracingExclusiveGuard<I>> {
         let mut locked = self.entities.lock().unwrap();
         let entry = locked.entry(key).or_default().clone();
         async move {
-            let mut guard = TracingWriteGuard::new(entry.write_owned().await);
+            let mut guard = TracingExclusiveGuard::new(entry.write_owned().await);
             *guard.guard = Some(operation);
             guard
         }
@@ -138,7 +138,7 @@ pub async fn trace_exclusive_lock<
     op_locks: &IdLockMap<T, I>,
     key: T,
     operation: I,
-) -> TracingWriteGuard<I> {
+) -> TracingExclusiveGuard<I> {
     let start = Instant::now();
     let guard = op_locks.exclusive(key.clone(), operation.clone()).await;
 
@@ -162,7 +162,7 @@ pub async fn trace_shared_lock<
     op_locks: &IdLockMap<T, I>,
     key: T,
     operation: I,
-) -> TracingReadGuard<I> {
+) -> TracingSharedGuard<I> {
     let start = Instant::now();
     let guard = op_locks.shared(key.clone(), operation.clone()).await;
 

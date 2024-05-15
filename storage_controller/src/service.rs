@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     compute_hook::NotifyError,
-    id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingWriteGuard},
+    id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{ScheduleContext, ScheduleMode},
@@ -330,7 +330,7 @@ struct TenantShardSplitAbort {
     new_shard_count: ShardCount,
     new_stripe_size: Option<ShardStripeSize>,
     /// Until this abort op is complete, no other operations may be done on the tenant
-    _tenant_lock: TracingWriteGuard<TenantOperations>,
+    _tenant_lock: TracingExclusiveGuard<TenantOperations>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1363,7 +1363,7 @@ impl Service {
     async fn node_activate_reconcile(
         &self,
         mut node: Node,
-        _lock: &TracingWriteGuard<NodeOperations>,
+        _lock: &TracingExclusiveGuard<NodeOperations>,
     ) -> Result<(), ApiError> {
         // This Node is a mutable local copy: we will set it active so that we can use its
         // API client to reconcile with the node.  The Node in [`Self::nodes`] will get updated
