@@ -49,7 +49,6 @@ use utils::{
 use crate::auth::check_permission;
 use crate::basebackup;
 use crate::basebackup::BasebackupError;
-use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
@@ -63,6 +62,7 @@ use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::ShardSelector;
+use crate::tenant::mgr::TenantManager;
 use crate::tenant::timeline::WaitLsnError;
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
@@ -135,7 +135,7 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
 /// Listens for connections, and launches a new handler task for each.
 ///
 pub async fn libpq_listener_main(
-    conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
     broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: TcpListener,
@@ -180,7 +180,7 @@ pub async fn libpq_listener_main(
                     "serving compute connection task",
                     false,
                     page_service_conn_main(
-                        conf,
+                        tenant_manager.clone(),
                         broker_client.clone(),
                         local_auth,
                         socket,
@@ -203,7 +203,7 @@ pub async fn libpq_listener_main(
 
 #[instrument(skip_all, fields(peer_addr))]
 async fn page_service_conn_main(
-    conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
     broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
@@ -260,7 +260,8 @@ async fn page_service_conn_main(
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler = PageServerHandler::new(conf, broker_client, auth, connection_ctx);
+    let mut conn_handler =
+        PageServerHandler::new(tenant_manager, broker_client, auth, connection_ctx);
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
@@ -291,10 +292,11 @@ struct HandlerTimeline {
 }
 
 struct PageServerHandler {
-    _conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
+
+    tenant_manager: Arc<TenantManager>,
 
     /// The context created for the lifetime of the connection
     /// services by this PageServerHandler.
@@ -381,13 +383,13 @@ impl From<WaitLsnError> for QueryError {
 
 impl PageServerHandler {
     pub fn new(
-        conf: &'static PageServerConf,
+        tenant_manager: Arc<TenantManager>,
         broker_client: storage_broker::BrokerClientChannel,
         auth: Option<Arc<SwappableJwtAuth>>,
         connection_ctx: RequestContext,
     ) -> Self {
         PageServerHandler {
-            _conf: conf,
+            tenant_manager,
             broker_client,
             auth,
             claims: None,
