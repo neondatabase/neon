@@ -5534,7 +5534,7 @@ mod tests {
             .await?;
 
         const NUM_KEYS: usize = 1000;
-        const STEP: usize = 100; // random update + scan base_key + idx * STEP
+        const STEP: usize = 10000; // random update + scan base_key + idx * STEP
 
         let cancel = CancellationToken::new();
 
@@ -5567,7 +5567,7 @@ mod tests {
 
         let keyspace = KeySpace::single(base_key..base_key.add((NUM_KEYS * STEP) as u32));
 
-        for _ in 0..10 {
+        for iter in 0..=10 {
             // Read all the blocks
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = (blknum * STEP) as u32;
@@ -5618,12 +5618,27 @@ mod tests {
                 updated[blknum] = lsn;
             }
 
-            // Perform a cycle of flush, compact, and GC
-            tline.freeze_and_flush().await?;
-            tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
-            tenant
-                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
-                .await?;
+            // Perform two cycles of flush, compact, and GC
+            for round in 0..2 {
+                tline.freeze_and_flush().await?;
+                tline
+                    .compact(
+                        &cancel,
+                        if iter % 5 == 0 && round == 0 {
+                            let mut flags = EnumSet::new();
+                            flags.insert(CompactFlags::ForceImageLayerCreation);
+                            flags.insert(CompactFlags::ForceRepartition);
+                            flags
+                        } else {
+                            EnumSet::empty()
+                        },
+                        &ctx,
+                    )
+                    .await?;
+                tenant
+                    .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                    .await?;
+            }
         }
 
         Ok(())

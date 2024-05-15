@@ -119,6 +119,7 @@ pub(crate) struct ValuesReconstructState {
 
     keys_done: KeySpaceRandomAccum,
     layers_visited: u32,
+    delta_layers_visited: u32,
 }
 
 impl ValuesReconstructState {
@@ -127,6 +128,7 @@ impl ValuesReconstructState {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),
             layers_visited: 0,
+            delta_layers_visited: 0,
         }
     }
 
@@ -140,8 +142,17 @@ impl ValuesReconstructState {
         }
     }
 
-    pub(crate) fn on_layer_visited(&mut self) {
+    pub(crate) fn on_layer_visited(&mut self, layer: &ReadableLayer) {
         self.layers_visited += 1;
+        if let ReadableLayer::PersistentLayer(layer) = layer {
+            if layer.layer_desc().is_delta() {
+                self.delta_layer_visited += 1;
+            }
+        }
+    }
+
+    pub(crate) fn get_delta_layers_visited(&self) -> usize {
+        self.delta_layers_visited
     }
 
     pub(crate) fn get_layers_visited(&self) -> u32 {
