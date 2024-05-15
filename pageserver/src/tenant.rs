@@ -20,7 +20,7 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
-use pageserver_api::models::RuntimeAuxFilePolicy;
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::ShardIdentity;
@@ -529,7 +529,7 @@ impl Tenant {
         index_part: Option<IndexPart>,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-        last_aux_file_policy: RuntimeAuxFilePolicy,
+        last_aux_file_policy: Option<AuxFilePolicy>,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
@@ -1369,7 +1369,7 @@ impl Tenant {
             create_guard,
             initdb_lsn,
             None,
-            RuntimeAuxFilePolicy::Unspecified,
+            None,
         )
         .await
     }
@@ -2441,7 +2441,7 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
-        last_aux_file_policy: RuntimeAuxFilePolicy,
+        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -3324,7 +3324,7 @@ impl Tenant {
                 timeline_create_guard,
                 pgdata_lsn,
                 None,
-                RuntimeAuxFilePolicy::Unspecified,
+                None,
             )
             .await?;
 
@@ -3402,7 +3402,7 @@ impl Tenant {
         create_guard: TimelineCreateGuard<'a>,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
-        last_aux_file_policy: RuntimeAuxFilePolicy,
+        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> anyhow::Result<UninitializedTimeline> {
         let tenant_shard_id = self.tenant_shard_id;
 

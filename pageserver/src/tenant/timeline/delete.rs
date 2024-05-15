@@ -4,10 +4,7 @@ use std::{
 };
 
 use anyhow::Context;
-use pageserver_api::{
-    models::{RuntimeAuxFilePolicy, TimelineState},
-    shard::TenantShardId,
-};
+use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
 use tracing::{error, info, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId};
@@ -282,7 +279,7 @@ impl DeleteTimelineFlow {
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
                 // Aux file policy is not needed for deletion, assuming deletion does not read aux keyspace
-                RuntimeAuxFilePolicy::Unspecified,
+                None,
             )
             .context("create_timeline_struct")?;
 

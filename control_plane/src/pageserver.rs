@@ -17,7 +17,7 @@ use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
 use pageserver_api::models::{
-    self, LocationConfig, ShardParameters, SwitchAuxFilePolicy, TenantHistorySize, TenantInfo,
+    self, LocationConfig, ShardParameters, AuxFilePolicy, TenantHistorySize, TenantInfo,
     TimelineInfo,
 };
 use pageserver_api::shard::TenantShardId;
@@ -380,7 +380,7 @@ impl PageServerNode {
                 .context("parse `timeline_get_throttle` from json")?,
             switch_aux_file_policy: settings
                 .remove("switch_aux_file_policy")
-                .map(|x| x.parse::<SwitchAuxFilePolicy>())
+                .map(|x| x.parse::<AuxFilePolicy>())
                 .transpose()
                 .context("Failed to parse 'switch_aux_file_policy'")?,
         };
@@ -503,7 +503,7 @@ impl PageServerNode {
                     .context("parse `timeline_get_throttle` from json")?,
                 switch_aux_file_policy: settings
                     .remove("switch_aux_file_policy")
-                    .map(|x| x.parse::<SwitchAuxFilePolicy>())
+                    .map(|x| x.parse::<AuxFilePolicy>())
                     .transpose()
                     .context("Failed to parse 'switch_aux_file_policy'")?,
             }

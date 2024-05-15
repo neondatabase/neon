@@ -20,10 +20,7 @@ def test_aux_v2_config_switch(neon_simple_env: NeonEnv, vanilla_pg):
         client.set_tenant_config(tenant_id, tenant_config)
         # aux file v2 is enabled on the write path
         assert (
-            client.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)[
-                "last_aux_file_policy"
-            ]
-            == "Unspecified"
+            "last_aux_file_policy" not in client.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)
         )
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()

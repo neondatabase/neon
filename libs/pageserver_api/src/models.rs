@@ -306,44 +306,57 @@ pub struct TenantConfig {
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
-    pub switch_aux_file_policy: Option<SwitchAuxFilePolicy>,
+    pub switch_aux_file_policy: Option<AuxFilePolicy>,
 }
 
+/// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`
+/// tenant config. When the first aux file written, the policy will be persisted in the
+/// `index_part.json` file and has a limited migration path.
+///
+/// Currently, we only allow the following migration path:
+///
+/// Unset -> V1
+///       -> V2
+///       -> CrossValidation -> V2
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SwitchAuxFilePolicy {
+pub enum AuxFilePolicy {
+    /// V1 aux file policy: store everything in AUX_FILE_KEY
     V1,
+    /// V2 aux file policy: store in the AUX_FILE keyspace
     V2,
+    /// Cross validation runs both formats on the write path and does validation
+    /// on the read path.
     CrossValidation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RuntimeAuxFilePolicy {
-    V1,
-    V2,
-    CrossValidation,
-    Unspecified,
-}
+/// The aux file policy memory flag. Users can store `Option<AuxFilePolicy>` into this atomic flag. 0 == unspecified.
+pub struct AtomicAuxFilePolicy(AtomicUsize);
 
-pub struct AtomicRuntimeAuxFilePolicy(AtomicUsize);
-
-impl AtomicRuntimeAuxFilePolicy {
-    pub fn new(policy: RuntimeAuxFilePolicy) -> Self {
-        Self(AtomicUsize::new(policy.to_usize()))
+impl AtomicAuxFilePolicy {
+    pub fn new(policy: Option<AuxFilePolicy>) -> Self {
+        Self(AtomicUsize::new(
+            policy.map(AuxFilePolicy::to_usize).unwrap_or_default(),
+        ))
     }
 
-    pub fn load(&self) -> RuntimeAuxFilePolicy {
-        RuntimeAuxFilePolicy::from_usize(self.0.load(std::sync::atomic::Ordering::SeqCst))
+    pub fn load(&self) -> Option<AuxFilePolicy> {
+        // Using SeqCst memory order because this flag will be read from both write/read threads
+        // and we want to guarantee the strongest consistency.
+        match self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => None,
+            other => Some(AuxFilePolicy::from_usize(other)),
+        }
     }
 
-    pub fn store(&self, policy: RuntimeAuxFilePolicy) {
+    pub fn store(&self, policy: Option<AuxFilePolicy>) {
         self.0.store(
-            RuntimeAuxFilePolicy::to_usize(policy),
+            policy.map(AuxFilePolicy::to_usize).unwrap_or_default(),
             std::sync::atomic::Ordering::SeqCst,
         );
     }
 }
 
-impl SwitchAuxFilePolicy {
+impl AuxFilePolicy {
     pub fn to_usize(self) -> usize {
         match self {
             Self::V1 => 1,
@@ -360,60 +373,17 @@ impl SwitchAuxFilePolicy {
             _ => None,
         }
     }
-    pub fn from_usize(this: usize) -> Self {
-        Self::try_from_usize(this).unwrap()
-    }
-
-    pub fn to_runtime_policy(&self) -> RuntimeAuxFilePolicy {
-        RuntimeAuxFilePolicy::from_usize(self.to_usize())
-    }
-}
-
-impl RuntimeAuxFilePolicy {
-    pub fn to_usize(self) -> usize {
-        match self {
-            Self::V1 => 1,
-            Self::CrossValidation => 2,
-            Self::V2 => 3,
-            Self::Unspecified => 0,
-        }
-    }
-
-    pub fn try_from_usize(this: usize) -> Option<Self> {
-        match this {
-            1 => Some(Self::V1),
-            2 => Some(Self::CrossValidation),
-            3 => Some(Self::V2),
-            0 => Some(Self::Unspecified),
-            _ => None,
-        }
-    }
 
     pub fn from_usize(this: usize) -> Self {
         Self::try_from_usize(this).unwrap()
     }
-}
 
-impl FromStr for RuntimeAuxFilePolicy {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.to_lowercase();
-        if s.is_empty() || s == "unspecified" {
-            Ok(Self::Unspecified)
-        } else if s == "v1" {
-            Ok(Self::V1)
-        } else if s == "v2" {
-            Ok(Self::V2)
-        } else if s == "crossvalidation" || s == "cross_validation" {
-            Ok(Self::CrossValidation)
-        } else {
-            anyhow::bail!("cannot parse {} to aux file policy", s)
-        }
+    pub fn to_runtime_policy(&self) -> AuxFilePolicy {
+        AuxFilePolicy::from_usize(self.to_usize())
     }
 }
 
-impl FromStr for SwitchAuxFilePolicy {
+impl FromStr for AuxFilePolicy {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -703,8 +673,8 @@ pub struct TimelineInfo {
 
     pub walreceiver_status: String,
 
-    /// Whether aux file v2 is enabled
-    pub(crate) last_aux_file_policy: RuntimeAuxFilePolicy,
+    /// The last aux file policy being used on this timeline
+    pub last_aux_file_policy: Option<AuxFilePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

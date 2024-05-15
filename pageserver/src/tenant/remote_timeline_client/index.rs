@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
-use pageserver_api::models::RuntimeAuxFilePolicy;
+use pageserver_api::models::AuxFilePolicy;
 use serde::{Deserialize, Serialize};
 use utils::id::TimelineId;
 
@@ -90,11 +90,11 @@ pub struct IndexPart {
     #[serde(default)]
     pub(crate) lineage: Lineage,
 
-    // Added in version 6. None == RuntimeAuxFilePolicy::Unspecified. Use Option wrapper to keep forward compatibility.
+    // Added in version 6. None == AuxFilePolicy::Unspecified. Use Option wrapper to keep forward compatibility.
     // This flag is controlled by TenantConf::switch_aux_file_policy. When the first aux file gets written, the aux file
     // mode will be persisted in `index_part.json`, and `switch_aux_file_policy` will be ignored.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub(crate) last_aux_file_policy: Option<RuntimeAuxFilePolicy>,
+    pub(crate) last_aux_file_policy: Option<AuxFilePolicy>,
 }
 
 impl IndexPart {
@@ -121,7 +121,7 @@ impl IndexPart {
         disk_consistent_lsn: Lsn,
         metadata: TimelineMetadata,
         lineage: Lineage,
-        last_aux_file_policy: RuntimeAuxFilePolicy,
+        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> Self {
         let layer_metadata = layers_and_metadata
             .iter()
@@ -135,7 +135,7 @@ impl IndexPart {
             metadata,
             deleted_at: None,
             lineage,
-            last_aux_file_policy: Some(last_aux_file_policy),
+            last_aux_file_policy,
         }
     }
 
@@ -165,13 +165,12 @@ impl IndexPart {
             example_metadata.disk_consistent_lsn(),
             example_metadata,
             Default::default(),
-            RuntimeAuxFilePolicy::V1,
+            Some(AuxFilePolicy::V1),
         )
     }
 
-    pub(crate) fn last_aux_file_policy(&self) -> RuntimeAuxFilePolicy {
+    pub(crate) fn last_aux_file_policy(&self) -> Option<AuxFilePolicy> {
         self.last_aux_file_policy
-            .unwrap_or(RuntimeAuxFilePolicy::Unspecified)
     }
 }
 
@@ -588,7 +587,7 @@ mod tests {
                 reparenting_history: vec![TimelineId::from_str("e1bfd8c633d713d279e6fcd2bcc15b6d").unwrap()],
                 original_ancestor: Some((TimelineId::from_str("e2bfd8c633d713d279e6fcd2bcc15b6d").unwrap(), Lsn::from_str("0/15A7618").unwrap(), parse_naive_datetime("2024-05-07T18:52:36.322426563"))),
             },
-            last_aux_file_policy: Some(RuntimeAuxFilePolicy::V2),
+            last_aux_file_policy: Some(AuxFilePolicy::V2),
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
