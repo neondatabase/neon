@@ -2132,6 +2132,68 @@ impl TenantManager {
 
         Ok(reparented)
     }
+
+    /// Get a [`Tenant`] in its active state. If the tenant_id is currently in [`TenantSlot::InProgress`]
+    /// state, then wait for up to `timeout`.  If the [`Tenant`] is not currently in [`TenantState::Active`],
+    /// then wait for up to `timeout` (minus however long we waited for the slot).
+    pub(crate) async fn get_active_tenant_with_timeout(
+        &self,
+        tenant_id: TenantId,
+        shard_selector: ShardSelector,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Arc<Tenant>, GetActiveTenantError> {
+        let wait_start = Instant::now();
+        let deadline = wait_start + timeout;
+
+        // Resolve TenantId to TenantShardId.  This is usually a quick one-shot thing, the loop is
+        // for handling the rare case that the slot we're accessing is InProgress.
+        let tenant_shard = loop {
+            let resolved = {
+                let locked = TENANTS.read().unwrap();
+                locked.resolve_attached_shard(&tenant_id, shard_selector)
+            };
+            match resolved {
+                ShardResolveResult::Found(tenant_shard) => break tenant_shard,
+                ShardResolveResult::NotFound => {
+                    return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
+                        tenant_id,
+                    )));
+                }
+                ShardResolveResult::InProgress(barrier) => {
+                    // We can't authoritatively answer right now: wait for InProgress state
+                    // to end, then try again
+                    match timeout_cancellable(
+                        deadline.duration_since(Instant::now()),
+                        cancel,
+                        barrier.wait(),
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            // The barrier completed: proceed around the loop to try looking up again
+                            continue;
+                        }
+                        Err(TimeoutCancellableError::Timeout) => {
+                            return Err(GetActiveTenantError::WaitForActiveTimeout {
+                                latest_state: None,
+                                wait_time: timeout,
+                            });
+                        }
+                        Err(TimeoutCancellableError::Cancelled) => {
+                            return Err(GetActiveTenantError::Cancelled);
+                        }
+                    }
+                }
+            };
+        };
+
+        tracing::debug!("Waiting for tenant to enter active state...");
+        tenant_shard
+            .wait_to_become_active(deadline.duration_since(Instant::now()))
+            .await?;
+        Ok(tenant_shard)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2178,67 +2240,6 @@ pub(crate) enum GetActiveTenantError {
     /// never happen.
     #[error("Tenant is broken: {0}")]
     Broken(String),
-}
-
-/// Get a [`Tenant`] in its active state. If the tenant_id is currently in [`TenantSlot::InProgress`]
-/// state, then wait for up to `timeout`.  If the [`Tenant`] is not currently in [`TenantState::Active`],
-/// then wait for up to `timeout` (minus however long we waited for the slot).
-pub(crate) async fn get_active_tenant_with_timeout(
-    tenant_id: TenantId,
-    shard_selector: ShardSelector,
-    timeout: Duration,
-    cancel: &CancellationToken,
-) -> Result<Arc<Tenant>, GetActiveTenantError> {
-    let wait_start = Instant::now();
-    let deadline = wait_start + timeout;
-
-    // Resolve TenantId to TenantShardId.  This is usually a quick one-shot thing, the loop is
-    // for handling the rare case that the slot we're accessing is InProgress.
-    let tenant_shard = loop {
-        let resolved = {
-            let locked = TENANTS.read().unwrap();
-            locked.resolve_attached_shard(&tenant_id, shard_selector)
-        };
-        match resolved {
-            ShardResolveResult::Found(tenant_shard) => break tenant_shard,
-            ShardResolveResult::NotFound => {
-                return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
-                    tenant_id,
-                )));
-            }
-            ShardResolveResult::InProgress(barrier) => {
-                // We can't authoritatively answer right now: wait for InProgress state
-                // to end, then try again
-                match timeout_cancellable(
-                    deadline.duration_since(Instant::now()),
-                    cancel,
-                    barrier.wait(),
-                )
-                .await
-                {
-                    Ok(_) => {
-                        // The barrier completed: proceed around the loop to try looking up again
-                        continue;
-                    }
-                    Err(TimeoutCancellableError::Timeout) => {
-                        return Err(GetActiveTenantError::WaitForActiveTimeout {
-                            latest_state: None,
-                            wait_time: timeout,
-                        });
-                    }
-                    Err(TimeoutCancellableError::Cancelled) => {
-                        return Err(GetActiveTenantError::Cancelled);
-                    }
-                }
-            }
-        };
-    };
-
-    tracing::debug!("Waiting for tenant to enter active state...");
-    tenant_shard
-        .wait_to_become_active(deadline.duration_since(Instant::now()))
-        .await?;
-    Ok(tenant_shard)
 }
 
 #[derive(Debug, thiserror::Error)]

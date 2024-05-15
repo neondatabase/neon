@@ -58,8 +58,6 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
-use crate::tenant::mgr;
-use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
@@ -554,13 +552,15 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
-        let tenant = mgr::get_active_tenant_with_timeout(
-            tenant_id,
-            ShardSelector::First,
-            ACTIVE_TENANT_TIMEOUT,
-            &task_mgr::shutdown_token(),
-        )
-        .await?;
+        let tenant = self
+            .tenant_manager
+            .get_active_tenant_with_timeout(
+                tenant_id,
+                ShardSelector::First,
+                ACTIVE_TENANT_TIMEOUT,
+                &task_mgr::shutdown_token(),
+            )
+            .await?;
 
         // Make request tracer if needed
         let mut tracer = if tenant.get_trace_read_requests() {
@@ -728,13 +728,15 @@ impl PageServerHandler {
 
         // Create empty timeline
         info!("creating new timeline");
-        let tenant = get_active_tenant_with_timeout(
-            tenant_id,
-            ShardSelector::Zero,
-            ACTIVE_TENANT_TIMEOUT,
-            &task_mgr::shutdown_token(),
-        )
-        .await?;
+        let tenant = self
+            .tenant_manager
+            .get_active_tenant_with_timeout(
+                tenant_id,
+                ShardSelector::Zero,
+                ACTIVE_TENANT_TIMEOUT,
+                &task_mgr::shutdown_token(),
+            )
+            .await?;
         let timeline = tenant
             .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
             .await?;
@@ -1372,14 +1374,16 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         selector: ShardSelector,
     ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
-        let tenant = get_active_tenant_with_timeout(
-            tenant_id,
-            selector,
-            ACTIVE_TENANT_TIMEOUT,
-            &task_mgr::shutdown_token(),
-        )
-        .await
-        .map_err(GetActiveTimelineError::Tenant)?;
+        let tenant = self
+            .tenant_manager
+            .get_active_tenant_with_timeout(
+                tenant_id,
+                selector,
+                ACTIVE_TENANT_TIMEOUT,
+                &task_mgr::shutdown_token(),
+            )
+            .await
+            .map_err(GetActiveTimelineError::Tenant)?;
         let timeline = tenant.get_timeline(timeline_id, true)?;
         set_tracing_field_shard_id(&timeline);
         Ok(timeline)
@@ -1773,13 +1777,15 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = get_active_tenant_with_timeout(
-                tenant_id,
-                ShardSelector::Zero,
-                ACTIVE_TENANT_TIMEOUT,
-                &task_mgr::shutdown_token(),
-            )
-            .await?;
+            let tenant = self
+                .tenant_manager
+                .get_active_tenant_with_timeout(
+                    tenant_id,
+                    ShardSelector::Zero,
+                    ACTIVE_TENANT_TIMEOUT,
+                    &task_mgr::shutdown_token(),
+                )
+                .await?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
