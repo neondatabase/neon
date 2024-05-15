@@ -238,7 +238,6 @@ impl LayerManager {
                 &mut self.layer_fmgr,
             );
 
-            metrics.resident_physical_size_sub(old_layer.layer_desc().file_size);
             metrics.record_new_file_metrics(new_layer.layer_desc().file_size);
         }
         for l in drop_layers {
