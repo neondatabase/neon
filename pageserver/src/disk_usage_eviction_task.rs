@@ -41,19 +41,15 @@
 // - The `#[allow(dead_code)]` above various structs are to suppress warnings about only the Debug impl
 //   reading these fields. We use the Debug impl for semi-structured logging, though.
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{sync::Arc, time::SystemTime};
 
 use anyhow::Context;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{config::DiskUsageEvictionTaskConfig, shard::TenantShardId};
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::serde_percent::Percent;
 use utils::{completion, id::TimelineId};
 
 use crate::{
@@ -68,30 +64,15 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiskUsageEvictionTaskConfig {
-    pub max_usage_pct: Percent,
-    pub min_avail_bytes: u64,
-    #[serde(with = "humantime_serde")]
-    pub period: Duration,
-    #[cfg(feature = "testing")]
-    pub mock_statvfs: Option<crate::statvfs::mock::Behavior>,
-    /// Select sorting for evicted layers
-    #[serde(default)]
-    pub eviction_order: EvictionOrder,
-}
-
 /// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
 /// partitioning.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "args")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvictionOrder {
     /// Order the layers to be evicted by how recently they have been accessed in absolute
     /// time.
     ///
     /// This strategy is unfair when some tenants grow faster than others towards the slower
     /// growing.
-    #[default]
     AbsoluteAccessed,
 
     /// Order the layers to be evicted by how recently they have been accessed relatively within
@@ -103,13 +84,21 @@ pub enum EvictionOrder {
         /// we read tenants is deterministic. If we find the need to use this as `false`, we need
         /// to ensure nondeterminism by adding in a random number to break the
         /// `relative_last_activity==0.0` ties.
-        #[serde(default = "default_highest_layer_count_loses_first")]
         highest_layer_count_loses_first: bool,
     },
 }
 
-fn default_highest_layer_count_loses_first() -> bool {
-    true
+impl From<pageserver_api::config::EvictionOrder> for EvictionOrder {
+    fn from(value: pageserver_api::config::EvictionOrder) -> Self {
+        match value {
+            pageserver_api::config::EvictionOrder::AbsoluteAccessed => Self::AbsoluteAccessed,
+            pageserver_api::config::EvictionOrder::RelativeAccessed {
+                highest_layer_count_loses_first,
+            } => Self::RelativeAccessed {
+                highest_layer_count_loses_first,
+            },
+        }
+    }
 }
 
 impl EvictionOrder {
@@ -302,7 +291,7 @@ async fn disk_usage_eviction_task_iteration(
         storage,
         usage_pre,
         tenant_manager,
-        task_config.eviction_order,
+        task_config.eviction_order.into(),
         cancel,
     )
     .await;

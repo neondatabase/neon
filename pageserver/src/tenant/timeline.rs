@@ -17,6 +17,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
 use pageserver_api::{
+    config::{GetImpl, GetVectoredImpl},
     key::{
         AUX_FILES_KEY, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
         NON_INHERITED_SPARSE_RANGE,
@@ -723,40 +724,6 @@ impl From<GetReadyAncestorError> for PageReconstructError {
             Other(other) => PageReconstructError::Other(other),
         }
     }
-}
-
-#[derive(
-    Eq,
-    PartialEq,
-    Debug,
-    Copy,
-    Clone,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum GetVectoredImpl {
-    Sequential,
-    Vectored,
-}
-
-#[derive(
-    Eq,
-    PartialEq,
-    Debug,
-    Copy,
-    Clone,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum GetImpl {
-    Legacy,
-    Vectored,
 }
 
 pub(crate) enum WaitLsnWaiter<'a> {
