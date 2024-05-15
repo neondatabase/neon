@@ -1,27 +1,26 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    NeonEnv,
+    NeonEnvBuilder,
     logical_replication_sync,
 )
 
 
-def test_aux_v2_config_switch(neon_simple_env: NeonEnv, vanilla_pg):
-    env = neon_simple_env
+def test_aux_v2_config_switch(neon_env_builder: NeonEnvBuilder, vanilla_pg):
+    env = neon_env_builder.init_start()
+    endpoint = env.endpoints.create_start("main")
+    client = env.pageserver.http_client()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_aux_v2_config_switch", "empty")
-    endpoint = env.endpoints.create_start(
-        "test_aux_v2_config_switch", config_lines=["log_statement=all"]
+    timeline_id = env.initial_timeline
+
+    tenant_config = client.tenant_config(tenant_id).effective_config
+    tenant_config["switch_aux_file_policy"] = "V2"
+    client.set_tenant_config(tenant_id, tenant_config)
+    # aux file v2 is enabled on the write path, so for now, it should be unset (or null)
+    assert "last_aux_file_policy" not in client.timeline_detail(
+        tenant_id=tenant_id, timeline_id=timeline_id
     )
 
-    with env.pageserver.http_client() as client:
-        tenant_config = client.tenant_config(tenant_id).effective_config
-        tenant_config["switch_aux_file_policy"] = "V2"
-        client.set_tenant_config(tenant_id, tenant_config)
-        # aux file v2 is enabled on the write path
-        assert (
-            "last_aux_file_policy" not in client.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)
-        )
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
@@ -49,12 +48,7 @@ def test_aux_v2_config_switch(neon_simple_env: NeonEnv, vanilla_pg):
 
     with env.pageserver.http_client() as client:
         # aux file v2 flag should be enabled at this point
-        assert (
-            client.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)[
-                "last_aux_file_policy"
-            ]
-            == "V2"
-        )
+        assert client.timeline_detail(tenant_id, timeline_id)["last_aux_file_policy"] == "V2"
     with env.pageserver.http_client() as client:
         tenant_config = client.tenant_config(tenant_id).effective_config
         tenant_config["switch_aux_file_policy"] = "V1"
@@ -75,4 +69,3 @@ def test_aux_v2_config_switch(neon_simple_env: NeonEnv, vanilla_pg):
             ]
             == "V2"
         )
-    # TODO(chi): test with timeline detach?
