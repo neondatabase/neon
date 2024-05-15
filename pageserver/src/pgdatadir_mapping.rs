@@ -24,7 +24,7 @@ use pageserver_api::key::{
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
-use pageserver_api::models::{AuxFilePolicy, };
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -720,9 +720,7 @@ impl Timeline {
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let current_policy = self.last_aux_file_policy.load();
         match current_policy {
-            Some(AuxFilePolicy::V1) | None => {
-                self.list_aux_files_v1(lsn, ctx).await
-            }
+            Some(AuxFilePolicy::V1) | None => self.list_aux_files_v1(lsn, ctx).await,
             Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
             Some(AuxFilePolicy::CrossValidation) => {
                 let v1_result = self.list_aux_files_v1(lsn, ctx).await;
@@ -1479,19 +1477,18 @@ impl<'a> DatadirModification<'a> {
             // Allowed switch path:
             // * no aux files -> v1/v2/cross-validation
             // * cross-validation->v2
-            match (current_policy, switch_policy) {
-                (None, _)
-                | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2) => {
-                    let new_policy = switch_policy.to_runtime_policy();
-                    self.tline.last_aux_file_policy.store(Some(new_policy));
-                    info!("switching to aux file policy {:?}", new_policy);
-                    if let Some(ref remote_client) = self.tline.remote_client {
-                        remote_client
-                            .schedule_index_upload_for_aux_file_policy_update(Some(new_policy))?;
-                    }
-                    new_policy
+            if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
+                self.tline.last_aux_file_policy.store(Some(switch_policy));
+                info!("switching to aux file policy {:?}", switch_policy);
+                if let Some(ref remote_client) = self.tline.remote_client {
+                    remote_client
+                        .schedule_index_upload_for_aux_file_policy_update(Some(switch_policy))?;
                 }
-                (Some(current_policy), _) => current_policy,
+                switch_policy
+            } else {
+                // This branch handles non-valid migration path, and the case that switch_policy == current_policy.
+                // And actually, because the migration path always allow unspecified -> *, this unwrap_or will never be hit.
+                current_policy.unwrap_or(AuxFilePolicy::V1)
             }
         };
 

@@ -329,6 +329,15 @@ pub enum AuxFilePolicy {
     CrossValidation,
 }
 
+impl AuxFilePolicy {
+    pub fn is_valid_migration_path(from: Option<Self>, to: Self) -> bool {
+        matches!(
+            (from, to),
+            (None, _) | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2)
+        )
+    }
+}
+
 /// The aux file policy memory flag. Users can store `Option<AuxFilePolicy>` into this atomic flag. 0 == unspecified.
 pub struct AtomicAuxFilePolicy(AtomicUsize);
 
@@ -376,10 +385,6 @@ impl AuxFilePolicy {
 
     pub fn from_usize(this: usize) -> Self {
         Self::try_from_usize(this).unwrap()
-    }
-
-    pub fn to_runtime_policy(&self) -> AuxFilePolicy {
-        AuxFilePolicy::from_usize(self.to_usize())
     }
 }
 
@@ -1519,5 +1524,60 @@ mod tests {
             let actual: &'static str = rendered.into();
             assert_eq!(actual, expected, "example on {line}");
         }
+    }
+
+    #[test]
+    fn test_aux_file_migration_path() {
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            None,
+            AuxFilePolicy::V1
+        ));
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            None,
+            AuxFilePolicy::V2
+        ));
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            None,
+            AuxFilePolicy::CrossValidation
+        ));
+        // Self-migration is not a valid migration path, and the caller should handle it by itself.
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V1),
+            AuxFilePolicy::V1
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V2),
+            AuxFilePolicy::V2
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::CrossValidation),
+            AuxFilePolicy::CrossValidation
+        ));
+        // Migrations not allowed
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::CrossValidation),
+            AuxFilePolicy::V1
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V1),
+            AuxFilePolicy::V2
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V2),
+            AuxFilePolicy::V1
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V2),
+            AuxFilePolicy::CrossValidation
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V1),
+            AuxFilePolicy::CrossValidation
+        ));
+        // Migrations allowed
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::CrossValidation),
+            AuxFilePolicy::V2
+        ));
     }
 }
