@@ -7,7 +7,7 @@ use crate::{
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
 };
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
 use hyper1::upgrade::OnUpgrade;
@@ -28,7 +28,8 @@ pin_project! {
     pub struct WebSocketRw<S> {
         #[pin]
         stream: WebSocketServer<S>,
-        bytes: Bytes,
+        recv: Bytes,
+        send: BytesMut,
     }
 }
 
@@ -36,7 +37,8 @@ impl<S> WebSocketRw<S> {
     pub fn new(stream: WebSocketServer<S>) -> Self {
         Self {
             stream,
-            bytes: Bytes::new(),
+            recv: Bytes::new(),
+            send: BytesMut::new(),
         }
     }
 }
@@ -47,13 +49,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let mut stream = self.project().stream;
+        let this = self.project();
+        let mut stream = this.stream;
+        this.send.put(buf);
 
         ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
-        match stream
-            .as_mut()
-            .start_send(Frame::binary(buf.to_vec().into()))
-        {
+        match stream.as_mut().start_send(Frame::binary(this.send.split())) {
             Ok(()) => Poll::Ready(Ok(buf.len())),
             Err(e) => Poll::Ready(Err(io_error(e))),
         }
@@ -91,8 +92,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
         let mut this = self.project();
         loop {
-            if !this.bytes.chunk().is_empty() {
-                let chunk = (*this.bytes).chunk();
+            if !this.recv.chunk().is_empty() {
+                let chunk = (*this.recv).chunk();
                 return Poll::Ready(Ok(chunk));
             }
 
@@ -108,8 +109,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
                         return Poll::Ready(Err(io_error(error)));
                     }
                     OpCode::Binary | OpCode::Continuation => {
-                        debug_assert!(this.bytes.is_empty());
-                        *this.bytes = message.payload;
+                        debug_assert!(this.recv.is_empty());
+                        *this.recv = message.payload.freeze();
                     }
                     OpCode::Close => return EOF,
                 },
@@ -119,7 +120,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
     }
 
     fn consume(self: Pin<&mut Self>, amount: usize) {
-        self.project().bytes.advance(amount);
+        self.project().recv.advance(amount);
     }
 }
 
