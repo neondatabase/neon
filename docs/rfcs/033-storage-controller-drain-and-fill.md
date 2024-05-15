@@ -216,6 +216,12 @@ to proceed.
 Once the triggered reconciles have finished or timed out, set the node's scheduling
 policy to `NodeSchedulingPolicy::PauseForRestart` to signal the end of the drain.
 
+A note on non HA tenants: These tenants do not have secondaries, so by the description
+above, they would not be migrated. It makes sense to skip them (especially the large ones)
+since, depending on tenant size, this might be more disruptive than the restart since the
+pageserver we've moved to do will need to on-demand download the entire working set for the tenant.
+We can consider expanding to small non-HA tenants in the future.
+
 ### Fill Process
 
 Before accpeting a fill request the following validations is applied:
