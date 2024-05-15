@@ -383,7 +383,7 @@ fn start_pageserver(
     let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
 
     // Set up remote storage client
-    let remote_storage = Some(create_remote_storage_client(conf)?);
+    let remote_storage = create_remote_storage_client(conf)?;
 
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
@@ -516,16 +516,12 @@ fn start_pageserver(
         }
     });
 
-    let secondary_controller = if let Some(remote_storage) = &remote_storage {
-        secondary::spawn_tasks(
-            tenant_manager.clone(),
-            remote_storage.clone(),
-            background_jobs_barrier.clone(),
-            shutdown_pageserver.clone(),
-        )
-    } else {
-        secondary::null_controller()
-    };
+    let secondary_controller = secondary::spawn_tasks(
+        tenant_manager.clone(),
+        remote_storage.clone(),
+        background_jobs_barrier.clone(),
+        shutdown_pageserver.clone(),
+    );
 
     // shared state between the disk-usage backed eviction background task and the http endpoint
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
@@ -533,15 +529,13 @@ fn start_pageserver(
     // been configured.
     let disk_usage_eviction_state: Arc<disk_usage_eviction_task::State> = Arc::default();
 
-    if let Some(remote_storage) = &remote_storage {
-        launch_disk_usage_global_eviction_task(
-            conf,
-            remote_storage.clone(),
-            disk_usage_eviction_state.clone(),
-            tenant_manager.clone(),
-            background_jobs_barrier.clone(),
-        )?;
-    }
+    launch_disk_usage_global_eviction_task(
+        conf,
+        remote_storage.clone(),
+        disk_usage_eviction_state.clone(),
+        tenant_manager.clone(),
+        background_jobs_barrier.clone(),
+    )?;
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.
@@ -693,14 +687,7 @@ fn start_pageserver(
             // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
             // The plan is to change that over time.
             shutdown_pageserver.take();
-            let bg_remote_storage = remote_storage.clone();
-            let bg_deletion_queue = deletion_queue.clone();
-            pageserver::shutdown_pageserver(
-                &tenant_manager,
-                bg_remote_storage.map(|_| bg_deletion_queue),
-                0,
-            )
-            .await;
+            pageserver::shutdown_pageserver(&tenant_manager, deletion_queue.clone(), 0).await;
             unreachable!()
         })
     }

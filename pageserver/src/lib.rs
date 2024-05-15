@@ -57,7 +57,7 @@ pub use crate::metrics::preinitialize_metrics;
 #[tracing::instrument(skip_all, fields(%exit_code))]
 pub async fn shutdown_pageserver(
     tenant_manager: &TenantManager,
-    deletion_queue: Option<DeletionQueue>,
+    mut deletion_queue: DeletionQueue,
     exit_code: i32,
 ) {
     use std::time::Duration;
@@ -89,9 +89,7 @@ pub async fn shutdown_pageserver(
     .await;
 
     // Best effort to persist any outstanding deletions, to avoid leaking objects
-    if let Some(mut deletion_queue) = deletion_queue {
-        deletion_queue.shutdown(Duration::from_secs(5)).await;
-    }
+    deletion_queue.shutdown(Duration::from_secs(5)).await;
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
@@ -113,10 +111,6 @@ pub async fn shutdown_pageserver(
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
 }
-
-/// The name of the metadata file pageserver creates per timeline.
-/// Full path: `tenants/<tenant_id>/timelines/<timeline_id>/metadata`.
-pub const METADATA_FILE_NAME: &str = "metadata";
 
 /// Per-tenant configuration file.
 /// Full path: `tenants/<tenant_id>/config`.
