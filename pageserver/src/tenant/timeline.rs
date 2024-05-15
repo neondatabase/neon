@@ -417,7 +417,7 @@ pub struct Timeline {
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
 
     /// Indicate whether aux file v2 storage is enabled.
-    pub(crate) last_aux_file_policy: AtomicRuntimeAuxFilePolicy,
+    pub last_aux_file_policy: AtomicRuntimeAuxFilePolicy,
 }
 
 pub struct WalReceiverInfo {
