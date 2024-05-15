@@ -654,17 +654,20 @@ fn start_pageserver(
             None,
             "libpq endpoint listener",
             true,
-            async move {
-                page_service::libpq_listener_main(
-                    conf,
-                    broker_client,
-                    pg_auth,
-                    pageserver_listener,
-                    conf.pg_auth_type,
-                    libpq_ctx,
-                    task_mgr::shutdown_token(),
-                )
-                .await
+            {
+                let tenant_manager = tenant_manager.clone();
+                async move {
+                    page_service::libpq_listener_main(
+                        tenant_manager,
+                        broker_client,
+                        pg_auth,
+                        pageserver_listener,
+                        conf.pg_auth_type,
+                        libpq_ctx,
+                        task_mgr::shutdown_token(),
+                    )
+                    .await
+                }
             },
         );
     }
