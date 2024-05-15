@@ -244,7 +244,9 @@ impl TenantsMap {
                     }
                 }
 
-                // Fall through: we didn't find an acceptable shard
+                // Fall through: we didn't find a slot that was in Attached state & matched our selector.  If
+                // we found one or more InProgress slot, indicate to caller that they should retry later.  Otherwise
+                // this requested shard simply isn't found.
                 if let Some(barrier) = any_in_progress {
                     ShardResolveResult::InProgress(barrier)
                 } else {
