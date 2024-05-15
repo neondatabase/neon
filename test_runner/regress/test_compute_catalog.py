@@ -26,7 +26,7 @@ def test_compute_catalog(neon_simple_env: NeonEnv):
     assert "-- PostgreSQL database dump" in ddl
 
     try:
-        client.catalog_schema_ddl(database="nonexistentdb")
+        client.catalog_datadbase_ddl(database="nonexistentdb")
         raise AssertionError("Expected HTTPError was not raised")
     except requests.exceptions.HTTPError as e:
         assert (

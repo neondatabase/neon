@@ -17,7 +17,7 @@ class EndpointHttpClient(requests.Session):
         res.raise_for_status()
         return res.json()
 
-    def catalog_schema_ddl(self, database: str):
+    def catalog_datadbase_ddl(self, database: str):
         res = self.get(f"http://localhost:{self.port}/catalog/database_ddl?database={database}")
         res.raise_for_status()
         return res.text
