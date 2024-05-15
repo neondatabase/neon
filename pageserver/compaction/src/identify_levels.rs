@@ -89,7 +89,7 @@ where
     //  |
     //  v
     //
-    layers.sort_by_key(|l| l.lsn_range().end);
+    layers.sort_by_key(|l| l.lsn_range().end); // this isn't deterministic, can have multiple layers with same LSN range but different key dimension
     let mut candidate_start_lsn = end_lsn;
     let mut candidate_layers: Vec<L> = Vec::new();
     let mut current_best_start_lsn = end_lsn;
@@ -135,6 +135,7 @@ where
             // Is it small enough to be considered part of this level?
             if r.end.0 - r.start.0 > lsn_max_size {
                 // Too large, this layer belongs to next level. Stop.
+                // Due to the sorting bug pointed out above there could still be smaller layers at same key range
                 trace!(
                     "too large {}, size {} vs {}",
                     l.short_id(),
@@ -305,6 +306,26 @@ mod tests {
         // Call with an LSN that doesn't partition the space
         let result = identify_level(layers, Lsn(0x6000), 0x1000).await;
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repro_identify_levels_bails_too_ealy_if_partitioned_keyspace_same_lsn() -> anyhow::Result<()> {
+        tracing_subscriber::fmt::init(); // so that RUST_LOG=trace works
+        // It's sorting by end_lsn only, so, this `vec![]` is already sorted.
+        // (The sort implementation may shuffle the elements anyway, but, let's assume it doesn't.)
+        // The `identify_levels` loop will bails out at the first layer that is too large.
+        // , i.e., layer B. (log message "too large").
+        // That leaves layer C out of the level, even though it belongs to it.
+        let max_size = 0x2000;
+        let layers = vec![
+            delta(0x1000..0x2000, Lsn(0x8000)..Lsn(0x9000)), // A
+            delta(0x2000..0x3000, Lsn(0x5000)..Lsn(0x9000)), // B  2 x max_size
+            delta(0x3000..0x4000, Lsn(0x8000)..Lsn(0x9000)), // C
+        ];
+
+        let level = identify_level(layers.clone(), Lsn(0x10_000), max_size).await?.unwrap();
+        assert_eq!(level.layers.len(), 3);
         Ok(())
     }
 
