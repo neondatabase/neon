@@ -8,13 +8,11 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use std::cmp::max;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard};
-use tokio::{
-    sync::{mpsc::Sender, watch},
-    time::Instant,
-};
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::{sync::watch, time::Instant};
 use tracing::*;
 use utils::http::error::ApiError;
 use utils::{
@@ -38,7 +36,7 @@ use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::FullTimelineInfo;
 use crate::wal_storage::Storage as wal_storage_iface;
-use crate::{debug_dump, wal_backup_partial, wal_storage};
+use crate::{debug_dump, timeline_manager, wal_backup_partial, wal_storage};
 use crate::{GlobalTimelines, SafeKeeperConf};
 
 /// Things safekeeper should know about timeline state on peers.
@@ -51,8 +49,7 @@ pub struct PeerInfo {
     /// LSN of the last record.
     pub flush_lsn: Lsn,
     pub commit_lsn: Lsn,
-    /// Since which LSN safekeeper has WAL. TODO: remove this once we fill new
-    /// sk since backup_lsn.
+    /// Since which LSN safekeeper has WAL.
     pub local_start_lsn: Lsn,
     /// When info was received. Serde annotations are not very useful but make
     /// the code compile -- we don't rely on this field externally.
@@ -97,25 +94,80 @@ impl PeersInfo {
     }
 }
 
+pub type ReadGuardSharedState<'a> = RwLockReadGuard<'a, SharedState>;
+/// WriteGuardSharedState is a wrapper around RwLockWriteGuard<SharedState> that
+/// automatically updates `watch::Sender` channels with state on drop.
+pub struct WriteGuardSharedState<'a> {
+    tli: Arc<Timeline>,
+    guard: RwLockWriteGuard<'a, SharedState>,
+}
+
+impl<'a> WriteGuardSharedState<'a> {
+    fn new(tli: Arc<Timeline>, guard: RwLockWriteGuard<'a, SharedState>) -> Self {
+        WriteGuardSharedState { tli, guard }
+    }
+}
+
+impl<'a> Deref for WriteGuardSharedState<'a> {
+    type Target = SharedState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<'a> DerefMut for WriteGuardSharedState<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl<'a> Drop for WriteGuardSharedState<'a> {
+    fn drop(&mut self) {
+        let term_flush_lsn = TermLsn::from((self.guard.sk.get_term(), self.guard.sk.flush_lsn()));
+        let commit_lsn = self.guard.sk.state.inmem.commit_lsn;
+
+        let _ = self.tli.term_flush_lsn_watch_tx.send_if_modified(|old| {
+            if *old != term_flush_lsn {
+                *old = term_flush_lsn;
+                true
+            } else {
+                false
+            }
+        });
+
+        let _ = self.tli.commit_lsn_watch_tx.send_if_modified(|old| {
+            if *old != commit_lsn {
+                *old = commit_lsn;
+                true
+            } else {
+                false
+            }
+        });
+
+        self.tli.shared_state_version_tx.send_modify(|old| {
+            *old += 1;
+        });
+    }
+}
+
 /// Shared state associated with database instance
 pub struct SharedState {
     /// Safekeeper object
-    sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
+    pub(crate) sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
     /// In memory list containing state of peers sent in latest messages from them.
-    peers_info: PeersInfo,
-    /// True when WAL backup launcher oversees the timeline, making sure WAL is
-    /// offloaded, allows to bother launcher less.
-    wal_backup_active: bool,
+    pub(crate) peers_info: PeersInfo,
     /// True whenever there is at least some pending activity on timeline: live
     /// compute connection, pageserver is not caughtup (it must have latest WAL
     /// for new compute start) or WAL backuping is not finished. Practically it
     /// means safekeepers broadcast info to peers about the timeline, old WAL is
     /// trimmed.
+    /// FIXME: this is not true if WAL backuping is not finished
     ///
     /// TODO: it might be better to remove tli completely from GlobalTimelines
     /// when tli is inactive instead of having this flag.
-    active: bool,
-    last_removed_segno: XLogSegNo,
+    pub(crate) active: bool,
+    pub(crate) last_removed_segno: XLogSegNo,
 }
 
 impl SharedState {
@@ -152,7 +204,6 @@ impl SharedState {
         Ok(Self {
             sk,
             peers_info: PeersInfo(vec![]),
-            wal_backup_active: false,
             active: false,
             last_removed_segno: 0,
         })
@@ -171,24 +222,22 @@ impl SharedState {
         Ok(Self {
             sk: SafeKeeper::new(control_store, wal_store, conf.my_id)?,
             peers_info: PeersInfo(vec![]),
-            wal_backup_active: false,
             active: false,
             last_removed_segno: 0,
         })
     }
 
-    fn is_active(&self, num_computes: usize) -> bool {
-        self.is_wal_backup_required(num_computes)
-            // FIXME: add tracking of relevant pageservers and check them here individually,
-            // otherwise migration won't work (we suspend too early).
-            || self.sk.state.inmem.remote_consistent_lsn < self.sk.state.inmem.commit_lsn
+    fn is_active(&self) -> bool {
+        // FIXME: add tracking of relevant pageservers and check them here individually,
+        // otherwise migration won't work (we suspend too early).
+        true || self.sk.state.inmem.remote_consistent_lsn < self.sk.state.inmem.commit_lsn
     }
 
-    /// Mark timeline active/inactive and return whether s3 offloading requires
-    /// start/stop action. If timeline is deactivated, control file is persisted
+    /// Mark timeline active/inactive.
+    /// If timeline is deactivated, control file is persisted
     /// as maintenance task does that only for active timelines.
-    async fn update_status(&mut self, num_computes: usize, ttid: TenantTimelineId) -> bool {
-        let is_active = self.is_active(num_computes);
+    async fn update_status(&mut self, ttid: TenantTimelineId) {
+        let is_active = self.is_active();
         if self.active != is_active {
             info!(
                 "timeline {} active={} now, remote_consistent_lsn={}, commit_lsn={}",
@@ -204,40 +253,6 @@ impl SharedState {
             }
         }
         self.active = is_active;
-        self.is_wal_backup_action_pending(num_computes)
-    }
-
-    /// Should we run s3 offloading in current state?
-    fn is_wal_backup_required(&self, num_computes: usize) -> bool {
-        let seg_size = self.get_wal_seg_size();
-        num_computes > 0 ||
-        // Currently only the whole segment is offloaded, so compare segment numbers.
-            (self.sk.state.inmem.commit_lsn.segment_number(seg_size) >
-             self.sk.state.inmem.backup_lsn.segment_number(seg_size))
-    }
-
-    /// Is current state of s3 offloading is not what it ought to be?
-    fn is_wal_backup_action_pending(&self, num_computes: usize) -> bool {
-        let res = self.wal_backup_active != self.is_wal_backup_required(num_computes);
-        if res {
-            let action_pending = if self.is_wal_backup_required(num_computes) {
-                "start"
-            } else {
-                "stop"
-            };
-            trace!(
-                "timeline {} s3 offloading action {} pending: num_computes={}, commit_lsn={}, backup_lsn={}",
-                self.sk.state.timeline_id, action_pending, num_computes, self.sk.state.inmem.commit_lsn, self.sk.state.inmem.backup_lsn
-            );
-        }
-        res
-    }
-
-    /// Returns whether s3 offloading is required and sets current status as
-    /// matching.
-    fn wal_backup_attend(&mut self, num_computes: usize) -> bool {
-        self.wal_backup_active = self.is_wal_backup_required(num_computes);
-        self.wal_backup_active
     }
 
     fn get_wal_seg_size(&self) -> usize {
@@ -278,7 +293,7 @@ impl SharedState {
     /// Get our latest view of alive peers status on the timeline.
     /// We pass our own info through the broker as well, so when we don't have connection
     /// to the broker returned vec is empty.
-    fn get_peers(&self, heartbeat_timeout: Duration) -> Vec<PeerInfo> {
+    pub(crate) fn get_peers(&self, heartbeat_timeout: Duration) -> Vec<PeerInfo> {
         let now = Instant::now();
         self.peers_info
             .0
@@ -294,18 +309,13 @@ impl SharedState {
     /// offloading.
     /// While it is safe to use inmem values for determining horizon,
     /// we use persistent to make possible normal states less surprising.
-    fn get_horizon_segno(
-        &self,
-        wal_backup_enabled: bool,
-        extra_horizon_lsn: Option<Lsn>,
-    ) -> XLogSegNo {
+    fn get_horizon_segno(&self, extra_horizon_lsn: Option<Lsn>) -> XLogSegNo {
         let state = &self.sk.state;
 
         use std::cmp::min;
         let mut horizon_lsn = min(state.remote_consistent_lsn, state.peer_horizon_lsn);
-        if wal_backup_enabled {
-            horizon_lsn = min(horizon_lsn, state.backup_lsn);
-        }
+        // we don't want to remove WAL that is not yet offloaded to s3
+        horizon_lsn = min(horizon_lsn, state.backup_lsn);
         if let Some(extra_horizon_lsn) = extra_horizon_lsn {
             horizon_lsn = min(horizon_lsn, extra_horizon_lsn);
         }
@@ -346,11 +356,6 @@ impl From<TimelineError> for ApiError {
 pub struct Timeline {
     pub ttid: TenantTimelineId,
 
-    /// Sending here asks for wal backup launcher attention (start/stop
-    /// offloading). Sending ttid instead of concrete command allows to do
-    /// sending without timeline lock.
-    pub wal_backup_launcher_tx: Sender<TenantTimelineId>,
-
     /// Used to broadcast commit_lsn updates to all background jobs.
     commit_lsn_watch_tx: watch::Sender<Lsn>,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
@@ -362,10 +367,14 @@ pub struct Timeline {
     term_flush_lsn_watch_tx: watch::Sender<TermLsn>,
     term_flush_lsn_watch_rx: watch::Receiver<TermLsn>,
 
+    /// Broadcasts shared state updates.
+    shared_state_version_tx: watch::Sender<usize>,
+    shared_state_version_rx: watch::Receiver<usize>,
+
     /// Safekeeper and other state, that should remain consistent and
     /// synchronized with the disk. This is tokio mutex as we write WAL to disk
     /// while holding it, ensuring that consensus checks are in order.
-    mutex: Mutex<SharedState>,
+    mutex: RwLock<SharedState>,
     walsenders: Arc<WalSenders>,
     walreceivers: Arc<WalReceivers>,
 
@@ -388,11 +397,7 @@ pub struct Timeline {
 
 impl Timeline {
     /// Load existing timeline from disk.
-    pub fn load_timeline(
-        conf: &SafeKeeperConf,
-        ttid: TenantTimelineId,
-        wal_backup_launcher_tx: Sender<TenantTimelineId>,
-    ) -> Result<Timeline> {
+    pub fn load_timeline(conf: &SafeKeeperConf, ttid: TenantTimelineId) -> Result<Timeline> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
         let shared_state = SharedState::restore(conf, &ttid)?;
@@ -402,17 +407,19 @@ impl Timeline {
             shared_state.sk.get_term(),
             shared_state.sk.flush_lsn(),
         )));
+        let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
 
         let walreceivers = WalReceivers::new();
         Ok(Timeline {
             ttid,
-            wal_backup_launcher_tx,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
             term_flush_lsn_watch_tx,
             term_flush_lsn_watch_rx,
-            mutex: Mutex::new(shared_state),
+            shared_state_version_tx,
+            shared_state_version_rx,
+            mutex: RwLock::new(shared_state),
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
             cancellation_rx,
@@ -426,7 +433,6 @@ impl Timeline {
     pub fn create_empty(
         conf: &SafeKeeperConf,
         ttid: TenantTimelineId,
-        wal_backup_launcher_tx: Sender<TenantTimelineId>,
         server_info: ServerInfo,
         commit_lsn: Lsn,
         local_start_lsn: Lsn,
@@ -434,19 +440,22 @@ impl Timeline {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) = watch::channel(Lsn::INVALID);
         let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) =
             watch::channel(TermLsn::from((INVALID_TERM, Lsn::INVALID)));
+        let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
+
         let state =
             TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
         let walreceivers = WalReceivers::new();
         Ok(Timeline {
             ttid,
-            wal_backup_launcher_tx,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
             term_flush_lsn_watch_tx,
             term_flush_lsn_watch_rx,
-            mutex: Mutex::new(SharedState::create_new(conf, &ttid, state)?),
+            shared_state_version_tx,
+            shared_state_version_rx,
+            mutex: RwLock::new(SharedState::create_new(conf, &ttid, state)?),
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
             cancellation_rx,
@@ -463,7 +472,7 @@ impl Timeline {
     /// and state on disk should remain unchanged.
     pub async fn init_new(
         self: &Arc<Timeline>,
-        shared_state: &mut MutexGuard<'_, SharedState>,
+        shared_state: &mut WriteGuardSharedState<'_>,
         conf: &SafeKeeperConf,
     ) -> Result<()> {
         match fs::metadata(&self.timeline_dir).await {
@@ -501,10 +510,15 @@ impl Timeline {
 
     /// Bootstrap new or existing timeline starting background stasks.
     pub fn bootstrap(self: &Arc<Timeline>, conf: &SafeKeeperConf) {
+        // Start manager task which will monitor timeline state and update
+        // background tasks.
+        tokio::spawn(timeline_manager::main_task(self.clone(), conf.clone()));
+
         // Start recovery task which always runs on the timeline.
         if conf.peer_recovery_enabled {
             tokio::spawn(recovery_main(self.clone(), conf.clone()));
         }
+        // TODO: migrate to timeline_manager
         if conf.is_wal_backup_enabled() && conf.partial_backup_enabled {
             tokio::spawn(wal_backup_partial::main_task(self.clone(), conf.clone()));
         }
@@ -517,7 +531,7 @@ impl Timeline {
     /// deletion API endpoint is retriable.
     pub async fn delete(
         &self,
-        shared_state: &mut MutexGuard<'_, SharedState>,
+        shared_state: &mut WriteGuardSharedState<'_>,
         only_local: bool,
     ) -> Result<(bool, bool)> {
         let was_active = shared_state.active;
@@ -539,13 +553,7 @@ impl Timeline {
 
     /// Cancel timeline to prevent further usage. Background tasks will stop
     /// eventually after receiving cancellation signal.
-    ///
-    /// Note that we can't notify backup launcher here while holding
-    /// shared_state lock, as this is a potential deadlock: caller is
-    /// responsible for that. Generally we should probably make WAL backup tasks
-    /// to shut down on their own, checking once in a while whether it is the
-    /// time.
-    fn cancel(&self, shared_state: &mut MutexGuard<'_, SharedState>) {
+    fn cancel(&self, shared_state: &mut WriteGuardSharedState<'_>) {
         info!("timeline {} is cancelled", self.ttid);
         let _ = self.cancellation_tx.send(true);
         // Close associated FDs. Nobody will be able to touch timeline data once
@@ -569,28 +577,26 @@ impl Timeline {
     }
 
     /// Take a writing mutual exclusive lock on timeline shared_state.
-    pub async fn write_shared_state(&self) -> MutexGuard<SharedState> {
-        self.mutex.lock().await
+    pub async fn write_shared_state<'a>(self: &'a Arc<Self>) -> WriteGuardSharedState<'a> {
+        WriteGuardSharedState::new(self.clone(), self.mutex.write().await)
     }
 
-    async fn update_status(&self, shared_state: &mut SharedState) -> bool {
-        shared_state
-            .update_status(self.walreceivers.get_num(), self.ttid)
-            .await
+    pub async fn read_shared_state(&self) -> ReadGuardSharedState {
+        self.mutex.read().await
     }
 
-    /// Update timeline status and kick wal backup launcher to stop/start offloading if needed.
-    pub async fn update_status_notify(&self) -> Result<()> {
+    async fn update_status(&self, shared_state: &mut SharedState) {
+        shared_state.update_status(self.ttid).await
+    }
+
+    /// Update timeline status.
+    pub async fn update_status_notify(self: &Arc<Self>) -> Result<()> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
-        let is_wal_backup_action_pending: bool = {
+        {
             let mut shared_state = self.write_shared_state().await;
-            self.update_status(&mut shared_state).await
-        };
-        if is_wal_backup_action_pending {
-            // Can fail only if channel to a static thread got closed, which is not normal at all.
-            self.wal_backup_launcher_tx.send(self.ttid).await?;
+            self.update_status(&mut shared_state).await;
         }
         Ok(())
     }
@@ -604,7 +610,7 @@ impl Timeline {
         if self.is_cancelled() {
             return true;
         }
-        let shared_state = self.write_shared_state().await;
+        let shared_state = self.read_shared_state().await;
         if self.walreceivers.get_num() == 0 {
             return shared_state.sk.state.inmem.commit_lsn == Lsn(0) || // no data at all yet
             reported_remote_consistent_lsn >= shared_state.sk.state.inmem.commit_lsn;
@@ -612,9 +618,9 @@ impl Timeline {
         false
     }
 
-    /// Ensure taht current term is t, erroring otherwise, and lock the state.
-    pub async fn acquire_term(&self, t: Term) -> Result<MutexGuard<SharedState>> {
-        let ss = self.write_shared_state().await;
+    /// Ensure that current term is t, erroring otherwise, and lock the state.
+    pub async fn acquire_term(&self, t: Term) -> Result<ReadGuardSharedState> {
+        let ss = self.read_shared_state().await;
         if ss.sk.state.acceptor_state.term != t {
             bail!(
                 "failed to acquire term {}, current term {}",
@@ -623,18 +629,6 @@ impl Timeline {
             );
         }
         Ok(ss)
-    }
-
-    /// Returns whether s3 offloading is required and sets current status as
-    /// matching it.
-    pub async fn wal_backup_attend(&self) -> bool {
-        if self.is_cancelled() {
-            return false;
-        }
-
-        self.write_shared_state()
-            .await
-            .wal_backup_attend(self.walreceivers.get_num())
     }
 
     /// Returns commit_lsn watch channel.
@@ -647,9 +641,14 @@ impl Timeline {
         self.term_flush_lsn_watch_rx.clone()
     }
 
+    /// Returns watch channel for SharedState update version.
+    pub fn get_state_version_rx(&self) -> watch::Receiver<usize> {
+        self.shared_state_version_rx.clone()
+    }
+
     /// Pass arrived message to the safekeeper.
     pub async fn process_msg(
-        &self,
+        self: &Arc<Self>,
         msg: &ProposerAcceptorMessage,
     ) -> Result<Option<AcceptorProposerMessage>> {
         if self.is_cancelled() {
@@ -657,8 +656,6 @@ impl Timeline {
         }
 
         let mut rmsg: Option<AcceptorProposerMessage>;
-        let commit_lsn: Lsn;
-        let term_flush_lsn: TermLsn;
         {
             let mut shared_state = self.write_shared_state().await;
             rmsg = shared_state.sk.process_msg(msg).await?;
@@ -667,19 +664,13 @@ impl Timeline {
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
                 resp.hs_feedback = self.walsenders.get_hotstandby().hs_feedback;
             }
-
-            commit_lsn = shared_state.sk.state.inmem.commit_lsn;
-            term_flush_lsn =
-                TermLsn::from((shared_state.sk.get_term(), shared_state.sk.flush_lsn()));
         }
-        self.term_flush_lsn_watch_tx.send(term_flush_lsn)?;
-        self.commit_lsn_watch_tx.send(commit_lsn)?;
         Ok(rmsg)
     }
 
     /// Returns wal_seg_size.
     pub async fn get_wal_seg_size(&self) -> usize {
-        self.write_shared_state().await.get_wal_seg_size()
+        self.read_shared_state().await.get_wal_seg_size()
     }
 
     /// Returns true only if the timeline is loaded and active.
@@ -688,22 +679,22 @@ impl Timeline {
             return false;
         }
 
-        self.write_shared_state().await.active
+        self.read_shared_state().await.active
     }
 
     /// Returns state of the timeline.
     pub async fn get_state(&self) -> (TimelineMemState, TimelinePersistentState) {
-        let state = self.write_shared_state().await;
+        let state = self.read_shared_state().await;
         (state.sk.state.inmem.clone(), state.sk.state.clone())
     }
 
     /// Returns latest backup_lsn.
     pub async fn get_wal_backup_lsn(&self) -> Lsn {
-        self.write_shared_state().await.sk.state.inmem.backup_lsn
+        self.read_shared_state().await.sk.state.inmem.backup_lsn
     }
 
     /// Sets backup_lsn to the given value.
-    pub async fn set_wal_backup_lsn(&self, backup_lsn: Lsn) -> Result<()> {
+    pub async fn set_wal_backup_lsn(self: &Arc<Self>, backup_lsn: Lsn) -> Result<()> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
@@ -717,40 +708,34 @@ impl Timeline {
 
     /// Get safekeeper info for broadcasting to broker and other peers.
     pub async fn get_safekeeper_info(&self, conf: &SafeKeeperConf) -> SafekeeperTimelineInfo {
-        let shared_state = self.write_shared_state().await;
         let standby_apply_lsn = self.walsenders.get_hotstandby().reply.apply_lsn;
+        let shared_state = self.read_shared_state().await;
         shared_state.get_safekeeper_info(&self.ttid, conf, standby_apply_lsn)
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub async fn record_safekeeper_info(&self, sk_info: SafekeeperTimelineInfo) -> Result<()> {
-        let is_wal_backup_action_pending: bool;
-        let commit_lsn: Lsn;
+    pub async fn record_safekeeper_info(
+        self: &Arc<Self>,
+        sk_info: SafekeeperTimelineInfo,
+    ) -> Result<()> {
         {
             let mut shared_state = self.write_shared_state().await;
             shared_state.sk.record_safekeeper_info(&sk_info).await?;
             let peer_info = PeerInfo::from_sk_info(&sk_info, Instant::now());
             shared_state.peers_info.upsert(&peer_info);
-            is_wal_backup_action_pending = self.update_status(&mut shared_state).await;
-            commit_lsn = shared_state.sk.state.inmem.commit_lsn;
-        }
-        self.commit_lsn_watch_tx.send(commit_lsn)?;
-        // Wake up wal backup launcher, if it is time to stop the offloading.
-        if is_wal_backup_action_pending {
-            self.wal_backup_launcher_tx.send(self.ttid).await?;
         }
         Ok(())
     }
 
     /// Update in memory remote consistent lsn.
-    pub async fn update_remote_consistent_lsn(&self, candidate: Lsn) {
+    pub async fn update_remote_consistent_lsn(self: &Arc<Self>, candidate: Lsn) {
         let mut shared_state = self.write_shared_state().await;
         shared_state.sk.state.inmem.remote_consistent_lsn =
             max(shared_state.sk.state.inmem.remote_consistent_lsn, candidate);
     }
 
     pub async fn get_peers(&self, conf: &SafeKeeperConf) -> Vec<PeerInfo> {
-        let shared_state = self.write_shared_state().await;
+        let shared_state = self.read_shared_state().await;
         shared_state.get_peers(conf.heartbeat_timeout)
     }
 
@@ -772,7 +757,7 @@ impl Timeline {
     /// depending on assembled quorum (e.g. classic picture 8 from Raft paper).
     /// Thus we don't try to predict it here.
     pub async fn recovery_needed(&self, heartbeat_timeout: Duration) -> RecoveryNeededInfo {
-        let ss = self.write_shared_state().await;
+        let ss = self.read_shared_state().await;
         let term = ss.sk.state.acceptor_state.term;
         let last_log_term = ss.sk.get_epoch();
         let flush_lsn = ss.sk.flush_lsn();
@@ -843,12 +828,12 @@ impl Timeline {
 
     /// Returns flush_lsn.
     pub async fn get_flush_lsn(&self) -> Lsn {
-        self.write_shared_state().await.sk.wal_store.flush_lsn()
+        self.read_shared_state().await.sk.wal_store.flush_lsn()
     }
 
     /// Delete WAL segments from disk that are no longer needed. This is determined
     /// based on pageserver's remote_consistent_lsn and local backup_lsn/peer_lsn.
-    pub async fn remove_old_wal(&self, wal_backup_enabled: bool) -> Result<()> {
+    pub async fn remove_old_wal(self: &Arc<Self>) -> Result<()> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
@@ -864,9 +849,8 @@ impl Timeline {
 
         let horizon_segno: XLogSegNo;
         let remover = {
-            let shared_state = self.write_shared_state().await;
-            horizon_segno =
-                shared_state.get_horizon_segno(wal_backup_enabled, replication_horizon_lsn);
+            let shared_state = self.read_shared_state().await;
+            horizon_segno = shared_state.get_horizon_segno(replication_horizon_lsn);
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(()); // nothing to do
             }
@@ -888,7 +872,7 @@ impl Timeline {
     /// passed after the last save. This helps to keep remote_consistent_lsn up
     /// to date so that storage nodes restart doesn't cause many pageserver ->
     /// safekeeper reconnections.
-    pub async fn maybe_persist_control_file(&self) -> Result<()> {
+    pub async fn maybe_persist_control_file(self: &Arc<Self>) -> Result<()> {
         self.write_shared_state()
             .await
             .sk
@@ -904,13 +888,13 @@ impl Timeline {
         }
 
         let (ps_feedback_count, last_ps_feedback) = self.walsenders.get_ps_feedback_stats();
-        let state = self.write_shared_state().await;
+        let state = self.read_shared_state().await;
         if state.active {
             Some(FullTimelineInfo {
                 ttid: self.ttid,
                 ps_feedback_count,
                 last_ps_feedback,
-                wal_backup_active: state.wal_backup_active,
+                wal_backup_active: false, // TODO: fill this
                 timeline_is_active: state.active,
                 num_computes: self.walreceivers.get_num() as u32,
                 last_removed_segno: state.last_removed_segno,
@@ -927,7 +911,7 @@ impl Timeline {
 
     /// Returns in-memory timeline state to build a full debug dump.
     pub async fn memory_dump(&self) -> debug_dump::Memory {
-        let state = self.write_shared_state().await;
+        let state = self.read_shared_state().await;
 
         let (write_lsn, write_record_lsn, flush_lsn, file_open) =
             state.sk.wal_store.internal_state();
@@ -936,7 +920,7 @@ impl Timeline {
             is_cancelled: self.is_cancelled(),
             peers_info_len: state.peers_info.0.len(),
             walsenders: self.walsenders.get_all(),
-            wal_backup_active: state.wal_backup_active,
+            wal_backup_active: false, // TODO: fill this
             active: state.active,
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: state.last_removed_segno,
@@ -951,7 +935,7 @@ impl Timeline {
 
     /// Apply a function to the control file state and persist it.
     pub async fn map_control_file<T>(
-        &self,
+        self: &Arc<Self>,
         f: impl FnOnce(&mut TimelinePersistentState) -> Result<T>,
     ) -> Result<T> {
         let mut state = self.write_shared_state().await;
