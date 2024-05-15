@@ -6,8 +6,8 @@ from typing import Optional
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, generate_uploads_and_deletions
-from fixtures.workload import Workload
 from fixtures.pageserver.http import PageserverApiException
+from fixtures.workload import Workload
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
