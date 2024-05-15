@@ -230,19 +230,20 @@ def test_uploads_and_deletions(
     # TODO remove these allowed errors
     # https://github.com/neondatabase/neon/issues/7707
     # https://github.com/neondatabase/neon/issues/7759
-    env.pageserver.allowed_errors.extend(
-        [
-            ".*duplicated L1 layer.*",
-            ".*delta layer created with.*duplicate values.*",
-            ".*assertion failed: self.lsn_range.start <= lsn.*",
-            ".*HTTP request handler task panicked: task.*panicked.*",
-        ]
-    )
+    allowed_errors = [
+        ".*duplicated L1 layer.*",
+        ".*delta layer created with.*duplicate values.*",
+        ".*assertion failed: self.lsn_range.start <= lsn.*",
+        ".*HTTP request handler task panicked: task.*panicked.*",
+    ]
+    env.pageserver.allowed_errors.extend(allowed_errors)
 
     try:
         generate_uploads_and_deletions(env, pageserver=env.pageserver)
     except PageserverApiException as e:
         log.info(f"Obtained PageserverApiException: {e}")
 
-    # We would like to assert for "duplicated L1 layer" here, but there is other errors that
-    # might occur flakily. Therefore, don't assert anything.
+    # The errors occur flakily and no error is ensured to occur,
+    # however at least one of them occurs.
+    if not any(env.pageserver.log_contains(e) for e in allowed_errors):
+        raise Exception("None of the allowed_errors occured in the log")
