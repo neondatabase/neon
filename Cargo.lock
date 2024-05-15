@@ -5952,7 +5952,7 @@ checksum = "81cdd64d312baedb58e21336b31bc043b77e01cc99033ce76ef539f78e965ebc"
 [[package]]
 name = "svg_fmt"
 version = "0.4.2"
-source = "git+https://github.com/neondatabase/fork--nical--rust_debug?branch=neon#c1820b28664b5df68de7f043fccf2ed5d67b6ae8"
+source = "git+https://github.com/nical/rust_debug?rev=28a7d96eecff2f28e75b1ea09f2d499a60d0e3b4#28a7d96eecff2f28e75b1ea09f2d499a60d0e3b4"
 
 [[package]]
 name = "syn"
