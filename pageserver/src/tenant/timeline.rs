@@ -2413,11 +2413,6 @@ impl Timeline {
         let shard = self.get_shard_index();
         let this = self.myself.upgrade().expect("&self method holds the arc");
 
-        if let Some(ref index_part) = index_part {
-            self.last_aux_file_policy
-                .store(index_part.last_aux_file_policy());
-        }
-
         let (loaded_layers, needs_cleanup, total_physical_size) = tokio::task::spawn_blocking({
             move || {
                 let _g = span.entered();

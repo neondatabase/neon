@@ -558,6 +558,10 @@ impl Tenant {
 
         if let Some(index_part) = index_part.as_ref() {
             timeline.remote_client.init_upload_queue(index_part)?;
+
+            timeline
+                .last_aux_file_policy
+                .store(index_part.last_aux_file_policy());
         } else {
             // No data on the remote storage, but we have local metadata file. We can end up
             // here with timeline_create being interrupted before finishing index part upload.
