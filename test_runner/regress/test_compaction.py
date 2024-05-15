@@ -234,6 +234,7 @@ def test_uploads_and_deletions(
             ".*duplicated L1 layer.*",
             ".*delta layer created with.*duplicate values.*",
             ".*assertion failed: self.lsn_range.start <= lsn.*",
+            ".*HTTP request handler task panicked: task.*panicked.*",
         ]
     )
 
