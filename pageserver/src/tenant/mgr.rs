@@ -1722,7 +1722,7 @@ impl TenantManager {
         for child_shard_id in &child_shards {
             let child_shard_id = *child_shard_id;
             let child_shard = {
-                let locked = TENANTS.read().unwrap();
+                let locked = self.tenants.read().unwrap();
                 let peek_slot =
                     tenant_map_peek_slot(&locked, &child_shard_id, TenantSlotPeekMode::Read)?;
                 peek_slot.and_then(|s| s.get_attached()).cloned()
@@ -1955,13 +1955,7 @@ impl TenantManager {
         deletion_queue_client: &DeletionQueueClient,
     ) -> Result<(), TenantStateError> {
         let tmp_path = self
-            .detach_tenant0(
-                conf,
-                &TENANTS,
-                tenant_shard_id,
-                detach_ignored,
-                deletion_queue_client,
-            )
+            .detach_tenant0(conf, tenant_shard_id, detach_ignored, deletion_queue_client)
             .await?;
         spawn_background_purge(tmp_path);
 
@@ -1971,7 +1965,6 @@ impl TenantManager {
     async fn detach_tenant0(
         &self,
         conf: &'static PageServerConf,
-        tenants: &std::sync::RwLock<TenantsMap>,
         tenant_shard_id: TenantShardId,
         detach_ignored: bool,
         deletion_queue_client: &DeletionQueueClient,
@@ -1986,7 +1979,7 @@ impl TenantManager {
         };
 
         let removal_result = remove_tenant_from_memory(
-            tenants,
+            self.tenants,
             tenant_shard_id,
             tenant_dir_rename_operation(tenant_shard_id),
         )
@@ -2022,7 +2015,7 @@ impl TenantManager {
     pub(crate) fn list_tenants(
         &self,
     ) -> Result<Vec<(TenantShardId, TenantState, Generation)>, TenantMapListError> {
-        let tenants = TENANTS.read().unwrap();
+        let tenants = self.tenants.read().unwrap();
         let m = match &*tenants {
             TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
@@ -2150,7 +2143,7 @@ impl TenantManager {
         // for handling the rare case that the slot we're accessing is InProgress.
         let tenant_shard = loop {
             let resolved = {
-                let locked = TENANTS.read().unwrap();
+                let locked = self.tenants.read().unwrap();
                 locked.resolve_attached_shard(&tenant_id, shard_selector)
             };
             match resolved {
