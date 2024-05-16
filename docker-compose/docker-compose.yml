@@ -30,6 +30,7 @@ services:
       - minio
 
   pageserver:
+    user: neon:neon
     restart: always
     image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
     environment:
@@ -37,6 +38,19 @@ services:
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
+    build:
+      context: .
+      args:
+        - |
+          PAGESERVER_CONFIG=
+          broker_endpoint=$BROKER_ENDPOINT
+          listen_pg_addr='0.0.0.0:6400'
+          listen_http_addr='0.0.0.0:9898'
+          remote_storage={
+          endpoint='http://minio:9000'
+          bucket_name='neon'
+          bucket_region='eu-north-1'
+          prefix_in_bucket='/pageserver'
     ports:
        #- 6400:6400  # pg protocol handler
        - 9898:9898 # http endpoints
@@ -44,14 +58,7 @@ services:
       - "/bin/sh"
       - "-c"
     command:
-      - "/usr/local/bin/pageserver -D /data/.neon/
-                                   -c \"broker_endpoint=$$BROKER_ENDPOINT\"
-                                   -c \"listen_pg_addr='0.0.0.0:6400'\"
-                                   -c \"listen_http_addr='0.0.0.0:9898'\"
-                                   -c \"remote_storage={endpoint='http://minio:9000',
-                                                        bucket_name='neon',
-                                                        bucket_region='eu-north-1',
-                                                        prefix_in_bucket='/pageserver/'}\""
+     - "/usr/local/bin/pageserver -D /data/.neon/"
     depends_on:
       - storage_broker
       - minio_create_buckets
