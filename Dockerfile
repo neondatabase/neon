@@ -36,7 +36,7 @@ ARG RUSTC_WRAPPER=cachepot
 ENV AWS_REGION=eu-central-1
 ENV CACHEPOT_S3_KEY_PREFIX=cachepot
 ARG CACHEPOT_BUCKET=neon-github-dev
-ARG PAGESERVER_CONFIG="broker_endpoint='http://storage_broker:50051'\n"\
+ENV PAGESERVER_CONFIG="broker_endpoint='http://storage_broker:50051'\n"\
 "pg_distrib_dir='/usr/local/'\n"\
 "listen_pg_addr='0.0.0.0:6400'\n"\
 "listen_http_addr='0.0.0.0:9898'\n"
@@ -110,3 +110,5 @@ VOLUME ["/data"]
 USER neon
 EXPOSE 6400
 EXPOSE 9898
+
+CMD chown -R neon:neon /data/.neon && /usr/local/bin/pageserver -D /data/.neon

@@ -36,27 +36,11 @@ services:
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
-    build:
-      context: ../
-      args:
-        - |
-          PAGESERVER_CONFIG=
-          broker_endpoint='http://storage_broker:50051'
-          listen_pg_addr='0.0.0.0:6400'
-          listen_http_addr='0.0.0.0:9898'
-          remote_storage={
-          endpoint='http://minio:9000'
-          bucket_name='neon'
-          bucket_region='eu-north-1'
-          prefix_in_bucket='/pageserver'
     ports:
        #- 6400:6400  # pg protocol handler
        - 9898:9898 # http endpoints
-    entrypoint:
-      - "/bin/sh"
-      - "-c"
-    command:
-     - "/usr/local/bin/pageserver -D /data/.neon/"
+    volumes:
+      - ./pageserver_config:/data/.neon/
     depends_on:
       - storage_broker
       - minio_create_buckets
