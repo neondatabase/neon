@@ -107,13 +107,20 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         for line in stderr.split("\n"):
             match = re.match(r"progress: ([0-9\.]+) s, ([0-9\.]+) tps, .* ([0-9]+) failed", line)
             if match is None:
-                continue
+                # Fall back to older-version pgbench output (omits failure count)
+                match = re.match(r"progress: ([0-9\.]+) s, ([0-9\.]+) tps, .*", line)
+                if match is None:
+                    continue
+                else:
+                    (_time, tps) = match.groups()
+                    tps = float(tps)
+                    failed = 0
             else:
-                matched_lines += 1
+                (_time, tps, failed) = match.groups()  # type: ignore
+                tps = float(tps)
+                failed = int(failed)
 
-            (_time, tps, failed) = match.groups()
-            tps = float(tps)
-            failed = int(failed)
+            matched_lines += 1
 
             if failed > 0:
                 raise RuntimeError(
