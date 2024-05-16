@@ -47,7 +47,7 @@ pub struct WalBackupTaskHandle {
     handle: JoinHandle<()>,
 }
 
-/// Do we have anything to upload to S3, i.e. should we run the backup task?
+/// Do we have anything to upload to S3, i.e. should safekeepers run backup activity?
 pub fn is_wal_backup_required(
     wal_seg_size: usize,
     num_computes: usize,
@@ -68,11 +68,16 @@ pub async fn update_task(
     state: &StateSnapshot,
     entry: &mut Option<WalBackupTaskHandle>,
 ) {
-    let (offloader, election_dbg_str) =
-        determine_offloader(&state.peers, state.backup_lsn, ttid, conf);
-    let elected_me = Some(conf.my_id) == offloader;
-    let should_task_run = need_backup && elected_me;
+    let (should_task_run, election_dbg_str) = if need_backup {
+        let (offloader, election_dbg_str) =
+            determine_offloader(&state.peers, state.backup_lsn, ttid, conf);
+        let elected_me = Some(conf.my_id) == offloader;
+        (elected_me, election_dbg_str)
+    } else {
+        (false, String::new())
+    };
 
+    // start or stop the task
     if should_task_run != (entry.is_some()) {
         if should_task_run {
             info!("elected for backup: {}", election_dbg_str);

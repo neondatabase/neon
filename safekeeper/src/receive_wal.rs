@@ -113,7 +113,7 @@ impl WalReceivers {
         self.mutex.lock().get_num()
     }
 
-    /// Get number of walreceivers (compute connections).
+    /// Get channel for number of walreceivers.
     pub fn get_num_rx(self: &Arc<WalReceivers>) -> tokio::sync::watch::Receiver<usize> {
         self.num_computes_rx.clone()
     }

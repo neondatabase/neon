@@ -46,7 +46,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let timelines_set = GlobalTimelines::get_global_broker_active_set();
+    let active_timelines_set = GlobalTimelines::get_global_broker_active_set();
 
     let mut client =
         storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)?;
@@ -59,7 +59,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
             // sensitive and there is no risk of deadlock as we don't await while
             // lock is held.
             let now = Instant::now();
-            let all_tlis = timelines_set.get_all();
+            let all_tlis = active_timelines_set.get_all();
             let mut n_pushed_tlis = 0;
             for tli in &all_tlis {
                 let sk_info = tli.get_safekeeper_info(&conf).await;

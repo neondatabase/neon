@@ -12,6 +12,7 @@ use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tracing::*;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
@@ -327,6 +328,8 @@ impl GlobalTimelines {
         let tli_res = TIMELINES_STATE.lock().unwrap().get(ttid);
         match tli_res {
             Ok(timeline) => {
+                let was_active = timeline.broker_active.load(Ordering::Relaxed);
+
                 // Take a lock and finish the deletion holding this mutex.
                 let mut shared_state = timeline.write_shared_state().await;
 
@@ -340,7 +343,7 @@ impl GlobalTimelines {
 
                 Ok(TimelineDeleteForceResult {
                     dir_existed,
-                    was_active: true, // TODO: we probably should remove this field
+                    was_active, // TODO: we probably should remove this field
                 })
             }
             Err(_) => {
