@@ -955,6 +955,14 @@ impl<'a> TenantDownloader<'a> {
             &self.secondary_state.cancel
         );
 
+        let local_path = local_layer_path(
+            self.conf,
+            tenant_shard_id,
+            timeline_id,
+            &layer.name,
+            &layer.metadata.generation,
+        );
+
         // Note: no backoff::retry wrapper here because download_layer_file does its own retries internally
         let downloaded_bytes = match download_layer_file(
             self.conf,
@@ -963,6 +971,7 @@ impl<'a> TenantDownloader<'a> {
             *timeline_id,
             &layer.name,
             &LayerFileMetadata::from(&layer.metadata),
+            &local_path,
             &self.secondary_state.cancel,
             ctx,
         )

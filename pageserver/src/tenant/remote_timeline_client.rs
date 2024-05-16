@@ -518,6 +518,7 @@ impl RemoteTimelineClient {
         &self,
         layer_file_name: &LayerName,
         layer_metadata: &LayerFileMetadata,
+        local_path: &Utf8Path,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<u64> {
@@ -536,6 +537,7 @@ impl RemoteTimelineClient {
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
+                local_path,
                 cancel,
                 ctx,
             )
