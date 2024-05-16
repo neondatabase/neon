@@ -890,7 +890,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
       # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
