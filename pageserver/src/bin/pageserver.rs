@@ -26,7 +26,7 @@ use tracing::*;
 
 use metrics::set_build_info_metric;
 use pageserver::{
-    config::{defaults::*, PageServerConf},
+    config::PageServerConf,
     context::{DownloadBehavior, RequestContext},
     deletion_queue::DeletionQueue,
     http, page_cache, page_service, task_mgr,
@@ -171,33 +171,26 @@ fn initialize_config(
         }
     };
 
-    let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
+    let config: toml_edit::Document = match std::fs::File::open(cfg_file_path) {
         Ok(mut f) => {
             let md = f.metadata().context("stat config file")?;
             if md.is_file() {
                 let mut s = String::new();
                 f.read_to_string(&mut s).context("read config file")?;
-                Some(s.parse().context("parse config file toml")?)
+                s.parse().context("parse config file toml")?
             } else {
                 anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
         }
     };
 
-    let effective_config = file_contents.unwrap_or_else(|| {
-        DEFAULT_CONFIG_FILE
-            .parse()
-            .expect("unit tests ensure this works")
-    });
-
-    debug!("Resulting toml: {effective_config}");
+    debug!("Using pageserver toml: {config}");
 
     // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(identity.node_id, &effective_config, workdir)
+    let conf = PageServerConf::parse_and_validate(identity.node_id, &config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
     Ok(Box::leak(Box::new(conf)))
