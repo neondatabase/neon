@@ -4494,10 +4494,15 @@ impl Timeline {
 
     async fn rewrite_layers(
         self: &Arc<Self>,
-        replace_layers: Vec<(Layer, ResidentLayer)>,
-        drop_layers: Vec<Layer>,
+        mut replace_layers: Vec<(Layer, ResidentLayer)>,
+        mut drop_layers: Vec<Layer>,
     ) -> anyhow::Result<()> {
         let mut guard = self.layers.write().await;
+
+        // Trim our lists in case our caller (compaction) raced with someone else (GC) removing layers: we want
+        // to avoid double-removing, and avoid rewriting something that was removed.
+        replace_layers.retain(|(l, _)| guard.contains(l));
+        drop_layers.retain(|l| guard.contains(l));
 
         guard.rewrite_layers(&replace_layers, &drop_layers, &self.metrics);
 

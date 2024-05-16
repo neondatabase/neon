@@ -194,7 +194,16 @@ impl Timeline {
         // We will use the Lsn cutoff of the last GC as a threshold for rewriting layers: if a
         // layer is behind this Lsn, it indicates that the layer is being retained beyond the
         // pitr_interval, for example because a branchpoint references it.
-        let last_gc_cutoff = self.gc_info.read().unwrap().cutoffs.pitr;
+        //
+        // Holding this read guard also blocks [`Self::gc_timeline`] from entering while we
+        // are rewriting layers.
+        let latest_gc_cutoff = self.get_latest_gc_cutoff_lsn();
+
+        tracing::info!(
+            "latest_gc_cutoff: {}, pitr cutoff {}",
+            *latest_gc_cutoff,
+            self.gc_info.read().unwrap().cutoffs.pitr
+        );
 
         let layers = self.layers.read().await;
         for layer_desc in layers.layer_map().iter_historic_layers() {
@@ -253,9 +262,9 @@ impl Timeline {
 
             // Don't bother re-writing a layer if it is within the PITR window: it will age-out eventually
             // without incurring the I/O cost of a rewrite.
-            if layer_desc.get_lsn_range().end >= last_gc_cutoff {
+            if layer_desc.get_lsn_range().end >= *latest_gc_cutoff {
                 debug!(%layer, "Skipping rewrite of layer still in GC window ({} >= {})",
-                    layer_desc.get_lsn_range().end, last_gc_cutoff);
+                    layer_desc.get_lsn_range().end, *latest_gc_cutoff);
                 continue;
             }
 
