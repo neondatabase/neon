@@ -412,6 +412,13 @@ struct PageServerConfigBuilder {
 }
 
 impl PageServerConfigBuilder {
+    fn new(node_id: NodeId) -> Self {
+        let mut this = Self::default();
+        this.id(node_id);
+
+        this
+    }
+
     #[inline(always)]
     fn default_values() -> Self {
         use self::BuilderValue::*;
@@ -928,8 +935,12 @@ impl PageServerConf {
     /// validating the input and failing on errors.
     ///
     /// This leaves any options not present in the file in the built-in defaults.
-    pub fn parse_and_validate(toml: &Document, workdir: &Utf8Path) -> anyhow::Result<Self> {
-        let mut builder = PageServerConfigBuilder::default();
+    pub fn parse_and_validate(
+        node_id: NodeId,
+        toml: &Document,
+        workdir: &Utf8Path,
+    ) -> anyhow::Result<Self> {
+        let mut builder = PageServerConfigBuilder::new(node_id);
         builder.workdir(workdir.to_owned());
 
         let mut t_conf = TenantConfOpt::default();
@@ -960,7 +971,8 @@ impl PageServerConf {
                 "tenant_config" => {
                     t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
                 }
-                "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
+                "id" => {}, // Ignoring `id` field in pageserver.toml - using identity.toml as the source of truth
+                            // Logging is not set up yet, so we can't do it.
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
                 "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
                 "log_format" => builder.log_format(
@@ -1330,7 +1342,7 @@ background_task_maximum_delay = '334 s'
         );
         let toml = config_string.parse()?;
 
-        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
             .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
@@ -1414,7 +1426,7 @@ background_task_maximum_delay = '334 s'
         );
         let toml = config_string.parse()?;
 
-        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
             .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
@@ -1504,12 +1516,13 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for the local FS");
+            let parsed_remote_storage_config =
+                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
+                    })
+                    .remote_storage_config
+                    .expect("Should have remote storage config for the local FS");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -1565,12 +1578,13 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for S3");
+            let parsed_remote_storage_config =
+                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
+                    })
+                    .remote_storage_config
+                    .expect("Should have remote storage config for S3");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -1611,7 +1625,7 @@ trace_read_requests = {trace_read_requests}"#,
 
         let toml = config_string.parse()?;
 
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+        let conf = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)?;
         assert_eq!(
             conf.default_tenant_conf.trace_read_requests, trace_read_requests,
             "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
@@ -1677,7 +1691,7 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse()?;
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+        let conf = PageServerConf::parse_and_validate(NodeId(222), &toml, &workdir)?;
 
         assert_eq!(conf.pg_distrib_dir, pg_distrib_dir);
         assert_eq!(
@@ -1738,7 +1752,7 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse().unwrap();
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir).unwrap();
+        let conf = PageServerConf::parse_and_validate(NodeId(222), &toml, &workdir).unwrap();
 
         match &conf.default_tenant_conf.eviction_policy {
             EvictionPolicy::OnlyImitiate(t) => {

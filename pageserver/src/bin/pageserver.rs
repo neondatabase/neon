@@ -2,11 +2,11 @@
 
 //! Main entry point for the Page Server executable.
 
+use std::env;
 use std::env::{var, VarError};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use camino::Utf8Path;
@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
     env::set_current_dir(&workdir)
         .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
-    let conf = initialize_config(&identity_file_path, &cfg_file_path, arg_matches, &workdir)?;
+    let conf = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
 
     // Initialize logging.
     //
@@ -145,7 +145,6 @@ fn main() -> anyhow::Result<()> {
 fn initialize_config(
     identity_file_path: &Utf8Path,
     cfg_file_path: &Utf8Path,
-    arg_matches: clap::ArgMatches,
     workdir: &Utf8Path,
 ) -> anyhow::Result<&'static PageServerConf> {
     // An identity file may be present on disk for new pageservers.
@@ -195,7 +194,7 @@ fn initialize_config(
     debug!("Resulting toml: {effective_config}");
 
     // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
+    let conf = PageServerConf::parse_and_validate(identity.node_id, &effective_config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
     Ok(Box::leak(Box::new(conf)))
