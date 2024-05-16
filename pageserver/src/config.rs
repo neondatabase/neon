@@ -1691,7 +1691,7 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse()?;
-        let conf = PageServerConf::parse_and_validate(NodeId(222), &toml, &workdir)?;
+        let conf = PageServerConf::parse_and_validate(NodeId(333), &toml, &workdir)?;
 
         assert_eq!(conf.pg_distrib_dir, pg_distrib_dir);
         assert_eq!(
@@ -1707,7 +1707,11 @@ threshold = "20m"
                 .evictions_low_residence_duration_metric_threshold,
             Duration::from_secs(20 * 60)
         );
-        assert_eq!(conf.id, NodeId(222));
+
+        // Assert that the node id provided by the indentity file (threaded
+        // through the call to [`PageServerConf::parse_and_validate`] is
+        // used.
+        assert_eq!(conf.id, NodeId(333));
         assert_eq!(
             conf.disk_usage_based_eviction,
             Some(DiskUsageEvictionTaskConfig {
