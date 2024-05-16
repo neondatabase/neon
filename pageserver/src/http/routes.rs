@@ -1,6 +1,8 @@
 //!
 //! Management HTTP API
 //!
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -2374,7 +2376,27 @@ async fn post_top_n_tenants(
         }
     }
 
-    let mut top_n = Vec::new();
+    #[derive(Eq, PartialEq)]
+    struct HeapItem {
+        metric: u64,
+        sizes: TopNTenantShardItem,
+    }
+
+    impl PartialOrd for HeapItem {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    /// Heap items have reverse ordering on their metric: this enables using BinaryHeap, which
+    /// supports popping the greatest item but not the smallest.
+    impl Ord for HeapItem {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            Reverse(self.metric).cmp(&Reverse(other.metric))
+        }
+    }
+
+    let mut top_n: BinaryHeap<HeapItem> = BinaryHeap::with_capacity(request.limit);
 
     // FIXME: this is a lot of clones to take this tenant list
     for (tenant_shard_id, tenant_slot) in state.tenant_manager.list() {
@@ -2400,37 +2422,30 @@ async fn post_top_n_tenants(
             }
         };
 
-        // Insert to vector keeping it sorted
-        match top_n.last() {
+        match top_n.peek() {
             None => {
                 // Top N list is empty: candidate becomes first member
-                top_n.push((metric, sizes));
+                top_n.push(HeapItem { metric, sizes });
             }
-            Some(last) if last.0 > metric && top_n.len() < request.limit => {
+            Some(i) if i.metric > metric && top_n.len() < request.limit => {
                 // Lowest item in list is greater than our candidate, but we aren't at limit yet: push to end
-                top_n.push((metric, sizes));
+                top_n.push(HeapItem { metric, sizes });
             }
-            Some(last) if last.0 > metric => {
+            Some(i) if i.metric > metric => {
                 // List is at limit and lowest value is greater than our candidate, drop it.
             }
-            Some(_) => {
-                // Find location to insert
-                for i in 0..top_n.len() {
-                    if top_n[i].0 < metric {
-                        top_n.insert(i, (metric, sizes));
-                        break;
-                    }
-                }
+            Some(_) => top_n.push(HeapItem { metric, sizes }),
+        }
 
-                top_n.truncate(request.limit);
-            }
+        while top_n.len() > request.limit {
+            top_n.pop();
         }
     }
 
     json_response(
         StatusCode::OK,
         TopNTenantShardsResponse {
-            shards: top_n.into_iter().map(|i| i.1).collect(),
+            shards: top_n.into_iter().map(|i| i.sizes).collect(),
         },
     )
 }

@@ -847,7 +847,7 @@ pub struct TopNTenantShardsRequest {
     pub where_gt: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct TopNTenantShardItem {
     pub id: TenantShardId,
 
