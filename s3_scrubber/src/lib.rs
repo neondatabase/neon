@@ -200,16 +200,11 @@ impl RootTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BucketConfig {
     pub region: String,
     pub bucket: String,
     pub prefix_in_bucket: Option<String>,
-}
-
-impl Display for BucketConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.region, self.bucket)
-    }
 }
 
 impl BucketConfig {
