@@ -725,16 +725,32 @@ impl Timeline {
             Some(AuxFilePolicy::CrossValidation) => {
                 let v1_result = self.list_aux_files_v1(lsn, ctx).await;
                 let v2_result = self.list_aux_files_v2(lsn, ctx).await;
+
                 match (v1_result, v2_result) {
                     (Ok(v1), Ok(v2)) => {
-                        if v1 != v2 {
-                            tracing::error!(
-                                "unmatched aux file v1 v2 result:\nv1 {v1:?}\nv2 {v2:?}"
-                            );
+                        for (path, contents) in &v1 {
+                            let later = v2.get(path);
+                            if later.is_some_and(|c2| c2 != contents) {
+                                tracing::error!(
+                                    "unmatched aux file v1 v2 result for {path:?}:\nv1 {contents:?}\nv2 {later:?}"
+                                );
+                                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                                    "unmatched aux file v1 v2 result: different results for {path:?}"
+                                )));
+                            }
+                        }
+
+                        if v1.len() < v2.len() {
+                            let extras = v2
+                                .keys()
+                                .filter(|x| !v1.contains_key(x.as_str()))
+                                .collect::<Vec<_>>();
+                            tracing::error!("unexpected v2 keys: {extras:?}");
                             return Err(PageReconstructError::Other(anyhow::anyhow!(
-                                "unmatched aux file v1 v2 result"
+                                "unmatched aux file v1 v2 result: extra v2 keys"
                             )));
                         }
+
                         Ok(v1)
                     }
                     (Ok(v1), Err(not_found)) if not_found.is_not_found() => {
