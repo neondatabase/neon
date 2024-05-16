@@ -5617,8 +5617,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn branch_copies_dirty_aux_file_flag() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("branch_copies_dirty_aux_file_flag")?;
+    async fn branch_copies_dirty_aux_file_flag() {
+        let harness = TenantHarness::create("branch_copies_dirty_aux_file_flag").unwrap();
         assert_eq!(
             harness.tenant_conf.switch_aux_file_policy,
             AuxFilePolicy::V1
@@ -5629,7 +5629,8 @@ mod tests {
 
         let tline: Arc<Timeline> = tenant
             .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
-            .await?;
+            .await
+            .unwrap();
 
         assert_eq!(
             tline.last_aux_file_policy.load(),
@@ -5642,8 +5643,9 @@ mod tests {
             let mut modification = tline.begin_modification(lsn);
             modification
                 .put_file("pg_logical/mappings/test1", b"first", &ctx)
-                .await?;
-            modification.commit(&ctx).await?;
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
         }
 
         // there is no tenant manager to pass the configuration through, so lets mimic it
@@ -5682,8 +5684,9 @@ mod tests {
             let mut modification = tline.begin_modification(lsn);
             modification
                 .put_file("pg_logical/mappings/test2", b"second", &ctx)
-                .await?;
-            modification.commit(&ctx).await?;
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
         }
 
         assert_eq!(
@@ -5700,7 +5703,8 @@ mod tests {
 
         let child = tenant
             .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
-            .await?;
+            .await
+            .unwrap();
 
         // child copies the last flag even if that is not on remote storage yet
         assert_eq!(child.get_switch_aux_file_policy(), AuxFilePolicy::V2);
@@ -5712,14 +5716,12 @@ mod tests {
 
         // even if we crash here without flushing parent timeline with it's new
         // last_aux_file_policy we are safe, because child was never meant to access ancestor's
-        // files. the ancestor can even switch back to V1 because of a migration.
-
-        Ok(())
+        // files. the ancestor can even switch back to V1 because of a migration safely.
     }
 
     #[tokio::test]
-    async fn aux_file_policy_is_not_switched_back() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("aux_file_policy_is_not_switched_back")?;
+    async fn aux_file_policy_is_not_switched_back() {
+        let harness = TenantHarness::create("aux_file_policy_is_not_switched_back").unwrap();
         assert_eq!(
             harness.tenant_conf.switch_aux_file_policy,
             AuxFilePolicy::V1
@@ -5730,7 +5732,8 @@ mod tests {
 
         let tline: Arc<Timeline> = tenant
             .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
-            .await?;
+            .await
+            .unwrap();
 
         assert_eq!(
             tline.last_aux_file_policy.load(),
@@ -5743,8 +5746,9 @@ mod tests {
             let mut modification = tline.begin_modification(lsn);
             modification
                 .put_file("pg_logical/mappings/test1", b"first", &ctx)
-                .await?;
-            modification.commit(&ctx).await?;
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
         }
 
         // there is no tenant manager to pass the configuration through, so lets mimic it
@@ -5783,8 +5787,9 @@ mod tests {
             let mut modification = tline.begin_modification(lsn);
             modification
                 .put_file("pg_logical/mappings/test2", b"second", &ctx)
-                .await?;
-            modification.commit(&ctx).await?;
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
         }
 
         assert_eq!(
@@ -5822,8 +5827,9 @@ mod tests {
             let mut modification = tline.begin_modification(lsn);
             modification
                 .put_file("pg_logical/mappings/test2", b"third", &ctx)
-                .await?;
-            modification.commit(&ctx).await?;
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
         }
 
         assert_eq!(
@@ -5866,8 +5872,9 @@ mod tests {
             let mut modification = tline.begin_modification(lsn);
             modification
                 .put_file("pg_logical/mappings/test3", b"last", &ctx)
-                .await?;
-            modification.commit(&ctx).await?;
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
         }
 
         assert_eq!(tline.get_switch_aux_file_policy(), AuxFilePolicy::V2);
@@ -5888,7 +5895,5 @@ mod tests {
             files.get("pg_logical/mappings/test3"),
             Some(&bytes::Bytes::from_static(b"last"))
         );
-
-        Ok(())
     }
 }
