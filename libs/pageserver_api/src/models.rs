@@ -818,7 +818,7 @@ pub struct TenantScanRemoteStorageResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TenantSorting {
     ResidentSize,
     MaxLogicalSize,
