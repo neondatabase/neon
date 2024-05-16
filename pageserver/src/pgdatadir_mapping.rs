@@ -1487,7 +1487,7 @@ impl<'a> DatadirModification<'a> {
             } else {
                 // This branch handles non-valid migration path, and the case that switch_policy == current_policy.
                 // And actually, because the migration path always allow unspecified -> *, this unwrap_or will never be hit.
-                current_policy.unwrap_or(AuxFilePolicy::V1)
+                current_policy.unwrap_or(AuxFilePolicy::default_tenant_config())
             }
         };
 

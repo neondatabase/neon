@@ -576,7 +576,7 @@ impl Default for TenantConf {
             lazy_slru_download: false,
             timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
-            switch_aux_file_policy: AuxFilePolicy::V1,
+            switch_aux_file_policy: AuxFilePolicy::default_tenant_config(),
         }
     }
 }

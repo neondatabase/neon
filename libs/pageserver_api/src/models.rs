@@ -336,6 +336,11 @@ impl AuxFilePolicy {
             (None, _) | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2)
         )
     }
+
+    /// If a tenant writes aux files without setting `switch_aux_policy`, this value will be used.
+    pub fn default_tenant_config() -> Self {
+        Self::V1
+    }
 }
 
 /// The aux file policy memory flag. Users can store `Option<AuxFilePolicy>` into this atomic flag. 0 == unspecified.
