@@ -1999,29 +1999,6 @@ impl Default for WalRedoProcessCounters {
 pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
     Lazy::new(WalRedoProcessCounters::default);
 
-#[cfg(not(test))]
-pub mod wal_redo {
-    use super::*;
-
-    static PROCESS_KIND: Lazy<std::sync::Mutex<UIntGaugeVec>> = Lazy::new(|| {
-        std::sync::Mutex::new(
-            register_uint_gauge_vec!(
-                "pageserver_wal_redo_process_kind",
-                "The configured process kind for walredo",
-                &["kind"],
-            )
-            .unwrap(),
-        )
-    });
-
-    pub fn set_process_kind_metric(kind: crate::walredo::ProcessKind) {
-        // use guard to avoid races around the next two steps
-        let guard = PROCESS_KIND.lock().unwrap();
-        guard.reset();
-        guard.with_label_values(&[&format!("{kind}")]).set(1);
-    }
-}
-
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,

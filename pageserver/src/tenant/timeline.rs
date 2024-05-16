@@ -200,7 +200,7 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
-    pub remote_client: Option<RemoteTimelineClient>,
+    pub remote_client: RemoteTimelineClient,
     pub deletion_queue_client: DeletionQueueClient,
     pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
@@ -272,7 +272,7 @@ pub struct Timeline {
 
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
-    pub remote_client: Option<Arc<RemoteTimelineClient>>,
+    pub remote_client: Arc<RemoteTimelineClient>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -1375,22 +1375,14 @@ impl Timeline {
     /// not validated with control plane yet.
     /// See [`Self::get_remote_consistent_lsn_visible`].
     pub(crate) fn get_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
-        if let Some(remote_client) = &self.remote_client {
-            remote_client.remote_consistent_lsn_projected()
-        } else {
-            None
-        }
+        self.remote_client.remote_consistent_lsn_projected()
     }
 
     /// remote_consistent_lsn which the tenant is guaranteed not to go backward from,
     /// i.e. a value of remote_consistent_lsn_projected which has undergone
     /// generation validation in the deletion queue.
     pub(crate) fn get_remote_consistent_lsn_visible(&self) -> Option<Lsn> {
-        if let Some(remote_client) = &self.remote_client {
-            remote_client.remote_consistent_lsn_visible()
-        } else {
-            None
-        }
+        self.remote_client.remote_consistent_lsn_visible()
     }
 
     /// The sum of the file size of all historic layers in the layer map.
@@ -1760,16 +1752,14 @@ impl Timeline {
             match self.freeze_and_flush().await {
                 Ok(_) => {
                     // drain the upload queue
-                    if let Some(client) = self.remote_client.as_ref() {
-                        // if we did not wait for completion here, it might be our shutdown process
-                        // didn't wait for remote uploads to complete at all, as new tasks can forever
-                        // be spawned.
-                        //
-                        // what is problematic is the shutting down of RemoteTimelineClient, because
-                        // obviously it does not make sense to stop while we wait for it, but what
-                        // about corner cases like s3 suddenly hanging up?
-                        client.shutdown().await;
-                    }
+                    // if we did not wait for completion here, it might be our shutdown process
+                    // didn't wait for remote uploads to complete at all, as new tasks can forever
+                    // be spawned.
+                    //
+                    // what is problematic is the shutting down of RemoteTimelineClient, because
+                    // obviously it does not make sense to stop while we wait for it, but what
+                    // about corner cases like s3 suddenly hanging up?
+                    self.remote_client.shutdown().await;
                 }
                 Err(e) => {
                     // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
@@ -1785,18 +1775,16 @@ impl Timeline {
 
         // Transition the remote_client into a state where it's only useful for timeline deletion.
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
-        if let Some(remote_client) = self.remote_client.as_ref() {
-            remote_client.stop();
-            // As documented in remote_client.stop()'s doc comment, it's our responsibility
-            // to shut down the upload queue tasks.
-            // TODO: fix that, task management should be encapsulated inside remote_client.
-            task_mgr::shutdown_tasks(
-                Some(TaskKind::RemoteUploadTask),
-                Some(self.tenant_shard_id),
-                Some(self.timeline_id),
-            )
-            .await;
-        }
+        self.remote_client.stop();
+        // As documented in remote_client.stop()'s doc comment, it's our responsibility
+        // to shut down the upload queue tasks.
+        // TODO: fix that, task management should be encapsulated inside remote_client.
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::RemoteUploadTask),
+            Some(self.tenant_shard_id),
+            Some(self.timeline_id),
+        )
+        .await;
 
         // TODO: work toward making this a no-op. See this funciton's doc comment for more context.
         tracing::debug!("Waiting for tasks...");
@@ -1921,10 +1909,6 @@ impl Timeline {
         let Some(layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
         };
-
-        if self.remote_client.is_none() {
-            return Ok(Some(false));
-        }
 
         layer.download().await?;
 
@@ -2190,7 +2174,7 @@ impl Timeline {
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
 
-                remote_client: resources.remote_client.map(Arc::new),
+                remote_client: Arc::new(resources.remote_client),
 
                 // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
                 last_record_lsn: SeqWait::new(RecordLsn {
@@ -2437,10 +2421,6 @@ impl Timeline {
                             discovered_layers.push((layer_file_name, local_path, file_size));
                             continue;
                         }
-                        Discovered::Metadata => {
-                            warn!("found legacy metadata file, these should have been removed in load_tenant_config");
-                            continue;
-                        }
                         Discovered::IgnoredBackup => {
                             continue;
                         }
@@ -2487,12 +2467,10 @@ impl Timeline {
                             if local.metadata.file_size() == remote.file_size() {
                                 // Use the local file, but take the remote metadata so that we pick up
                                 // the correct generation.
-                                UseLocal(
-                                    LocalLayerFileMetadata {
-                                        metadata: remote,
-                                        local_path: local.local_path
-                                    }
-                                )
+                                UseLocal(LocalLayerFileMetadata {
+                                    metadata: remote,
+                                    local_path: local.local_path,
+                                })
                             } else {
                                 init::cleanup_local_file_for_remote(&local, &remote)?;
                                 UseRemote { local, remote }
@@ -2501,7 +2479,11 @@ impl Timeline {
                         Ok(decision) => decision,
                         Err(DismissedLayer::Future { local }) => {
                             if let Some(local) = local {
-                                init::cleanup_future_layer(&local.local_path, &name, disk_consistent_lsn)?;
+                                init::cleanup_future_layer(
+                                    &local.local_path,
+                                    &name,
+                                    disk_consistent_lsn,
+                                )?;
                             }
                             needs_cleanup.push(name);
                             continue;
@@ -2523,7 +2505,8 @@ impl Timeline {
                     let layer = match decision {
                         UseLocal(local) => {
                             total_physical_size += local.metadata.file_size();
-                            Layer::for_resident(conf, &this, local.local_path, name, local.metadata).drop_eviction_guard()
+                            Layer::for_resident(conf, &this, local.local_path, name, local.metadata)
+                                .drop_eviction_guard()
                         }
                         Evicted(remote) | UseRemote { remote, .. } => {
                             Layer::for_evicted(conf, &this, name, remote)
@@ -2543,36 +2526,36 @@ impl Timeline {
 
         guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
-        if let Some(rtc) = self.remote_client.as_ref() {
-            rtc.schedule_layer_file_deletion(&needs_cleanup)?;
-            rtc.schedule_index_upload_for_file_changes()?;
-            // This barrier orders above DELETEs before any later operations.
-            // This is critical because code executing after the barrier might
-            // create again objects with the same key that we just scheduled for deletion.
-            // For example, if we just scheduled deletion of an image layer "from the future",
-            // later compaction might run again and re-create the same image layer.
-            // "from the future" here means an image layer whose LSN is > IndexPart::disk_consistent_lsn.
-            // "same" here means same key range and LSN.
-            //
-            // Without a barrier between above DELETEs and the re-creation's PUTs,
-            // the upload queue may execute the PUT first, then the DELETE.
-            // In our example, we will end up with an IndexPart referencing a non-existent object.
-            //
-            // 1. a future image layer is created and uploaded
-            // 2. ps restart
-            // 3. the future layer from (1) is deleted during load layer map
-            // 4. image layer is re-created and uploaded
-            // 5. deletion queue would like to delete (1) but actually deletes (4)
-            // 6. delete by name works as expected, but it now deletes the wrong (later) version
-            //
-            // See https://github.com/neondatabase/neon/issues/5878
-            //
-            // NB: generation numbers naturally protect against this because they disambiguate
-            //     (1) and (4)
-            rtc.schedule_barrier()?;
-            // Tenant::create_timeline will wait for these uploads to happen before returning, or
-            // on retry.
-        }
+        self.remote_client
+            .schedule_layer_file_deletion(&needs_cleanup)?;
+        self.remote_client
+            .schedule_index_upload_for_file_changes()?;
+        // This barrier orders above DELETEs before any later operations.
+        // This is critical because code executing after the barrier might
+        // create again objects with the same key that we just scheduled for deletion.
+        // For example, if we just scheduled deletion of an image layer "from the future",
+        // later compaction might run again and re-create the same image layer.
+        // "from the future" here means an image layer whose LSN is > IndexPart::disk_consistent_lsn.
+        // "same" here means same key range and LSN.
+        //
+        // Without a barrier between above DELETEs and the re-creation's PUTs,
+        // the upload queue may execute the PUT first, then the DELETE.
+        // In our example, we will end up with an IndexPart referencing a non-existent object.
+        //
+        // 1. a future image layer is created and uploaded
+        // 2. ps restart
+        // 3. the future layer from (1) is deleted during load layer map
+        // 4. image layer is re-created and uploaded
+        // 5. deletion queue would like to delete (1) but actually deletes (4)
+        // 6. delete by name works as expected, but it now deletes the wrong (later) version
+        //
+        // See https://github.com/neondatabase/neon/issues/5878
+        //
+        // NB: generation numbers naturally protect against this because they disambiguate
+        //     (1) and (4)
+        self.remote_client.schedule_barrier()?;
+        // Tenant::create_timeline will wait for these uploads to happen before returning, or
+        // on retry.
 
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
@@ -3025,9 +3008,6 @@ impl Timeline {
     /// should treat this as a cue to simply skip doing any heatmap uploading
     /// for this timeline.
     pub(crate) async fn generate_heatmap(&self) -> Option<HeatMapTimeline> {
-        // no point in heatmaps without remote client
-        let _remote_client = self.remote_client.as_ref()?;
-
         if !self.is_active() {
             return None;
         }
@@ -3055,10 +3035,7 @@ impl Timeline {
         // branchpoint in the value in IndexPart::lineage
         self.ancestor_lsn == lsn
             || (self.ancestor_lsn == Lsn::INVALID
-                && self
-                    .remote_client
-                    .as_ref()
-                    .is_some_and(|rtc| rtc.is_previous_ancestor_lsn(lsn)))
+                && self.remote_client.is_previous_ancestor_lsn(lsn))
     }
 }
 
@@ -3978,29 +3955,23 @@ impl Timeline {
             x.unwrap()
         ));
 
-        if let Some(remote_client) = &self.remote_client {
-            for layer in layers_to_upload {
-                remote_client.schedule_layer_file_upload(layer)?;
-            }
-            remote_client.schedule_index_upload_for_metadata_update(&update)?;
+        for layer in layers_to_upload {
+            self.remote_client.schedule_layer_file_upload(layer)?;
         }
+        self.remote_client
+            .schedule_index_upload_for_metadata_update(&update)?;
 
         Ok(())
     }
 
     pub(crate) async fn preserve_initdb_archive(&self) -> anyhow::Result<()> {
-        if let Some(remote_client) = &self.remote_client {
-            remote_client
-                .preserve_initdb_archive(
-                    &self.tenant_shard_id.tenant_id,
-                    &self.timeline_id,
-                    &self.cancel,
-                )
-                .await?;
-        } else {
-            bail!("No remote storage configured, but was asked to backup the initdb archive for {} / {}", self.tenant_shard_id.tenant_id, self.timeline_id);
-        }
-        Ok(())
+        self.remote_client
+            .preserve_initdb_archive(
+                &self.tenant_shard_id.tenant_id,
+                &self.timeline_id,
+                &self.cancel,
+            )
+            .await
     }
 
     // Write out the given frozen in-memory layer as a new L0 delta file. This L0 file will not be tracked
@@ -4361,12 +4332,7 @@ impl Timeline {
             return;
         }
 
-        if self
-            .remote_client
-            .as_ref()
-            .map(|c| c.is_deleting())
-            .unwrap_or(false)
-        {
+        if self.remote_client.is_deleting() {
             // The timeline was created in a deletion-resume state, we don't expect logical size to be populated
             return;
         }
@@ -4534,9 +4500,8 @@ impl Timeline {
         // deletion will happen later, the layer file manager calls garbage_collect_on_drop
         guard.finish_compact_l0(&remove_layers, &insert_layers, &self.metrics);
 
-        if let Some(remote_client) = self.remote_client.as_ref() {
-            remote_client.schedule_compaction_update(&remove_layers, new_deltas)?;
-        }
+        self.remote_client
+            .schedule_compaction_update(&remove_layers, new_deltas)?;
 
         drop_wlock(guard);
 
@@ -4554,9 +4519,8 @@ impl Timeline {
 
         let upload_layers: Vec<_> = replace_layers.into_iter().map(|r| r.1).collect();
 
-        if let Some(remote_client) = self.remote_client.as_ref() {
-            remote_client.schedule_compaction_update(&drop_layers, &upload_layers)?;
-        }
+        self.remote_client
+            .schedule_compaction_update(&drop_layers, &upload_layers)?;
 
         Ok(())
     }
@@ -4566,16 +4530,14 @@ impl Timeline {
         self: &Arc<Self>,
         new_images: impl IntoIterator<Item = ResidentLayer>,
     ) -> anyhow::Result<()> {
-        let Some(remote_client) = &self.remote_client else {
-            return Ok(());
-        };
         for layer in new_images {
-            remote_client.schedule_layer_file_upload(layer)?;
+            self.remote_client.schedule_layer_file_upload(layer)?;
         }
         // should any new image layer been created, not uploading index_part will
         // result in a mismatch between remote_physical_size and layermap calculated
         // size, which will fail some tests, but should not be an issue otherwise.
-        remote_client.schedule_index_upload_for_file_changes()?;
+        self.remote_client
+            .schedule_index_upload_for_file_changes()?;
         Ok(())
     }
 
@@ -4861,9 +4823,7 @@ impl Timeline {
 
             result.layers_removed = gc_layers.len() as u64;
 
-            if let Some(remote_client) = self.remote_client.as_ref() {
-                remote_client.schedule_gc_update(&gc_layers)?;
-            }
+            self.remote_client.schedule_gc_update(&gc_layers)?;
 
             guard.finish_gc_timeline(&gc_layers);
 
