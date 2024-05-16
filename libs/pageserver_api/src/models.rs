@@ -351,7 +351,7 @@ impl AtomicAuxFilePolicy {
     pub fn load(&self) -> Option<AuxFilePolicy> {
         // Using SeqCst memory order because this flag will be read from both write/read threads
         // and we want to guarantee the strongest consistency.
-        match self.0.load(std::sync::atomic::Ordering::SeqCst) {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
             0 => None,
             other => Some(AuxFilePolicy::from_usize(other)),
         }
@@ -360,7 +360,7 @@ impl AtomicAuxFilePolicy {
     pub fn store(&self, policy: Option<AuxFilePolicy>) {
         self.0.store(
             policy.map(AuxFilePolicy::to_usize).unwrap_or_default(),
-            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::Release,
         );
     }
 }
