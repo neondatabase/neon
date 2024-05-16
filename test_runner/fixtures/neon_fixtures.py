@@ -48,6 +48,7 @@ from urllib3.util.retry import Retry
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
+from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pageserver.allowed_errors import (
@@ -3372,6 +3373,13 @@ class Endpoint(PgProtocol):
         self.check_stop_result = check_stop_result
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
+
+    def http_client(
+        self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
+    ) -> EndpointHttpClient:
+        return EndpointHttpClient(
+            port=self.http_port,
+        )
 
     def create(
         self,
