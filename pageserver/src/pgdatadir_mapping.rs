@@ -1491,28 +1491,26 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let switch_policy = self.tline.get_switch_aux_file_policy();
-
         let policy = {
-            let current_policy = self.tline.last_aux_file_policy.load();
-            // Allowed switch path:
-            // * no aux files -> v1/v2/cross-validation
-            // * cross-validation->v2
-            if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
-                self.tline.last_aux_file_policy.store(Some(switch_policy));
-                info!("switching to aux file policy {:?}", switch_policy);
+            let wanted = self.tline.get_switch_aux_file_policy();
+            let current = self.tline.last_aux_file_policy.load();
+
+            if AuxFilePolicy::is_valid_migration_path(current, wanted) {
+                self.tline.last_aux_file_policy.store(Some(wanted));
+
+                // TODO: I don't think we even need to schedule the upload, because of the "child
+                // does not care about what files ancestor had" property
                 self.tline
                     .remote_client
-                    .schedule_index_upload_for_aux_file_policy_update(Some(switch_policy))?;
-                switch_policy
+                    .schedule_index_upload_for_aux_file_policy_update(Some(wanted))?;
+                info!(prev=?current, next=?wanted, "switching aux file policy");
+                wanted
             } else {
                 // This branch handles non-valid migration path, and the case that switch_policy == current_policy.
                 // And actually, because the migration path always allow unspecified -> *, this unwrap_or will never be hit.
-                current_policy.unwrap_or(AuxFilePolicy::V1)
+                current.unwrap_or(AuxFilePolicy::V1)
             }
         };
-
-        info!(?policy, ?path, "adding a file");
 
         if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
             let key = aux_file::encode_aux_file_key(path);
