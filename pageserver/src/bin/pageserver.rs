@@ -147,9 +147,12 @@ fn initialize_config(
     cfg_file_path: &Utf8Path,
     workdir: &Utf8Path,
 ) -> anyhow::Result<&'static PageServerConf> {
-    // An identity file may be present on disk for new pageservers.
-    // If that's the case, use it as the source of truth for the node id.
-    // Otherwise, use the id from the pageserver config file.
+    // The deployment orchestrator writes out an indentity file containing the node id
+    // for all pageservers. This file is the source of truth for the node id. In order
+    // to allow for rolling back pageserver releases, the node id is also included in
+    // the pageserver config that the deployment orchestrator writes to disk for the pageserver.
+    // A rolled back version of the pageserver will get the node id from the pageserver.toml
+    // config file.
     let identity = match std::fs::File::open(identity_file_path) {
         Ok(mut f) => {
             let md = f.metadata().context("stat config file")?;
