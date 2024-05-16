@@ -1827,11 +1827,9 @@ impl ResidentLayer {
     ) -> anyhow::Result<usize> {
         use LayerKind::*;
 
-        let key_range = self.layer_desc().key_range.clone();
-
         match self.downloaded.get(&self.owner.0, ctx).await? {
             Delta(_) => anyhow::bail!(format!("cannot filter() on a delta layer {self}")),
-            Image(i) => i.filter(key_range, shard_identity, writer, ctx).await,
+            Image(i) => i.filter(shard_identity, writer, ctx).await,
         }
     }
 

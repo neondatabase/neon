@@ -553,7 +553,6 @@ impl ImageLayerInner {
     /// then execute vectored GET operations, passing the results of all read keys into the writer.
     pub(super) async fn filter(
         &self,
-        range: Range<Key>,
         shard_identity: &ShardIdentity,
         writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
@@ -562,7 +561,8 @@ impl ImageLayerInner {
         let plan = self
             .plan_reads(
                 KeySpace {
-                    ranges: vec![range],
+                    // If asked for the total key space, plan_reads will give us all the keys in the layer
+                    ranges: vec![Key::MIN..Key::MAX],
                 },
                 Some(shard_identity),
                 ctx,
