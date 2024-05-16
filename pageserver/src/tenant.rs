@@ -2222,15 +2222,7 @@ impl Tenant {
             max_logical_size: 0,
         };
 
-        let timelines = self
-            .timelines
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for timeline in timelines {
+        for timeline in self.timelines.lock().unwrap().values() {
             result.resident_size += timeline.metrics.resident_physical_size_gauge.get();
 
             result.physical_size += timeline
