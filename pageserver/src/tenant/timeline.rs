@@ -4161,6 +4161,8 @@ impl Timeline {
         false
     }
 
+    /// Create image layers for Postgres data. Assumes the caller passes a partition that is not too large,
+    /// so that at most one image layer will be produced from this function.
     async fn create_image_layers_for_rel_blocks(
         self: &Arc<Self>,
         partition: &KeySpace,
@@ -4169,7 +4171,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         start: &mut Key,
-    ) -> Result<Vec<ResidentLayer>, CreateImageLayersError> {
+    ) -> Result<Option<ResidentLayer>, CreateImageLayersError> {
         let mut wrote_keys = false;
 
         let mut key_request_accum = KeySpaceAccum::new();
@@ -4236,25 +4238,25 @@ impl Timeline {
             }
         }
 
-        let mut image_layers = Vec::new();
-
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
             *start = img_range.end;
             let image_layer = image_layer_writer.finish(self, ctx).await?;
-            image_layers.push(image_layer);
+            Ok(Some(image_layer))
         } else {
             // Special case: the image layer may be empty if this is a sharded tenant and the
             // partition does not cover any keys owned by this shard.  In this case, to ensure
             // we don't leave gaps between image layers, leave `start` where it is, so that the next
             // layer we write will cover the key range that we just scanned.
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
+            Ok(None)
         }
-
-        Ok(image_layers)
     }
 
+    /// Create an image layer for metadata keys. This function produces one image layer for all metadata
+    /// keys for now. Because metadata keys cannot exceed basebackup size limit, the image layer for it
+    /// would not be too large to fit in a single image layer.
     #[allow(clippy::too_many_arguments)]
     async fn create_image_layers_for_metadata_keys(
         self: &Arc<Self>,
@@ -4265,7 +4267,7 @@ impl Timeline {
         img_range: Range<Key>,
         start: &mut Key,
         mode: ImageLayerCreationMode,
-    ) -> Result<Vec<ResidentLayer>, CreateImageLayersError> {
+    ) -> Result<Option<ResidentLayer>, CreateImageLayersError> {
         // Metadata keys image layer creation.
         let delta_file_accessed_begin = ctx
             .vectored_access_delta_file_cnt
@@ -4298,7 +4300,7 @@ impl Timeline {
         let trigger_generation = delta_file_accessed >= MAX_AUX_FILE_V2_DELTAS;
         info!("generate image layers for metadata keys: trigger_generation={trigger_generation}, delta_file_accessed={delta_file_accessed}, total_kb_retrieved={total_kb_retrieved}, total_key_retrieved={total_key_retrieved}");
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let has_keys = !data.is_empty();
         for (k, v) in data {
@@ -4317,10 +4319,10 @@ impl Timeline {
         *start = img_range.end;
         if has_keys {
             let image_layer = image_layer_writer.finish(self, ctx).await?;
-            Ok(vec![image_layer])
+            Ok(Some(image_layer))
         } else {
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
-            Ok(Vec::new())
+            Ok(None)
         }
     }
 
