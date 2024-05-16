@@ -507,6 +507,13 @@ pub(crate) enum PageReconstructError {
     MissingKey(MissingKeyError),
 }
 
+impl GetVectoredError {
+    #[cfg(test)]
+    pub(crate) fn is_missing_key_error(&self) -> bool {
+        matches!(self, Self::MissingKey(_))
+    }
+}
+
 #[derive(Debug)]
 pub struct MissingKeyError {
     key: Key,
@@ -3338,7 +3345,7 @@ impl Timeline {
             // image layer, which means that the key does not exist.
             for image_layer_keyspace in &covered {
                 // Get the overlapping of the image layer keyspace and the incomplete keyspace.
-                let removed = keyspace.remove_overlapping_with(&image_layer_keyspace);
+                let removed = keyspace.remove_overlapping_with(image_layer_keyspace);
                 if !removed.is_empty() {
                     break 'outer Some(removed);
                 }

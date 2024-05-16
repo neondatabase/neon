@@ -6107,4 +6107,250 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_vectored_missing_data_key_reads() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_vectored_missing_data_key_reads")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        let base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
+        let base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
+
+        let mut lsn = Lsn(0x20);
+
+        {
+            let mut writer = tline.writer().await;
+            writer
+                .put(base_key, lsn, &Value::Image(test_img("data key 1")), &ctx)
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+
+            tline.freeze_and_flush().await?; // this will create an image layer
+        }
+
+        let child = tenant
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
+            .await
+            .unwrap();
+
+        lsn.0 += 0x10;
+
+        {
+            let mut writer = child.writer().await;
+            writer
+                .put(
+                    base_key_child,
+                    lsn,
+                    &Value::Image(test_img("data key 2")),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+
+            child.freeze_and_flush().await?; // this will create an image layer
+        }
+
+        async fn get_vectored_impl_wrapper(
+            tline: &Arc<Timeline>,
+            key: Key,
+            lsn: Lsn,
+            ctx: &RequestContext,
+        ) -> Result<Option<Bytes>, GetVectoredError> {
+            let reconstruct_state = ValuesReconstructState::new();
+            let mut res = tline
+                .get_vectored_impl(
+                    KeySpace::single(key..key.next()),
+                    lsn,
+                    reconstruct_state,
+                    ctx,
+                )
+                .await?;
+            Ok(res.pop_last().map(|(k, v)| {
+                assert_eq!(k, key);
+                v.unwrap()
+            }))
+        }
+
+        // test vectored get on parent timeline
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_key, lsn, &ctx).await?,
+            Some(test_img("data key 1"))
+        );
+        assert!(get_vectored_impl_wrapper(&tline, base_key_child, lsn, &ctx)
+            .await
+            .unwrap_err()
+            .is_missing_key_error());
+        assert!(
+            get_vectored_impl_wrapper(&tline, base_key_nonexist, lsn, &ctx)
+                .await
+                .unwrap_err()
+                .is_missing_key_error()
+        );
+
+        // test vectored get on child timeline
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key, lsn, &ctx).await?,
+            Some(test_img("data key 1"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key_child, lsn, &ctx).await?,
+            Some(test_img("data key 2"))
+        );
+        assert!(
+            get_vectored_impl_wrapper(&child, base_key_nonexist, lsn, &ctx)
+                .await
+                .unwrap_err()
+                .is_missing_key_error()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_vectored_missing_metadata_key_reads() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        let mut base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
+        let mut base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
+        base_key.field1 = AUX_KEY_PREFIX;
+        base_key_child.field1 = AUX_KEY_PREFIX;
+        base_key_nonexist.field1 = AUX_KEY_PREFIX;
+
+        let mut lsn = Lsn(0x20);
+
+        {
+            let mut writer = tline.writer().await;
+            writer
+                .put(
+                    base_key,
+                    lsn,
+                    &Value::Image(test_img("metadata key 1")),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+
+            tline.freeze_and_flush().await?; // this will create an image layer
+
+            tline
+                .compact(
+                    &cancel,
+                    {
+                        let mut set = EnumSet::empty();
+                        set.insert(CompactFlags::ForceImageLayerCreation);
+                        set.insert(CompactFlags::ForceRepartition);
+                        set
+                    },
+                    &ctx,
+                )
+                .await?; // force create an image layer for metadata keys
+            tenant
+                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .await?;
+        }
+
+        let child = tenant
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
+            .await
+            .unwrap();
+
+        lsn.0 += 0x10;
+
+        {
+            let mut writer = child.writer().await;
+            writer
+                .put(
+                    base_key_child,
+                    lsn,
+                    &Value::Image(test_img("metadata key 2")),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+
+            child.freeze_and_flush().await?;
+
+            child
+                .compact(
+                    &cancel,
+                    {
+                        let mut set = EnumSet::empty();
+                        set.insert(CompactFlags::ForceImageLayerCreation);
+                        set.insert(CompactFlags::ForceRepartition);
+                        set
+                    },
+                    &ctx,
+                )
+                .await?; // force create an image layer for metadata keys
+            tenant
+                .gc_iteration(Some(child.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .await?;
+        }
+
+        async fn get_vectored_impl_wrapper(
+            tline: &Arc<Timeline>,
+            key: Key,
+            lsn: Lsn,
+            ctx: &RequestContext,
+        ) -> Result<Option<Bytes>, GetVectoredError> {
+            let reconstruct_state = ValuesReconstructState::new();
+            let mut res = tline
+                .get_vectored_impl(
+                    KeySpace::single(key..key.next()),
+                    lsn,
+                    reconstruct_state,
+                    ctx,
+                )
+                .await?;
+            Ok(res.pop_last().map(|(k, v)| {
+                assert_eq!(k, key);
+                v.unwrap()
+            }))
+        }
+
+        // test vectored get on parent timeline
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_key, lsn, &ctx).await?,
+            Some(test_img("metadata key 1"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_key_child, lsn, &ctx).await?,
+            None
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_key_nonexist, lsn, &ctx).await?,
+            None
+        );
+
+        // test vectored get on child timeline
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key, lsn, &ctx).await?,
+            None
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key_child, lsn, &ctx).await?,
+            Some(test_img("metadata key 2"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key_nonexist, lsn, &ctx).await?,
+            None
+        );
+
+        Ok(())
+    }
 }
