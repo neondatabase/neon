@@ -830,11 +830,13 @@ where
     fn feed(&mut self, key: K, size: u64) {
         let last_size;
         if let Some(last) = self.elems.back_mut() {
-            assert!(last.last_key <= key);
-            if key == last.last_key {
-                last.accum_size += size;
-                return;
-            }
+            // We require the keys to be strictly increasing for the window.
+            // Keys should already have been deduplicated by `accum_key_values`
+            assert!(
+                last.last_key < key,
+                "last_key(={}) >= key(={key})",
+                last.last_key
+            );
             last_size = last.accum_size;
         } else {
             last_size = 0;
