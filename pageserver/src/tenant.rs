@@ -5712,7 +5712,7 @@ mod tests {
 
         // even if we crash here without flushing parent timeline with it's new
         // last_aux_file_policy we are safe, because child was never meant to access ancestor's
-        // files
+        // files. the ancestor can even switch back to V1 because of a migration.
 
         Ok(())
     }
