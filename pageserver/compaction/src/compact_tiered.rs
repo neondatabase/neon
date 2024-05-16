@@ -25,7 +25,7 @@ use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
 use crate::helpers::{
-    accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with,
+    accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with, PAGE_SZ,
 };
 use crate::interface::*;
 use utils::lsn::Lsn;
@@ -379,7 +379,7 @@ where
                 .get_keyspace(&job.key_range, job.lsn_range.end, ctx)
                 .await?,
             &self.shard_identity,
-        ) * 8192;
+        ) * PAGE_SZ;
 
         let wal_size = job
             .input_layers
@@ -441,7 +441,7 @@ where
         let mut window = KeyspaceWindow::new(
             E::Key::MIN..E::Key::MAX,
             keyspace,
-            self.target_file_size / 8192,
+            self.target_file_size / PAGE_SZ,
         );
         while let Some(key_range) = window.choose_next_image(&self.shard_identity) {
             new_jobs.push(CompactionJob::<E> {
