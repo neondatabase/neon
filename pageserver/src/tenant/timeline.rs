@@ -3300,12 +3300,12 @@ impl Timeline {
 
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
-        loop {
+        let missing_keyspace = 'outer: loop {
             if self.cancel.is_cancelled() {
                 return Err(GetVectoredError::Cancelled);
             }
 
-            let completed = Self::get_vectored_reconstruct_data_timeline(
+            let (completed, covered) = Self::get_vectored_reconstruct_data_timeline(
                 timeline,
                 keyspace.clone(),
                 cont_lsn,
@@ -3324,10 +3324,25 @@ impl Timeline {
                 ranges: vec![NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE],
             });
 
-            // Keyspace is fully retrieved, no ancestor timeline, or metadata scan (where we do not look
-            // into ancestor timelines). TODO: is there any other metadata which we want to inherit?
-            if keyspace.total_raw_size() == 0 || timeline.ancestor_timeline.is_none() {
-                break;
+            // Keyspace is fully retrieved
+            if keyspace.is_empty() {
+                break None;
+            }
+
+            // Not fully retrieved but no ancestor timeline.
+            if timeline.ancestor_timeline.is_none() {
+                break Some(keyspace);
+            }
+
+            // Now we see if there are keys covered by the image layer but does not exist in the
+            // image layer, which means that the key does not exist.
+            for image_layer_keyspace in &covered {
+                // Get the overlapping of the image layer keyspace and the incomplete keyspace.
+                let removed = keyspace.remove_overlapping_with(&image_layer_keyspace);
+                if !removed.is_empty() {
+                    break 'outer Some(removed);
+                }
+                // If we don't break here, `keyspace` should stays the same within the loop.
             }
 
             // Take the min to avoid reconstructing a page with data newer than request Lsn.
@@ -3337,14 +3352,14 @@ impl Timeline {
                 .await
                 .map_err(GetVectoredError::GetReadyAncestorError)?;
             timeline = &*timeline_owned;
-        }
+        };
 
-        if keyspace.total_raw_size() != 0 {
+        if let Some(missing_keyspace) = missing_keyspace {
             return Err(GetVectoredError::MissingKey(MissingKeyError {
-                key: keyspace.start().unwrap(), /* better if we can store the full keyspace */
+                key: missing_keyspace.start().unwrap(), /* better if we can store the full keyspace */
                 shard: self
                     .shard_identity
-                    .get_shard_number(&keyspace.start().unwrap()),
+                    .get_shard_number(&missing_keyspace.start().unwrap()),
                 cont_lsn,
                 request_lsn,
                 ancestor_lsn: Some(timeline.ancestor_lsn),
@@ -3369,6 +3384,9 @@ impl Timeline {
     ///
     /// At each iteration pop the top of the fringe (the layer with the highest Lsn)
     /// and get all the required reconstruct data from the layer in one go.
+    ///
+    /// Returns the completed keyspace and the keyspaces with image coverage. The caller
+    /// decides how to deal with these two keyspaces.
     async fn get_vectored_reconstruct_data_timeline(
         timeline: &Timeline,
         keyspace: KeySpace,
@@ -3376,11 +3394,12 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> Result<KeySpace, GetVectoredError> {
+    ) -> Result<(KeySpace, Vec<KeySpace>), GetVectoredError> {
         let mut unmapped_keyspace = keyspace.clone();
         let mut fringe = LayerFringe::new();
 
         let mut completed_keyspace = KeySpace::default();
+        let mut image_covered_keyspaces = Vec::new();
 
         loop {
             if cancel.is_cancelled() {
@@ -3392,6 +3411,9 @@ impl Timeline {
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
             unmapped_keyspace.remove_overlapping_with(&image_coverage_last_step);
             completed_keyspace.merge(&keys_done_last_step);
+            if !image_coverage_last_step.is_empty() {
+                image_covered_keyspaces.push(image_coverage_last_step);
+            }
 
             // Do not descent any further if the last layer we visited
             // completed all keys in the keyspace it inspected. This is not
@@ -3469,7 +3491,7 @@ impl Timeline {
             }
         }
 
-        Ok(completed_keyspace)
+        Ok((completed_keyspace, image_covered_keyspaces))
     }
 
     /// # Cancel-safety
