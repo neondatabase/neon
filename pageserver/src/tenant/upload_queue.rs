@@ -193,7 +193,7 @@ impl UploadQueue {
             dangling_files: HashMap::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
-            last_aux_file_policy: None,
+            last_aux_file_policy: Default::default(),
         };
 
         *self = UploadQueue::Initialized(state);
