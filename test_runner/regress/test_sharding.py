@@ -274,7 +274,8 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
             ps.http_client().configure_failpoints((failpoint, "exit"))
 
         # Do a GC to update gc_info (compaction uses this to decide whether a layer is to be rewritten)
-        ps.http_client().timeline_gc(shard, timeline_id, gc_horizon=None)
+        # Set gc_horizon=0 to let PITR horizon control GC cutoff exclusively.
+        ps.http_client().timeline_gc(shard, timeline_id, gc_horizon=0)
 
         # We will compare stats before + after compaction
         detail_before = ps.http_client().timeline_detail(shard, timeline_id)
