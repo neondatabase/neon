@@ -4,6 +4,8 @@ from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import wait_until
 
 
+# This test checks of logical replication subscriber is able to correctly restart replication without receiving duplicates.
+# It requires tracking information about replication origins at page server side
 def test_subscriber_restart(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("publisher")
