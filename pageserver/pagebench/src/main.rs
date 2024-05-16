@@ -30,7 +30,7 @@ enum Args {
 }
 
 fn main() {
-    logging::init(
+    let _guard = logging::init(
         logging::LogFormat::Plain,
         logging::TracingErrorLayerEnablement::Disabled,
         logging::Output::Stderr,

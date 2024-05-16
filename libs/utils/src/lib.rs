@@ -27,6 +27,7 @@ pub mod auth;
 pub mod id;
 
 mod hex;
+
 pub use hex::Hex;
 
 // http endpoint utils
