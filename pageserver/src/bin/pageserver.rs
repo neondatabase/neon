@@ -162,9 +162,8 @@ fn initialize_config(
             f.read_to_string(&mut s).context("read identity file")?;
             let doc: toml_edit::Document = s.parse().context("parse identity file toml")?;
 
-            Some(PageserverIdentity::parse_and_validate(&doc)?)
+            PageserverIdentity::parse_and_validate(&doc)?
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             anyhow::bail!("Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ...");
         }
@@ -192,18 +191,6 @@ fn initialize_config(
             .parse()
             .expect("unit tests ensure this works")
     });
-
-
-    if let Some(identity) = identity {
-        let replaced =
-            effective_config.insert("id", toml_edit::value(i64::try_from(identity.node_id.0)?));
-        if replaced.is_some() {
-            tracing::warn!(
-                "Overrode node id present in config to node id from identity file: {}",
-                identity.node_id
-            )
-        }
-    }
 
     debug!("Resulting toml: {effective_config}");
 
