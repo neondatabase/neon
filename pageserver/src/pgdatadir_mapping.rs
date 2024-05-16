@@ -1491,6 +1491,8 @@ impl<'a> DatadirModification<'a> {
             }
         };
 
+        info!(?policy, ?path, "adding a file");
+
         if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
             let key = aux_file::encode_aux_file_key(path);
             // retrieve the key from the engine
