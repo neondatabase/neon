@@ -924,7 +924,7 @@ where
         // If we're willing to stretch it up to 1.25 target size, could we
         // gobble up the rest of the work? This avoids creating very small
         // "tail" layers at the end of the keyspace
-        if !has_more && self.remain_size() < target_size * 5 / 3 {
+        if !has_more && self.remain_size() < target_size * 5 / 4 {
             self.commit_upto(self.elems.len());
         } else {
             let delta_split_at = self.find_size_split(target_size);
