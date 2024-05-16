@@ -737,6 +737,11 @@ impl Timeline {
                         }
                         Ok(v1)
                     }
+                    (Ok(v1), Err(not_found)) if not_found.is_not_found() => {
+                        // accept switching after ingesting some V1 files
+                        // TODO: do we need to make sure the MissingKeyError is expected?
+                        Ok(v1)
+                    }
                     (Ok(_), Err(v2)) => {
                         tracing::error!("aux file v1 returns Ok while aux file v2 returns an err");
                         Err(v2)

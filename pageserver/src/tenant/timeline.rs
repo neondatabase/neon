@@ -505,6 +505,12 @@ pub(crate) enum PageReconstructError {
     MissingKey(MissingKeyError),
 }
 
+impl PageReconstructError {
+    pub(crate) fn is_not_found(&self) -> bool {
+        matches!(self, PageReconstructError::MissingKey(_))
+    }
+}
+
 #[derive(Debug)]
 pub struct MissingKeyError {
     key: Key,
