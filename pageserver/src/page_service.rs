@@ -32,6 +32,7 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
@@ -58,14 +59,15 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
-use crate::tenant::mgr;
-use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
+use crate::tenant::mgr::GetTenantError;
+use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
 use crate::tenant::timeline::WaitLsnError;
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
+use crate::tenant::Tenant;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
 use pageserver_api::key::rel_block_to_key;
@@ -554,13 +556,9 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
-        let tenant = mgr::get_active_tenant_with_timeout(
-            tenant_id,
-            ShardSelector::First,
-            ACTIVE_TENANT_TIMEOUT,
-            &task_mgr::shutdown_token(),
-        )
-        .await?;
+        let tenant = self
+            .get_active_tenant_with_timeout(tenant_id, ShardSelector::First, ACTIVE_TENANT_TIMEOUT)
+            .await?;
 
         // Make request tracer if needed
         let mut tracer = if tenant.get_trace_read_requests() {
@@ -728,13 +726,9 @@ impl PageServerHandler {
 
         // Create empty timeline
         info!("creating new timeline");
-        let tenant = get_active_tenant_with_timeout(
-            tenant_id,
-            ShardSelector::Zero,
-            ACTIVE_TENANT_TIMEOUT,
-            &task_mgr::shutdown_token(),
-        )
-        .await?;
+        let tenant = self
+            .get_active_tenant_with_timeout(tenant_id, ShardSelector::Zero, ACTIVE_TENANT_TIMEOUT)
+            .await?;
         let timeline = tenant
             .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
             .await?;
@@ -1372,17 +1366,68 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         selector: ShardSelector,
     ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
-        let tenant = get_active_tenant_with_timeout(
-            tenant_id,
-            selector,
-            ACTIVE_TENANT_TIMEOUT,
-            &task_mgr::shutdown_token(),
-        )
-        .await
-        .map_err(GetActiveTimelineError::Tenant)?;
+        let tenant = self
+            .get_active_tenant_with_timeout(tenant_id, selector, ACTIVE_TENANT_TIMEOUT)
+            .await
+            .map_err(GetActiveTimelineError::Tenant)?;
         let timeline = tenant.get_timeline(timeline_id, true)?;
         set_tracing_field_shard_id(&timeline);
         Ok(timeline)
+    }
+
+    /// Get a shard's [`Tenant`] in its active state, if present.  If we don't find the shard and some
+    /// slots for this tenant are `InProgress` then we will wait.
+    /// If we find the [`Tenant`] and it's not yet in state [`TenantState::Active`], we will wait.
+    ///
+    /// `timeout` is used as a total timeout for the whole wait operation.
+    async fn get_active_tenant_with_timeout(
+        &self,
+        tenant_id: TenantId,
+        shard_selector: ShardSelector,
+        timeout: Duration,
+    ) -> Result<Arc<Tenant>, GetActiveTenantError> {
+        let wait_start = Instant::now();
+        let deadline = wait_start + timeout;
+
+        // Resolve TenantId to TenantShardId.  This is usually a quick one-shot thing, the loop is
+        // for handling the rare case that the slot we're accessing is InProgress.
+        let tenant_shard = loop {
+            let resolved = self
+                .tenant_manager
+                .resolve_attached_shard(&tenant_id, shard_selector);
+            match resolved {
+                ShardResolveResult::Found(tenant_shard) => break tenant_shard,
+                ShardResolveResult::NotFound => {
+                    return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
+                        tenant_id,
+                    )));
+                }
+                ShardResolveResult::InProgress(barrier) => {
+                    // We can't authoritatively answer right now: wait for InProgress state
+                    // to end, then try again
+                    tokio::select! {
+                        _ = self.await_connection_cancelled() => {
+                            return Err(GetActiveTenantError::Cancelled)
+                        },
+                        _  = barrier.wait() => {
+                            // The barrier completed: proceed around the loop to try looking up again
+                        },
+                        _ = tokio::time::sleep(deadline.duration_since(Instant::now())) => {
+                            return Err(GetActiveTenantError::WaitForActiveTimeout {
+                                latest_state: None,
+                                wait_time: timeout,
+                            });
+                        }
+                    }
+                }
+            };
+        };
+
+        tracing::debug!("Waiting for tenant to enter active state...");
+        tenant_shard
+            .wait_to_become_active(deadline.duration_since(Instant::now()))
+            .await?;
+        Ok(tenant_shard)
     }
 }
 
@@ -1773,13 +1818,13 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = get_active_tenant_with_timeout(
-                tenant_id,
-                ShardSelector::Zero,
-                ACTIVE_TENANT_TIMEOUT,
-                &task_mgr::shutdown_token(),
-            )
-            .await?;
+            let tenant = self
+                .get_active_tenant_with_timeout(
+                    tenant_id,
+                    ShardSelector::Zero,
+                    ACTIVE_TENANT_TIMEOUT,
+                )
+                .await?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),

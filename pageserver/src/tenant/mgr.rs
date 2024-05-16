@@ -16,10 +16,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use sysinfo::SystemExt;
 use tokio::fs;
-use utils::timeout::{timeout_cancellable, TimeoutCancellableError};
 
 use anyhow::Context;
 use once_cell::sync::Lazy;
@@ -171,7 +170,7 @@ impl TenantStartupMode {
 }
 
 /// Result type for looking up a TenantId to a specific shard
-enum ShardResolveResult {
+pub(crate) enum ShardResolveResult {
     NotFound,
     Found(Arc<Tenant>),
     // Wait for this barrrier, then query again
@@ -187,71 +186,6 @@ impl TenantsMap {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 m.get(tenant_shard_id).and_then(|slot| slot.get_attached())
-            }
-        }
-    }
-
-    /// A page service client sends a TenantId, and to look up the correct Tenant we must
-    /// resolve this to a fully qualified TenantShardId.
-    ///
-    /// During shard splits: we shall see parent shards in InProgress state and skip them, and
-    /// instead match on child shards which should appear in Attached state.  Very early in a shard
-    /// split, or in other cases where a shard is InProgress, we will return our own InProgress result
-    /// to instruct the caller to wait for that to finish before querying again.
-    fn resolve_attached_shard(
-        &self,
-        tenant_id: &TenantId,
-        selector: ShardSelector,
-    ) -> ShardResolveResult {
-        let mut want_shard = None;
-        let mut any_in_progress = None;
-
-        match self {
-            TenantsMap::Initializing => ShardResolveResult::NotFound,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
-                for slot in m.range(TenantShardId::tenant_range(*tenant_id)) {
-                    // Ignore all slots that don't contain an attached tenant
-                    let tenant = match &slot.1 {
-                        TenantSlot::Attached(t) => t,
-                        TenantSlot::InProgress(barrier) => {
-                            // We might still find a usable shard, but in case we don't, remember that
-                            // we saw at least one InProgress slot, so that we can distinguish this case
-                            // from a simple NotFound in our return value.
-                            any_in_progress = Some(barrier.clone());
-                            continue;
-                        }
-                        _ => continue,
-                    };
-
-                    match selector {
-                        ShardSelector::First => return ShardResolveResult::Found(tenant.clone()),
-                        ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
-                            return ShardResolveResult::Found(tenant.clone())
-                        }
-                        ShardSelector::Page(key) => {
-                            // First slot we see for this tenant, calculate the expected shard number
-                            // for the key: we will use this for checking if this and subsequent
-                            // slots contain the key, rather than recalculating the hash each time.
-                            if want_shard.is_none() {
-                                want_shard = Some(tenant.shard_identity.get_shard_number(&key));
-                            }
-
-                            if Some(tenant.shard_identity.number) == want_shard {
-                                return ShardResolveResult::Found(tenant.clone());
-                            }
-                        }
-                        _ => continue,
-                    }
-                }
-
-                // Fall through: we didn't find a slot that was in Attached state & matched our selector.  If
-                // we found one or more InProgress slot, indicate to caller that they should retry later.  Otherwise
-                // this requested shard simply isn't found.
-                if let Some(barrier) = any_in_progress {
-                    ShardResolveResult::InProgress(barrier)
-                } else {
-                    ShardResolveResult::NotFound
-                }
             }
         }
     }
@@ -2132,6 +2066,72 @@ impl TenantManager {
 
         Ok(reparented)
     }
+
+    /// A page service client sends a TenantId, and to look up the correct Tenant we must
+    /// resolve this to a fully qualified TenantShardId.
+    ///
+    /// During shard splits: we shall see parent shards in InProgress state and skip them, and
+    /// instead match on child shards which should appear in Attached state.  Very early in a shard
+    /// split, or in other cases where a shard is InProgress, we will return our own InProgress result
+    /// to instruct the caller to wait for that to finish before querying again.
+    pub(crate) fn resolve_attached_shard(
+        &self,
+        tenant_id: &TenantId,
+        selector: ShardSelector,
+    ) -> ShardResolveResult {
+        let tenants = self.tenants.read().unwrap();
+        let mut want_shard = None;
+        let mut any_in_progress = None;
+
+        match &*tenants {
+            TenantsMap::Initializing => ShardResolveResult::NotFound,
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
+                for slot in m.range(TenantShardId::tenant_range(*tenant_id)) {
+                    // Ignore all slots that don't contain an attached tenant
+                    let tenant = match &slot.1 {
+                        TenantSlot::Attached(t) => t,
+                        TenantSlot::InProgress(barrier) => {
+                            // We might still find a usable shard, but in case we don't, remember that
+                            // we saw at least one InProgress slot, so that we can distinguish this case
+                            // from a simple NotFound in our return value.
+                            any_in_progress = Some(barrier.clone());
+                            continue;
+                        }
+                        _ => continue,
+                    };
+
+                    match selector {
+                        ShardSelector::First => return ShardResolveResult::Found(tenant.clone()),
+                        ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
+                            return ShardResolveResult::Found(tenant.clone())
+                        }
+                        ShardSelector::Page(key) => {
+                            // First slot we see for this tenant, calculate the expected shard number
+                            // for the key: we will use this for checking if this and subsequent
+                            // slots contain the key, rather than recalculating the hash each time.
+                            if want_shard.is_none() {
+                                want_shard = Some(tenant.shard_identity.get_shard_number(&key));
+                            }
+
+                            if Some(tenant.shard_identity.number) == want_shard {
+                                return ShardResolveResult::Found(tenant.clone());
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+
+                // Fall through: we didn't find a slot that was in Attached state & matched our selector.  If
+                // we found one or more InProgress slot, indicate to caller that they should retry later.  Otherwise
+                // this requested shard simply isn't found.
+                if let Some(barrier) = any_in_progress {
+                    ShardResolveResult::InProgress(barrier)
+                } else {
+                    ShardResolveResult::NotFound
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2178,67 +2178,6 @@ pub(crate) enum GetActiveTenantError {
     /// never happen.
     #[error("Tenant is broken: {0}")]
     Broken(String),
-}
-
-/// Get a [`Tenant`] in its active state. If the tenant_id is currently in [`TenantSlot::InProgress`]
-/// state, then wait for up to `timeout`.  If the [`Tenant`] is not currently in [`TenantState::Active`],
-/// then wait for up to `timeout` (minus however long we waited for the slot).
-pub(crate) async fn get_active_tenant_with_timeout(
-    tenant_id: TenantId,
-    shard_selector: ShardSelector,
-    timeout: Duration,
-    cancel: &CancellationToken,
-) -> Result<Arc<Tenant>, GetActiveTenantError> {
-    let wait_start = Instant::now();
-    let deadline = wait_start + timeout;
-
-    // Resolve TenantId to TenantShardId.  This is usually a quick one-shot thing, the loop is
-    // for handling the rare case that the slot we're accessing is InProgress.
-    let tenant_shard = loop {
-        let resolved = {
-            let locked = TENANTS.read().unwrap();
-            locked.resolve_attached_shard(&tenant_id, shard_selector)
-        };
-        match resolved {
-            ShardResolveResult::Found(tenant_shard) => break tenant_shard,
-            ShardResolveResult::NotFound => {
-                return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
-                    tenant_id,
-                )));
-            }
-            ShardResolveResult::InProgress(barrier) => {
-                // We can't authoritatively answer right now: wait for InProgress state
-                // to end, then try again
-                match timeout_cancellable(
-                    deadline.duration_since(Instant::now()),
-                    cancel,
-                    barrier.wait(),
-                )
-                .await
-                {
-                    Ok(_) => {
-                        // The barrier completed: proceed around the loop to try looking up again
-                        continue;
-                    }
-                    Err(TimeoutCancellableError::Timeout) => {
-                        return Err(GetActiveTenantError::WaitForActiveTimeout {
-                            latest_state: None,
-                            wait_time: timeout,
-                        });
-                    }
-                    Err(TimeoutCancellableError::Cancelled) => {
-                        return Err(GetActiveTenantError::Cancelled);
-                    }
-                }
-            }
-        };
-    };
-
-    tracing::debug!("Waiting for tenant to enter active state...");
-    tenant_shard
-        .wait_to_become_active(deadline.duration_since(Instant::now()))
-        .await?;
-    Ok(tenant_shard)
 }
 
 #[derive(Debug, thiserror::Error)]
