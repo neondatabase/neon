@@ -200,30 +200,15 @@ impl RootTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BucketConfig {
     pub region: String,
     pub bucket: String,
     pub prefix_in_bucket: Option<String>,
-
-    /// Use SSO if this is set, else rely on AWS_* environment vars
-    pub sso_account_id: Option<String>,
-}
-
-impl Display for BucketConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}/{}/{}",
-            self.sso_account_id.as_deref().unwrap_or("<none>"),
-            self.region,
-            self.bucket
-        )
-    }
 }
 
 impl BucketConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let sso_account_id = env::var("SSO_ACCOUNT_ID").ok();
         let region = env::var("REGION").context("'REGION' param retrieval")?;
         let bucket = env::var("BUCKET").context("'BUCKET' param retrieval")?;
         let prefix_in_bucket = env::var("BUCKET_PREFIX").ok();
@@ -232,7 +217,6 @@ impl BucketConfig {
             region,
             bucket,
             prefix_in_bucket,
-            sso_account_id,
         })
     }
 }
@@ -276,7 +260,7 @@ pub fn init_logging(file_name: &str) -> WorkerGuard {
     guard
 }
 
-pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Client {
+pub fn init_s3_client(bucket_region: Region) -> Client {
     let credentials_provider = {
         // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
         let chain = CredentialsProviderChain::first_try(
@@ -290,7 +274,7 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
         );
 
         // Use SSO if we were given an account ID
-        match account_id {
+        match std::env::var("SSO_ACCOUNT_ID").ok() {
             Some(sso_account) => chain.or_else(
                 "sso",
                 SsoCredentialsProvider::builder()
@@ -334,7 +318,7 @@ fn init_remote(
 ) -> anyhow::Result<(Arc<Client>, RootTarget)> {
     let bucket_region = Region::new(bucket_config.region);
     let delimiter = "/".to_string();
-    let s3_client = Arc::new(init_s3_client(bucket_config.sso_account_id, bucket_region));
+    let s3_client = Arc::new(init_s3_client(bucket_region));
 
     let s3_root = match node_kind {
         NodeKind::Pageserver => RootTarget::Pageserver(S3Target {
