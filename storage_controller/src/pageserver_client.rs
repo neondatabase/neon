@@ -2,7 +2,7 @@ use pageserver_api::{
     models::{
         LocationConfig, LocationConfigListResponse, PageserverUtilization, SecondaryProgress,
         TenantScanRemoteStorageResponse, TenantShardSplitRequest, TenantShardSplitResponse,
-        TimelineCreateRequest, TimelineInfo, TopNTenantShardsRequest, TopNTenantShardsResponse,
+        TimelineCreateRequest, TimelineInfo, TopTenantShardsRequest, TopTenantShardsResponse,
     },
     shard::TenantShardId,
 };
@@ -235,15 +235,15 @@ impl PageserverClient {
         )
     }
 
-    pub(crate) async fn top_n_tenant_shards(
+    pub(crate) async fn top_tenant_shards(
         &self,
-        request: TopNTenantShardsRequest,
-    ) -> Result<TopNTenantShardsResponse> {
+        request: TopTenantShardsRequest,
+    ) -> Result<TopTenantShardsResponse> {
         measured_request!(
-            "top_n_tenants",
+            "top_tenants",
             crate::metrics::Method::Post,
             &self.node_id_label,
-            self.inner.top_n_tenant_shards(request).await
+            self.inner.top_tenant_shards(request).await
         )
     }
 }

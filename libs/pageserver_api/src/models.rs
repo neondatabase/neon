@@ -819,21 +819,21 @@ pub struct TenantScanRemoteStorageResponse {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
-pub enum TopNSorting {
+pub enum TenantSorting {
     ResidentSize,
     MaxLogicalSize,
 }
 
-impl Default for TopNSorting {
+impl Default for TenantSorting {
     fn default() -> Self {
         Self::ResidentSize
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TopNTenantShardsRequest {
+pub struct TopTenantShardsRequest {
     // How would you like to sort the tenants?
-    pub order_by: TopNSorting,
+    pub order_by: TenantSorting,
 
     // How many results?
     pub limit: usize,
@@ -848,7 +848,7 @@ pub struct TopNTenantShardsRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct TopNTenantShardItem {
+pub struct TopTenantShardItem {
     pub id: TenantShardId,
 
     /// Total size of layers on local disk for all timelines in this tenant
@@ -862,8 +862,8 @@ pub struct TopNTenantShardItem {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct TopNTenantShardsResponse {
-    pub shards: Vec<TopNTenantShardItem>,
+pub struct TopTenantShardsResponse {
+    pub shards: Vec<TopTenantShardItem>,
 }
 
 pub mod virtual_file {

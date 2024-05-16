@@ -32,7 +32,7 @@ use pageserver_api::{
         TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
         UtilizationScore,
     },
-    models::{SecondaryProgress, TenantConfigRequest, TopNTenantShardsRequest},
+    models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
 use reqwest::StatusCode;
 use tracing::{instrument, Instrument};
@@ -4788,12 +4788,12 @@ impl Service {
         let mut top_n = Vec::new();
 
         // Call into each node to look for big tenants
-        let top_n_request = TopNTenantShardsRequest {
+        let top_n_request = TopTenantShardsRequest {
             // We currently split based on logical size, for simplicity: logical size is a signal of
             // the user's intent to run a large database, whereas physical/resident size can be symptoms
             // of compaction issues.  Eventually we should switch to using resident size to bound the
             // disk space impact of one shard.
-            order_by: models::TopNSorting::MaxLogicalSize,
+            order_by: models::TenantSorting::MaxLogicalSize,
             limit: 10,
             where_shards_lt: Some(SPLIT_TO_MAX),
             where_gt: Some(split_threshold),
@@ -4804,7 +4804,7 @@ impl Service {
                 .with_client_retries(
                     |client| async move {
                         let request = request_ref.clone();
-                        client.top_n_tenant_shards(request.clone()).await
+                        client.top_tenant_shards(request.clone()).await
                     },
                     &self.config.jwt_token,
                     3,

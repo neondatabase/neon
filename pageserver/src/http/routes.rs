@@ -26,11 +26,11 @@ use pageserver_api::models::TenantScanRemoteStorageShard;
 use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
+use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TenantState;
-use pageserver_api::models::TopNSorting;
-use pageserver_api::models::TopNTenantShardItem;
-use pageserver_api::models::TopNTenantShardsRequest;
-use pageserver_api::models::TopNTenantShardsResponse;
+use pageserver_api::models::TopTenantShardItem;
+use pageserver_api::models::TopTenantShardsRequest;
+use pageserver_api::models::TopTenantShardsResponse;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
@@ -2361,25 +2361,25 @@ async fn get_utilization(
 
 /// Report on the largest tenants on this pageserver, for the storage controller to identify
 /// candidates for splitting
-async fn post_top_n_tenants(
+async fn post_top_tenants(
     mut r: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&r, None)?;
-    let request: TopNTenantShardsRequest = json_request(&mut r).await?;
+    let request: TopTenantShardsRequest = json_request(&mut r).await?;
     let state = get_state(&r);
 
-    fn get_size_metric(sizes: &TopNTenantShardItem, order_by: &TopNSorting) -> u64 {
+    fn get_size_metric(sizes: &TopTenantShardItem, order_by: &TenantSorting) -> u64 {
         match order_by {
-            TopNSorting::ResidentSize => sizes.resident_size,
-            TopNSorting::MaxLogicalSize => sizes.max_logical_size,
+            TenantSorting::ResidentSize => sizes.resident_size,
+            TenantSorting::MaxLogicalSize => sizes.max_logical_size,
         }
     }
 
     #[derive(Eq, PartialEq)]
     struct HeapItem {
         metric: u64,
-        sizes: TopNTenantShardItem,
+        sizes: TopTenantShardItem,
     }
 
     impl PartialOrd for HeapItem {
@@ -2444,7 +2444,7 @@ async fn post_top_n_tenants(
 
     json_response(
         StatusCode::OK,
-        TopNTenantShardsResponse {
+        TopTenantShardsResponse {
             shards: top_n.into_iter().map(|i| i.sizes).collect(),
         },
     )
@@ -2736,6 +2736,6 @@ pub fn make_router(
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
-        .post("/v1/top_n_tenants", |r| api_handler(r, post_top_n_tenants))
+        .post("/v1/top_tenants", |r| api_handler(r, post_top_tenants))
         .any(handler_404))
 }

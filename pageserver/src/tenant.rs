@@ -21,7 +21,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::TimelineState;
-use pageserver_api::models::TopNTenantShardItem;
+use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::ShardStripeSize;
@@ -2214,8 +2214,8 @@ impl Tenant {
         Ok(())
     }
 
-    pub(crate) fn get_sizes(&self) -> TopNTenantShardItem {
-        let mut result = TopNTenantShardItem {
+    pub(crate) fn get_sizes(&self) -> TopTenantShardItem {
+        let mut result = TopTenantShardItem {
             id: self.tenant_shard_id,
             resident_size: 0,
             physical_size: 0,
