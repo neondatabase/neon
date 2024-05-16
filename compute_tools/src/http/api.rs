@@ -5,10 +5,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
-use crate::compute::forward_termination_signal;
-use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use crate::catalog::SchemaDumpError;
 use crate::catalog::{get_database_schema, get_dbs_and_roles};
+use crate::compute::forward_termination_signal;
+use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
@@ -141,10 +141,9 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             info!("serving /dbs_and_roles GET request",);
             match get_dbs_and_roles(compute).await {
                 Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
-                Err(_) => render_json_error(
-                    "can't get dbs and roles",
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                ),
+                Err(_) => {
+                    render_json_error("can't get dbs and roles", StatusCode::INTERNAL_SERVER_ERROR)
+                }
             }
         }
 
