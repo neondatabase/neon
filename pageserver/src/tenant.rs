@@ -5671,7 +5671,7 @@ mod tests {
             "aux file is written with switch_aux_file_policy unset (which is v1), so we should keep v1"
         );
 
-        // we can still read the auxfile v1 before we ingest anything new
+        // we can read everything from the storage
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
         assert_eq!(
             files.get("pg_logical/mappings/test1"),
@@ -5691,7 +5691,7 @@ mod tests {
         assert_eq!(
             tline.last_aux_file_policy.load(),
             Some(AuxFilePolicy::V1),
-            "keep v1 storage format on branching"
+            "keep v1 storage format when new files are written"
         );
 
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
