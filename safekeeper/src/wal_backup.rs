@@ -32,7 +32,7 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS};
 use crate::timeline::{PeerInfo, Timeline};
 use crate::timeline_manager::StateSnapshot;
-use crate::{GlobalTimelines, SafeKeeperConf};
+use crate::{GlobalTimelines, SafeKeeperConf, WAL_BACKUP_RUNTIME};
 
 use once_cell::sync::OnceCell;
 
@@ -80,13 +80,19 @@ pub async fn update_task(
             let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
             let timeline_dir = conf.timeline_dir(&ttid);
 
-            let handle = tokio::spawn(backup_task_main(
+            let async_task = backup_task_main(
                 ttid,
                 timeline_dir,
                 conf.workdir.clone(),
                 conf.backup_parallel_jobs,
                 shutdown_rx,
-            ));
+            );
+
+            let handle = if conf.current_thread_runtime {
+                tokio::spawn(async_task)
+            } else {
+                WAL_BACKUP_RUNTIME.spawn(async_task)
+            };
 
             *entry = Some(WalBackupTaskHandle {
                 shutdown_tx,
