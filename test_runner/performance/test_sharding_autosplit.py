@@ -1,5 +1,6 @@
 import concurrent.futures
 import re
+import threading
 from pathlib import Path
 
 import pytest
@@ -61,11 +62,18 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         )
 
     # Total tenants
-    tenant_count = 4
+    tenant_count = 3
 
     # Transaction rate: we set this rather than running at full-speed because we
     # might run on a slow node that doesn't cope well with many full-speed pgbenches running concurrently.
-    transaction_rate = 100
+    transaction_rate = 50
+
+    # Choose a pgbench scale that is just high enough to hit the split threshold around the time init
+    # finishes (we want splits going on during the main read/write bench)
+    pgbench_scale = 40
+
+    # Runtime selected to give storage controller time to do all the shard splits while it runs
+    pgbench_runtime = 180
 
     class TenantState:
         def __init__(self, timeline_id, endpoint):
@@ -76,7 +84,9 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     tenants = {}
     for tenant_id in set(TenantId.generate() for _i in range(0, tenant_count)):
         timeline_id = TimelineId.generate()
-        env.neon_cli.create_tenant(tenant_id, timeline_id, conf=tenant_conf)
+        env.neon_cli.create_tenant(
+            tenant_id, timeline_id, conf=tenant_conf, placement_policy='{"Attached":1}'
+        )
         endpoint = env.endpoints.create("main", tenant_id=tenant_id)
         tenants[tenant_id] = TenantState(timeline_id, endpoint)
         endpoint.start()
@@ -85,7 +95,7 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         pg_bin.run_capture(
             [
                 "pgbench",
-                "-s50",
+                f"-s{pgbench_scale}",
                 "-i",
                 f"postgres://cloud_admin@localhost:{endpoint.pg_port}/postgres",
             ]
@@ -144,9 +154,8 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         out_path = pg_bin.run_capture(
             [
                 "pgbench",
-                "-s50",
                 "-T",
-                "300",
+                f"{pgbench_runtime}",
                 "-R",
                 f"{transaction_rate}",
                 "-P",
@@ -161,7 +170,6 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         out_path = pg_bin.run_capture(
             [
                 "pgbench",
-                "-s50",
                 "-T",
                 "60",
                 "-R",
@@ -175,7 +183,20 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
         check_pgbench_output(out_path)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=tenant_count) as pgbench_threads:
+    background_reconcile_stop = threading.Event()
+
+    def background_reconcile_task():
+        # The controller will do all this autonomously, but with a 20 second wait between each
+        # time it considers doing a split/optimization.  To enable a shorter test, actively
+        # poll the reconcile_all endpoint to make it all happen faster.
+        #
+        # Note that this is mainly to drain the post-split migrations faster, rather than to
+        # prompt the splits themselves.
+        while not background_reconcile_stop.is_set():
+            env.storage_controller.reconcile_until_idle(timeout_secs=pgbench_runtime, delay_max=0.5)
+            background_reconcile_stop.wait(5)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=tenant_count + 1) as pgbench_threads:
         pgbench_futs = []
         for tenant_state in tenants.values():
             fut = pgbench_threads.submit(run_pgbench_init, tenant_state.endpoint)
@@ -185,6 +206,8 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         for fut in pgbench_futs:
             fut.result()
 
+        reconcile_fut = pgbench_threads.submit(background_reconcile_task)
+
         pgbench_futs = []
         for tenant_state in tenants.values():
             fut = pgbench_threads.submit(run_pgbench_main, tenant_state.endpoint)
@@ -193,6 +216,10 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         log.info("Waiting for pgbench read/write pass")
         for fut in pgbench_futs:
             fut.result()
+
+        log.info("Waiting for background reconcile thread")
+        background_reconcile_stop.set()
+        reconcile_fut.result()
 
     def assert_all_split():
         for tenant_id in tenants.keys():
