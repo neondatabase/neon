@@ -5617,7 +5617,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_aux_flag_branch() -> anyhow::Result<()> {
+    async fn test_branch_copies_aux_file_flag() -> anyhow::Result<()> {
         let mut harness = TenantHarness::create("aux_flag_branch")?;
         harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V2;
         let (tenant, ctx) = harness.load().await;
