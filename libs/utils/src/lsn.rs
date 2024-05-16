@@ -415,7 +415,7 @@ mod tests {
 
     use super::*;
 
-    use serde_assert::{Deserializer, Serializer, Token, Tokens};
+    use serde_assert::{Deserializer, Serializer, Token};
 
     #[test]
     fn test_lsn_strings() {
@@ -496,18 +496,16 @@ mod tests {
     #[test]
     fn test_lsn_serde() {
         let original_lsn = Lsn(0x0123456789abcdef);
-        let expected_readable_tokens = Tokens(vec![Token::U64(0x0123456789abcdef)]);
-        let expected_non_readable_tokens =
-            Tokens(vec![Token::Str(String::from("1234567/89ABCDEF"))]);
+        let expected_readable_tokens = vec![Token::U64(0x0123456789abcdef)];
+        let expected_non_readable_tokens = vec![Token::Str(String::from("1234567/89ABCDEF"))];
 
         // Testing human_readable ser/de
         let serializer = Serializer::builder().is_human_readable(false).build();
         let readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
         assert_eq!(readable_ser_tokens, expected_readable_tokens);
 
-        let mut deserializer = Deserializer::builder()
+        let mut deserializer = Deserializer::builder(readable_ser_tokens)
             .is_human_readable(false)
-            .tokens(readable_ser_tokens)
             .build();
         let des_lsn = Lsn::deserialize(&mut deserializer).unwrap();
         assert_eq!(des_lsn, original_lsn);
@@ -517,9 +515,8 @@ mod tests {
         let non_readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
         assert_eq!(non_readable_ser_tokens, expected_non_readable_tokens);
 
-        let mut deserializer = Deserializer::builder()
+        let mut deserializer = Deserializer::builder(non_readable_ser_tokens)
             .is_human_readable(true)
-            .tokens(non_readable_ser_tokens)
             .build();
         let des_lsn = Lsn::deserialize(&mut deserializer).unwrap();
         assert_eq!(des_lsn, original_lsn);
@@ -528,18 +525,16 @@ mod tests {
         let serializer = Serializer::builder().is_human_readable(false).build();
         let non_readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
 
-        let mut deserializer = Deserializer::builder()
+        let mut deserializer = Deserializer::builder(non_readable_ser_tokens)
             .is_human_readable(true)
-            .tokens(non_readable_ser_tokens)
             .build();
         Lsn::deserialize(&mut deserializer).unwrap_err();
 
         let serializer = Serializer::builder().is_human_readable(true).build();
         let readable_ser_tokens = original_lsn.serialize(&serializer).unwrap();
 
-        let mut deserializer = Deserializer::builder()
+        let mut deserializer = Deserializer::builder(readable_ser_tokens)
             .is_human_readable(false)
-            .tokens(readable_ser_tokens)
             .build();
         Lsn::deserialize(&mut deserializer).unwrap_err();
     }
@@ -551,9 +546,8 @@ mod tests {
         let serializer = Serializer::builder().is_human_readable(false).build();
         let ser_tokens = original_lsn.serialize(&serializer).unwrap();
 
-        let mut deserializer = Deserializer::builder()
+        let mut deserializer = Deserializer::builder(ser_tokens)
             .is_human_readable(false)
-            .tokens(ser_tokens)
             .build();
 
         let des_lsn = Lsn::deserialize(&mut deserializer).unwrap();

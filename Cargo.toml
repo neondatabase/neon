@@ -71,7 +71,7 @@ camino = "1.1.6"
 cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive"] }
-comfy-table = "6.1"
+comfy-table = "7.1.1"
 const_format = "0.2"
 crc32c = "0.6"
 crossbeam-utils = "0.8.5"
@@ -86,8 +86,8 @@ futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 git-version = "0.3"
-hashbrown = "0.13"
-hashlink = "0.8.4"
+hashbrown = "0.14"
+hashlink = "0.9"
 hdrhistogram = "7.5.2"
 hex = "0.4"
 hex-literal = "0.4"
@@ -110,16 +110,17 @@ libc = "0.2"
 md5 = "0.7.0"
 measured = { version = "0.0.21", features=["lasso"] }
 measured-process = { version = "0.0.21" }
-memoffset = "0.8"
+memoffset = "0.9.1"
 native-tls = "0.2"
 nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
 notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"
 once_cell = "1.13"
-opentelemetry = "0.20.0"
-opentelemetry-otlp = { version = "0.13.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
-opentelemetry-semantic-conventions = "0.12.0"
+opentelemetry = "0.22.0"
+opentelemetry_sdk = "0.22.0"
+opentelemetry-otlp = { version = "0.15.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-semantic-conventions = "0.14.0"
 parking_lot = "0.12"
 parquet = { version = "49.0.0", default-features = false, features = ["zstd"] }
 parquet_derive = "49.0.0"
@@ -127,16 +128,16 @@ pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
 procfs = "0.14"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
-prost = "0.11"
+prost = "0.12"
 rand = "0.8"
 redis = { version = "0.25.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_20"] }
+reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_22"] }
 reqwest-middleware = "0.3.0"
 reqwest-retry = "0.5"
 routerify = "3"
-rpds = "0.13"
+rpds = "1.1"
 rustc-hash = "1.1.0"
 rustls = "0.22"
 rustls-pemfile = "2"
@@ -148,15 +149,15 @@ sentry = { version = "0.32", default-features = false, features = ["backtrace", 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
-serde_with = "2.0"
-serde_assert = "0.5.0"
+serde_with = "3.0"
+serde_assert = "0.7.0"
 sha2 = "0.10.2"
 signal-hook = "0.3"
 smallvec = "1.11"
 smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
-strum = "0.24"
-strum_macros = "0.24"
+strum = "0.26"
+strum_macros = "0.26"
 "subtle"  = "2.5.0"
 # Our PR https://github.com/nical/rust_debug/pull/4 has been merged but no new version released yet
 svg_fmt = { git = "https://github.com/nical/rust_debug", rev = "28a7d96eecff2f28e75b1ea09f2d499a60d0e3b4" }
@@ -177,11 +178,11 @@ tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.7"
 toml_edit = "0.19"
-tonic = {version = "0.9", features = ["tls", "tls-roots"]}
+tonic = {version = "0.11", features = ["tls", "tls-roots"]}
 tower-service = "0.3.2"
 tracing = "0.1"
 tracing-error = "0.2.0"
-tracing-opentelemetry = "0.21.0"
+tracing-opentelemetry = "0.23.0"
 tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json", "ansi"] }
 twox-hash = { version = "1.6.3", default-features = false }
 url = "2.2"
@@ -232,9 +233,8 @@ workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 ## Build dependencies
 criterion = "0.5.1"
 rcgen = "0.12"
-rstest = "0.18"
 camino-tempfile = "1.0.2"
-tonic-build = "0.9"
+tonic-build = "0.11"
 
 [patch.crates-io]
 

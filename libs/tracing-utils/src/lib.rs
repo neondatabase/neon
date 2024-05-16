@@ -35,10 +35,10 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use opentelemetry::sdk::Resource;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_otlp::{OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT};
+use opentelemetry_sdk::Resource;
 
 pub use tracing_opentelemetry::OpenTelemetryLayer;
 
@@ -71,7 +71,7 @@ pub mod http;
 ///
 /// This doesn't block, but is marked as 'async' to hint that this must be called in
 /// asynchronous execution context.
-pub async fn init_tracing(service_name: &str) -> Option<opentelemetry::sdk::trace::Tracer> {
+pub async fn init_tracing(service_name: &str) -> Option<opentelemetry_sdk::trace::Tracer> {
     if std::env::var("OTEL_SDK_DISABLED") == Ok("true".to_string()) {
         return None;
     };
@@ -82,7 +82,7 @@ pub async fn init_tracing(service_name: &str) -> Option<opentelemetry::sdk::trac
 /// tasks.
 pub fn init_tracing_without_runtime(
     service_name: &str,
-) -> Option<opentelemetry::sdk::trace::Tracer> {
+) -> Option<opentelemetry_sdk::trace::Tracer> {
     if std::env::var("OTEL_SDK_DISABLED") == Ok("true".to_string()) {
         return None;
     };
@@ -113,9 +113,9 @@ pub fn init_tracing_without_runtime(
     Some(init_tracing_internal(service_name.to_string()))
 }
 
-fn init_tracing_internal(service_name: String) -> opentelemetry::sdk::trace::Tracer {
+fn init_tracing_internal(service_name: String) -> opentelemetry_sdk::trace::Tracer {
     // Set up exporter from the OTEL_EXPORTER_* environment variables
-    let mut exporter = opentelemetry_otlp::new_exporter().http().with_env();
+    let mut exporter = opentelemetry_otlp::new_exporter().http();
 
     // XXX opentelemetry-otlp v0.18.0 has a bug in how it uses the
     // OTEL_EXPORTER_OTLP_ENDPOINT env variable. According to the
@@ -147,19 +147,19 @@ fn init_tracing_internal(service_name: String) -> opentelemetry::sdk::trace::Tra
 
     // Propagate trace information in the standard W3C TraceContext format.
     opentelemetry::global::set_text_map_propagator(
-        opentelemetry::sdk::propagation::TraceContextPropagator::new(),
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
     );
 
     opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_exporter(exporter)
         .with_trace_config(
-            opentelemetry::sdk::trace::config().with_resource(Resource::new(vec![KeyValue::new(
+            opentelemetry_sdk::trace::config().with_resource(Resource::new(vec![KeyValue::new(
                 opentelemetry_semantic_conventions::resource::SERVICE_NAME,
                 service_name,
             )])),
         )
-        .install_batch(opentelemetry::runtime::Tokio)
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
         .expect("could not initialize opentelemetry exporter")
 }
 
