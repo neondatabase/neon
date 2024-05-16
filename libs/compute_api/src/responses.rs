@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::spec::ComputeSpec;
+use crate::spec::{ComputeSpec, Database, Role};
 
 #[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
@@ -111,6 +111,12 @@ pub struct ComputeMetrics {
     pub num_ext_downloaded: u64,
     pub largest_ext_size: u64, // these are measured in bytes
     pub total_ext_download_size: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CatalogObjects {
+    pub roles: Vec<Role>,
+    pub databases: Vec<Database>,
 }
 
 /// Response of the `/computes/{compute_id}/spec` control-plane API.
