@@ -12,12 +12,12 @@ class EndpointHttpClient(requests.Session):
 
         self.mount("http://", HTTPAdapter())
 
-    def catalog_objects(self):
-        res = self.get(f"http://localhost:{self.port}/catalog/objects")
+    def dbs_and_roles(self):
+        res = self.get(f"http://localhost:{self.port}/dbs_and_roles")
         res.raise_for_status()
         return res.json()
 
-    def catalog_datadbase_ddl(self, database: str):
-        res = self.get(f"http://localhost:{self.port}/catalog/database_ddl?database={database}")
+    def database_schema(self, database: str):
+        res = self.get(f"http://localhost:{self.port}/database_schema?database={database}")
         res.raise_for_status()
         return res.text

@@ -8,7 +8,7 @@ use std::thread;
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use crate::catalog::SchemaDumpError;
-use crate::catalog::{get_schema_ddl, get_objects};
+use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
@@ -137,24 +137,24 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
-        (&Method::GET, "/catalog/objects") => {
-            info!("serving /catalog/objects GET request",);
-            match get_objects(compute).await {
+        (&Method::GET, "/dbs_and_roles") => {
+            info!("serving /dbs_and_roles GET request",);
+            match get_dbs_and_roles(compute).await {
                 Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
                 Err(_) => render_json_error(
-                    "can't get schema objects",
+                    "can't get dbs and roles",
                     StatusCode::INTERNAL_SERVER_ERROR,
                 ),
             }
         }
 
-        (&Method::GET, "/catalog/database_ddl") => {
+        (&Method::GET, "/database_schema") => {
             let database = match must_get_query_param(&req, "database") {
                 Err(e) => return e.into_response(),
                 Ok(database) => database,
             };
-            info!("serving /catalog/database_ddl GET request with database: {database}",);
-            match get_schema_ddl(compute, &database).await {
+            info!("serving /database_schema GET request with database: {database}",);
+            match get_database_schema(compute, &database).await {
                 Ok(res) => render_plain(Body::wrap_stream(res)),
                 Err(SchemaDumpError::DatabaseDoesNotExist) => {
                     render_json_error("database does not exist", StatusCode::NOT_FOUND)

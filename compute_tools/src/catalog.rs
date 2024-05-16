@@ -19,7 +19,7 @@ use crate::{
     pg_helpers::{get_existing_dbs, get_existing_roles},
 };
 
-pub async fn get_objects(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
+pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
     let connstr = compute.connstr.clone();
     task::spawn_blocking(move || {
         let mut client = Client::connect(connstr.as_str(), NoTls)?;
@@ -51,7 +51,7 @@ pub enum SchemaDumpError {
 // and special error is returned.
 //
 // To make sure that the process is killed when the caller drops the stream, we use tokio kill_on_drop feature.
-pub async fn get_schema_ddl(
+pub async fn get_database_schema(
     compute: &Arc<ComputeNode>,
     dbname: &str,
 ) -> Result<impl Stream<Item = Result<bytes::Bytes, std::io::Error>>, SchemaDumpError> {

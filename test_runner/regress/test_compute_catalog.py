@@ -9,7 +9,7 @@ def test_compute_catalog(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create_start("test_config", config_lines=["log_min_messages=debug1"])
     client = endpoint.http_client()
 
-    objects = client.catalog_objects()
+    objects = client.dbs_and_roles()
 
     # Assert that 'cloud_admin' role exists in the 'roles' list
     assert any(
@@ -21,12 +21,12 @@ def test_compute_catalog(neon_simple_env: NeonEnv):
         db["name"] == "postgres" for db in objects["databases"]
     ), "The 'postgres' database is missing"
 
-    ddl = client.catalog_schema_ddl(database="postgres")
+    ddl = client.database_schema(database="postgres")
 
     assert "-- PostgreSQL database dump" in ddl
 
     try:
-        client.catalog_datadbase_ddl(database="nonexistentdb")
+        client.database_schema(database="nonexistentdb")
         raise AssertionError("Expected HTTPError was not raised")
     except requests.exceptions.HTTPError as e:
         assert (
