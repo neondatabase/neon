@@ -9,6 +9,7 @@ use tokio::fs;
 
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -31,6 +32,7 @@ use crate::safekeeper::{
 };
 use crate::send_wal::WalSenders;
 use crate::state::{TimelineMemState, TimelinePersistentState};
+use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self};
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
@@ -157,16 +159,6 @@ pub struct SharedState {
     pub(crate) sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
     /// In memory list containing state of peers sent in latest messages from them.
     pub(crate) peers_info: PeersInfo,
-    /// True whenever there is at least some pending activity on timeline: live
-    /// compute connection, pageserver is not caughtup (it must have latest WAL
-    /// for new compute start) or WAL backuping is not finished. Practically it
-    /// means safekeepers broadcast info to peers about the timeline, old WAL is
-    /// trimmed.
-    /// FIXME: this is not true if WAL backuping is not finished
-    ///
-    /// TODO: it might be better to remove tli completely from GlobalTimelines
-    /// when tli is inactive instead of having this flag.
-    pub(crate) active: bool,
     pub(crate) last_removed_segno: XLogSegNo,
 }
 
@@ -204,7 +196,6 @@ impl SharedState {
         Ok(Self {
             sk,
             peers_info: PeersInfo(vec![]),
-            active: false,
             last_removed_segno: 0,
         })
     }
@@ -222,37 +213,8 @@ impl SharedState {
         Ok(Self {
             sk: SafeKeeper::new(control_store, wal_store, conf.my_id)?,
             peers_info: PeersInfo(vec![]),
-            active: false,
             last_removed_segno: 0,
         })
-    }
-
-    fn is_active(&self) -> bool {
-        // FIXME: add tracking of relevant pageservers and check them here individually,
-        // otherwise migration won't work (we suspend too early).
-        true || self.sk.state.inmem.remote_consistent_lsn < self.sk.state.inmem.commit_lsn
-    }
-
-    /// Mark timeline active/inactive.
-    /// If timeline is deactivated, control file is persisted
-    /// as maintenance task does that only for active timelines.
-    async fn update_status(&mut self, ttid: TenantTimelineId) {
-        let is_active = self.is_active();
-        if self.active != is_active {
-            info!(
-                "timeline {} active={} now, remote_consistent_lsn={}, commit_lsn={}",
-                ttid,
-                is_active,
-                self.sk.state.inmem.remote_consistent_lsn,
-                self.sk.state.inmem.commit_lsn
-            );
-            if !is_active {
-                if let Err(e) = self.sk.state.flush().await {
-                    warn!("control file save in update_status failed: {:?}", e);
-                }
-            }
-        }
-        self.active = is_active;
     }
 
     fn get_wal_seg_size(&self) -> usize {
@@ -391,6 +353,10 @@ pub struct Timeline {
     /// with different speed.
     // TODO: add `Arc<SafeKeeperConf>` here instead of adding each field separately.
     walsenders_keep_horizon: bool,
+
+    // timeline_manager controlled state
+    pub(crate) broker_active: AtomicBool,
+    pub(crate) wal_backup_active: AtomicBool,
 }
 
 impl Timeline {
@@ -424,6 +390,8 @@ impl Timeline {
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
             walsenders_keep_horizon: conf.walsenders_keep_horizon,
+            broker_active: AtomicBool::new(false),
+            wal_backup_active: AtomicBool::new(false),
         })
     }
 
@@ -460,6 +428,8 @@ impl Timeline {
             cancellation_tx,
             timeline_dir: conf.timeline_dir(&ttid),
             walsenders_keep_horizon: conf.walsenders_keep_horizon,
+            broker_active: AtomicBool::new(false),
+            wal_backup_active: AtomicBool::new(false),
         })
     }
 
@@ -472,6 +442,7 @@ impl Timeline {
         self: &Arc<Timeline>,
         shared_state: &mut WriteGuardSharedState<'_>,
         conf: &SafeKeeperConf,
+        broker_active_set: Arc<TimelinesSet>,
     ) -> Result<()> {
         match fs::metadata(&self.timeline_dir).await {
             Ok(_) => {
@@ -502,15 +473,23 @@ impl Timeline {
 
             return Err(e);
         }
-        self.bootstrap(conf);
+        self.bootstrap(conf, broker_active_set);
         Ok(())
     }
 
     /// Bootstrap new or existing timeline starting background stasks.
-    pub fn bootstrap(self: &Arc<Timeline>, conf: &SafeKeeperConf) {
+    pub fn bootstrap(
+        self: &Arc<Timeline>,
+        conf: &SafeKeeperConf,
+        broker_active_set: Arc<TimelinesSet>,
+    ) {
         // Start manager task which will monitor timeline state and update
         // background tasks.
-        tokio::spawn(timeline_manager::main_task(self.clone(), conf.clone()));
+        tokio::spawn(timeline_manager::main_task(
+            self.clone(),
+            conf.clone(),
+            broker_active_set,
+        ));
 
         // Start recovery task which always runs on the timeline.
         if conf.peer_recovery_enabled {
@@ -531,8 +510,7 @@ impl Timeline {
         &self,
         shared_state: &mut WriteGuardSharedState<'_>,
         only_local: bool,
-    ) -> Result<(bool, bool)> {
-        let was_active = shared_state.active;
+    ) -> Result<bool> {
         self.cancel(shared_state);
 
         // TODO: It's better to wait for s3 offloader termination before
@@ -546,7 +524,7 @@ impl Timeline {
             wal_backup::delete_timeline(&self.ttid).await?;
         }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
-        Ok((dir_existed, was_active))
+        Ok(dir_existed)
     }
 
     /// Cancel timeline to prevent further usage. Background tasks will stop
@@ -581,22 +559,6 @@ impl Timeline {
 
     pub async fn read_shared_state(&self) -> ReadGuardSharedState {
         self.mutex.read().await
-    }
-
-    async fn update_status(&self, shared_state: &mut SharedState) {
-        shared_state.update_status(self.ttid).await
-    }
-
-    /// Update timeline status.
-    pub async fn update_status_notify(self: &Arc<Self>) -> Result<()> {
-        if self.is_cancelled() {
-            bail!(TimelineError::Cancelled(self.ttid));
-        }
-        {
-            let mut shared_state = self.write_shared_state().await;
-            self.update_status(&mut shared_state).await;
-        }
-        Ok(())
     }
 
     /// Returns true if walsender should stop sending WAL to pageserver. We
@@ -669,15 +631,6 @@ impl Timeline {
     /// Returns wal_seg_size.
     pub async fn get_wal_seg_size(&self) -> usize {
         self.read_shared_state().await.get_wal_seg_size()
-    }
-
-    /// Returns true only if the timeline is loaded and active.
-    pub async fn is_active(&self) -> bool {
-        if self.is_cancelled() {
-            return false;
-        }
-
-        self.read_shared_state().await.active
     }
 
     /// Returns state of the timeline.
@@ -877,8 +830,7 @@ impl Timeline {
             .await
     }
 
-    /// Gather timeline data for metrics. If the timeline is not active, returns
-    /// None, we do not collect these.
+    /// Gather timeline data for metrics.
     pub async fn info_for_metrics(&self) -> Option<FullTimelineInfo> {
         if self.is_cancelled() {
             return None;
@@ -886,24 +838,20 @@ impl Timeline {
 
         let (ps_feedback_count, last_ps_feedback) = self.walsenders.get_ps_feedback_stats();
         let state = self.read_shared_state().await;
-        if state.active {
-            Some(FullTimelineInfo {
-                ttid: self.ttid,
-                ps_feedback_count,
-                last_ps_feedback,
-                wal_backup_active: false, // TODO: fill this
-                timeline_is_active: state.active,
-                num_computes: self.walreceivers.get_num() as u32,
-                last_removed_segno: state.last_removed_segno,
-                epoch_start_lsn: state.sk.epoch_start_lsn,
-                mem_state: state.sk.state.inmem.clone(),
-                persisted_state: state.sk.state.clone(),
-                flush_lsn: state.sk.wal_store.flush_lsn(),
-                wal_storage: state.sk.wal_store.get_metrics(),
-            })
-        } else {
-            None
-        }
+        Some(FullTimelineInfo {
+            ttid: self.ttid,
+            ps_feedback_count,
+            last_ps_feedback,
+            wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
+            timeline_is_active: self.broker_active.load(Ordering::Relaxed),
+            num_computes: self.walreceivers.get_num() as u32,
+            last_removed_segno: state.last_removed_segno,
+            epoch_start_lsn: state.sk.epoch_start_lsn,
+            mem_state: state.sk.state.inmem.clone(),
+            persisted_state: state.sk.state.clone(),
+            flush_lsn: state.sk.wal_store.flush_lsn(),
+            wal_storage: state.sk.wal_store.get_metrics(),
+        })
     }
 
     /// Returns in-memory timeline state to build a full debug dump.
@@ -917,8 +865,8 @@ impl Timeline {
             is_cancelled: self.is_cancelled(),
             peers_info_len: state.peers_info.0.len(),
             walsenders: self.walsenders.get_all(),
-            wal_backup_active: false, // TODO: fill this
-            active: state.active,
+            wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
+            active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: state.last_removed_segno,
             epoch_start_lsn: state.sk.epoch_start_lsn,

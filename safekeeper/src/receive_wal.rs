@@ -486,14 +486,7 @@ impl WalAcceptor {
     /// The main loop. Returns Ok(()) if either msg_rx or reply_tx got closed;
     /// it must mean that network thread terminated.
     async fn run(&mut self) -> anyhow::Result<()> {
-        // Register the connection and defer unregister.
-        // Order of the next two lines is important: we want first to remove our entry and then
-        // update status which depends on registered connections.
-        let _compute_conn_guard = ComputeConnectionGuard {
-            timeline: Arc::clone(&self.tli),
-        };
         let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
-        self.tli.update_status_notify().await?;
 
         // After this timestamp we will stop processing AppendRequests and send a response
         // to the walproposer. walproposer sends at least one AppendRequest per second,
@@ -557,21 +550,5 @@ impl WalAcceptor {
                 next_keepalive = Instant::now() + KEEPALIVE_INTERVAL;
             }
         }
-    }
-}
-
-/// Calls update_status_notify in drop to update timeline status.
-struct ComputeConnectionGuard {
-    timeline: Arc<Timeline>,
-}
-
-impl Drop for ComputeConnectionGuard {
-    fn drop(&mut self) {
-        let tli = self.timeline.clone();
-        tokio::spawn(async move {
-            if let Err(e) = tli.update_status_notify().await {
-                error!("failed to update timeline status: {}", e);
-            }
-        });
     }
 }
