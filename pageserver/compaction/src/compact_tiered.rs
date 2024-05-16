@@ -663,8 +663,8 @@ where
     }
 }
 
-// Sliding window through keyspace and values
-// This is used by over_with_images to decide on good split points
+/// Sliding window through keyspace and values for image layer
+/// This is used by [`LevelCompactionState::cover_with_images`] to decide on good split points
 struct KeyspaceWindow<K> {
     head: KeyspaceWindowHead<K>,
 
@@ -804,9 +804,9 @@ struct WindowElement<K> {
     accum_size: u64,
 }
 
-// Sliding window through keyspace and values
-//
-// This is used to decide what layer to write next, from the beginning of the window.
+/// Sliding window through keyspace and values for delta layer tiling
+///
+/// This is used to decide which delta layer to write next.
 struct Window<K> {
     elems: VecDeque<WindowElement<K>>,
 
