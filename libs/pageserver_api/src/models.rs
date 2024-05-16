@@ -335,8 +335,9 @@ impl AuxFilePolicy {
             (from, to),
             // TODO: I still think having the implicit default to be confused here is wrong
             (None, _)
-                | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2)
                 | (Some(AuxFilePolicy::V1), AuxFilePolicy::V2)
+                | (Some(AuxFilePolicy::V1), AuxFilePolicy::CrossValidation)
+                | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2)
         )
     }
 }
