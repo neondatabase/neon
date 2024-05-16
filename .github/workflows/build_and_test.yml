@@ -890,6 +890,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          submodules: true
           fetch-depth: 1
 
       # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
