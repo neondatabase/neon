@@ -97,6 +97,7 @@ impl PeersInfo {
 }
 
 pub type ReadGuardSharedState<'a> = RwLockReadGuard<'a, SharedState>;
+
 /// WriteGuardSharedState is a wrapper around RwLockWriteGuard<SharedState> that
 /// automatically updates `watch::Sender` channels with state on drop.
 pub struct WriteGuardSharedState<'a> {
@@ -147,6 +148,7 @@ impl<'a> Drop for WriteGuardSharedState<'a> {
             }
         });
 
+        // send notification about shared state update
         self.tli.shared_state_version_tx.send_modify(|old| {
             *old += 1;
         });
@@ -479,7 +481,7 @@ impl Timeline {
         Ok(())
     }
 
-    /// Bootstrap new or existing timeline starting background stasks.
+    /// Bootstrap new or existing timeline starting background tasks.
     pub fn bootstrap(
         self: &Arc<Timeline>,
         conf: &SafeKeeperConf,

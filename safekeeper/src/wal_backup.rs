@@ -68,14 +68,11 @@ pub async fn update_task(
     state: &StateSnapshot,
     entry: &mut Option<WalBackupTaskHandle>,
 ) {
-    let (should_task_run, election_dbg_str) = if need_backup {
-        let (offloader, election_dbg_str) =
-            determine_offloader(&state.peers, state.backup_lsn, ttid, conf);
-        let elected_me = Some(conf.my_id) == offloader;
-        (elected_me, election_dbg_str)
-    } else {
-        (false, String::new())
-    };
+    let (offloader, election_dbg_str) =
+        determine_offloader(&state.peers, state.backup_lsn, ttid, conf);
+    let elected_me = Some(conf.my_id) == offloader;
+
+    let should_task_run = need_backup && elected_me;
 
     // start or stop the task
     if should_task_run != (entry.is_some()) {

@@ -18,6 +18,7 @@ pub struct StateSnapshot {
 }
 
 impl StateSnapshot {
+    /// Create a new snapshot of the timeline state.
     fn new(read_guard: ReadGuardSharedState, heartbeat_timeout: Duration) -> Self {
         Self {
             commit_lsn: read_guard.sk.state.inmem.commit_lsn,
@@ -71,7 +72,7 @@ pub async fn main_task(
     // list of background tasks
     let mut backup_task: Option<WalBackupTaskHandle> = None;
 
-    loop {
+    let last_state = 'outer: loop {
         let state_snapshot = StateSnapshot::new(tli.read_shared_state().await, heartbeat_timeout);
         let num_computes = *num_computes_rx.borrow();
 
@@ -89,12 +90,10 @@ pub async fn main_task(
             .await;
         }
 
-        // FIXME: add tracking of relevant pageservers and check them here individually,
-        // otherwise migration won't work (we suspend too early).
         let is_active = is_wal_backup_required
             || state_snapshot.remote_consistent_lsn < state_snapshot.commit_lsn;
 
-        // update the broker map
+        // update the broker timeline set
         if tli_broker_active.set(is_active) {
             // write log if state has changed
             info!(
@@ -123,7 +122,7 @@ pub async fn main_task(
         tokio::select! {
             _ = cancellation_rx.changed() => {
                 // timeline was deleted
-                return;
+                break 'outer state_snapshot;
             }
             _ = state_version_rx.changed() => {
                 // state was updated
@@ -132,5 +131,10 @@ pub async fn main_task(
                 // number of connected computes was updated
             }
         }
+    };
+
+    // shutdown background tasks
+    if conf.is_wal_backup_enabled() {
+        wal_backup::update_task(&conf, ttid, false, &last_state, &mut backup_task).await;
     }
 }

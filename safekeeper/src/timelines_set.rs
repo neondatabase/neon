@@ -9,7 +9,7 @@ use crate::timeline::Timeline;
 /// - remove timeline
 /// - clone the set
 ///
-/// Used for keeping subset of active (for which broker push is required) timelines.
+/// Usually used for keeping subset of timelines. For example active timelines that require broker push.
 pub struct TimelinesSet {
     timelines: std::sync::Mutex<HashMap<TenantTimelineId, Arc<Timeline>>>,
 }
