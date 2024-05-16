@@ -2318,13 +2318,10 @@ impl Timeline {
                     dir: None,
                     n_deltas: 0,
                 }),
-<<<<<<< HEAD
 
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
 
                 last_aux_file_policy: AtomicAuxFilePolicy::new(aux_file_policy),
-=======
->>>>>>> b57518599 (Store repl origins as individual entries)
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -3887,18 +3884,21 @@ impl Timeline {
                 assert_eq!(
                     metadata_partition.parts.len(),
                     1,
-                    "currently sparse keyspace should only contain a single aux file keyspace"
+                    "currently sparse keyspace should only contain a single metadata keyspace"
                 );
                 let metadata_keyspace = &metadata_partition.parts[0];
-                assert_eq!(
-                    metadata_keyspace.0.ranges.len(),
-                    1,
-                    "aux file keyspace should be a single range"
-                );
                 self.create_delta_layer(
                     &frozen_layer,
+<<<<<<< HEAD
                     Some(metadata_keyspace.0.ranges[0].clone()),
                     ctx,
+=======
+                    ctx,
+                    Some(
+                        metadata_keyspace.0.ranges.first().unwrap().start
+                            ..metadata_keyspace.0.ranges.last().unwrap().end,
+                    ),
+>>>>>>> 10b1208f9 (Fix unit tests)
                 )
                 .await
                 .map_err(|e| FlushLayerError::from_anyhow(self, e))?
