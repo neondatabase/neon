@@ -333,7 +333,10 @@ impl AuxFilePolicy {
     pub fn is_valid_migration_path(from: Option<Self>, to: Self) -> bool {
         matches!(
             (from, to),
-            (None, _) | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2)
+            // TODO: I still think having the implicit default to be confused here is wrong
+            (None, _)
+                | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2)
+                | (Some(AuxFilePolicy::V1), AuxFilePolicy::V2)
         )
     }
 }
