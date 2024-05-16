@@ -48,7 +48,11 @@ pub struct WalBackupTaskHandle {
 }
 
 /// Do we have anything to upload to S3, i.e. should we run the backup task?
-fn is_wal_backup_required(wal_seg_size: usize, num_computes: usize, state: &StateSnapshot) -> bool {
+pub fn is_wal_backup_required(
+    wal_seg_size: usize,
+    num_computes: usize,
+    state: &StateSnapshot,
+) -> bool {
     num_computes > 0 ||
     // Currently only the whole segment is offloaded, so compare segment numbers.
     (state.commit_lsn.segment_number(wal_seg_size) > state.backup_lsn.segment_number(wal_seg_size))
@@ -60,15 +64,14 @@ fn is_wal_backup_required(wal_seg_size: usize, num_computes: usize, state: &Stat
 pub async fn update_task(
     conf: &SafeKeeperConf,
     ttid: TenantTimelineId,
-    wal_seg_size: usize,
-    num_computes: usize,
+    need_backup: bool,
     state: &StateSnapshot,
     entry: &mut Option<WalBackupTaskHandle>,
 ) {
     let (offloader, election_dbg_str) =
         determine_offloader(&state.peers, state.backup_lsn, ttid, conf);
     let elected_me = Some(conf.my_id) == offloader;
-    let should_task_run = is_wal_backup_required(wal_seg_size, num_computes, state) && elected_me;
+    let should_task_run = need_backup && elected_me;
 
     if should_task_run != (entry.is_some()) {
         if should_task_run {

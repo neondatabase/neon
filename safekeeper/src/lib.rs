@@ -32,6 +32,7 @@ pub mod send_wal;
 pub mod state;
 pub mod timeline;
 pub mod timeline_manager;
+pub mod timelines_set;
 pub mod wal_backup;
 pub mod wal_backup_partial;
 pub mod wal_service;
