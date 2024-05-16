@@ -307,7 +307,7 @@ where
 }
 
 async fn upload_parquet(
-    w: SerializedFileWriter<Writer<BytesMut>>,
+    mut w: SerializedFileWriter<Writer<BytesMut>>,
     len: i64,
     storage: &GenericRemoteStorage,
 ) -> anyhow::Result<Writer<BytesMut>> {
@@ -319,11 +319,15 @@ async fn upload_parquet(
 
     // I don't know how compute intensive this is, although it probably isn't much... better be safe than sorry.
     // finish method only available on the fork: https://github.com/apache/arrow-rs/issues/5253
-    let (writer, metadata) = tokio::task::spawn_blocking(move || w.finish())
+    let (mut buffer, metadata) =
+        tokio::task::spawn_blocking(move || -> parquet::errors::Result<_> {
+            let metadata = w.finish()?;
+            let buffer = std::mem::take(w.inner_mut().get_mut());
+            Ok((buffer, metadata))
+        })
         .await
         .unwrap()?;
 
-    let mut buffer = writer.into_inner();
     let data = buffer.split().freeze();
 
     let compression = len as f64 / len_uncompressed as f64;
@@ -474,10 +478,11 @@ mod tests {
         RequestData {
             session_id: uuid::Builder::from_random_bytes(rng.gen()).into_uuid(),
             peer_addr: Ipv4Addr::from(rng.gen::<[u8; 4]>()).to_string(),
-            timestamp: chrono::NaiveDateTime::from_timestamp_millis(
+            timestamp: chrono::DateTime::from_timestamp_millis(
                 rng.gen_range(1703862754..1803862754),
             )
-            .unwrap(),
+            .unwrap()
+            .naive_utc(),
             application_name: Some("test".to_owned()),
             username: Some(hex::encode(rng.gen::<[u8; 4]>())),
             endpoint_id: Some(hex::encode(rng.gen::<[u8; 16]>())),
@@ -560,15 +565,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1315008, 3, 6000),
-                (1315001, 3, 6000),
-                (1315061, 3, 6000),
-                (1315018, 3, 6000),
-                (1315148, 3, 6000),
-                (1314990, 3, 6000),
-                (1314782, 3, 6000),
-                (1315018, 3, 6000),
-                (438575, 1, 2000)
+                (1315314, 3, 6000),
+                (1315307, 3, 6000),
+                (1315367, 3, 6000),
+                (1315324, 3, 6000),
+                (1315454, 3, 6000),
+                (1315296, 3, 6000),
+                (1315088, 3, 6000),
+                (1315324, 3, 6000),
+                (438713, 1, 2000)
             ]
         );
 
@@ -598,11 +603,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1221738, 5, 10000),
-                (1227888, 5, 10000),
-                (1229682, 5, 10000),
-                (1229044, 5, 10000),
-                (1220322, 5, 10000)
+                (1222212, 5, 10000),
+                (1228362, 5, 10000),
+                (1230156, 5, 10000),
+                (1229518, 5, 10000),
+                (1220796, 5, 10000)
             ]
         );
 
@@ -634,11 +639,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1207385, 5, 10000),
-                (1207116, 5, 10000),
-                (1207409, 5, 10000),
-                (1207397, 5, 10000),
-                (1207652, 5, 10000)
+                (1207859, 5, 10000),
+                (1207590, 5, 10000),
+                (1207883, 5, 10000),
+                (1207871, 5, 10000),
+                (1208126, 5, 10000)
             ]
         );
 
@@ -663,15 +668,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1315008, 3, 6000),
-                (1315001, 3, 6000),
-                (1315061, 3, 6000),
-                (1315018, 3, 6000),
-                (1315148, 3, 6000),
-                (1314990, 3, 6000),
-                (1314782, 3, 6000),
-                (1315018, 3, 6000),
-                (438575, 1, 2000)
+                (1315314, 3, 6000),
+                (1315307, 3, 6000),
+                (1315367, 3, 6000),
+                (1315324, 3, 6000),
+                (1315454, 3, 6000),
+                (1315296, 3, 6000),
+                (1315088, 3, 6000),
+                (1315324, 3, 6000),
+                (438713, 1, 2000)
             ]
         );
 
@@ -708,7 +713,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(659240, 2, 3001), (658954, 2, 3000), (658750, 2, 2999)]
+            [(659462, 2, 3001), (659176, 2, 3000), (658972, 2, 2999)]
         );
 
         tmpdir.close().unwrap();
