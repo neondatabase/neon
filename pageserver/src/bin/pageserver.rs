@@ -187,24 +187,12 @@ fn initialize_config(
         }
     };
 
-    let mut effective_config = file_contents.unwrap_or_else(|| {
+    let effective_config = file_contents.unwrap_or_else(|| {
         DEFAULT_CONFIG_FILE
             .parse()
             .expect("unit tests ensure this works")
     });
 
-    // Patch with overrides from the command line
-    if let Some(values) = arg_matches.get_many::<String>("config-override") {
-        for option_line in values {
-            let doc = toml_edit::Document::from_str(option_line).with_context(|| {
-                format!("Option '{option_line}' could not be parsed as a toml document")
-            })?;
-
-            for (key, item) in doc.iter() {
-                effective_config.insert(key, item.clone());
-            }
-        }
-    }
 
     if let Some(identity) = identity {
         let replaced =
@@ -757,16 +745,6 @@ fn cli() -> Command {
                 .short('D')
                 .long("workdir")
                 .help("Working directory for the pageserver"),
-        )
-        // See `settings.md` for more details on the extra configuration patameters pageserver can process
-        .arg(
-            Arg::new("config-override")
-                .long("config-override")
-                .short('c')
-                .num_args(1)
-                .action(ArgAction::Append)
-                .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there). \
-                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
         .arg(
             Arg::new("enabled-features")

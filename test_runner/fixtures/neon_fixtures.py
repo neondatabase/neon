@@ -451,7 +451,6 @@ class NeonEnvBuilder:
         test_output_dir: Path,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
-        # toml that will be decomposed into `--config-override` flags during `pageserver --init`
         pageserver_config_override: Optional[str] = None,
         num_safekeepers: int = 1,
         num_pageservers: int = 1,
