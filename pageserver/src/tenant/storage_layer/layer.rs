@@ -1830,7 +1830,7 @@ impl ResidentLayer {
         let key_range = self.layer_desc().key_range.clone();
 
         match self.downloaded.get(&self.owner.0, ctx).await? {
-            Delta(_) => anyhow::bail!(format!("cannot load_image_keys on a delta layer {self}")),
+            Delta(_) => anyhow::bail!(format!("cannot filter() on a delta layer {self}")),
             Image(i) => i.filter(key_range, shard_identity, writer, ctx).await,
         }
     }
