@@ -5751,7 +5751,7 @@ mod tests {
         tenant.set_new_location_config(
             AttachedTenantConf::try_from(LocationConf::attached_single(
                 TenantConfOpt {
-                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
+                    switch_aux_file_policy: Some(AuxFilePolicy::CrossValidation),
                     ..Default::default()
                 },
                 tenant.generation,
@@ -5762,7 +5762,7 @@ mod tests {
 
         assert_eq!(
             tline.get_switch_aux_file_policy(),
-            AuxFilePolicy::V2,
+            AuxFilePolicy::CrossValidation,
             "wanted state has been updated"
         );
         assert_eq!(
@@ -5789,22 +5789,22 @@ mod tests {
 
         assert_eq!(
             tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
+            Some(AuxFilePolicy::CrossValidation),
             "ingesting a file should apply the wanted switch state when applicable"
         );
 
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
         assert_eq!(
             files.get("pg_logical/mappings/test1"),
-            None,
-            "V1 file is no longer readable after switch to V2"
+            Some(&bytes::Bytes::from_static(b"first")),
+            "V1 file is readable in cross validation even though it is not found as V2"
         );
         assert_eq!(
             files.get("pg_logical/mappings/test2"),
             Some(&bytes::Bytes::from_static(b"second"))
         );
 
-        // mimic again by trying to flip it from V2 to V1 (not allowed after ingesting a file)
+        // mimic again by trying to flip it from V2 to V1 (not switched to while ingesting a file)
         tenant.set_new_location_config(
             AttachedTenantConf::try_from(LocationConf::attached_single(
                 TenantConfOpt {
@@ -5834,20 +5834,60 @@ mod tests {
 
         assert_eq!(
             tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
+            Some(AuxFilePolicy::CrossValidation),
             "ingesting a file should apply the wanted switch state when applicable"
         );
 
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(files.get("pg_logical/mappings/test1"), None);
+        assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            Some(&bytes::Bytes::from_static(b"first"))
+        );
         assert_eq!(
             files.get("pg_logical/mappings/test2"),
             Some(&bytes::Bytes::from_static(b"third"))
         );
 
-        // even if we crash here without flushing parent timeline with it's new
-        // last_aux_file_policy we are safe, because child was never meant to access ancestor's
-        // files
+        // mimic again by trying to flip it from V2 to V1 (not switched to while ingesting a file)
+        tenant.set_new_location_config(
+            AttachedTenantConf::try_from(LocationConf::attached_single(
+                TenantConfOpt {
+                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
+                    ..Default::default()
+                },
+                tenant.generation,
+                &pageserver_api::models::ShardParameters::default(),
+            ))
+            .unwrap(),
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test3", b"last", &ctx)
+                .await?;
+            modification.commit(&ctx).await?;
+        }
+
+        assert_eq!(tline.get_switch_aux_file_policy(), AuxFilePolicy::V2);
+
+        assert_eq!(tline.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
+
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            None,
+            "v1 only file is no longer found"
+        );
+        assert_eq!(
+            files.get("pg_logical/mappings/test2"),
+            Some(&bytes::Bytes::from_static(b"third"))
+        );
+        assert_eq!(
+            files.get("pg_logical/mappings/test3"),
+            Some(&bytes::Bytes::from_static(b"last"))
+        );
 
         Ok(())
     }
