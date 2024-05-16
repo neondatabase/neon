@@ -5617,29 +5617,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_aux_flag_branch() -> anyhow::Result<()> {
-        let mut harness = TenantHarness::create("aux_flag_branch")?;
-        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V2;
+    async fn branch_copies_dirty_aux_file_flag() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("branch_copies_dirty_aux_file_flag")?;
+        assert_eq!(
+            harness.tenant_conf.switch_aux_file_policy,
+            AuxFilePolicy::V1
+        );
         let (tenant, ctx) = harness.load().await;
+
+        let mut lsn = Lsn(0x08);
+
         let tline: Arc<Timeline> = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
             .await?;
-        assert_eq!(tline.last_aux_file_policy.load(), None);
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            None,
+            "this should be V1 but there's no Default impl"
+        );
+
         {
-            let mut modification = tline.begin_modification(Lsn(0x10));
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
             modification
-                .put_file("pg_logical/mappings/test", b"test", &ctx)
+                .put_file("pg_logical/mappings/test1", b"first", &ctx)
                 .await?;
             modification.commit(&ctx).await?;
         }
-        assert_eq!(tline.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
-        let create_guard = tenant
-            .create_timeline_create_guard(NEW_TIMELINE_ID)
-            .unwrap();
-        let tline2 = tenant
-            .branch_timeline_impl(&tline, NEW_TIMELINE_ID, None, create_guard, &ctx)
+
+        // there is no tenant manager to pass the configuration through, so lets mimic it
+        tenant.set_new_location_config(
+            AttachedTenantConf::try_from(LocationConf::attached_single(
+                TenantConfOpt {
+                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
+                    ..Default::default()
+                },
+                tenant.generation,
+                &pageserver_api::models::ShardParameters::default(),
+            ))
+            .unwrap(),
+        );
+
+        assert_eq!(
+            tline.get_switch_aux_file_policy(),
+            AuxFilePolicy::V2,
+            "wanted state has been updated"
+        );
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::V1),
+            "dirty index_part.json reflected state is yet to be updated"
+        );
+
+        // we can still read the auxfile v1 before we ingest anything new
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            Some(&bytes::Bytes::from_static(b"first"))
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test2", b"second", &ctx)
+                .await?;
+            modification.commit(&ctx).await?;
+        }
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::V2),
+            "ingesting a file should apply the wanted switch state when applicable"
+        );
+
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test2"),
+            Some(&bytes::Bytes::from_static(b"second"))
+        );
+
+        let child = tenant
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
             .await?;
-        assert_eq!(tline2.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
+
+        // child copies the last flag even if that is not on remote storage yet
+        assert_eq!(child.get_switch_aux_file_policy(), AuxFilePolicy::V2);
+        assert_eq!(child.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
+
+        let files = child.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(files.get("pg_logical/mappings/test1"), None);
+        assert_eq!(files.get("pg_logical/mappings/test2"), None);
+
+        // even if we crash here without flushing parent timeline with it's new
+        // last_aux_file_policy we are safe, because child was never meant to access ancestor's
+        // files
+
         Ok(())
     }
 }
