@@ -745,9 +745,9 @@ impl Collector for TimelineCollector {
 
 async fn collect_timeline_metrics() -> Vec<FullTimelineInfo> {
     let mut res = vec![];
-    let timelines = GlobalTimelines::get_global_broker_active_set().get_all();
+    let active_timelines = GlobalTimelines::get_global_broker_active_set().get_all();
 
-    for tli in timelines {
+    for tli in active_timelines {
         if let Some(info) = tli.info_for_metrics().await {
             res.push(info);
         }

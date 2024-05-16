@@ -4,7 +4,12 @@ use utils::id::TenantTimelineId;
 
 use crate::timeline::Timeline;
 
-/// Set of timelines, used to keep subset of timelines used for some tasks (like WAL removal).
+/// Set of timelines, supports operations:
+/// - add timeline
+/// - remove timeline
+/// - clone the set
+///
+/// Used for keeping subset of active (for which broker push is required) timelines.
 pub struct TimelinesSet {
     timelines: std::sync::Mutex<HashMap<TenantTimelineId, Arc<Timeline>>>,
 }
@@ -26,6 +31,7 @@ impl TimelinesSet {
         self.timelines.lock().unwrap().remove(ttid);
     }
 
+    /// If present is true, adds timeline to the set, otherwise removes it.
     pub fn set_present(&self, tli: Arc<Timeline>, present: bool) {
         if present {
             self.insert(tli);
@@ -38,10 +44,12 @@ impl TimelinesSet {
         self.timelines.lock().unwrap().contains_key(ttid)
     }
 
+    /// Returns all timelines in the set.
     pub fn get_all(&self) -> Vec<Arc<Timeline>> {
         self.timelines.lock().unwrap().values().cloned().collect()
     }
 
+    /// Returns a timeline guard for easy presence control.
     pub fn guard(self: &Arc<Self>, tli: Arc<Timeline>) -> TimelineSetGuard {
         let is_present = self.is_present(&tli.ttid);
         TimelineSetGuard {
@@ -52,6 +60,10 @@ impl TimelinesSet {
     }
 }
 
+/// Guard is used to add or remove timeline from the set.
+/// If the timeline present in set, it will be removed from it on drop.
+/// Note: do not use more than one guard for the same timeline, it caches the presence state.
+/// It is designed to be used in the manager task only.
 pub struct TimelineSetGuard {
     timelines_set: Arc<TimelinesSet>,
     tli: Arc<Timeline>,
