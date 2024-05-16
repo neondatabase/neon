@@ -91,10 +91,10 @@ pub struct IndexPart {
     pub(crate) lineage: Lineage,
 
     /// Describes the kind of aux files stored in the timeline.
-    /// 
+    ///
     /// The value is modified during file ingestion when the latest wanted value communicated via tenant config is applied if it is acceptable.
     /// A V1 setting after V2 files have been committed is not accepted.
-    /// 
+    ///
     /// None means no aux files have been written to the storage before the point
     /// when this flag is introduced.
     #[serde(skip_serializing_if = "Option::is_none", default)]
