@@ -34,16 +34,15 @@ services:
     restart: always
     image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
     environment:
-      - BROKER_ENDPOINT='http://storage_broker:50051'
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
     build:
-      context: .
+      context: ../
       args:
         - |
           PAGESERVER_CONFIG=
-          broker_endpoint=$BROKER_ENDPOINT
+          broker_endpoint='http://storage_broker:50051'
           listen_pg_addr='0.0.0.0:6400'
           listen_http_addr='0.0.0.0:9898'
           remote_storage={
