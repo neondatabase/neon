@@ -30,7 +30,6 @@ services:
       - minio
 
   pageserver:
-    user: neon:neon
     restart: always
     image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
     environment:
