@@ -5795,6 +5795,11 @@ mod tests {
 
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
         assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            None,
+            "V1 file is no longer readable after switch to V2"
+        );
+        assert_eq!(
             files.get("pg_logical/mappings/test2"),
             Some(&bytes::Bytes::from_static(b"second"))
         );
