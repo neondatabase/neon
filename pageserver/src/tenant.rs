@@ -5643,4 +5643,63 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_metadata_compaction_trigger() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_compaction_trigger")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        base_key.field1 = AUX_KEY_PREFIX;
+        let test_key = base_key;
+        let mut lsn = Lsn(0x10);
+
+        for _ in 0..20 {
+            lsn = Lsn(lsn.0 + 0x10);
+            let mut writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(test_img(&format!("{} at {}", 0, lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+            tline.freeze_and_flush().await?; // force create a delta layer
+        }
+
+        let before_num_l0_delta_files = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .get_level0_deltas()?
+            .len();
+
+        tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+
+        let after_num_l0_delta_files = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .get_level0_deltas()?
+            .len();
+
+        assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
+
+        assert_eq!(
+            tline.get(test_key, lsn, &ctx).await?,
+            test_img(&format!("{} at {}", 0, lsn))
+        );
+
+        Ok(())
+    }
 }
