@@ -25,6 +25,7 @@ from fixtures.neon_fixtures import (
     S3Scrubber,
     generate_uploads_and_deletions,
 )
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     assert_tenant_state,
@@ -668,3 +669,22 @@ def test_upgrade_generationless_local_file_paths(
         )
         == 0
     )
+
+    # Check that when we evict and promote one of the legacy-named layers, everything works as
+    # expected
+    local_layers = list(
+        (
+            parse_layer_file_name(path.name),
+            os.path.join(env.pageserver.timeline_dir(tenant_id, timeline_id), path),
+        )
+        for path in env.pageserver.list_layers(tenant_id, timeline_id)
+    )
+    (victim_layer_name, victim_path) = local_layers[0]
+    assert os.path.exists(victim_path)
+
+    env.pageserver.http_client().evict_layer(tenant_id, timeline_id, victim_layer_name.to_str())
+    assert not os.path.exists(victim_path)
+
+    env.pageserver.http_client().download_layer(tenant_id, timeline_id, victim_layer_name.to_str())
+    # We should download into the same local path we started with
+    assert os.path.exists(victim_path)
