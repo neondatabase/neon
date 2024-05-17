@@ -2341,13 +2341,13 @@ async fn list_aux_files(
             .await?;
 
     let process = || async move {
-        let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Warn);
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let files = timeline.list_aux_files(body.lsn, &ctx).await?;
         Ok::<_, anyhow::Error>(files)
     };
 
     match process().await {
-        Ok(st) => json_response(StatusCode::ACCEPTED, st),
+        Ok(st) => json_response(StatusCode::OK, st),
         Err(err) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::InternalServerError(err).to_string(),
@@ -2374,7 +2374,7 @@ async fn ingest_aux_files(
         let mut modification = timeline.begin_modification(Lsn(
             timeline.get_last_record_lsn().0 + 8
         ) /* advance LSN by 8 */);
-        let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Warn);
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         for (fname, content) in body.aux_files {
             modification
                 .put_file(&fname, content.as_bytes(), &ctx)
@@ -2385,7 +2385,7 @@ async fn ingest_aux_files(
     };
 
     match process().await {
-        Ok(st) => json_response(StatusCode::ACCEPTED, st),
+        Ok(st) => json_response(StatusCode::OK, st),
         Err(err) => Err(ApiError::InternalServerError(err)),
     }
 }
@@ -2678,11 +2678,11 @@ pub fn make_router(
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/ingest_aux_files",
-            |r| api_handler(r, ingest_aux_files),
+            |r| testing_api_handler("ingest_aux_files", r, ingest_aux_files),
         )
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/list_aux_files",
-            |r| api_handler(r, list_aux_files),
+            |r| testing_api_handler("list_aux_files", r, list_aux_files),
         )
         .any(handler_404))
 }

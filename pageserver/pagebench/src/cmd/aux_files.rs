@@ -4,10 +4,7 @@ use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
-use crate::util::{request_stats, tokio_thread_local_stats};
+use std::sync::Arc;
 
 /// Ingest aux files into the pageserver.
 #[derive(clap::Parser)]
@@ -22,18 +19,17 @@ pub(crate) struct Args {
     targets: Option<Vec<TenantTimelineId>>,
 }
 
-tokio_thread_local_stats::declare!(STATS: request_stats::Stats);
-
 pub(crate) fn main(args: Args) -> anyhow::Result<()> {
-    tokio_thread_local_stats::main!(STATS, move |thread_local_stats| {
-        main_impl(args, thread_local_stats)
-    })
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let main_task = rt.spawn(main_impl(args));
+    rt.block_on(main_task).unwrap()
 }
 
-async fn main_impl(
-    args: Args,
-    _all_thread_local_stats: AllThreadLocalStats<request_stats::Stats>,
-) -> anyhow::Result<()> {
+async fn main_impl(args: Args) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
@@ -45,8 +41,17 @@ async fn main_impl(
     let timelines: Vec<TenantTimelineId> = crate::util::cli::targets::discover(
         &mgmt_api_client,
         crate::util::cli::targets::Spec {
-            limit_to_first_n_targets: Some(1),
-            targets: args.targets.clone(),
+            limit_to_first_n_targets: None,
+            targets: {
+                if let Some(targets) = &args.targets {
+                    if targets.len() != 1 {
+                        anyhow::bail!("must specify exactly one target");
+                    }
+                    Some(targets.clone())
+                } else {
+                    None
+                }
+            },
         },
     )
     .await?;
