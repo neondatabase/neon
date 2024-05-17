@@ -30,47 +30,27 @@
 //! 2024-04-15 on i3en.3xlarge
 //!
 //! ```text
-//! async-short/1           time:   [24.584 µs 24.737 µs 24.922 µs]
-//! async-short/2           time:   [33.479 µs 33.660 µs 33.888 µs]
-//! async-short/4           time:   [42.713 µs 43.046 µs 43.440 µs]
-//! async-short/8           time:   [71.814 µs 72.478 µs 73.240 µs]
-//! async-short/16          time:   [132.73 µs 134.45 µs 136.22 µs]
-//! async-short/32          time:   [258.31 µs 260.73 µs 263.27 µs]
-//! async-short/64          time:   [511.61 µs 514.44 µs 517.51 µs]
-//! async-short/128         time:   [992.64 µs 998.23 µs 1.0042 ms]
-//! async-medium/1          time:   [110.11 µs 110.50 µs 110.96 µs]
-//! async-medium/2          time:   [153.06 µs 153.85 µs 154.99 µs]
-//! async-medium/4          time:   [317.51 µs 319.92 µs 322.85 µs]
-//! async-medium/8          time:   [638.30 µs 644.68 µs 652.12 µs]
-//! async-medium/16         time:   [1.2651 ms 1.2773 ms 1.2914 ms]
-//! async-medium/32         time:   [2.5117 ms 2.5410 ms 2.5720 ms]
-//! async-medium/64         time:   [4.8088 ms 4.8555 ms 4.9047 ms]
-//! async-medium/128        time:   [8.8311 ms 8.9849 ms 9.1263 ms]
-//! sync-short/1            time:   [25.503 µs 25.626 µs 25.771 µs]
-//! sync-short/2            time:   [30.850 µs 31.013 µs 31.208 µs]
-//! sync-short/4            time:   [45.543 µs 45.856 µs 46.193 µs]
-//! sync-short/8            time:   [84.114 µs 84.639 µs 85.220 µs]
-//! sync-short/16           time:   [185.22 µs 186.15 µs 187.13 µs]
-//! sync-short/32           time:   [377.43 µs 378.87 µs 380.46 µs]
-//! sync-short/64           time:   [756.49 µs 759.04 µs 761.70 µs]
-//! sync-short/128          time:   [1.4825 ms 1.4874 ms 1.4923 ms]
-//! sync-medium/1           time:   [105.66 µs 106.01 µs 106.43 µs]
-//! sync-medium/2           time:   [153.10 µs 153.84 µs 154.72 µs]
-//! sync-medium/4           time:   [327.13 µs 329.44 µs 332.27 µs]
-//! sync-medium/8           time:   [654.26 µs 658.73 µs 663.63 µs]
-//! sync-medium/16          time:   [1.2682 ms 1.2748 ms 1.2816 ms]
-//! sync-medium/32          time:   [2.4456 ms 2.4595 ms 2.4731 ms]
-//! sync-medium/64          time:   [4.6523 ms 4.6890 ms 4.7256 ms]
-//! sync-medium/128         time:   [8.7215 ms 8.8323 ms 8.9344 ms]
+//! short/1           time:   [24.584 µs 24.737 µs 24.922 µs]
+//! short/2           time:   [33.479 µs 33.660 µs 33.888 µs]
+//! short/4           time:   [42.713 µs 43.046 µs 43.440 µs]
+//! short/8           time:   [71.814 µs 72.478 µs 73.240 µs]
+//! short/16          time:   [132.73 µs 134.45 µs 136.22 µs]
+//! short/32          time:   [258.31 µs 260.73 µs 263.27 µs]
+//! short/64          time:   [511.61 µs 514.44 µs 517.51 µs]
+//! short/128         time:   [992.64 µs 998.23 µs 1.0042 ms]
+//! medium/1          time:   [110.11 µs 110.50 µs 110.96 µs]
+//! medium/2          time:   [153.06 µs 153.85 µs 154.99 µs]
+//! medium/4          time:   [317.51 µs 319.92 µs 322.85 µs]
+//! medium/8          time:   [638.30 µs 644.68 µs 652.12 µs]
+//! medium/16         time:   [1.2651 ms 1.2773 ms 1.2914 ms]
+//! medium/32         time:   [2.5117 ms 2.5410 ms 2.5720 ms]
+//! medium/64         time:   [4.8088 ms 4.8555 ms 4.9047 ms]
+//! medium/128        time:   [8.8311 ms 8.9849 ms 9.1263 ms]
 //! ```
 
 use bytes::{Buf, Bytes};
 use criterion::{BenchmarkId, Criterion};
-use pageserver::{
-    config::PageServerConf,
-    walrecord::NeonWalRecord,
-    walredo::{PostgresRedoManager, ProcessKind},
-};
+use pageserver::{config::PageServerConf, walrecord::NeonWalRecord, walredo::PostgresRedoManager};
 use pageserver_api::{key::Key, shard::TenantShardId};
 use std::{
     sync::Arc,
@@ -80,39 +60,32 @@ use tokio::{sync::Barrier, task::JoinSet};
 use utils::{id::TenantId, lsn::Lsn};
 
 fn bench(c: &mut Criterion) {
-    for process_kind in &[ProcessKind::Async, ProcessKind::Sync] {
-        {
-            let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
-            for nclients in nclients {
-                let mut group = c.benchmark_group(format!("{process_kind}-short"));
-                group.bench_with_input(
-                    BenchmarkId::from_parameter(nclients),
-                    &nclients,
-                    |b, nclients| {
-                        let redo_work = Arc::new(Request::short_input());
-                        b.iter_custom(|iters| {
-                            bench_impl(*process_kind, Arc::clone(&redo_work), iters, *nclients)
-                        });
-                    },
-                );
-            }
+    {
+        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
+        for nclients in nclients {
+            let mut group = c.benchmark_group("short");
+            group.bench_with_input(
+                BenchmarkId::from_parameter(nclients),
+                &nclients,
+                |b, nclients| {
+                    let redo_work = Arc::new(Request::short_input());
+                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
+                },
+            );
         }
-
-        {
-            let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
-            for nclients in nclients {
-                let mut group = c.benchmark_group(format!("{process_kind}-medium"));
-                group.bench_with_input(
-                    BenchmarkId::from_parameter(nclients),
-                    &nclients,
-                    |b, nclients| {
-                        let redo_work = Arc::new(Request::medium_input());
-                        b.iter_custom(|iters| {
-                            bench_impl(*process_kind, Arc::clone(&redo_work), iters, *nclients)
-                        });
-                    },
-                );
-            }
+    }
+    {
+        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
+        for nclients in nclients {
+            let mut group = c.benchmark_group("medium");
+            group.bench_with_input(
+                BenchmarkId::from_parameter(nclients),
+                &nclients,
+                |b, nclients| {
+                    let redo_work = Arc::new(Request::medium_input());
+                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
+                },
+            );
         }
     }
 }
@@ -120,16 +93,10 @@ criterion::criterion_group!(benches, bench);
 criterion::criterion_main!(benches);
 
 // Returns the sum of each client's wall-clock time spent executing their share of the n_redos.
-fn bench_impl(
-    process_kind: ProcessKind,
-    redo_work: Arc<Request>,
-    n_redos: u64,
-    nclients: u64,
-) -> Duration {
+fn bench_impl(redo_work: Arc<Request>, n_redos: u64, nclients: u64) -> Duration {
     let repo_dir = camino_tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
 
-    let mut conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
-    conf.walredo_process_kind = process_kind;
+    let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
     let conf = Box::leak(Box::new(conf));
     let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
 
@@ -158,27 +125,13 @@ fn bench_impl(
         });
     }
 
-    let elapsed = rt.block_on(async move {
+    rt.block_on(async move {
         let mut total_wallclock_time = Duration::ZERO;
         while let Some(res) = tasks.join_next().await {
             total_wallclock_time += res.unwrap();
         }
         total_wallclock_time
-    });
-
-    // consistency check to ensure process kind setting worked
-    if nredos_per_client > 0 {
-        assert_eq!(
-            manager
-                .status()
-                .process
-                .map(|p| p.kind)
-                .expect("the benchmark work causes a walredo process to be spawned"),
-            std::borrow::Cow::Borrowed(process_kind.into())
-        );
-    }
-
-    elapsed
+    })
 }
 
 async fn client(

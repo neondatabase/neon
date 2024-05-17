@@ -26,7 +26,7 @@ use crate::{
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
     },
     virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
-    METADATA_FILE_NAME, TEMP_FILE_SUFFIX,
+    TEMP_FILE_SUFFIX,
 };
 
 use super::{
@@ -111,6 +111,7 @@ struct SecondaryDownloader {
 pub(super) struct OnDiskState {
     metadata: LayerFileMetadata,
     access_time: SystemTime,
+    local_path: Utf8PathBuf,
 }
 
 impl OnDiskState {
@@ -121,11 +122,25 @@ impl OnDiskState {
         _ame: LayerName,
         metadata: LayerFileMetadata,
         access_time: SystemTime,
+        local_path: Utf8PathBuf,
     ) -> Self {
         Self {
             metadata,
             access_time,
+            local_path,
         }
+    }
+
+    // This is infallible, because all errors are either acceptable (ENOENT), or totally
+    // unexpected (fatal).
+    pub(super) fn remove_blocking(&self) {
+        // We tolerate ENOENT, because between planning eviction and executing
+        // it, the secondary downloader could have seen an updated heatmap that
+        // resulted in a layer being deleted.
+        // Other local I/O errors are process-fatal: these should never happen.
+        std::fs::remove_file(&self.local_path)
+            .or_else(fs_ext::ignore_not_found)
+            .fatal_err("Deleting secondary layer")
     }
 }
 
@@ -816,20 +831,12 @@ impl<'a> TenantDownloader<'a> {
                 if cfg!(debug_assertions) {
                     // Debug for https://github.com/neondatabase/neon/issues/6966: check that the files we think
                     // are already present on disk are really there.
-                    let local_path = local_layer_path(
-                        self.conf,
-                        tenant_shard_id,
-                        &timeline.timeline_id,
-                        &layer.name,
-                        &layer.metadata.generation,
-                    );
-
-                    match tokio::fs::metadata(&local_path).await {
+                    match tokio::fs::metadata(&on_disk.local_path).await {
                         Ok(meta) => {
                             tracing::debug!(
                                 "Layer {} present at {}, size {}",
                                 layer.name,
-                                local_path,
+                                on_disk.local_path,
                                 meta.len(),
                             );
                         }
@@ -837,7 +844,7 @@ impl<'a> TenantDownloader<'a> {
                             tracing::warn!(
                                 "Layer {} not found at {} ({})",
                                 layer.name,
-                                local_path,
+                                on_disk.local_path,
                                 e
                             );
                             debug_assert!(false);
@@ -926,6 +933,13 @@ impl<'a> TenantDownloader<'a> {
                         v.get_mut().access_time = t.access_time;
                     }
                     Entry::Vacant(e) => {
+                        let local_path = local_layer_path(
+                            self.conf,
+                            tenant_shard_id,
+                            &timeline.timeline_id,
+                            &t.name,
+                            &t.metadata.generation,
+                        );
                         e.insert(OnDiskState::new(
                             self.conf,
                             tenant_shard_id,
@@ -933,6 +947,7 @@ impl<'a> TenantDownloader<'a> {
                             t.name,
                             LayerFileMetadata::from(&t.metadata),
                             t.access_time,
+                            local_path,
                         ));
                     }
                 }
@@ -955,6 +970,14 @@ impl<'a> TenantDownloader<'a> {
             &self.secondary_state.cancel
         );
 
+        let local_path = local_layer_path(
+            self.conf,
+            tenant_shard_id,
+            timeline_id,
+            &layer.name,
+            &layer.metadata.generation,
+        );
+
         // Note: no backoff::retry wrapper here because download_layer_file does its own retries internally
         let downloaded_bytes = match download_layer_file(
             self.conf,
@@ -963,6 +986,7 @@ impl<'a> TenantDownloader<'a> {
             *timeline_id,
             &layer.name,
             &LayerFileMetadata::from(&layer.metadata),
+            &local_path,
             &self.secondary_state.cancel,
             ctx,
         )
@@ -1074,11 +1098,7 @@ async fn init_timeline_state(
             .fatal_err(&format!("Read metadata on {}", file_path));
 
         let file_name = file_path.file_name().expect("created it from the dentry");
-        if file_name == METADATA_FILE_NAME {
-            // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
-            warn!(path=?dentry.path(), "found legacy metadata file, these should have been removed in load_tenant_config");
-            continue;
-        } else if crate::is_temporary(&file_path)
+        if crate::is_temporary(&file_path)
             || is_temp_download_file(&file_path)
             || is_ephemeral_file(file_name)
         {
@@ -1120,6 +1140,7 @@ async fn init_timeline_state(
                                     name,
                                     LayerFileMetadata::from(&remote_meta.metadata),
                                     remote_meta.access_time,
+                                    file_path,
                                 ),
                             );
                         }

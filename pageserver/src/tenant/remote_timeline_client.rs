@@ -317,7 +317,7 @@ pub struct RemoteTimelineClient {
 
     upload_queue: Mutex<UploadQueue>,
 
-    metrics: Arc<RemoteTimelineClientMetrics>,
+    pub(crate) metrics: Arc<RemoteTimelineClientMetrics>,
 
     storage_impl: GenericRemoteStorage,
 
@@ -461,11 +461,11 @@ impl RemoteTimelineClient {
         } else {
             0
         };
-        self.metrics.remote_physical_size_set(size);
+        self.metrics.remote_physical_size_gauge.set(size);
     }
 
     pub fn get_remote_physical_size(&self) -> u64 {
-        self.metrics.remote_physical_size_get()
+        self.metrics.remote_physical_size_gauge.get()
     }
 
     //
@@ -518,6 +518,7 @@ impl RemoteTimelineClient {
         &self,
         layer_file_name: &LayerName,
         layer_metadata: &LayerFileMetadata,
+        local_path: &Utf8Path,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<u64> {
@@ -536,6 +537,7 @@ impl RemoteTimelineClient {
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
+                local_path,
                 cancel,
                 ctx,
             )
@@ -2137,7 +2139,7 @@ mod tests {
             tenant_ctx: _tenant_ctx,
         } = test_setup;
 
-        let client = timeline.remote_client.as_ref().unwrap();
+        let client = &timeline.remote_client;
 
         // Download back the index.json, and check that the list of files is correct
         let initial_index_part = match client
@@ -2328,7 +2330,7 @@ mod tests {
             timeline,
             ..
         } = TestSetup::new("metrics").await.unwrap();
-        let client = timeline.remote_client.as_ref().unwrap();
+        let client = &timeline.remote_client;
 
         let layer_file_name_1: LayerName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
         let local_path = local_layer_path(

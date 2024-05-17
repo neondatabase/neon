@@ -21,24 +21,22 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    NeonPageserver,
     PgBin,
     S3Scrubber,
-    flush_ep_to_pageserver,
-    last_flush_lsn_upload,
+    generate_uploads_and_deletions,
 )
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     list_prefix,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import (
     RemoteStorageKind,
 )
-from fixtures.utils import print_gc_result, wait_until
+from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
 # A tenant configuration that is convenient for generating uploads and deletions
@@ -57,82 +55,6 @@ TENANT_CONF = {
     "image_creation_threshold": "1",
     "image_layer_creation_check_threshold": "0",
 }
-
-
-def generate_uploads_and_deletions(
-    env: NeonEnv,
-    *,
-    init: bool = True,
-    tenant_id: Optional[TenantId] = None,
-    timeline_id: Optional[TimelineId] = None,
-    data: Optional[str] = None,
-    pageserver: NeonPageserver,
-):
-    """
-    Using the environment's default tenant + timeline, generate a load pattern
-    that results in some uploads and some deletions to remote storage.
-    """
-
-    if tenant_id is None:
-        tenant_id = env.initial_tenant
-    assert tenant_id is not None
-
-    if timeline_id is None:
-        timeline_id = env.initial_timeline
-    assert timeline_id is not None
-
-    ps_http = pageserver.http_client()
-
-    with env.endpoints.create_start(
-        "main", tenant_id=tenant_id, pageserver_id=pageserver.id
-    ) as endpoint:
-        if init:
-            endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
-            last_flush_lsn_upload(
-                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
-            )
-
-        def churn(data):
-            endpoint.safe_psql_many(
-                [
-                    f"""
-                INSERT INTO foo (id, val)
-                SELECT g, '{data}'
-                FROM generate_series(1, 200) g
-                ON CONFLICT (id) DO UPDATE
-                SET val = EXCLUDED.val
-                """,
-                    # to ensure that GC can actually remove some layers
-                    "VACUUM foo",
-                ]
-            )
-            assert tenant_id is not None
-            assert timeline_id is not None
-            # We are waiting for uploads as well as local flush, in order to avoid leaving the system
-            # in a state where there are "future layers" in remote storage that will generate deletions
-            # after a restart.
-            last_flush_lsn_upload(
-                env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver.id
-            )
-
-        # Compaction should generate some GC-elegible layers
-        for i in range(0, 2):
-            churn(f"{i if data is None else data}")
-
-        gc_result = ps_http.timeline_gc(tenant_id, timeline_id, 0)
-        print_gc_result(gc_result)
-        assert gc_result["layers_removed"] > 0
-
-        # Stop endpoint and flush all data to pageserver, then checkpoint it: this
-        # ensures that the pageserver is in a fully idle state: there will be no more
-        # background ingest, no more uploads pending, and therefore no non-determinism
-        # in subsequent actions like pageserver restarts.
-        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-        ps_http.timeline_checkpoint(tenant_id, timeline_id)
-        # Finish uploads
-        wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
-        # Finish all remote writes (including deletions)
-        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
 
 def read_all(
@@ -711,39 +633,86 @@ def test_upgrade_generationless_local_file_paths(
     generation numbers: it should accept these layer files, and avoid doing
     a delete/download cycle on them.
     """
-    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_tenant(
+        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}'
+    )
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
     workload.write_rows(1000)
 
-    env.pageserver.stop()
+    attached_pageserver = env.get_tenant_pageserver(tenant_id)
+    secondary_pageserver = list([ps for ps in env.pageservers if ps.id != attached_pageserver.id])[
+        0
+    ]
+
+    attached_pageserver.http_client().tenant_heatmap_upload(tenant_id)
+    secondary_pageserver.http_client().tenant_secondary_download(tenant_id)
 
     # Rename the local paths to legacy format, to simulate what
-    # we would see when upgrading
-    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
-    files_renamed = 0
-    for filename in os.listdir(timeline_dir):
-        path = os.path.join(timeline_dir, filename)
-        log.info(f"Found file {path}")
-        if path.endswith("-v1-00000001"):
-            new_path = path[:-12]
-            os.rename(path, new_path)
-            log.info(f"Renamed {path} -> {new_path}")
-            files_renamed += 1
+    # we would see when upgrading.  Do this on both attached and secondary locations, as we will
+    # test the behavior of both.
+    for pageserver in env.pageservers:
+        pageserver.stop()
+        timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
+        files_renamed = 0
+        for filename in os.listdir(timeline_dir):
+            path = os.path.join(timeline_dir, filename)
+            log.info(f"Found file {path}")
+            if path.endswith("-v1-00000001"):
+                new_path = path[:-12]
+                os.rename(path, new_path)
+                log.info(f"Renamed {path} -> {new_path}")
+                files_renamed += 1
 
-    assert files_renamed > 0
+        assert files_renamed > 0
 
-    env.pageserver.start()
+        pageserver.start()
 
     workload.validate()
 
     # Assert that there were no on-demand downloads
     assert (
-        env.pageserver.http_client().get_metric_value(
+        attached_pageserver.http_client().get_metric_value(
             "pageserver_remote_ondemand_downloaded_layers_total"
         )
         == 0
     )
+
+    # Do a secondary download and ensure there were no layer downloads
+    secondary_pageserver.http_client().tenant_secondary_download(tenant_id)
+    assert (
+        secondary_pageserver.http_client().get_metric_value(
+            "pageserver_secondary_download_layer_total"
+        )
+        == 0
+    )
+
+    # Check that when we evict and promote one of the legacy-named layers, everything works as
+    # expected
+    local_layers = list(
+        (
+            parse_layer_file_name(path.name),
+            os.path.join(attached_pageserver.timeline_dir(tenant_id, timeline_id), path),
+        )
+        for path in attached_pageserver.list_layers(tenant_id, timeline_id)
+    )
+    (victim_layer_name, victim_path) = local_layers[0]
+    assert os.path.exists(victim_path)
+
+    attached_pageserver.http_client().evict_layer(
+        tenant_id, timeline_id, victim_layer_name.to_str()
+    )
+    assert not os.path.exists(victim_path)
+
+    attached_pageserver.http_client().download_layer(
+        tenant_id, timeline_id, victim_layer_name.to_str()
+    )
+    # We should download into the same local path we started with
+    assert os.path.exists(victim_path)
