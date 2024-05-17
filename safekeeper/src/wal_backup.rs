@@ -29,7 +29,7 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
-use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS};
+use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
 use crate::timeline::{PeerInfo, Timeline};
 use crate::timeline_manager::StateSnapshot;
 use crate::{GlobalTimelines, SafeKeeperConf, WAL_BACKUP_RUNTIME};
@@ -209,6 +209,8 @@ async fn backup_task_main(
     parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
+    let _guard = WAL_BACKUP_TASKS.guard();
+
     info!("started");
     let res = GlobalTimelines::get(ttid);
     if let Err(e) = res {

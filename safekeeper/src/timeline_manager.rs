@@ -4,6 +4,7 @@ use tracing::{info, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
+    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
     timeline::{PeerInfo, ReadGuardSharedState, Timeline},
     timelines_set::TimelinesSet,
     wal_backup::{self, WalBackupTaskHandle},
@@ -73,6 +74,8 @@ pub async fn main_task(
     let mut backup_task: Option<WalBackupTaskHandle> = None;
 
     let last_state = 'outer: loop {
+        MANAGER_ITERATIONS_TOTAL.inc();
+
         let state_snapshot = StateSnapshot::new(tli.read_shared_state().await, heartbeat_timeout);
         let num_computes = *num_computes_rx.borrow();
 
@@ -97,9 +100,11 @@ pub async fn main_task(
         if tli_broker_active.set(is_active) {
             // write log if state has changed
             info!(
-                "timeline {} active={} now, remote_consistent_lsn={}, commit_lsn={}",
-                ttid, is_active, state_snapshot.remote_consistent_lsn, state_snapshot.commit_lsn,
+                "timeline active={} now, remote_consistent_lsn={}, commit_lsn={}",
+                is_active, state_snapshot.remote_consistent_lsn, state_snapshot.commit_lsn,
             );
+
+            MANAGER_ACTIVE_CHANGES.inc();
 
             if !is_active {
                 // TODO: maybe use tokio::spawn?
@@ -115,16 +120,17 @@ pub async fn main_task(
         tli.broker_active
             .store(is_active, std::sync::atomic::Ordering::SeqCst);
 
-        // sleep to make the loop less busy
-        tokio::time::sleep(REFRESH_INTERVAL).await;
-
         // wait until something changes
         tokio::select! {
             _ = cancellation_rx.changed() => {
                 // timeline was deleted
                 break 'outer state_snapshot;
             }
-            _ = state_version_rx.changed() => {
+            _ = async {
+                // don't wake up on every state change, but at most every REFRESH_INTERVAL
+                tokio::time::sleep(REFRESH_INTERVAL).await;
+                let _ = state_version_rx.changed().await;
+            } => {
                 // state was updated
             }
             _ = num_computes_rx.changed() => {
