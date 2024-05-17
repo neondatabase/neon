@@ -1528,9 +1528,13 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
 	{
 		/* Request the page at the last replayed LSN. */
 		result.request_lsn = GetXLogReplayRecPtr(NULL);
-		result.not_modified_since = last_written_lsn;
 		result.effective_request_lsn = result.request_lsn;
-		Assert(last_written_lsn <= result.request_lsn);
+		/*
+		 * lastReplayedEndRecPtr is advanced after applying WAL record while
+		 * last written LSN can be advanced while applying WAL record this is why
+		 * last_written_lsn can be larger than GetXLogReplayRecPtr(NULL).
+		 */
+		result.not_modified_since = Min(last_written_lsn, result.request_lsn);
 
 		neon_log(DEBUG1, "neon_get_request_lsns request lsn %X/%X, not_modified_since %X/%X",
 				 LSN_FORMAT_ARGS(result.request_lsn), LSN_FORMAT_ARGS(result.not_modified_since));
