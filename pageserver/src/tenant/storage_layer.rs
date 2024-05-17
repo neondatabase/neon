@@ -113,7 +113,7 @@ impl From<VectoredValueReconstructState> for ValueReconstructState {
     }
 }
 
-/// Bag of data accumulated during a vectored get.
+/// Bag of data accumulated during a vectored get..
 pub(crate) struct ValuesReconstructState {
     /// The keys will be removed after `get_vectored` completes. The caller outside `Timeline`
     /// should not expect to get anything from this hashmap.
