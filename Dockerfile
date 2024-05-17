@@ -36,6 +36,10 @@ ARG RUSTC_WRAPPER=cachepot
 ENV AWS_REGION=eu-central-1
 ENV CACHEPOT_S3_KEY_PREFIX=cachepot
 ARG CACHEPOT_BUCKET=neon-github-dev
+ENV PAGESERVER_CONFIG="broker_endpoint='http://storage_broker:50051'\n"\
+"pg_distrib_dir='/usr/local/'\n"\
+"listen_pg_addr='0.0.0.0:6400'\n"\
+"listen_http_addr='0.0.0.0:9898'\n"
 #ARG AWS_ACCESS_KEY_ID
 #ARG AWS_SECRET_ACCESS_KEY
 
@@ -92,13 +96,10 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
-RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
-    && /usr/local/bin/pageserver -D /data/.neon/ --init \
-       -c "id=1234" \
-       -c "broker_endpoint='http://storage_broker:50051'" \
-       -c "pg_distrib_dir='/usr/local/'" \
-       -c "listen_pg_addr='0.0.0.0:6400'" \
-       -c "listen_http_addr='0.0.0.0:9898'"
+RUN mkdir -p /data/.neon/ && \
+  echo "id=1234" > "/data/.neon/identity.toml" && \
+  echo "$PAGESERVER_CONFIG" > /data/.neon/pageserver.toml && \
+  chown -R neon:neon /data/.neon
 
 # When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
 # that want a particular postgres version will select it explicitly: this is just a default.
@@ -109,3 +110,5 @@ VOLUME ["/data"]
 USER neon
 EXPOSE 6400
 EXPOSE 9898
+
+CMD chown -R neon:neon /data/.neon && /usr/local/bin/pageserver -D /data/.neon
