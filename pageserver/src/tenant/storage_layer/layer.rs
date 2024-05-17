@@ -277,10 +277,41 @@ impl Layer {
 
         let downloaded = resident.expect("just initialized");
 
-        // if the rename works, the path is as expected
-        // TODO: sync system call
-        std::fs::rename(temp_path, owner.local_path())
-            .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
+        // We never want to overwrite an existing file, so we use `RENAME_NOREPLACE`.
+        // TODO: move to `virtual_file` module, next to `VirtualFile::crashsafe_overwrite`
+        // TODO: do the same check for when L0s are being written.
+        {
+            #[cfg(target_os = "linux")]
+            {
+                nix::fcntl::renameat2(
+                    None,
+                    temp_path,
+                    None,
+                    owner.local_path(),
+                    nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+                )
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // use getattrlist system call to check for VOL_CAP_INT_RENAME_EXCL
+                // which is the precondition for using RENAME_EXCL, according to the
+                // macos manpage for renamex_np: https://www.manpagez.com/man/2/renamex_np/osx-10.12.3.php
+                let supports_rename_excl: bool = { todo!() };
+
+                if !supports_rename_excl {
+                    anyhow::bail!("filesystem does not support atomic rename");
+                }
+
+                todo!("use renamex_np with RENAME_EXCL to rename {temp_path} to {owner}", owner = owner.local_path());
+
+                std::io::Result::Ok(())
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                std::compile_error!("OS (and filesystem) must support atomic rename with no-replace mode");
+            }
+        }
+        .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
 
         Ok(ResidentLayer { downloaded, owner })
     }
