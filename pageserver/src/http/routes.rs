@@ -16,6 +16,8 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::IngestAuxFilesRequest;
+use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::ShardParameters;
@@ -2331,6 +2333,71 @@ async fn get_utilization(
         .map_err(ApiError::InternalServerError)
 }
 
+async fn list_aux_files(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let body: ListAuxFilesRequest = json_request(&mut request).await?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let process = || async move {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let files = timeline.list_aux_files(body.lsn, &ctx).await?;
+        Ok::<_, anyhow::Error>(files)
+    };
+
+    match process().await {
+        Ok(st) => json_response(StatusCode::OK, st),
+        Err(err) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::InternalServerError(err).to_string(),
+        ),
+    }
+}
+
+async fn ingest_aux_files(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let body: IngestAuxFilesRequest = json_request(&mut request).await?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let process = || async move {
+        let mut modification = timeline.begin_modification(Lsn(
+            timeline.get_last_record_lsn().0 + 8
+        ) /* advance LSN by 8 */);
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        for (fname, content) in body.aux_files {
+            modification
+                .put_file(&fname, content.as_bytes(), &ctx)
+                .await?;
+        }
+        modification.commit(&ctx).await?;
+        Ok::<_, anyhow::Error>(())
+    };
+
+    match process().await {
+        Ok(st) => json_response(StatusCode::OK, st),
+        Err(err) => Err(ApiError::InternalServerError(err)),
+    }
+}
+
 /// Report on the largest tenants on this pageserver, for the storage controller to identify
 /// candidates for splitting
 async fn post_top_tenants(
@@ -2708,6 +2775,14 @@ pub fn make_router(
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/ingest_aux_files",
+            |r| testing_api_handler("ingest_aux_files", r, ingest_aux_files),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/list_aux_files",
+            |r| testing_api_handler("list_aux_files", r, list_aux_files),
+        )
         .post("/v1/top_tenants", |r| api_handler(r, post_top_tenants))
         .any(handler_404))
 }

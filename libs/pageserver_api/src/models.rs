@@ -841,6 +841,16 @@ pub struct DownloadRemoteLayersTaskSpawnRequest {
     pub max_concurrent_downloads: NonZeroUsize,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IngestAuxFilesRequest {
+    pub aux_files: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListAuxFilesRequest {
+    pub lsn: Lsn,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DownloadRemoteLayersTaskInfo {
     pub task_id: String,
