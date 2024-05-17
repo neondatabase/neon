@@ -302,13 +302,18 @@ impl Layer {
                     anyhow::bail!("filesystem does not support atomic rename");
                 }
 
-                todo!("use renamex_np with RENAME_EXCL to rename {temp_path} to {owner}", owner = owner.local_path());
+                todo!(
+                    "use renamex_np with RENAME_EXCL to rename {temp_path} to {owner}",
+                    owner = owner.local_path()
+                );
 
                 std::io::Result::Ok(())
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
-                std::compile_error!("OS (and filesystem) must support atomic rename with no-replace mode");
+                std::compile_error!(
+                    "OS (and filesystem) must support atomic rename with no-replace mode"
+                );
             }
         }
         .with_context(|| format!("rename temporary file as correct path for {owner}"))?;

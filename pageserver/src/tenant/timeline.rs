@@ -4518,7 +4518,7 @@ impl Timeline {
         }
 
         // deletion will happen later, the layer file manager calls garbage_collect_on_drop
-        guard.finish_compact_l0(layers_to_remove, &new_deltas, &self.metrics);
+        guard.finish_compact_l0(layers_to_remove, new_deltas, &self.metrics);
 
         if let Some(remote_client) = self.remote_client.as_ref() {
             remote_client.schedule_compaction_update(layers_to_remove, new_deltas)?;
