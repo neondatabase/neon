@@ -173,7 +173,7 @@ impl Persistence {
     /// Wraps `with_conn` in order to collect latency and error metrics
     async fn with_measured_conn<F, R>(&self, op: DatabaseOperation, func: F) -> DatabaseResult<R>
     where
-        F: FnOnce(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
+        F: Fn(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
         R: Send + 'static,
     {
         let latency = &METRICS_REGISTRY
@@ -199,12 +199,45 @@ impl Persistence {
     /// Call the provided function in a tokio blocking thread, with a Diesel database connection.
     async fn with_conn<F, R>(&self, func: F) -> DatabaseResult<R>
     where
-        F: FnOnce(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
+        F: Fn(&mut PgConnection) -> DatabaseResult<R> + Send + 'static,
         R: Send + 'static,
     {
+        // A generous allowance for how many times we may retry serializable transactions
+        // before giving up.  This is not expected to be hit: it is a defensive measure in case we
+        // somehow engineer a situation where duelling transactions might otherwise live-lock.
+        const MAX_RETRIES: usize = 128;
+
         let mut conn = self.connection_pool.get()?;
         tokio::task::spawn_blocking(move || -> DatabaseResult<R> {
-            conn.build_transaction().serializable().run(|c| func(c))
+            let mut retry_count = 0;
+            loop {
+                match conn.build_transaction().serializable().run(|c| func(c)) {
+                    Ok(r) => break Ok(r),
+                    Err(
+                        err @ DatabaseError::Query(diesel::result::Error::DatabaseError(
+                            diesel::result::DatabaseErrorKind::SerializationFailure,
+                            _,
+                        )),
+                    ) => {
+                        retry_count += 1;
+                        if retry_count > MAX_RETRIES {
+                            tracing::error!(
+                                "Exceeded max retries on SerializationFailure errors: {err:?}"
+                            );
+                            break Err(err);
+                        } else {
+                            // Retry on serialization errors: these are expected, because even though our
+                            // transactions don't fight for the same rows, they will occasionally collide
+                            // on index pages (e.g. increment_generation for unrelated shards can collide)
+                            tracing::debug!(
+                                "Retrying transaction on serialization failure {err:?}"
+                            );
+                            continue;
+                        }
+                    }
+                    Err(e) => break Err(e),
+                }
+            }
         })
         .await
         .expect("Task panic")
@@ -532,8 +565,11 @@ impl Persistence {
             let update = ShardUpdate {
                 generation: input_generation.map(|g| g.into().unwrap() as i32),
                 placement_policy: input_placement_policy
+                    .as_ref()
                     .map(|p| serde_json::to_string(&p).unwrap()),
-                config: input_config.map(|c| serde_json::to_string(&c).unwrap()),
+                config: input_config
+                    .as_ref()
+                    .map(|c| serde_json::to_string(&c).unwrap()),
                 scheduling_policy: input_scheduling_policy
                     .map(|p| serde_json::to_string(&p).unwrap()),
             };
