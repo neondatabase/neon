@@ -285,9 +285,9 @@ impl Layer {
             {
                 nix::fcntl::renameat2(
                     None,
-                    temp_path,
+                    temp_path.as_std_path(),
                     None,
-                    owner.local_path(),
+                    owner.local_path().as_std_path(),
                     nix::fcntl::RenameFlags::RENAME_NOREPLACE,
                 )
             }
