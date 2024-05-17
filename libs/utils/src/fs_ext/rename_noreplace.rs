@@ -1,8 +1,8 @@
 use nix::NixPath;
 
-//! Rename a file without replacing an existing file.
-//!
-//! This is a wrapper around platform-specific APIs.
+/// Rename a file without replacing an existing file.
+///
+/// This is a wrapper around platform-specific APIs.
 pub fn rename_noreplace<P1: ?Sized + NixPath, P2: ?Sized + NixPath>(
     src: &P1,
     dst: &P2,
@@ -12,9 +12,9 @@ pub fn rename_noreplace<P1: ?Sized + NixPath, P2: ?Sized + NixPath>(
         {
             nix::fcntl::renameat2(
                 None,
-                src.as_std_path(),
+                src,
                 None,
-                dst.as_std_path(),
+                dst,
                 nix::fcntl::RenameFlags::RENAME_NOREPLACE,
             )
         }
