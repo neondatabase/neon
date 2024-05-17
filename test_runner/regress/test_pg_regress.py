@@ -33,6 +33,8 @@ def test_pg_regress(
     pg_distrib_dir: Path,
     shard_count: Optional[int],
 ):
+    DBNAME = "regression"
+
     """
     :param shard_count: if None, create an unsharded tenant.  Otherwise create a tenant with this
                         many shards.
@@ -50,7 +52,7 @@ def test_pg_regress(
 
     # Connect to postgres and create a database called "regression".
     endpoint = env.endpoints.create_start("main")
-    endpoint.safe_psql("CREATE DATABASE regression")
+    endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
 
     # Create some local directories for pg_regress to run in.
     runpath = test_output_dir / "regress"
