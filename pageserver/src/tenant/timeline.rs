@@ -3425,15 +3425,14 @@ impl Timeline {
                 return Err(GetVectoredError::Cancelled);
             }
 
-            let (keys_done_last_step, image_coverage_last_step) =
+            let (keys_done_last_step, keys_with_image_coverage) =
                 reconstruct_state.consume_done_keys();
             unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
-            unmapped_keyspace.remove_overlapping_with(&image_coverage_last_step);
             completed_keyspace.merge(&keys_done_last_step);
-            if !image_coverage_last_step.is_empty() {
-                for range in image_coverage_last_step.ranges {
-                    image_covered_keyspace.add_range(range);
-                }
+            if let Some(keys_with_image_coverage) = keys_with_image_coverage {
+                unmapped_keyspace
+                    .remove_overlapping_with(&KeySpace::single(keys_with_image_coverage.clone()));
+                image_covered_keyspace.add_range(keys_with_image_coverage);
             }
 
             // Do not descent any further if the last layer we visited

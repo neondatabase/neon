@@ -480,7 +480,7 @@ impl ImageLayerInner {
         self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
 
-        reconstruct_state.finish_key_range(&self.key_range, self.lsn);
+        reconstruct_state.on_image_layer_visited(&self.key_range);
 
         Ok(())
     }
