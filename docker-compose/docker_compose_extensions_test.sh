@@ -41,7 +41,7 @@ done
 echo Enabling trust connection
 docker exec $COMPUTE_CONTAINER_NAME bash -c "sed -i '\$d' /var/db/postgres/compute/pg_hba.conf && echo -e 'host\t all\t all\t all\t trust' >> /var/db/postgres/compute/pg_hba.conf"
 echo Adding postgres role
-docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "CREATE ROLE postgres SUPERUSER"
+docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "CREATE ROLE postgres SUPERUSER LOGIN"
 echo Adding auto-loading of anon
 docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "ALTER SYSTEM SET session_preload_libraries='anon'"
 docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "SELECT pg_reload_conf()"
@@ -50,7 +50,7 @@ docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
 echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
 docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
 rm -rf $TMPDIR
-if docker exec -e SKIP=pg_anon-src,rum-src,pg_cron-src,timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_hint_plan-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
+if docker exec -e SKIP=rum-src,pg_cron-src,timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_hint_plan-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
     $TEST_CONTAINER_NAME /run-tests.sh > testout.txt
 then
     cleanup
