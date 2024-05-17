@@ -307,7 +307,7 @@ impl KeySpace {
     }
 
     /// Merge another keyspace into the current one.
-    /// Note: the keyspaces must not overlap (enforced via assertions). To merge overlapping keyspaces, use `KeySpaceRandomAccum`.
+    /// Note: the keyspaces must not overlap (enforced via assertions). To merge overlapping key ranges, use `KeySpaceRandomAccum`.
     pub fn merge(&mut self, other: &KeySpace) {
         let all_ranges = self
             .ranges

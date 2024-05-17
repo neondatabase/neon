@@ -483,7 +483,7 @@ impl GcCutoffs {
     }
 }
 
-pub(crate) struct GetVectoredReconstructDataResult {
+pub(crate) struct TimelineVisitOutcome {
     completed_keyspace: KeySpace,
     image_covered_keyspace: KeySpace,
 }
@@ -3317,7 +3317,7 @@ impl Timeline {
                 return Err(GetVectoredError::Cancelled);
             }
 
-            let GetVectoredReconstructDataResult {
+            let TimelineVisitOutcome {
                 completed_keyspace: completed,
                 image_covered_keyspace,
             } = Self::get_vectored_reconstruct_data_timeline(
@@ -3352,12 +3352,17 @@ impl Timeline {
             // Now we see if there are keys covered by the image layer but does not exist in the
             // image layer, which means that the key does not exist.
 
-            // Get the overlapping of the image layer keyspace and the incomplete keyspace.
+            // The block below will stop the vectored search if any of the keys encountered an image layer
+            // which did not contain a snapshot for said key. Since we have already removed all completed
+            // keys from `keyspace`, we expect there to be no overlap between it and the image covered key
+            // space. If that's not the case, we had at least one key encounter a gap in the image layer
+            // and stop the search as a result of that.
             let removed = keyspace.remove_overlapping_with(&image_covered_keyspace);
             if !removed.is_empty() {
                 break Some(removed);
             }
-            // If we don't break here, `keyspace` should stays the same within the loop.
+            // If we reached this point, `remove_overlapping_with` should not have made any change to the
+            // keyspace.
 
             // Take the min to avoid reconstructing a page with data newer than request Lsn.
             cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
@@ -3408,7 +3413,7 @@ impl Timeline {
         reconstruct_state: &mut ValuesReconstructState,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> Result<GetVectoredReconstructDataResult, GetVectoredError> {
+    ) -> Result<TimelineVisitOutcome, GetVectoredError> {
         let mut unmapped_keyspace = keyspace.clone();
         let mut fringe = LayerFringe::new();
 
@@ -3507,7 +3512,7 @@ impl Timeline {
             }
         }
 
-        Ok(GetVectoredReconstructDataResult {
+        Ok(TimelineVisitOutcome {
             completed_keyspace,
             image_covered_keyspace: image_covered_keyspace.consume_keyspace(),
         })
