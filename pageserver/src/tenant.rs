@@ -6021,23 +6021,11 @@ mod tests {
             lsn: Lsn,
             ctx: &RequestContext,
         ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
-            let begin_files_accessed = ctx
-                .vectored_access_delta_file_cnt
-                .load(std::sync::atomic::Ordering::SeqCst);
+            let mut reconstruct_state = ValuesReconstructState::default();
             let res = tline
-                .get_vectored_impl(
-                    keyspace.clone(),
-                    lsn,
-                    ValuesReconstructState::default(),
-                    ctx,
-                )
+                .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
                 .await?;
-            Ok((
-                res,
-                ctx.vectored_access_delta_file_cnt
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                    - begin_files_accessed,
-            ))
+            Ok((res, reconstruct_state.get_delta_layers_visited() as usize))
         }
 
         #[allow(clippy::needless_range_loop)]
@@ -6116,6 +6104,8 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
+        let cancel = CancellationToken::new();
+
         let base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
         let base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
         let base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
@@ -6130,7 +6120,7 @@ mod tests {
             writer.finish_write(lsn);
             drop(writer);
 
-            tline.freeze_and_flush().await?; // this will create an image layer
+            tline.freeze_and_flush().await?; // this will create a image layer
         }
 
         let child = tenant
@@ -6153,7 +6143,30 @@ mod tests {
             writer.finish_write(lsn);
             drop(writer);
 
-            child.freeze_and_flush().await?; // this will create an image layer
+            child.freeze_and_flush().await?; // this will create a delta
+
+            {
+                // update the partitioning to include the test key space, otherwise they
+                // will be dropped by image layer creation
+                let mut guard = child.partitioning.lock().await;
+                let ((partitioning, _), partition_lsn) = &mut *guard;
+                partitioning
+                    .parts
+                    .push(KeySpace::single(base_key..base_key_nonexist)); // exclude the nonexist key
+                *partition_lsn = lsn;
+            }
+
+            child
+                .compact(
+                    &cancel,
+                    {
+                        let mut set = EnumSet::empty();
+                        set.insert(CompactFlags::ForceImageLayerCreation);
+                        set
+                    },
+                    &ctx,
+                )
+                .await?; // force create an image layer for the keys
         }
 
         async fn get_vectored_impl_wrapper(
@@ -6162,12 +6175,12 @@ mod tests {
             lsn: Lsn,
             ctx: &RequestContext,
         ) -> Result<Option<Bytes>, GetVectoredError> {
-            let reconstruct_state = ValuesReconstructState::new();
+            let mut reconstruct_state = ValuesReconstructState::new();
             let mut res = tline
                 .get_vectored_impl(
                     KeySpace::single(key..key.next()),
                     lsn,
-                    reconstruct_state,
+                    &mut reconstruct_state,
                     ctx,
                 )
                 .await?;
@@ -6308,12 +6321,12 @@ mod tests {
             lsn: Lsn,
             ctx: &RequestContext,
         ) -> Result<Option<Bytes>, GetVectoredError> {
-            let reconstruct_state = ValuesReconstructState::new();
+            let mut reconstruct_state = ValuesReconstructState::new();
             let mut res = tline
                 .get_vectored_impl(
                     KeySpace::single(key..key.next()),
                     lsn,
-                    reconstruct_state,
+                    &mut reconstruct_state,
                     ctx,
                 )
                 .await?;
