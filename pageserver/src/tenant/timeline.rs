@@ -780,6 +780,11 @@ pub(crate) enum ShutdownMode {
     Hard,
 }
 
+struct ImageLayerCreationOutcome {
+    image: Option<ResidentLayer>,
+    next_start_key: Key,
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -4172,8 +4177,8 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
         img_range: Range<Key>,
-        start: &mut Key,
-    ) -> Result<Option<ResidentLayer>, CreateImageLayersError> {
+        start: Key,
+    ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         let mut wrote_keys = false;
 
         let mut key_request_accum = KeySpaceAccum::new();
@@ -4243,16 +4248,21 @@ impl Timeline {
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
-            *start = img_range.end;
             let image_layer = image_layer_writer.finish(self, ctx).await?;
-            Ok(Some(image_layer))
+            Ok(ImageLayerCreationOutcome {
+                image: Some(image_layer),
+                next_start_key: img_range.end,
+            })
         } else {
             // Special case: the image layer may be empty if this is a sharded tenant and the
             // partition does not cover any keys owned by this shard.  In this case, to ensure
             // we don't leave gaps between image layers, leave `start` where it is, so that the next
             // layer we write will cover the key range that we just scanned.
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
-            Ok(None)
+            Ok(ImageLayerCreationOutcome {
+                image: None,
+                next_start_key: start,
+            })
         }
     }
 
@@ -4267,13 +4277,14 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
         img_range: Range<Key>,
-        start: &mut Key,
         mode: ImageLayerCreationMode,
-    ) -> Result<Option<ResidentLayer>, CreateImageLayersError> {
+    ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
+        assert!(!matches!(mode, ImageLayerCreationMode::Initial));
+
         // Metadata keys image layer creation.
         let mut reconstruct_state = ValuesReconstructState::default();
         let data = self
-            .scan(partition.clone(), lsn, &mut reconstruct_state, ctx)
+            .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
             .await?;
         let (data, total_kb_retrieved, total_key_retrieved) = {
             let mut new_data = BTreeMap::new();
@@ -4296,7 +4307,10 @@ impl Timeline {
                 total_key_retrieved={total_key_retrieved}"
         );
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
-            return Ok(None);
+            return Ok(ImageLayerCreationOutcome {
+                image: None,
+                next_start_key: img_range.end,
+            });
         }
         let has_keys = !data.is_empty();
         for (k, v) in data {
@@ -4312,14 +4326,16 @@ impl Timeline {
             // on the normal data path either.
             image_layer_writer.put_image(k, v, ctx).await?;
         }
-        *start = img_range.end;
-        if has_keys {
-            let image_layer = image_layer_writer.finish(self, ctx).await?;
-            Ok(Some(image_layer))
-        } else {
-            tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
-            Ok(None)
-        }
+        Ok(ImageLayerCreationOutcome {
+            image: if has_keys {
+                let image_layer = image_layer_writer.finish(self, ctx).await?;
+                Some(image_layer)
+            } else {
+                tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
+                None
+            },
+            next_start_key: img_range.end,
+        })
     }
 
     #[tracing::instrument(skip_all, fields(%lsn, %mode))]
@@ -4382,7 +4398,7 @@ impl Timeline {
                     start = img_range.end;
                     continue;
                 }
-            };
+            }
 
             let image_layer_writer = ImageLayerWriter::new(
                 self.conf,
@@ -4401,30 +4417,38 @@ impl Timeline {
             });
 
             if !compact_metadata {
-                image_layers.extend(
-                    self.create_image_layer_for_rel_blocks(
+                let ImageLayerCreationOutcome {
+                    image,
+                    next_start_key,
+                } = self
+                    .create_image_layer_for_rel_blocks(
                         partition,
                         image_layer_writer,
                         lsn,
                         ctx,
                         img_range,
-                        &mut start,
+                        start,
                     )
-                    .await?,
-                );
+                    .await?;
+
+                start = next_start_key;
+                image_layers.extend(image);
             } else {
-                image_layers.extend(
-                    self.create_image_layer_for_metadata_keys(
+                let ImageLayerCreationOutcome {
+                    image,
+                    next_start_key,
+                } = self
+                    .create_image_layer_for_metadata_keys(
                         partition,
                         image_layer_writer,
                         lsn,
                         ctx,
                         img_range,
-                        &mut start,
                         mode,
                     )
-                    .await?,
-                );
+                    .await?;
+                start = next_start_key;
+                image_layers.extend(image);
             }
         }
 
