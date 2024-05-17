@@ -278,8 +278,6 @@ impl Layer {
         let downloaded = resident.expect("just initialized");
 
         // We never want to overwrite an existing file, so we use `RENAME_NOREPLACE`.
-        // TODO: move to `virtual_file` module, next to `VirtualFile::crashsafe_overwrite`
-        // TODO: do the same check for when L0s are being written.
         {
             #[cfg(target_os = "linux")]
             {
