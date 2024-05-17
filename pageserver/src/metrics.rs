@@ -2098,7 +2098,7 @@ pub(crate) struct TimelineMetrics {
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
-    resident_physical_size_gauge: UIntGauge,
+    pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub aux_file_size_gauge: IntGauge,
@@ -2312,6 +2312,7 @@ use pin_project_lite::pin_project;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -2321,35 +2322,35 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::mgr::TenantSlot;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
-struct PerTimelineRemotePhysicalSizeGauge {
-    last_set: u64,
+pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
+    last_set: AtomicU64,
     gauge: UIntGauge,
 }
 
 impl PerTimelineRemotePhysicalSizeGauge {
     fn new(per_timeline_gauge: UIntGauge) -> Self {
         Self {
-            last_set: per_timeline_gauge.get(),
+            last_set: AtomicU64::new(0),
             gauge: per_timeline_gauge,
         }
     }
-    fn set(&mut self, sz: u64) {
+    pub(crate) fn set(&self, sz: u64) {
         self.gauge.set(sz);
-        if sz < self.last_set {
-            REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set - sz);
+        let prev = self.last_set.swap(sz, std::sync::atomic::Ordering::Relaxed);
+        if sz < prev {
+            REMOTE_PHYSICAL_SIZE_GLOBAL.sub(prev - sz);
         } else {
-            REMOTE_PHYSICAL_SIZE_GLOBAL.add(sz - self.last_set);
+            REMOTE_PHYSICAL_SIZE_GLOBAL.add(sz - prev);
         };
-        self.last_set = sz;
     }
-    fn get(&self) -> u64 {
+    pub(crate) fn get(&self) -> u64 {
         self.gauge.get()
     }
 }
 
 impl Drop for PerTimelineRemotePhysicalSizeGauge {
     fn drop(&mut self) {
-        REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set);
+        REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
 
@@ -2357,7 +2358,7 @@ pub(crate) struct RemoteTimelineClientMetrics {
     tenant_id: String,
     shard_id: String,
     timeline_id: String,
-    remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
+    pub(crate) remote_physical_size_gauge: PerTimelineRemotePhysicalSizeGauge,
     calls: Mutex<HashMap<(&'static str, &'static str), IntCounterPair>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
@@ -2365,36 +2366,25 @@ pub(crate) struct RemoteTimelineClientMetrics {
 
 impl RemoteTimelineClientMetrics {
     pub fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
+        let tenant_id_str = tenant_shard_id.tenant_id.to_string();
+        let shard_id_str = format!("{}", tenant_shard_id.shard_slug());
+        let timeline_id_str = timeline_id.to_string();
+
+        let remote_physical_size_gauge = PerTimelineRemotePhysicalSizeGauge::new(
+            REMOTE_PHYSICAL_SIZE
+                .get_metric_with_label_values(&[&tenant_id_str, &shard_id_str, &timeline_id_str])
+                .unwrap(),
+        );
+
         RemoteTimelineClientMetrics {
-            tenant_id: tenant_shard_id.tenant_id.to_string(),
-            shard_id: format!("{}", tenant_shard_id.shard_slug()),
-            timeline_id: timeline_id.to_string(),
+            tenant_id: tenant_id_str,
+            shard_id: shard_id_str,
+            timeline_id: timeline_id_str,
             calls: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
             bytes_finished_counter: Mutex::new(HashMap::default()),
-            remote_physical_size_gauge: Mutex::new(None),
+            remote_physical_size_gauge,
         }
-    }
-
-    pub(crate) fn remote_physical_size_set(&self, sz: u64) {
-        let mut guard = self.remote_physical_size_gauge.lock().unwrap();
-        let gauge = guard.get_or_insert_with(|| {
-            PerTimelineRemotePhysicalSizeGauge::new(
-                REMOTE_PHYSICAL_SIZE
-                    .get_metric_with_label_values(&[
-                        &self.tenant_id,
-                        &self.shard_id,
-                        &self.timeline_id,
-                    ])
-                    .unwrap(),
-            )
-        });
-        gauge.set(sz);
-    }
-
-    pub(crate) fn remote_physical_size_get(&self) -> u64 {
-        let guard = self.remote_physical_size_gauge.lock().unwrap();
-        guard.as_ref().map(|gauge| gauge.get()).unwrap_or(0)
     }
 
     pub fn remote_operation_time(
