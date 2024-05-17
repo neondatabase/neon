@@ -113,11 +113,15 @@ impl From<VectoredValueReconstructState> for ValueReconstructState {
     }
 }
 
-/// Bag of data accumulated during a vectored get
+/// Bag of data accumulated during a vectored get.
 pub(crate) struct ValuesReconstructState {
+    /// The keys will be removed after `get_vectored` completes. The caller outside `Timeline`
+    /// should not expect to get anything from this hashmap.
     pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
 
     keys_done: KeySpaceRandomAccum,
+
+    // Statistics that are still accessible as a caller of `get_vectored_impl`.
     layers_visited: u32,
     delta_layers_visited: u32,
 }

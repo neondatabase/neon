@@ -4764,7 +4764,12 @@ mod tests {
             info!("Doing vectored read on {:?}", read);
 
             let vectored_res = tline
-                .get_vectored_impl(read.clone(), reads_lsn, ValuesReconstructState::new(), &ctx)
+                .get_vectored_impl(
+                    read.clone(),
+                    reads_lsn,
+                    &mut ValuesReconstructState::new(),
+                    &ctx,
+                )
                 .await;
             tline
                 .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
@@ -4813,7 +4818,7 @@ mod tests {
             .get_vectored_impl(
                 aux_keyspace.clone(),
                 read_lsn,
-                ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(),
                 &ctx,
             )
             .await;
@@ -4958,7 +4963,7 @@ mod tests {
             .get_vectored_impl(
                 read.clone(),
                 current_lsn,
-                ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(),
                 &ctx,
             )
             .await?;
@@ -5093,7 +5098,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
-                    ValuesReconstructState::new(),
+                    &mut ValuesReconstructState::new(),
                     &ctx,
                 )
                 .await;
@@ -5582,7 +5587,7 @@ mod tests {
                 .get_vectored_impl(
                     keyspace.clone(),
                     lsn,
-                    ValuesReconstructState::default(),
+                    &mut ValuesReconstructState::default(),
                     &ctx,
                 )
                 .await?

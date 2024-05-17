@@ -881,7 +881,7 @@ impl Timeline {
                 }
 
                 let vectored_res = self
-                    .get_vectored_impl(keyspace.clone(), lsn, reconstruct_state, ctx)
+                    .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
                     .await;
 
                 if self.conf.validate_vectored_get {
@@ -1026,7 +1026,12 @@ impl Timeline {
             }
             GetVectoredImpl::Vectored => {
                 let vectored_res = self
-                    .get_vectored_impl(keyspace.clone(), lsn, ValuesReconstructState::new(), ctx)
+                    .get_vectored_impl(
+                        keyspace.clone(),
+                        lsn,
+                        &mut ValuesReconstructState::new(),
+                        ctx,
+                    )
                     .await;
 
                 if self.conf.validate_vectored_get {
@@ -1114,7 +1119,7 @@ impl Timeline {
             .get_vectored_impl(
                 keyspace.clone(),
                 lsn,
-                ValuesReconstructState::default(),
+                &mut ValuesReconstructState::default(),
                 ctx,
             )
             .await;
@@ -1191,7 +1196,7 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
-        mut reconstruct_state: ValuesReconstructState,
+        reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let get_kind = if keyspace.total_raw_size() == 1 {
@@ -1203,7 +1208,7 @@ impl Timeline {
         let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
             .for_get_kind(get_kind)
             .start_timer();
-        self.get_vectored_reconstruct_data(keyspace, lsn, &mut reconstruct_state, ctx)
+        self.get_vectored_reconstruct_data(keyspace, lsn, reconstruct_state, ctx)
             .await?;
         get_data_timer.stop_and_record();
 
@@ -1212,11 +1217,8 @@ impl Timeline {
             .start_timer();
         let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
-        ctx.vectored_access_delta_file_cnt.fetch_add(
-            reconstruct_state.get_delta_layers_visited() as usize,
-            AtomicOrdering::SeqCst,
-        );
-        for (key, res) in reconstruct_state.keys {
+
+        for (key, res) in std::mem::take(&mut reconstruct_state.keys) {
             match res {
                 Err(err) => {
                     results.insert(key, Err(err));
@@ -4163,7 +4165,7 @@ impl Timeline {
 
     /// Create image layers for Postgres data. Assumes the caller passes a partition that is not too large,
     /// so that at most one image layer will be produced from this function.
-    async fn create_image_layers_for_rel_blocks(
+    async fn create_image_layer_for_rel_blocks(
         self: &Arc<Self>,
         partition: &KeySpace,
         mut image_layer_writer: ImageLayerWriter,
@@ -4258,7 +4260,7 @@ impl Timeline {
     /// keys for now. Because metadata keys cannot exceed basebackup size limit, the image layer for it
     /// would not be too large to fit in a single image layer.
     #[allow(clippy::too_many_arguments)]
-    async fn create_image_layers_for_metadata_keys(
+    async fn create_image_layer_for_metadata_keys(
         self: &Arc<Self>,
         partition: &KeySpace,
         mut image_layer_writer: ImageLayerWriter,
@@ -4269,16 +4271,9 @@ impl Timeline {
         mode: ImageLayerCreationMode,
     ) -> Result<Option<ResidentLayer>, CreateImageLayersError> {
         // Metadata keys image layer creation.
-        let delta_file_accessed_begin = ctx
-            .vectored_access_delta_file_cnt
-            .load(AtomicOrdering::SeqCst);
+        let mut reconstruct_state = ValuesReconstructState::default();
         let data = self
-            .get_vectored_impl(
-                partition.clone(),
-                lsn,
-                ValuesReconstructState::default(),
-                ctx,
-            )
+            .scan(partition.clone(), lsn, &mut reconstruct_state, ctx)
             .await?;
         let (data, total_kb_retrieved, total_key_retrieved) = {
             let mut new_data = BTreeMap::new();
@@ -4292,13 +4287,14 @@ impl Timeline {
             }
             (new_data, total_kb_retrieved / 1024, total_key_retrieved)
         };
-        let delta_file_accessed = ctx
-            .vectored_access_delta_file_cnt
-            .load(AtomicOrdering::SeqCst)
-            - delta_file_accessed_begin;
+        let delta_file_accessed = reconstruct_state.get_delta_layers_visited();
 
-        let trigger_generation = delta_file_accessed >= MAX_AUX_FILE_V2_DELTAS;
-        info!("generate image layers for metadata keys: trigger_generation={trigger_generation}, delta_file_accessed={delta_file_accessed}, total_kb_retrieved={total_kb_retrieved}, total_key_retrieved={total_key_retrieved}");
+        let trigger_generation = delta_file_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
+        info!(
+            "generate image layers for metadata keys: trigger_generation={trigger_generation}, \
+                delta_file_accessed={delta_file_accessed}, total_kb_retrieved={total_kb_retrieved}, \
+                total_key_retrieved={total_key_retrieved}"
+        );
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
             return Ok(None);
         }
@@ -4406,7 +4402,7 @@ impl Timeline {
 
             if !compact_metadata {
                 image_layers.extend(
-                    self.create_image_layers_for_rel_blocks(
+                    self.create_image_layer_for_rel_blocks(
                         partition,
                         image_layer_writer,
                         lsn,
@@ -4418,7 +4414,7 @@ impl Timeline {
                 );
             } else {
                 image_layers.extend(
-                    self.create_image_layers_for_metadata_keys(
+                    self.create_image_layer_for_metadata_keys(
                         partition,
                         image_layer_writer,
                         lsn,
