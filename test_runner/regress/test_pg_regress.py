@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     check_restored_datadir_content,
 )
+from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import s3_storage
 
 if TYPE_CHECKING:
@@ -87,7 +88,67 @@ def test_pg_regress(
     with capsys.disabled():
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
-        check_restored_datadir_content(test_output_dir, env, endpoint)
+        ignored_files: Optional[list[str]] = None
+
+        # Neon handles unlogged relations in a special manner. During a
+        # basebackup, we ship the init fork as the main fork. This presents a
+        # problem in that the endpoint's data directory and the basebackup will
+        # have differences and will fail the eventual file comparison.
+        #
+        # Unlogged tables were introduced in version 9.1. ALTER TABLE grew
+        # support for setting the persistence of a table in 9.5. The reason that
+        # this doesn't affect versions < 15 (but probably would between 9.1 and
+        # 9.5) is that all the regression tests that deal with unlogged tables
+        # up until that point dropped the unlogged tables or set them to logged
+        # at some point during the test.
+        #
+        # In version 15, Postgres grew support for unlogged sequences, and with
+        # that came a few more regression tests. These tests did not all drop
+        # the unlogged tables/sequences prior to finishing.
+        #
+        # But unlogged sequences came with a bug in that, sequences didn't
+        # inherit the persistence of their "parent" tables if they had one. This
+        # was fixed and backported to 15, thus exacerbating our problem a bit.
+        #
+        # So what we can do is just ignore file differences between the data
+        # directory and basebackup for unlogged relations.
+        results = cast(
+            "list[tuple[str, str]]",
+            endpoint.safe_psql(
+                """
+            SELECT
+                relkind,
+                pg_relation_filepath(
+                    pg_filenode_relation(reltablespace, relfilenode)
+                ) AS unlogged_relation_paths
+            FROM pg_class
+            WHERE relpersistence = 'u'
+            """,
+                dbname=DBNAME,
+            ),
+        )
+
+        unlogged_relation_files: list[str] = []
+        for r in results:
+            unlogged_relation_files.append(r[1])
+            # This is related to the following Postgres commit:
+            #
+            # commit ccadf73163ca88bdaa74b8223d4dde05d17f550b
+            # Author: Heikki Linnakangas <heikki.linnakangas@iki.fi>
+            # Date:   2023-08-23 09:21:31 -0500
+            #
+            # Use the buffer cache when initializing an unlogged index.
+            #
+            # This patch was backpatched to 16. Without it, the LSN in the
+            # page header would be 0/0 in the data directory, which wouldn't
+            # match the LSN generated during the basebackup, thus creating
+            # a difference.
+            if env.pg_version <= PgVersion.V15 and r[0] == "i":
+                unlogged_relation_files.append(f"{r[1]}_init")
+
+        ignored_files = unlogged_relation_files
+
+        check_restored_datadir_content(test_output_dir, env, endpoint, ignored_files=ignored_files)
 
 
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
