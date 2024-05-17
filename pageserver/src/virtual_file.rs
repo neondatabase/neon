@@ -344,16 +344,23 @@ macro_rules! with_file {
 
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
-    pub async fn open(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(path, OpenOptions::new().read(true)).await
+    pub async fn open(
+        path: &Utf8Path,
+        ctx: &RequestContext,
+    ) -> Result<VirtualFile, std::io::Error> {
+        Self::open_with_options(path, OpenOptions::new().read(true), ctx).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
-    pub async fn create(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
+    pub async fn create(
+        path: &Utf8Path,
+        ctx: &RequestContext,
+    ) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(
             path,
             OpenOptions::new().write(true).create(true).truncate(true),
+            ctx,
         )
         .await
     }
@@ -366,6 +373,7 @@ impl VirtualFile {
     pub async fn open_with_options(
         path: &Utf8Path,
         open_options: &OpenOptions,
+        _ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
     ) -> Result<VirtualFile, std::io::Error> {
         let path_str = path.to_string();
         let parts = path_str.split('/').collect::<Vec<&str>>();
@@ -1179,7 +1187,6 @@ mod tests {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
-    use std::future::Future;
     use std::io::Write;
     use std::os::unix::fs::FileExt;
     use std::sync::Arc;
@@ -1293,41 +1300,69 @@ mod tests {
         // results with VirtualFiles as with native Files. (Except that with
         // native files, you will run out of file descriptors if the ulimit
         // is low enough.)
-        test_files("virtual_files", |path, open_options| async move {
-            let vf = VirtualFile::open_with_options(&path, &open_options).await?;
-            Ok(MaybeVirtualFile::VirtualFile(vf))
-        })
-        .await
+        struct A;
+
+        impl Adapter for A {
+            async fn open(
+                path: Utf8PathBuf,
+                opts: OpenOptions,
+                ctx: &RequestContext,
+            ) -> Result<MaybeVirtualFile, anyhow::Error> {
+                let vf = VirtualFile::open_with_options(&path, &opts, ctx).await?;
+                Ok(MaybeVirtualFile::VirtualFile(vf))
+            }
+        }
+        test_files::<A>("virtual_files").await
     }
 
     #[tokio::test]
     async fn test_physical_files() -> anyhow::Result<()> {
-        test_files("physical_files", |path, open_options| async move {
-            Ok(MaybeVirtualFile::File({
-                let owned_fd = open_options.open(path.as_std_path()).await?;
-                File::from(owned_fd)
-            }))
-        })
-        .await
+        struct B;
+
+        impl Adapter for B {
+            async fn open(
+                path: Utf8PathBuf,
+                opts: OpenOptions,
+                _ctx: &RequestContext,
+            ) -> Result<MaybeVirtualFile, anyhow::Error> {
+                Ok(MaybeVirtualFile::File({
+                    let owned_fd = opts.open(path.as_std_path()).await?;
+                    File::from(owned_fd)
+                }))
+            }
+        }
+
+        test_files::<B>("physical_files").await
     }
 
-    async fn test_files<OF, FT>(testname: &str, openfunc: OF) -> anyhow::Result<()>
+    /// This is essentially a closure which returns a MaybeVirtualFile, but because rust edition
+    /// 2024 is not yet out with new lifetime capture or outlives rules, this is a async function
+    /// in trait which benefits from the new lifetime capture rules already.
+    trait Adapter {
+        async fn open(
+            path: Utf8PathBuf,
+            opts: OpenOptions,
+            ctx: &RequestContext,
+        ) -> Result<MaybeVirtualFile, anyhow::Error>;
+    }
+
+    async fn test_files<A>(testname: &str) -> anyhow::Result<()>
     where
-        OF: Fn(Utf8PathBuf, OpenOptions) -> FT,
-        FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
+        A: Adapter,
     {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
         std::fs::create_dir_all(&testdir)?;
 
         let path_a = testdir.join("file_a");
-        let mut file_a = openfunc(
+        let mut file_a = A::open(
             path_a.clone(),
             OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .to_owned(),
+            &ctx,
         )
         .await?;
         file_a.write_all(b"foobar".to_vec(), &ctx).await?;
@@ -1336,7 +1371,7 @@ mod tests {
         let _ = file_a.read_string(&ctx).await.unwrap_err();
 
         // Close the file and re-open for reading
-        let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
+        let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
         let _ = file_a.write_all(b"bar".to_vec(), &ctx).await.unwrap_err();
@@ -1371,7 +1406,7 @@ mod tests {
 
         // Create another test file, and try FileExt functions on it.
         let path_b = testdir.join("file_b");
-        let mut file_b = openfunc(
+        let mut file_b = A::open(
             path_b.clone(),
             OpenOptions::new()
                 .read(true)
@@ -1379,6 +1414,7 @@ mod tests {
                 .create(true)
                 .truncate(true)
                 .to_owned(),
+            &ctx,
         )
         .await?;
         file_b.write_all_at(b"BAR".to_vec(), 3, &ctx).await?;
@@ -1394,8 +1430,12 @@ mod tests {
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
-            let mut vfile =
-                openfunc(path_b.clone(), OpenOptions::new().read(true).to_owned()).await?;
+            let mut vfile = A::open(
+                path_b.clone(),
+                OpenOptions::new().read(true).to_owned(),
+                &ctx,
+            )
+            .await?;
             assert_eq!("FOOBAR", vfile.read_string(&ctx).await?);
             vfiles.push(vfile);
         }
@@ -1441,8 +1481,12 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFile::open_with_options(&test_file_path, OpenOptions::new().read(true))
-                .await?;
+            let f = VirtualFile::open_with_options(
+                &test_file_path,
+                OpenOptions::new().read(true),
+                &ctx,
+            )
+            .await?;
             files.push(f);
         }
         let files = Arc::new(files);
@@ -1488,7 +1532,7 @@ mod tests {
         VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
-        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
+        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
         let post = file.read_string(&ctx).await.unwrap();
         assert_eq!(post, "foo");
         assert!(!tmp_path.exists());
@@ -1497,7 +1541,7 @@ mod tests {
         VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"bar".to_vec())
             .await
             .unwrap();
-        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
+        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
         let post = file.read_string(&ctx).await.unwrap();
         assert_eq!(post, "bar");
         assert!(!tmp_path.exists());
@@ -1521,7 +1565,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path).await.unwrap());
+        let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
         let post = file.read_string(&ctx).await.unwrap();
         assert_eq!(post, "foo");
         assert!(!tmp_path.exists());

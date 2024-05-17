@@ -25,14 +25,14 @@ import zstandard
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
-from fixtures.pageserver.types import (
+from fixtures.pageserver.common_types import (
     parse_delta_layer,
     parse_image_layer,
 )
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import PgBin
-from fixtures.types import TimelineId
+from fixtures.common_types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
@@ -452,6 +452,7 @@ def humantime_to_ms(humantime: str) -> float:
 
 
 def scan_log_for_errors(input: Iterable[str], allowed_errors: List[str]) -> List[Tuple[int, str]]:
+    # FIXME: this duplicates test_runner/fixtures/pageserver/allowed_errors.py
     error_or_warn = re.compile(r"\s(ERROR|WARN)")
     errors = []
     for lineno, line in enumerate(input, start=1):
@@ -484,7 +485,7 @@ def assert_no_errors(log_file, service, allowed_errors):
     for _lineno, error in errors:
         log.info(f"not allowed {service} error: {error.strip()}")
 
-    assert not errors, f"Log errors on {service}: {errors[0]}"
+    assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
 
 
 @enum.unique

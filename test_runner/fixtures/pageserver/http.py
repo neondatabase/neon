@@ -11,10 +11,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import Fn
 
 

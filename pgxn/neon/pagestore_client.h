@@ -237,18 +237,50 @@ extern void neon_zeroextend(SMgrRelation reln, ForkNumber forknum,
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum);
 
+/*
+ * LSN values associated with each request to the pageserver
+ */
+typedef struct
+{
+	/*
+	 * 'request_lsn' is the main value that determines which page version to
+	 * fetch.
+	 */
+	XLogRecPtr request_lsn;
+
+	/*
+	 * A hint to the pageserver that the requested page hasn't been modified
+	 * between this LSN and 'request_lsn'. That allows the pageserver to
+	 * return the page faster, without waiting for 'request_lsn' to arrive in
+	 * the pageserver, as long as 'not_modified_since' has arrived.
+	 */
+	XLogRecPtr not_modified_since;
+
+	/*
+	 * 'effective_request_lsn' is not included in the request that's sent to
+	 * the pageserver, but is used to keep track of the latest LSN of when the
+	 * request was made. In a standby server, this is always the same as the
+	 * 'request_lsn', but in the primary we use UINT64_MAX as the
+	 * 'request_lsn' to request the latest page version, so we need this
+	 * separate field to remember that latest LSN was when the request was
+	 * made. It's needed to manage prefetch request, to verify if the response
+	 * to a prefetched request is still valid.
+	 */
+	XLogRecPtr effective_request_lsn;
+} neon_request_lsns;
+
 #if PG_MAJORVERSION_NUM < 16
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  char *buffer);
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-										 XLogRecPtr request_lsn, XLogRecPtr not_modified_since, char *buffer);
+										 neon_request_lsns request_lsns, char *buffer);
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, char *buffer, bool skipFsync);
 #else
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  void *buffer);
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-										 XLogRecPtr request_lsn, XLogRecPtr not_modified_since, void *buffer);
+										 neon_request_lsns request_lsns, void *buffer);
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, const void *buffer, bool skipFsync);
 #endif

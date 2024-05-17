@@ -2,10 +2,10 @@ import json
 import uuid
 
 from anyio import Path
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin
 from fixtures.pg_version import PgVersion
-from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 
 

@@ -23,8 +23,8 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use utils::crashsafe::path_with_suffix_extension;
 
 use crate::{
-    Download, DownloadError, Listing, ListingMode, RemotePath, TimeTravelError, TimeoutOrCancel,
-    REMOTE_STORAGE_PREFIX_SEPARATOR,
+    Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorageActivity,
+    TimeTravelError, TimeoutOrCancel, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 use super::{RemoteStorage, StorageMetadata};
@@ -604,6 +604,16 @@ impl RemoteStorage for LocalFs {
         _cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError> {
         Err(TimeTravelError::Unimplemented)
+    }
+
+    fn activity(&self) -> RemoteStorageActivity {
+        // LocalFS has no concurrency limiting: give callers the impression that plenty of units are available
+        RemoteStorageActivity {
+            read_available: 16,
+            read_total: 16,
+            write_available: 16,
+            write_total: 16,
+        }
     }
 }
 

@@ -585,6 +585,15 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define current logical size metric")
 });
 
+static AUX_FILE_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_aux_file_estimated_size",
+        "The size of all aux files for a timeline in aux file v2 store.",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) mod initial_logical_size {
     use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
     use once_cell::sync::Lazy;
@@ -1990,29 +1999,6 @@ impl Default for WalRedoProcessCounters {
 pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
     Lazy::new(WalRedoProcessCounters::default);
 
-#[cfg(not(test))]
-pub mod wal_redo {
-    use super::*;
-
-    static PROCESS_KIND: Lazy<std::sync::Mutex<UIntGaugeVec>> = Lazy::new(|| {
-        std::sync::Mutex::new(
-            register_uint_gauge_vec!(
-                "pageserver_wal_redo_process_kind",
-                "The configured process kind for walredo",
-                &["kind"],
-            )
-            .unwrap(),
-        )
-    });
-
-    pub fn set_process_kind_metric(kind: crate::walredo::ProcessKind) {
-        // use guard to avoid races around the next two steps
-        let guard = PROCESS_KIND.lock().unwrap();
-        guard.reset();
-        guard.with_label_values(&[&format!("{kind}")]).set(1);
-    }
-}
-
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
@@ -2115,6 +2101,7 @@ pub(crate) struct TimelineMetrics {
     resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
+    pub aux_file_size_gauge: IntGauge,
     pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
     pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
@@ -2187,6 +2174,9 @@ impl TimelineMetrics {
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
+        let aux_file_size_gauge = AUX_FILE_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
         // TODO use impl Trait syntax here once we have ability to use it: https://github.com/rust-lang/rust/issues/63065
         let directory_entries_count_gauge_closure = {
             let tenant_shard_id = *tenant_shard_id;
@@ -2224,6 +2214,7 @@ impl TimelineMetrics {
             last_record_gauge,
             resident_physical_size_gauge,
             current_logical_size_gauge,
+            aux_file_size_gauge,
             directory_entries_count_gauge,
             evictions,
             evictions_with_low_residence_duration: std::sync::RwLock::new(
@@ -2264,6 +2255,7 @@ impl TimelineMetrics {
             let _ = metric.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()

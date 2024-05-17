@@ -1,8 +1,8 @@
 import time
 
+from fixtures.common_types import Lsn, TenantId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
-from fixtures.types import Lsn, TenantId
 
 
 # Checks that pageserver's walreceiver state is printed in the logs during WAL wait timeout.

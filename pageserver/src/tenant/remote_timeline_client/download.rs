@@ -112,14 +112,17 @@ pub async fn download_layer_file<'a>(
     // We use fatal_err() below because the after the rename above,
     // the in-memory state of the filesystem already has the layer file in its final place,
     // and subsequent pageserver code could think it's durable while it really isn't.
-    let work = async move {
-        let timeline_dir = VirtualFile::open(&timeline_path)
-            .await
-            .fatal_err("VirtualFile::open for timeline dir fsync");
-        timeline_dir
-            .sync_all()
-            .await
-            .fatal_err("VirtualFile::sync_all timeline dir");
+    let work = {
+        let ctx = ctx.detached_child(ctx.task_kind(), ctx.download_behavior());
+        async move {
+            let timeline_dir = VirtualFile::open(&timeline_path, &ctx)
+                .await
+                .fatal_err("VirtualFile::open for timeline dir fsync");
+            timeline_dir
+                .sync_all()
+                .await
+                .fatal_err("VirtualFile::sync_all timeline dir");
+        }
     };
     crate::virtual_file::io_engine::get()
         .spawn_blocking_and_block_on_if_std(work)
@@ -196,7 +199,7 @@ async fn download_object<'a>(
             use crate::virtual_file::owned_buffers_io::{self, util::size_tracking_writer};
             use bytes::BytesMut;
             async {
-                let destination_file = VirtualFile::create(dst_path)
+                let destination_file = VirtualFile::create(dst_path, ctx)
                     .await
                     .with_context(|| format!("create a destination file for layer '{dst_path}'"))
                     .map_err(DownloadError::Other)?;

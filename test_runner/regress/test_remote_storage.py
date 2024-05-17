@@ -6,13 +6,14 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
-from fixtures.pageserver.types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
@@ -25,7 +26,6 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     available_remote_storages,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     assert_eq,
     assert_ge,

@@ -4,13 +4,13 @@ from pathlib import Path
 
 import psycopg2
 import pytest
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgProtocol,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
-from fixtures.types import TenantId, TimelineId
 
 
 def assert_client_authorized(env: NeonEnv, http_client: PageserverHttpClient):

@@ -10,6 +10,7 @@ from threading import Barrier
 from typing import IO, List, Set, Tuple, Union
 
 import pytest
+from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -19,7 +20,6 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import HistoricLayerInfo
 from fixtures.pageserver.utils import wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage
-from fixtures.types import Lsn, TimelineId
 
 
 def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
