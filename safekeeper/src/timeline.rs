@@ -98,7 +98,7 @@ impl PeersInfo {
 
 pub type ReadGuardSharedState<'a> = RwLockReadGuard<'a, SharedState>;
 
-/// WriteGuardSharedState is a wrapper around RwLockWriteGuard<SharedState> that
+/// WriteGuardSharedState is a wrapper around `RwLockWriteGuard<SharedState>` that
 /// automatically updates `watch::Sender` channels with state on drop.
 pub struct WriteGuardSharedState<'a> {
     tli: Arc<Timeline>,
