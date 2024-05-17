@@ -834,6 +834,55 @@ pub struct TenantScanRemoteStorageResponse {
     pub shards: Vec<TenantScanRemoteStorageShard>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantSorting {
+    ResidentSize,
+    MaxLogicalSize,
+}
+
+impl Default for TenantSorting {
+    fn default() -> Self {
+        Self::ResidentSize
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TopTenantShardsRequest {
+    // How would you like to sort the tenants?
+    pub order_by: TenantSorting,
+
+    // How many results?
+    pub limit: usize,
+
+    // Omit tenants with more than this many shards (e.g. if this is the max number of shards
+    // that the caller would ever split to)
+    pub where_shards_lt: Option<ShardCount>,
+
+    // Omit tenants where the ordering metric is less than this (this is an optimization to
+    // let us quickly exclude numerous tiny shards)
+    pub where_gt: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct TopTenantShardItem {
+    pub id: TenantShardId,
+
+    /// Total size of layers on local disk for all timelines in this tenant
+    pub resident_size: u64,
+
+    /// Total size of layers in remote storage for all timelines in this tenant
+    pub physical_size: u64,
+
+    /// The largest logical size of a timeline within this tenant
+    pub max_logical_size: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct TopTenantShardsResponse {
+    pub shards: Vec<TopTenantShardItem>,
+}
+
 pub mod virtual_file {
     #[derive(
         Copy,
