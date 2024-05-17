@@ -23,7 +23,7 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, SparseKeyPartitioning},
     models::{
-        AuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
+        AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
         DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
         TimelineState,
     },
@@ -413,7 +413,11 @@ pub struct Timeline {
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
 
+    /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
+
+    /// Indicate whether aux file v2 storage is enabled.
+    pub(crate) last_aux_file_policy: AtomicAuxFilePolicy,
 }
 
 pub struct WalReceiverInfo {
@@ -2133,6 +2137,7 @@ impl Timeline {
         resources: TimelineResources,
         pg_version: u32,
         state: TimelineState,
+        aux_file_policy: Option<AuxFilePolicy>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2257,6 +2262,8 @@ impl Timeline {
                 }),
 
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
+
+                last_aux_file_policy: AtomicAuxFilePolicy::new(aux_file_policy),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;

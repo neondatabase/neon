@@ -439,6 +439,8 @@ async fn build_timeline_info_common(
         state,
 
         walreceiver_status,
+
+        last_aux_file_policy: timeline.last_aux_file_policy.load(),
     };
     Ok(info)
 }
