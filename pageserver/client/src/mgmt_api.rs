@@ -568,8 +568,7 @@ impl Client {
             .request_noerror(Method::POST, &uri, IngestAuxFilesRequest { aux_files })
             .await?;
         match resp.status() {
-            StatusCode::ACCEPTED | StatusCode::OK => Ok(true),
-            StatusCode::NOT_MODIFIED => Ok(false),
+            StatusCode::OK => Ok(true),
             status => Err(match resp.json::<HttpErrorBody>().await {
                 Ok(HttpErrorBody { msg }) => Error::ApiError(status, msg),
                 Err(_) => {
@@ -593,7 +592,7 @@ impl Client {
             .request_noerror(Method::POST, &uri, ListAuxFilesRequest { lsn })
             .await?;
         match resp.status() {
-            StatusCode::ACCEPTED | StatusCode::OK => {
+            StatusCode::OK => {
                 let resp: HashMap<String, Bytes> = resp.json().await.map_err(|e| {
                     Error::ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
                 })?;
