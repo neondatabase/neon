@@ -455,7 +455,7 @@ class NeonEnvBuilder:
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
         # toml that will be decomposed into `--config-override` flags during `pageserver --init`
-        pageserver_config_override: Optional[str] = None,
+        pageserver_config_override: Optional[str | Callable[[Dict[str, Any]], None]] = None,
         num_safekeepers: int = 1,
         num_pageservers: int = 1,
         # Use non-standard SK ids to check for various parsing bugs
@@ -1127,10 +1127,14 @@ class NeonEnv:
                 )
 
             if config.pageserver_config_override is not None:
-                for o in config.pageserver_config_override.split(";"):
-                    override = toml.loads(o)
-                    for key, value in override.items():
-                        ps_cfg[key] = value
+                if callable(config.pageserver_config_override):
+                    config.pageserver_config_override(ps_cfg)
+                else:
+                    assert isinstance(config.pageserver_config_override, str)
+                    for o in config.pageserver_config_override.split(";"):
+                        override = toml.loads(o)
+                        for key, value in override.items():
+                            ps_cfg[key] = value
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(

@@ -1326,3 +1326,45 @@ def test_sharding_unlogged_relation(neon_env_builder: NeonEnvBuilder):
 
         # Ensure that post-endpoint-restart modifications are ingested happily by pageserver
         wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
+
+
+def test_top_tenants(neon_env_builder: NeonEnvBuilder):
+    """
+    The top_tenants API is used in shard auto-splitting to find candidates.
+    """
+
+    env = neon_env_builder.init_configs()
+    neon_env_builder.start()
+
+    tenants = []
+    n_tenants = 8
+    for i in range(0, n_tenants):
+        tenant_id = TenantId.generate()
+        timeline_id = TimelineId.generate()
+        env.neon_cli.create_tenant(tenant_id, timeline_id)
+
+        # Write a different amount of data to each tenant
+        w = Workload(env, tenant_id, timeline_id)
+        w.init()
+        w.write_rows(i * 1000)
+        w.stop()
+
+        logical_size = env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)[
+            "current_logical_size"
+        ]
+        tenants.append((tenant_id, timeline_id, logical_size))
+
+        log.info(f"Created {tenant_id}/{timeline_id} with size {logical_size}")
+
+    # Ask for 1 largest tenant
+    top_1 = env.pageserver.http_client().top_tenants("max_logical_size", 1, 8, 0)
+    assert len(top_1["shards"]) == 1
+    assert top_1["shards"][0]["id"] == str(tenants[-1][0])
+    assert top_1["shards"][0]["max_logical_size"] == tenants[-1][2]
+
+    # Apply a lower bound limit
+    top = env.pageserver.http_client().top_tenants(
+        "max_logical_size", 100, 8, where_gt=tenants[3][2]
+    )
+    assert len(top["shards"]) == n_tenants - 4
+    assert set(i["id"] for i in top["shards"]) == set(str(i[0]) for i in tenants[4:])
