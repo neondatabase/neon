@@ -1359,6 +1359,14 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 
 	if (ShutdownRequestPending)
 		return;
+
+	/* On replica we still need to update last written LSN */
+	if (RecoveryInProgress())
+	{
+		SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
+		return;
+	}
+
 	/* Don't log any pages if we're not allowed to do so. */
 	if (!XLogInsertAllowed())
 		return;
@@ -1528,13 +1536,14 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
 	{
 		/* Request the page at the last replayed LSN. */
 		result.request_lsn = GetXLogReplayRecPtr(NULL);
-		result.effective_request_lsn = result.request_lsn;
+		result.not_modified_since = last_written_lsn;
 		/*
 		 * lastReplayedEndRecPtr is advanced after applying WAL record while
 		 * last written LSN can be advanced while applying WAL record this is why
 		 * last_written_lsn can be larger than GetXLogReplayRecPtr(NULL).
 		 */
-		result.not_modified_since = Min(last_written_lsn, result.request_lsn);
+		result.request_lsn = Max(result.request_lsn, last_written_lsn);
+		result.effective_request_lsn = result.request_lsn;
 
 		neon_log(DEBUG1, "neon_get_request_lsns request lsn %X/%X, not_modified_since %X/%X",
 				 LSN_FORMAT_ARGS(result.request_lsn), LSN_FORMAT_ARGS(result.not_modified_since));
@@ -3247,16 +3256,21 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 
 		no_redo_needed = buffer < 0;
 	}
-	/* In both cases st lwlsn past this WAL record */
-	SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
-
 	/*
-	 * we don't have the buffer in memory, update lwLsn past this record, also
-	 * evict page from file cache
+	 * Update lw-lsn only page is not present in shared buffers,
+	 * otherwise it will be updated in norma;l way when page is evicted from shared buffers
 	 */
 	if (no_redo_needed)
-		lfc_evict(rinfo, forknum, blkno);
+	{
+		SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
 
+
+		/*
+		 * we don't have the buffer in memory, update lwLsn past this record, also
+		 * evict page from file cache
+		 */
+		lfc_evict(rinfo, forknum, blkno);
+	}
 
 	LWLockRelease(partitionLock);
 
