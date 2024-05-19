@@ -12,8 +12,8 @@ use hmac::{
     Hmac, Mac,
 };
 use parking_lot::{Condvar, Mutex};
-use rand::seq::SliceRandom;
 use rand::Rng;
+use rand::{rngs::SmallRng, seq::SliceRandom, thread_rng, SeedableRng};
 use sha2::Sha256;
 use tokio::sync::oneshot;
 
@@ -30,7 +30,6 @@ pub struct ThreadPool {
 enum State {
     Idle,
     WorkAvailable,
-    Shutdown,
 }
 
 impl ThreadPool {
@@ -58,13 +57,13 @@ impl ThreadPool {
         rx
     }
 
-    pub fn shutdown(&self) {
-        let mut lock = self.lock.lock();
-        *lock = State::Shutdown;
-        self.condvar.notify_all();
-    }
+    // pub fn shutdown(&self) {
+    //     let mut lock = self.lock.lock();
+    //     *lock = State::Shutdown;
+    //     self.condvar.notify_all();
+    // }
 
-    pub fn spawn_workers<R: Rng + Default>(self: &Arc<Self>, workers: usize) {
+    pub fn spawn_workers(self: &Arc<Self>, workers: usize) {
         let _guard = self.lock.lock();
 
         let mut threads = Vec::with_capacity(workers);
@@ -72,20 +71,21 @@ impl ThreadPool {
             let worker = Worker::new_fifo();
             threads.push(worker.stealer());
 
+            let seed = thread_rng().gen();
+
             let pool = Arc::clone(self);
             std::thread::spawn(move || {
-                let mut rng = R::default();
+                let mut rng = SmallRng::seed_from_u64(seed);
                 'wait: loop {
                     // wait for notification of work
                     {
                         let mut lock = pool.lock.lock();
+                        #[allow(clippy::while_let_loop)]
                         loop {
                             match *lock {
                                 State::Idle => pool.condvar.wait(&mut lock),
                                 State::WorkAvailable => break,
-                                State::Shutdown => {
-                                    return;
-                                }
+                                // State::Shutdown => return,
                             }
                         }
                     }
@@ -115,11 +115,14 @@ impl ThreadPool {
                             }
                         };
 
-                        match job.pbkdf2.turn() {
-                            std::task::Poll::Ready(result) => {
-                                let _ = job.response.send(result);
+                        // receiver is closed, cancel the task
+                        if !job.response.is_closed() {
+                            match job.pbkdf2.turn() {
+                                std::task::Poll::Ready(result) => {
+                                    let _ = job.response.send(result);
+                                }
+                                std::task::Poll::Pending => worker.push(job),
                             }
-                            std::task::Poll::Pending => worker.push(job),
                         }
 
                         // if we get stuck with a few long lived jobs in the queue
@@ -208,14 +211,12 @@ impl Pbkdf2 {
 mod tests {
     use std::sync::Arc;
 
-    use rand::rngs::ThreadRng;
-
     use super::*;
 
     #[tokio::test]
     async fn hash_is_correct() {
         let pool = Arc::new(ThreadPool::new());
-        pool.spawn_workers::<ThreadRng>(1);
+        pool.spawn_workers(1);
 
         let salt = [0x55; 32];
         let actual = pool
