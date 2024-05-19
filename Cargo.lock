@@ -3914,7 +3914,7 @@ dependencies = [
 [[package]]
 name = "parquet"
 version = "51.0.0"
-source = "git+https://github.com/neondatabase/arrow-rs?branch=fix-uuid-derive#6249554cd722ec41cb30b00c4f8d9cc8b15e57cd"
+source = "git+https://github.com/apache/arrow-rs?branch=master#2534976a564be3d2d56312dc88fb1b6ed4cef829"
 dependencies = [
  "ahash",
  "bytes",
@@ -3934,7 +3934,7 @@ dependencies = [
 [[package]]
 name = "parquet_derive"
 version = "51.0.0"
-source = "git+https://github.com/neondatabase/arrow-rs?branch=fix-uuid-derive#6249554cd722ec41cb30b00c4f8d9cc8b15e57cd"
+source = "git+https://github.com/apache/arrow-rs?branch=master#2534976a564be3d2d56312dc88fb1b6ed4cef829"
 dependencies = [
  "parquet",
  "proc-macro2",
