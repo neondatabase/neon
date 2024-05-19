@@ -365,7 +365,10 @@ async fn authenticate_with_secret(
     config: &'static AuthenticationConfig,
 ) -> auth::Result<ComputeCredentials> {
     if let Some(password) = unauthenticated_password {
-        let auth_outcome = validate_password_and_exchange(&password, secret).await?;
+        let ep = EndpointIdInt::from(&info.endpoint);
+
+        let auth_outcome =
+            validate_password_and_exchange(&config.thread_pool, ep, &password, secret).await?;
         let keys = match auth_outcome {
             crate::sasl::Outcome::Success(key) => key,
             crate::sasl::Outcome::Failure(reason) => {
@@ -386,7 +389,7 @@ async fn authenticate_with_secret(
     // Currently, we use it for websocket connections (latency).
     if allow_cleartext {
         ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
-        return hacks::authenticate_cleartext(ctx, info, client, secret).await;
+        return hacks::authenticate_cleartext(ctx, info, client, secret, config).await;
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
@@ -554,7 +557,7 @@ mod tests {
         context::RequestMonitoring,
         proxy::NeonOptions,
         rate_limiter::{EndpointRateLimiter, RateBucketInfo},
-        scram::ServerSecret,
+        scram::{threadpool::ThreadPool, ServerSecret},
         stream::{PqStream, Stream},
     };
 
@@ -595,11 +598,16 @@ mod tests {
         }
     }
 
-    static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
-        scram_protocol_timeout: std::time::Duration::from_secs(5),
-        rate_limiter_enabled: true,
-        rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
-        rate_limit_ip_subnet: 64,
+    static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| {
+        let config = AuthenticationConfig {
+            thread_pool: Arc::new(ThreadPool::new()),
+            scram_protocol_timeout: std::time::Duration::from_secs(5),
+            rate_limiter_enabled: true,
+            rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
+            rate_limit_ip_subnet: 64,
+        };
+        config.thread_pool.spawn_workers(1);
+        config
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {

@@ -11,7 +11,7 @@ mod key;
 mod messages;
 mod secret;
 mod signature;
-mod threadpool;
+pub mod threadpool;
 
 pub use exchange::{exchange, Exchange};
 pub use key::ScramKey;
@@ -57,9 +57,15 @@ fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use crate::sasl::{Mechanism, Step};
+    use std::sync::Arc;
 
-    use super::{Exchange, ServerSecret};
+    use crate::{
+        intern::EndpointIdInt,
+        sasl::{Mechanism, Step},
+        EndpointId,
+    };
+
+    use super::{threadpool::ThreadPool, Exchange, ServerSecret};
 
     #[test]
     fn snapshot() {
@@ -113,8 +119,14 @@ mod tests {
     }
 
     async fn run_round_trip_test(server_password: &str, client_password: &str) {
+        let pool = Arc::new(ThreadPool::new());
+        pool.spawn_workers(1);
+
+        let ep = EndpointId::from("foo");
+        let ep = EndpointIdInt::from(ep);
+
         let scram_secret = ServerSecret::build(server_password).await.unwrap();
-        let outcome = super::exchange(&scram_secret, client_password.as_bytes())
+        let outcome = super::exchange(&pool, ep, &scram_secret, client_password.as_bytes())
             .await
             .unwrap();
 
