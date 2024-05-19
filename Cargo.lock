@@ -4358,6 +4358,7 @@ dependencies = [
 name = "proxy"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "async-compression",
  "async-trait",
