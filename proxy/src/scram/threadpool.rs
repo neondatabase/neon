@@ -71,11 +71,9 @@ impl ThreadPool {
             let worker = Worker::new_fifo();
             threads.push(worker.stealer());
 
-            let seed = thread_rng().gen();
-
             let pool = Arc::clone(self);
             std::thread::spawn(move || {
-                let mut rng = SmallRng::seed_from_u64(seed);
+                let mut rng = SmallRng::from_entropy();
                 'wait: loop {
                     // wait for notification of work
                     {
