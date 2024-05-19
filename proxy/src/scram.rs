@@ -11,6 +11,7 @@ mod key;
 mod messages;
 mod secret;
 mod signature;
+mod threadpool;
 
 pub use exchange::{exchange, Exchange};
 pub use key::ScramKey;
