@@ -4691,6 +4691,9 @@ impl Timeline {
         // It is an easy way to unset it when standby disappears without adding
         // more conf options.
         self.standby_horizon.store(Lsn::INVALID);
+        self.metrics
+            .standby_horizon_gauge
+            .set(Lsn::INVALID.0 as i64);
 
         let res = self
             .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)

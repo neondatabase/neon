@@ -735,6 +735,10 @@ impl ConnectionManagerState {
             self.timeline
                 .standby_horizon
                 .store(Lsn(timeline_update.standby_horizon));
+            self.timeline
+                .metrics
+                .standby_horizon_gauge
+                .set(timeline_update.standby_horizon as i64);
         }
 
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
