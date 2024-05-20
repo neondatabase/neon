@@ -609,6 +609,22 @@ impl<'a> TenantDownloader<'a> {
                 .unwrap_or(DEFAULT_DOWNLOAD_INTERVAL),
         });
 
+        // Robustness: we should have updated progress properly, but in case we didn't, make sure
+        // we don't leave the tenant in a state where we claim to have successfully downloaded
+        // everything, but our progress is incomplete.  The invariant here should be that if
+        // we have set `last_download` to this heatmap's etag, then the next time we see that
+        // etag we can safely do no work (i.e. we must be complete).
+        let mut progress = self.secondary_state.progress.lock().unwrap();
+        debug_assert!(progress.layers_downloaded == progress.layers_total);
+        debug_assert!(progress.bytes_downloaded == progress.bytes_total);
+        if progress.layers_downloaded != progress.layers_total
+            || progress.bytes_downloaded != progress.bytes_total
+        {
+            tracing::warn!("Correcting drift in progress stats ({progress:?})");
+            progress.layers_downloaded = progress.layers_total;
+            progress.bytes_downloaded = progress.bytes_total;
+        }
+
         Ok(())
     }
 
@@ -1009,6 +1025,14 @@ impl<'a> TenantDownloader<'a> {
                     "Skipped downloading missing layer {}, raced with compaction/gc?",
                     layer.name
                 );
+
+                // If the layer is 404, adjust the progress statistics to reflect that we will not download it.
+                let mut progress = self.secondary_state.progress.lock().unwrap();
+                progress.layers_total = progress.layers_total.saturating_sub(1);
+                progress.bytes_total = progress
+                    .bytes_total
+                    .saturating_sub(layer.metadata.file_size);
+
                 return Ok(None);
             }
             Err(e) => return Err(e.into()),
