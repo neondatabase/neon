@@ -585,6 +585,15 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define current logical size metric")
 });
 
+static AUX_FILE_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_aux_file_estimated_size",
+        "The size of all aux files for a timeline in aux file v2 store.",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) mod initial_logical_size {
     use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
     use once_cell::sync::Lazy;
@@ -1990,29 +1999,6 @@ impl Default for WalRedoProcessCounters {
 pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
     Lazy::new(WalRedoProcessCounters::default);
 
-#[cfg(not(test))]
-pub mod wal_redo {
-    use super::*;
-
-    static PROCESS_KIND: Lazy<std::sync::Mutex<UIntGaugeVec>> = Lazy::new(|| {
-        std::sync::Mutex::new(
-            register_uint_gauge_vec!(
-                "pageserver_wal_redo_process_kind",
-                "The configured process kind for walredo",
-                &["kind"],
-            )
-            .unwrap(),
-        )
-    });
-
-    pub fn set_process_kind_metric(kind: crate::walredo::ProcessKind) {
-        // use guard to avoid races around the next two steps
-        let guard = PROCESS_KIND.lock().unwrap();
-        guard.reset();
-        guard.with_label_values(&[&format!("{kind}")]).set(1);
-    }
-}
-
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
@@ -2112,9 +2098,10 @@ pub(crate) struct TimelineMetrics {
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
-    resident_physical_size_gauge: UIntGauge,
+    pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
+    pub aux_file_size_gauge: IntGauge,
     pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
     pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
@@ -2187,6 +2174,9 @@ impl TimelineMetrics {
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
+        let aux_file_size_gauge = AUX_FILE_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
         // TODO use impl Trait syntax here once we have ability to use it: https://github.com/rust-lang/rust/issues/63065
         let directory_entries_count_gauge_closure = {
             let tenant_shard_id = *tenant_shard_id;
@@ -2224,6 +2214,7 @@ impl TimelineMetrics {
             last_record_gauge,
             resident_physical_size_gauge,
             current_logical_size_gauge,
+            aux_file_size_gauge,
             directory_entries_count_gauge,
             evictions,
             evictions_with_low_residence_duration: std::sync::RwLock::new(
@@ -2264,6 +2255,7 @@ impl TimelineMetrics {
             let _ = metric.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()
@@ -2320,6 +2312,7 @@ use pin_project_lite::pin_project;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -2329,35 +2322,35 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::mgr::TenantSlot;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
-struct PerTimelineRemotePhysicalSizeGauge {
-    last_set: u64,
+pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
+    last_set: AtomicU64,
     gauge: UIntGauge,
 }
 
 impl PerTimelineRemotePhysicalSizeGauge {
     fn new(per_timeline_gauge: UIntGauge) -> Self {
         Self {
-            last_set: per_timeline_gauge.get(),
+            last_set: AtomicU64::new(0),
             gauge: per_timeline_gauge,
         }
     }
-    fn set(&mut self, sz: u64) {
+    pub(crate) fn set(&self, sz: u64) {
         self.gauge.set(sz);
-        if sz < self.last_set {
-            REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set - sz);
+        let prev = self.last_set.swap(sz, std::sync::atomic::Ordering::Relaxed);
+        if sz < prev {
+            REMOTE_PHYSICAL_SIZE_GLOBAL.sub(prev - sz);
         } else {
-            REMOTE_PHYSICAL_SIZE_GLOBAL.add(sz - self.last_set);
+            REMOTE_PHYSICAL_SIZE_GLOBAL.add(sz - prev);
         };
-        self.last_set = sz;
     }
-    fn get(&self) -> u64 {
+    pub(crate) fn get(&self) -> u64 {
         self.gauge.get()
     }
 }
 
 impl Drop for PerTimelineRemotePhysicalSizeGauge {
     fn drop(&mut self) {
-        REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set);
+        REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
 
@@ -2365,7 +2358,7 @@ pub(crate) struct RemoteTimelineClientMetrics {
     tenant_id: String,
     shard_id: String,
     timeline_id: String,
-    remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
+    pub(crate) remote_physical_size_gauge: PerTimelineRemotePhysicalSizeGauge,
     calls: Mutex<HashMap<(&'static str, &'static str), IntCounterPair>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
@@ -2373,36 +2366,25 @@ pub(crate) struct RemoteTimelineClientMetrics {
 
 impl RemoteTimelineClientMetrics {
     pub fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
+        let tenant_id_str = tenant_shard_id.tenant_id.to_string();
+        let shard_id_str = format!("{}", tenant_shard_id.shard_slug());
+        let timeline_id_str = timeline_id.to_string();
+
+        let remote_physical_size_gauge = PerTimelineRemotePhysicalSizeGauge::new(
+            REMOTE_PHYSICAL_SIZE
+                .get_metric_with_label_values(&[&tenant_id_str, &shard_id_str, &timeline_id_str])
+                .unwrap(),
+        );
+
         RemoteTimelineClientMetrics {
-            tenant_id: tenant_shard_id.tenant_id.to_string(),
-            shard_id: format!("{}", tenant_shard_id.shard_slug()),
-            timeline_id: timeline_id.to_string(),
+            tenant_id: tenant_id_str,
+            shard_id: shard_id_str,
+            timeline_id: timeline_id_str,
             calls: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
             bytes_finished_counter: Mutex::new(HashMap::default()),
-            remote_physical_size_gauge: Mutex::new(None),
+            remote_physical_size_gauge,
         }
-    }
-
-    pub(crate) fn remote_physical_size_set(&self, sz: u64) {
-        let mut guard = self.remote_physical_size_gauge.lock().unwrap();
-        let gauge = guard.get_or_insert_with(|| {
-            PerTimelineRemotePhysicalSizeGauge::new(
-                REMOTE_PHYSICAL_SIZE
-                    .get_metric_with_label_values(&[
-                        &self.tenant_id,
-                        &self.shard_id,
-                        &self.timeline_id,
-                    ])
-                    .unwrap(),
-            )
-        });
-        gauge.set(sz);
-    }
-
-    pub(crate) fn remote_physical_size_get(&self) -> u64 {
-        let guard = self.remote_physical_size_gauge.lock().unwrap();
-        guard.as_ref().map(|gauge| gauge.get()).unwrap_or(0)
     }
 
     pub fn remote_operation_time(

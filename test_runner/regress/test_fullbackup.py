@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -8,7 +9,6 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
 )
 from fixtures.port_distributor import PortDistributor
-from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar, subprocess_capture
 
 num_rows = 1000

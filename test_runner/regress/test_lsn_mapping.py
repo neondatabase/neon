@@ -2,10 +2,10 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
 

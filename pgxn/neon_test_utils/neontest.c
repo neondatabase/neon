@@ -48,10 +48,10 @@ PG_FUNCTION_INFO_V1(neon_xlogflush);
  */
 #if PG_MAJORVERSION_NUM < 16
 typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-									   XLogRecPtr request_lsn, XLogRecPtr not_modified_since, char *buffer);
+									   neon_request_lsns request_lsns, char *buffer);
 #else
 typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-									   XLogRecPtr request_lsn, XLogRecPtr not_modified_since, void *buffer);
+									   neon_request_lsns request_lsns, void *buffer);
 #endif
 
 static neon_read_at_lsn_type neon_read_at_lsn_ptr;
@@ -298,9 +298,7 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	text	   *relname;
 	text	   *forkname;
 	uint32		blkno;
-
-	XLogRecPtr	request_lsn;
-	XLogRecPtr	not_modified_since;
+	neon_request_lsns	request_lsns;
 
 	if (PG_NARGS() != 5)
 		elog(ERROR, "unexpected number of arguments in SQL function signature");
@@ -312,8 +310,15 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	forkname = PG_GETARG_TEXT_PP(1);
 	blkno = PG_GETARG_UINT32(2);
 
-	request_lsn = PG_ARGISNULL(3) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(3);
-	not_modified_since = PG_ARGISNULL(4) ? request_lsn : PG_GETARG_LSN(4);
+	request_lsns.request_lsn = PG_ARGISNULL(3) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(3);
+	request_lsns.not_modified_since = PG_ARGISNULL(4) ? request_lsns.request_lsn : PG_GETARG_LSN(4);
+	/*
+	 * For the time being, use the same LSN for request and
+	 * effective request LSN. If any test needed to use UINT64_MAX
+	 * as the request LSN, we'd need to add effective_request_lsn
+	 * as a new argument.
+	 */
+	request_lsns.effective_request_lsn = request_lsns.request_lsn;
 
 	if (!superuser())
 		ereport(ERROR,
@@ -367,7 +372,8 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 	raw_page_data = VARDATA(raw_page);
 
-	neon_read_at_lsn(InfoFromRelation(rel), forknum, blkno, request_lsn, not_modified_since, raw_page_data);
+	neon_read_at_lsn(InfoFromRelation(rel), forknum, blkno, request_lsns,
+					 raw_page_data);
 
 	relation_close(rel, AccessShareLock);
 
@@ -413,19 +419,25 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 
 		ForkNumber	forknum = PG_GETARG_UINT32(3);
 		uint32		blkno = PG_GETARG_UINT32(4);
-		XLogRecPtr	request_lsn;
-		XLogRecPtr	not_modified_since;
+		neon_request_lsns	request_lsns;
 
 		/* Initialize buffer to copy to */
 		bytea	   *raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
 
-		request_lsn = PG_ARGISNULL(5) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(5);
-		not_modified_since = PG_ARGISNULL(6) ? request_lsn : PG_GETARG_LSN(6);
+		request_lsns.request_lsn = PG_ARGISNULL(5) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(5);
+		request_lsns.not_modified_since = PG_ARGISNULL(6) ? request_lsns.request_lsn : PG_GETARG_LSN(6);
+		/*
+		 * For the time being, use the same LSN for request
+		 * and effective request LSN. If any test needed to
+		 * use UINT64_MAX as the request LSN, we'd need to add
+		 * effective_request_lsn as a new argument.
+		 */
+		request_lsns.effective_request_lsn = request_lsns.request_lsn;
 
 		SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 		raw_page_data = VARDATA(raw_page);
 
-		neon_read_at_lsn(rinfo, forknum, blkno, request_lsn, not_modified_since, raw_page_data);
+		neon_read_at_lsn(rinfo, forknum, blkno, request_lsns, raw_page_data);
 		PG_RETURN_BYTEA_P(raw_page);
 	}
 }

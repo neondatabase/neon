@@ -135,7 +135,14 @@ async def test_websockets_pipelined(static_proxy: NeonProxy):
         query_message = "SELECT 1".encode("utf-8") + b"\0"
         length2 = (4 + len(query_message)).to_bytes(4, byteorder="big")
         await websocket.send(
-            [length0, startup_message, b"p", length1, auth_message, b"Q", length2, query_message]
+            length0
+            + startup_message
+            + b"p"
+            + length1
+            + auth_message
+            + b"Q"
+            + length2
+            + query_message
         )
 
         startup_response = await websocket.recv()

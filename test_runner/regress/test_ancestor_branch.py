@@ -1,6 +1,6 @@
+from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import TimelineId
 from fixtures.utils import query_scalar
 
 

@@ -56,7 +56,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             rewrite_concurrency: std::num::NonZeroUsize::new(2).unwrap(),
-            copy_concurrency: std::num::NonZeroUsize::new(10).unwrap(),
+            copy_concurrency: std::num::NonZeroUsize::new(100).unwrap(),
         }
     }
 }
@@ -69,10 +69,6 @@ pub(super) async fn prepare(
     ctx: &RequestContext,
 ) -> Result<(completion::Completion, PreparedTimelineDetach), Error> {
     use Error::*;
-
-    if detached.remote_client.as_ref().is_none() {
-        unimplemented!("no new code for running without remote storage");
-    }
 
     let Some((ancestor, ancestor_lsn)) = detached
         .ancestor_timeline
@@ -215,6 +211,7 @@ pub(super) async fn prepare(
                 &detached
                     .conf
                     .timeline_path(&detached.tenant_shard_id, &detached.timeline_id),
+                ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -314,8 +311,6 @@ async fn upload_rewritten_layer(
     // FIXME: better shuttingdown error
     target
         .remote_client
-        .as_ref()
-        .unwrap()
         .upload_layer_file(&copied, cancel)
         .await
         .map_err(UploadRewritten)?;
@@ -339,6 +334,7 @@ async fn copy_lsn_prefix(
         target_timeline.tenant_shard_id,
         layer.layer_desc().key_range.start,
         layer.layer_desc().lsn_range.start..end_lsn,
+        ctx,
     )
     .await
     .map_err(CopyDeltaPrefix)?;
@@ -404,8 +400,6 @@ async fn remote_copy(
     // FIXME: better shuttingdown error
     adoptee
         .remote_client
-        .as_ref()
-        .unwrap()
         .copy_timeline_layer(adopted, &owned, cancel)
         .await
         .map(move |()| owned)
@@ -419,11 +413,6 @@ pub(super) async fn complete(
     prepared: PreparedTimelineDetach,
     _ctx: &RequestContext,
 ) -> Result<Vec<TimelineId>, anyhow::Error> {
-    let rtc = detached
-        .remote_client
-        .as_ref()
-        .expect("has to have a remote timeline client for timeline ancestor detach");
-
     let PreparedTimelineDetach { layers } = prepared;
 
     let ancestor = detached
@@ -440,11 +429,13 @@ pub(super) async fn complete(
     //
     // this is not perfect, but it avoids us a retry happening after a compaction or gc on restart
     // which could give us a completely wrong layer combination.
-    rtc.schedule_adding_existing_layers_to_index_detach_and_wait(
-        &layers,
-        (ancestor.timeline_id, ancestor_lsn),
-    )
-    .await?;
+    detached
+        .remote_client
+        .schedule_adding_existing_layers_to_index_detach_and_wait(
+            &layers,
+            (ancestor.timeline_id, ancestor_lsn),
+        )
+        .await?;
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -489,8 +480,6 @@ pub(super) async fn complete(
                 async move {
                     let res = timeline
                         .remote_client
-                        .as_ref()
-                        .expect("reparented has to have remote client because detached has one")
                         .schedule_reparenting_and_wait(&new_parent)
                         .await;
 

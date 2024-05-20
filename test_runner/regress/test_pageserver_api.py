@@ -3,13 +3,13 @@ from pathlib import Path
 from typing import Optional
 
 import toml
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 
@@ -42,6 +42,8 @@ def test_pageserver_init_node_id(neon_simple_env: NeonEnv, neon_binpath: Path):
         "listen_http_addr",
         "pg_auth_type",
         "http_auth_type",
+        # TODO: only needed for NEON_PAGESERVER_PANIC_ON_UNSPECIFIED_COMPACTION_ALGORITHM in https://github.com/neondatabase/neon/pull/7748
+        # "tenant_config",
     ]
     required_config_overrides = [
         f"--config-override={toml.dumps({k: ps_config[k]})}" for k in required_config_keys

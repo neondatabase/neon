@@ -305,6 +305,10 @@ impl StorageController {
             ));
         }
 
+        if let Some(split_threshold) = self.config.split_threshold.as_ref() {
+            args.push(format!("--split-threshold={split_threshold}"))
+        }
+
         background_process::start_process(
             COMMAND,
             &self.env.base_data_dir,

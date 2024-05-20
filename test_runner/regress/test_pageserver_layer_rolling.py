@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 
 import psutil
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -13,7 +14,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 TIMELINE_COUNT = 10

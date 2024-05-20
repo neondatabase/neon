@@ -295,13 +295,11 @@ impl Timeline {
         // Update the LayerMap so that readers will use the new layers, and enqueue it for writing to remote storage
         self.rewrite_layers(replace_layers, drop_layers).await?;
 
-        if let Some(remote_client) = self.remote_client.as_ref() {
-            // We wait for all uploads to complete before finishing this compaction stage.  This is not
-            // necessary for correctness, but it simplifies testing, and avoids proceeding with another
-            // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
-            // load.
-            remote_client.wait_completion().await?;
-        }
+        // We wait for all uploads to complete before finishing this compaction stage.  This is not
+        // necessary for correctness, but it simplifies testing, and avoids proceeding with another
+        // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
+        // load.
+        self.remote_client.wait_completion().await?;
 
         Ok(())
     }
@@ -700,6 +698,7 @@ impl Timeline {
                                 debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
                                 lsn_range.clone()
                             },
+                            ctx,
                         )
                         .await?,
                     );
@@ -755,6 +754,7 @@ impl Timeline {
                 &self
                     .conf
                     .timeline_path(&self.tenant_shard_id, &self.timeline_id),
+                ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -1093,6 +1093,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range.start,
             lsn_range.clone(),
+            ctx,
         )
         .await?;
 
@@ -1167,6 +1168,7 @@ impl TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range,
             lsn,
+            ctx,
         )
         .await?;
 

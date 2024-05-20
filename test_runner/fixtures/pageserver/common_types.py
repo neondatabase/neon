@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Union
 
-from fixtures.types import KEY_MAX, KEY_MIN, Key, Lsn
+from fixtures.common_types import KEY_MAX, KEY_MIN, Key, Lsn
 
 
 @dataclass

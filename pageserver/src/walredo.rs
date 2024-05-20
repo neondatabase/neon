@@ -153,10 +153,7 @@ impl PostgresRedoManager {
             process: self
                 .redo_process
                 .get()
-                .map(|p| WalRedoManagerProcessStatus {
-                    pid: p.id(),
-                    kind: std::borrow::Cow::Borrowed(p.kind().into()),
-                }),
+                .map(|p| WalRedoManagerProcessStatus { pid: p.id() }),
         }
     }
 }

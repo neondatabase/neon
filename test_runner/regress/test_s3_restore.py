@@ -1,6 +1,7 @@
 import time
 from datetime import datetime, timezone
 
+from fixtures.common_types import Lsn
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
@@ -14,7 +15,6 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
-from fixtures.types import Lsn
 from fixtures.utils import run_pg_bench_small
 
 

@@ -11,10 +11,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import Fn
 
 
@@ -890,3 +890,18 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert current_logical_size == non_incremental
         assert isinstance(current_logical_size, int)
         return current_logical_size
+
+    def top_tenants(
+        self, order_by: str, limit: int, where_shards_lt: int, where_gt: int
+    ) -> dict[Any, Any]:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/top_tenants",
+            json={
+                "order_by": order_by,
+                "limit": limit,
+                "where_shards_lt": where_shards_lt,
+                "where_gt": where_gt,
+            },
+        )
+        self.verbose_error(res)
+        return res.json()  # type: ignore

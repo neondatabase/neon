@@ -78,7 +78,7 @@ impl RW {
                     page_cache::ReadBufResult::NotFound(write_guard) => {
                         let write_guard = writer
                             .file
-                            .read_exact_at_page(write_guard, blknum as u64 * PAGE_SZ as u64)
+                            .read_exact_at_page(write_guard, blknum as u64 * PAGE_SZ as u64, ctx)
                             .await?;
                         let read_guard = write_guard.mark_valid();
                         return Ok(BlockLease::PageReadGuard(read_guard));
