@@ -508,6 +508,8 @@ def test_compaction_induced_by_detaches_in_history(
             # Lsn, but we also do not want to compact L0 -> L1.
             "compaction_threshold": "99999",
             "compaction_period": "0s",
+            # shouldn't matter, but just in case
+            "gc_period": "0s",
         }
     )
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
