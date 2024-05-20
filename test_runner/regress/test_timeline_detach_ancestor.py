@@ -517,6 +517,7 @@ def test_compaction_induced_by_detaches_in_history(
         ep.safe_psql("create table integers (i bigint not null);")
         ep.safe_psql("insert into integers (i) values (42)")
         branch_lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+
         client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
 
         assert (
@@ -577,7 +578,8 @@ def test_compaction_induced_by_detaches_in_history(
         ep.safe_psql(f"create table other_table_{last_suffix + 1} as select * from integers")
         wait_for_last_flush_lsn(env, ep, env.initial_tenant, branch_timeline_id)
 
-        # we need to wait here, because the detaches will do implicit tenant restart
+        # we need to wait here, because the detaches will do implicit tenant restart,
+        # and we could get unexpected layer counts
         client.timeline_checkpoint(env.initial_tenant, branch_timeline_id, wait_until_uploaded=True)
 
     assert (
@@ -590,7 +592,7 @@ def test_compaction_induced_by_detaches_in_history(
             ]
         )
         == 1
-    ), "compaction should leave one L0 untouched"
+    )
 
     skip_main = branches[1:]
     branch_lsn = client.timeline_detail(env.initial_tenant, branch_timeline_id)["ancestor_lsn"]
@@ -618,7 +620,7 @@ def test_compaction_induced_by_detaches_in_history(
             client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers(),
         )
     )
-    assert len(post_detach_l0s) == 5, "should had inherited 3 L0s, have 5 in total"
+    assert len(post_detach_l0s) == 5, "should had inherited 4 L0s, have 5 in total"
 
     # checkpoint does compaction, which in turn decides to run, because
     # there is now in total threshold number L0s even if they are not
