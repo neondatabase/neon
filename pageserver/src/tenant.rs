@@ -4777,7 +4777,12 @@ mod tests {
             info!("Doing vectored read on {:?}", read);
 
             let vectored_res = tline
-                .get_vectored_impl(read.clone(), reads_lsn, ValuesReconstructState::new(), &ctx)
+                .get_vectored_impl(
+                    read.clone(),
+                    reads_lsn,
+                    &mut ValuesReconstructState::new(),
+                    &ctx,
+                )
                 .await;
             tline
                 .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
@@ -4826,7 +4831,7 @@ mod tests {
             .get_vectored_impl(
                 aux_keyspace.clone(),
                 read_lsn,
-                ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(),
                 &ctx,
             )
             .await;
@@ -4971,7 +4976,7 @@ mod tests {
             .get_vectored_impl(
                 read.clone(),
                 current_lsn,
-                ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(),
                 &ctx,
             )
             .await?;
@@ -5106,7 +5111,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
-                    ValuesReconstructState::new(),
+                    &mut ValuesReconstructState::new(),
                     &ctx,
                 )
                 .await;
@@ -5547,7 +5552,7 @@ mod tests {
             .await?;
 
         const NUM_KEYS: usize = 1000;
-        const STEP: usize = 100; // random update + scan base_key + idx * STEP
+        const STEP: usize = 10000; // random update + scan base_key + idx * STEP
 
         let cancel = CancellationToken::new();
 
@@ -5580,7 +5585,7 @@ mod tests {
 
         let keyspace = KeySpace::single(base_key..base_key.add((NUM_KEYS * STEP) as u32));
 
-        for _ in 0..10 {
+        for iter in 0..=10 {
             // Read all the blocks
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = (blknum * STEP) as u32;
@@ -5595,7 +5600,7 @@ mod tests {
                 .get_vectored_impl(
                     keyspace.clone(),
                     lsn,
-                    ValuesReconstructState::default(),
+                    &mut ValuesReconstructState::default(),
                     &ctx,
                 )
                 .await?
@@ -5631,13 +5636,87 @@ mod tests {
                 updated[blknum] = lsn;
             }
 
-            // Perform a cycle of flush, compact, and GC
-            tline.freeze_and_flush().await?;
-            tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
-            tenant
-                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
-                .await?;
+            // Perform two cycles of flush, compact, and GC
+            for round in 0..2 {
+                tline.freeze_and_flush().await?;
+                tline
+                    .compact(
+                        &cancel,
+                        if iter % 5 == 0 && round == 0 {
+                            let mut flags = EnumSet::new();
+                            flags.insert(CompactFlags::ForceImageLayerCreation);
+                            flags.insert(CompactFlags::ForceRepartition);
+                            flags
+                        } else {
+                            EnumSet::empty()
+                        },
+                        &ctx,
+                    )
+                    .await?;
+                tenant
+                    .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                    .await?;
+            }
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_compaction_trigger() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_compaction_trigger")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        base_key.field1 = AUX_KEY_PREFIX;
+        let test_key = base_key;
+        let mut lsn = Lsn(0x10);
+
+        for _ in 0..20 {
+            lsn = Lsn(lsn.0 + 0x10);
+            let mut writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(test_img(&format!("{} at {}", 0, lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+            tline.freeze_and_flush().await?; // force create a delta layer
+        }
+
+        let before_num_l0_delta_files = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .get_level0_deltas()?
+            .len();
+
+        tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+
+        let after_num_l0_delta_files = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .get_level0_deltas()?
+            .len();
+
+        assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
+
+        assert_eq!(
+            tline.get(test_key, lsn, &ctx).await?,
+            test_img(&format!("{} at {}", 0, lsn))
+        );
 
         Ok(())
     }

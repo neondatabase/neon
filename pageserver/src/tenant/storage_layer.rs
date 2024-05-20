@@ -113,12 +113,17 @@ impl From<VectoredValueReconstructState> for ValueReconstructState {
     }
 }
 
-/// Bag of data accumulated during a vectored get
+/// Bag of data accumulated during a vectored get.
 pub(crate) struct ValuesReconstructState {
+    /// The keys will be removed after `get_vectored` completes. The caller outside `Timeline`
+    /// should not expect to get anything from this hashmap.
     pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
 
     keys_done: KeySpaceRandomAccum,
+
+    // Statistics that are still accessible as a caller of `get_vectored_impl`.
     layers_visited: u32,
+    delta_layers_visited: u32,
 }
 
 impl ValuesReconstructState {
@@ -127,6 +132,7 @@ impl ValuesReconstructState {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),
             layers_visited: 0,
+            delta_layers_visited: 0,
         }
     }
 
@@ -140,8 +146,17 @@ impl ValuesReconstructState {
         }
     }
 
-    pub(crate) fn on_layer_visited(&mut self) {
+    pub(crate) fn on_layer_visited(&mut self, layer: &ReadableLayer) {
         self.layers_visited += 1;
+        if let ReadableLayer::PersistentLayer(layer) = layer {
+            if layer.layer_desc().is_delta() {
+                self.delta_layers_visited += 1;
+            }
+        }
+    }
+
+    pub(crate) fn get_delta_layers_visited(&self) -> u32 {
+        self.delta_layers_visited
     }
 
     pub(crate) fn get_layers_visited(&self) -> u32 {

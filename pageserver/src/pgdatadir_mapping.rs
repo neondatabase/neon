@@ -40,7 +40,11 @@ use utils::bin_ser::DeserializeError;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
-const MAX_AUX_FILE_DELTAS: usize = 1024;
+/// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
+pub const MAX_AUX_FILE_DELTAS: usize = 1024;
+
+/// Max number of aux-file-related delta layers. The compaction will create a new image layer once this threshold is reached.
+pub const MAX_AUX_FILE_V2_DELTAS: usize = 64;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
