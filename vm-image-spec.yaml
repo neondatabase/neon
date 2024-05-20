@@ -294,6 +294,9 @@ files:
         query: |
           SELECT checkpoints_timed FROM pg_stat_bgwriter;
 
+      # In all the below metrics, we cast LSNs to floats because Prometheus only supports floats.
+      # It's probably fine because float64 can store integers from -2^53 to +2^53 exactly.
+
       # Number of slots is limited by max_replication_slots, so collecting position for all of them shouldn't be bad.
       - metric_name: logical_slot_restart_lsn
         type: gauge
