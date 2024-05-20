@@ -1736,6 +1736,8 @@ async fn timeline_compact_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "force_image_layer_creation")? {
         flags |= CompactFlags::ForceImageLayerCreation;
     }
+    let wait_until_uploaded =
+        parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
@@ -1744,6 +1746,9 @@ async fn timeline_compact_handler(
             .compact(&cancel, flags, &ctx)
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
+        if wait_until_uploaded {
+            timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
+        }
         json_response(StatusCode::OK, ())
     }
     .instrument(info_span!("manual_compaction", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
@@ -1768,6 +1773,8 @@ async fn timeline_checkpoint_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "force_image_layer_creation")? {
         flags |= CompactFlags::ForceImageLayerCreation;
     }
+    let wait_until_uploaded =
+        parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
@@ -1780,6 +1787,10 @@ async fn timeline_checkpoint_handler(
             .compact(&cancel, flags, &ctx)
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+        if wait_until_uploaded {
+            timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
+        }
 
         json_response(StatusCode::OK, ())
     }

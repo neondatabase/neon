@@ -583,6 +583,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        wait_until_uploaded=False
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -590,6 +591,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if wait_until_uploaded:
+            query["wait_until_uploaded"] = "true"
 
         log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
@@ -656,6 +659,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        wait_until_uploaded=False,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -663,6 +667,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if wait_until_uploaded:
+            query["wait_until_uploaded"] = "true"
 
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
