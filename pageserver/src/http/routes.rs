@@ -1,6 +1,8 @@
 //!
 //! Management HTTP API
 //!
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,6 +16,8 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::IngestAuxFilesRequest;
+use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::ShardParameters;
@@ -24,7 +28,11 @@ use pageserver_api::models::TenantScanRemoteStorageShard;
 use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
+use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TenantState;
+use pageserver_api::models::TopTenantShardItem;
+use pageserver_api::models::TopTenantShardsRequest;
+use pageserver_api::models::TopTenantShardsResponse;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
@@ -104,7 +112,7 @@ pub struct State {
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     allowlist_routes: Vec<Uri>,
-    remote_storage: Option<GenericRemoteStorage>,
+    remote_storage: GenericRemoteStorage,
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
@@ -118,7 +126,7 @@ impl State {
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
-        remote_storage: Option<GenericRemoteStorage>,
+        remote_storage: GenericRemoteStorage,
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
@@ -433,6 +441,8 @@ async fn build_timeline_info_common(
         state,
 
         walreceiver_status,
+
+        last_aux_file_policy: timeline.last_aux_file_policy.load(),
     };
     Ok(info)
 }
@@ -812,12 +822,6 @@ async fn tenant_attach_handler(
     let state = get_state(&request);
 
     let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
-
-    if state.remote_storage.is_none() {
-        return Err(ApiError::BadRequest(anyhow!(
-            "attach_tenant is not possible because pageserver was configured without remote storage"
-        )));
-    }
 
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
     let shard_params = ShardParameters::default();
@@ -1643,12 +1647,6 @@ async fn tenant_time_travel_remote_storage_handler(
         )));
     }
 
-    let Some(storage) = state.remote_storage.as_ref() else {
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "remote storage not configured, cannot run time travel"
-        )));
-    };
-
     if timestamp > done_if_after {
         return Err(ApiError::BadRequest(anyhow!(
             "The done_if_after timestamp comes before the timestamp to recover to"
@@ -1658,7 +1656,7 @@ async fn tenant_time_travel_remote_storage_handler(
     tracing::info!("Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}");
 
     remote_timeline_client::upload::time_travel_recover_tenant(
-        storage,
+        &state.remote_storage,
         &tenant_shard_id,
         timestamp,
         done_if_after,
@@ -1903,11 +1901,6 @@ async fn deletion_queue_flush(
 ) -> Result<Response<Body>, ApiError> {
     let state = get_state(&r);
 
-    if state.remote_storage.is_none() {
-        // Nothing to do if remote storage is disabled.
-        return json_response(StatusCode::OK, ());
-    }
-
     let execute = parse_query_param(&r, "execute")?.unwrap_or(false);
 
     let flush = async {
@@ -2072,18 +2065,11 @@ async fn disk_usage_eviction_run(
     };
 
     let state = get_state(&r);
-
-    let Some(storage) = state.remote_storage.as_ref() else {
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "remote storage not configured, cannot run eviction iteration"
-        )));
-    };
-
     let eviction_state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
         &eviction_state,
-        storage,
+        &state.remote_storage,
         usage,
         &state.tenant_manager,
         config.eviction_order,
@@ -2120,29 +2106,23 @@ async fn tenant_scan_remote_handler(
     let state = get_state(&request);
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
 
-    let Some(remote_storage) = state.remote_storage.as_ref() else {
-        return Err(ApiError::BadRequest(anyhow::anyhow!(
-            "Remote storage not configured"
-        )));
-    };
-
     let mut response = TenantScanRemoteStorageResponse::default();
 
     let (shards, _other_keys) =
-        list_remote_tenant_shards(remote_storage, tenant_id, cancel.clone())
+        list_remote_tenant_shards(&state.remote_storage, tenant_id, cancel.clone())
             .await
             .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
 
     for tenant_shard_id in shards {
         let (timeline_ids, _other_keys) =
-            list_remote_timelines(remote_storage, tenant_shard_id, cancel.clone())
+            list_remote_timelines(&state.remote_storage, tenant_shard_id, cancel.clone())
                 .await
                 .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
 
         let mut generation = Generation::none();
         for timeline_id in timeline_ids {
             match download_index_part(
-                remote_storage,
+                &state.remote_storage,
                 &tenant_shard_id,
                 &timeline_id,
                 Generation::MAX,
@@ -2351,6 +2331,162 @@ async fn get_utilization(
         .body(hyper::Body::from(cached))
         .context("build response")
         .map_err(ApiError::InternalServerError)
+}
+
+async fn list_aux_files(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let body: ListAuxFilesRequest = json_request(&mut request).await?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let process = || async move {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let files = timeline.list_aux_files(body.lsn, &ctx).await?;
+        Ok::<_, anyhow::Error>(files)
+    };
+
+    match process().await {
+        Ok(st) => json_response(StatusCode::OK, st),
+        Err(err) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::InternalServerError(err).to_string(),
+        ),
+    }
+}
+
+async fn ingest_aux_files(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let body: IngestAuxFilesRequest = json_request(&mut request).await?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let process = || async move {
+        let mut modification = timeline.begin_modification(Lsn(
+            timeline.get_last_record_lsn().0 + 8
+        ) /* advance LSN by 8 */);
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        for (fname, content) in body.aux_files {
+            modification
+                .put_file(&fname, content.as_bytes(), &ctx)
+                .await?;
+        }
+        modification.commit(&ctx).await?;
+        Ok::<_, anyhow::Error>(())
+    };
+
+    match process().await {
+        Ok(st) => json_response(StatusCode::OK, st),
+        Err(err) => Err(ApiError::InternalServerError(err)),
+    }
+}
+
+/// Report on the largest tenants on this pageserver, for the storage controller to identify
+/// candidates for splitting
+async fn post_top_tenants(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+    let request: TopTenantShardsRequest = json_request(&mut r).await?;
+    let state = get_state(&r);
+
+    fn get_size_metric(sizes: &TopTenantShardItem, order_by: &TenantSorting) -> u64 {
+        match order_by {
+            TenantSorting::ResidentSize => sizes.resident_size,
+            TenantSorting::MaxLogicalSize => sizes.max_logical_size,
+        }
+    }
+
+    #[derive(Eq, PartialEq)]
+    struct HeapItem {
+        metric: u64,
+        sizes: TopTenantShardItem,
+    }
+
+    impl PartialOrd for HeapItem {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    /// Heap items have reverse ordering on their metric: this enables using BinaryHeap, which
+    /// supports popping the greatest item but not the smallest.
+    impl Ord for HeapItem {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            Reverse(self.metric).cmp(&Reverse(other.metric))
+        }
+    }
+
+    let mut top_n: BinaryHeap<HeapItem> = BinaryHeap::with_capacity(request.limit);
+
+    // FIXME: this is a lot of clones to take this tenant list
+    for (tenant_shard_id, tenant_slot) in state.tenant_manager.list() {
+        if let Some(shards_lt) = request.where_shards_lt {
+            // Ignore tenants which already have >= this many shards
+            if tenant_shard_id.shard_count >= shards_lt {
+                continue;
+            }
+        }
+
+        let sizes = match tenant_slot {
+            TenantSlot::Attached(tenant) => tenant.get_sizes(),
+            TenantSlot::Secondary(_) | TenantSlot::InProgress(_) => {
+                continue;
+            }
+        };
+        let metric = get_size_metric(&sizes, &request.order_by);
+
+        if let Some(gt) = request.where_gt {
+            // Ignore tenants whose metric is <= the lower size threshold, to do less sorting work
+            if metric <= gt {
+                continue;
+            }
+        };
+
+        match top_n.peek() {
+            None => {
+                // Top N list is empty: candidate becomes first member
+                top_n.push(HeapItem { metric, sizes });
+            }
+            Some(i) if i.metric > metric && top_n.len() < request.limit => {
+                // Lowest item in list is greater than our candidate, but we aren't at limit yet: push to end
+                top_n.push(HeapItem { metric, sizes });
+            }
+            Some(i) if i.metric > metric => {
+                // List is at limit and lowest value is greater than our candidate, drop it.
+            }
+            Some(_) => top_n.push(HeapItem { metric, sizes }),
+        }
+
+        while top_n.len() > request.limit {
+            top_n.pop();
+        }
+    }
+
+    json_response(
+        StatusCode::OK,
+        TopTenantShardsResponse {
+            shards: top_n.into_iter().map(|i| i.sizes).collect(),
+        },
+    )
 }
 
 /// Common functionality of all the HTTP API handlers.
@@ -2639,5 +2775,14 @@ pub fn make_router(
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/ingest_aux_files",
+            |r| testing_api_handler("ingest_aux_files", r, ingest_aux_files),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/list_aux_files",
+            |r| testing_api_handler("list_aux_files", r, list_aux_files),
+        )
+        .post("/v1/top_tenants", |r| api_handler(r, post_top_tenants))
         .any(handler_404))
 }

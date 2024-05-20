@@ -66,6 +66,10 @@ struct Cli {
     #[arg(long)]
     max_unavailable_interval: Option<humantime::Duration>,
 
+    /// Size threshold for automatically splitting shards (disabled by default)
+    #[arg(long)]
+    split_threshold: Option<u64>,
+
     /// Maximum number of reconcilers that may run in parallel
     #[arg(long)]
     reconciler_concurrency: Option<usize>,
@@ -255,6 +259,7 @@ async fn async_main() -> anyhow::Result<()> {
         reconciler_concurrency: args
             .reconciler_concurrency
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
+        split_threshold: args.split_threshold,
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations

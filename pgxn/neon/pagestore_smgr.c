@@ -45,6 +45,7 @@
  */
 #include "postgres.h"
 
+#include "access/parallel.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xlogdefs.h"
@@ -2822,10 +2823,14 @@ neon_start_unlogged_build(SMgrRelation reln)
 	reln->smgr_relpersistence = RELPERSISTENCE_UNLOGGED;
 
 	/*
+	 * Create the local file. In a parallel build, the leader is expected to
+	 * call this first and do it.
+	 *
 	 * FIXME: should we pass isRedo true to create the tablespace dir if it
 	 * doesn't exist? Is it needed?
 	 */
-	mdcreate(reln, MAIN_FORKNUM, false);
+	if (!IsParallelWorker())
+		mdcreate(reln, MAIN_FORKNUM, false);
 }
 
 /*
@@ -2849,7 +2854,17 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 	Assert(unlogged_build_phase == UNLOGGED_BUILD_PHASE_1);
 	Assert(reln->smgr_relpersistence == RELPERSISTENCE_UNLOGGED);
 
-	unlogged_build_phase = UNLOGGED_BUILD_PHASE_2;
+	/*
+	 * In a parallel build, (only) the leader process performs the 2nd
+	 * phase.
+	 */
+	if (IsParallelWorker())
+	{
+		unlogged_build_rel = NULL;
+		unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+	}
+	else
+		unlogged_build_phase = UNLOGGED_BUILD_PHASE_2;
 }
 
 /*

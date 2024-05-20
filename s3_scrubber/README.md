@@ -9,11 +9,13 @@ and `safekeeper`, and does housekeeping such as cleaning up objects for tenants 
 
 #### S3
 
-Do `aws sso login --profile dev` to get the SSO access to the bucket to clean, get the SSO_ACCOUNT_ID for your profile (`cat ~/.aws/config` may help).
+Do `aws sso login --profile dev` to get the SSO access to the bucket to clean.
+Also, set the following environment variables:
 
-- `SSO_ACCOUNT_ID`: Credentials id to use for accessing S3 buckets
+- `AWS_PROFILE`: Profile name to use for accessing S3 buckets (e.g. `dev`)
 - `REGION`: A region where the bucket is located at.
 - `BUCKET`: Bucket name
+- `BUCKET_PREFIX` (optional): Prefix inside the bucket
 
 #### Console API
 
@@ -43,7 +45,7 @@ processing by the `purge-garbage` subcommand.
 
 Example:
 
-`env SSO_ACCOUNT_ID=123456 REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- find-garbage --node-kind=pageserver --depth=tenant --output-path=eu-west-1-garbage.json`
+`env AWS_PROFILE=dev REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- find-garbage --node-kind=pageserver --depth=tenant --output-path=eu-west-1-garbage.json`
 
 #### `purge-garbage`
 
@@ -59,7 +61,7 @@ to pass them on the command line
 
 Example:
 
-`env SSO_ACCOUNT_ID=123456 cargo run --release -- purge-garbage --node-kind=pageserver --depth=tenant --input-path=eu-west-1-garbage.json`
+`env AWS_PROFILE=dev cargo run --release -- purge-garbage --node-kind=pageserver --depth=tenant --input-path=eu-west-1-garbage.json`
 
 Add the `--delete` argument before `purge-garbage` to enable deletion.  This is intentionally
 not provided inline in the example above to avoid accidents.  Without the `--delete` flag
@@ -72,7 +74,7 @@ Errors are logged to stderr and summary to stdout.
 
 For pageserver:
 ```
-env SSO_ACCOUNT_ID=123456 REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- scan-metadata --node-kind pageserver
+env AWS_PROFILE=dev REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- scan-metadata --node-kind pageserver
 
 Timelines: 31106
 With errors: 3

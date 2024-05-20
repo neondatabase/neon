@@ -359,7 +359,7 @@ impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
             // Is there enough space on the page for another logical message and an
             // XLOG_SWITCH? If not, start over.
             let page_remain = XLOG_BLCKSZ as u64 - u64::from(after_lsn) % XLOG_BLCKSZ as u64;
-            if page_remain < base_size - XLOG_SIZE_OF_XLOG_RECORD as u64 {
+            if page_remain < base_size + XLOG_SIZE_OF_XLOG_RECORD as u64 {
                 continue;
             }
 
