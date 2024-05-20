@@ -596,7 +596,7 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
     #           |
     #       l1 layers from "fill in the final, most growing timeline"
     #
-    # branch_lsn is between 4 and first X; we dont have straddling layers here, should assert?
+    # branch_lsn is between 4 and first X.
     client.timeline_checkpoint(env.initial_tenant, branch_timeline_id)
 
     post_compact_l0s = list(filter(lambda x: x.l0, client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()))
