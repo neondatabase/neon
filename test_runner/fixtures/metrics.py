@@ -142,6 +142,7 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_resident_physical_size",
     "pageserver_io_operations_bytes_total",
     "pageserver_last_record_lsn",
+    "pageserver_standby_horizon",
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",
     "pageserver_smgr_query_seconds_sum",
