@@ -561,7 +561,7 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
         # we need to wait here, because the detaches will do implicit tenant restart
         client.timeline_checkpoint(env.initial_tenant, branch_timeline_id, wait_until_uploaded=True)
 
-    assert len([filter(lambda x: x.is_l0(), client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers())]) == 1, "compaction should leave one L0 untouched"
+    assert len([filter(lambda x: x.l0, client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers())]) == 1, "compaction should leave one L0 untouched"
 
     skip_main = branches[1:]
     branch_lsn = client.timeline_detail(env.initial_tenant, branch_timeline_id)["ancestor_lsn"]
@@ -583,7 +583,7 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
         assert reparented == set(), "we have no earlier branches at any level"
 
-    post_detach_l0s = list(filter(lambda x: x.is_l0(), client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()))
+    post_detach_l0s = list(filter(lambda x: x.l0, client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()))
     assert len(post_detach_l0s) == 5, "should had inherited 3 L0s, have 5 in total"
 
     # checkpoint does compaction, which in turn decides to run, because
@@ -599,7 +599,7 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
     # branch_lsn is between 4 and first X; we dont have straddling layers here, should assert?
     client.timeline_checkpoint(env.initial_tenant, branch_timeline_id)
 
-    post_compact_l0s = list(filter(lambda x: x.is_l0(), client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()))
+    post_compact_l0s = list(filter(lambda x: x.l0, client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()))
     assert len(post_compact_l0s) == 1, "only the consecutive inherited L0s should be compacted"
 
     fullbackup_after = test_output_dir / "fullbackup_after.tar"
