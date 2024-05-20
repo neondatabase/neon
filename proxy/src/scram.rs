@@ -57,8 +57,6 @@ fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use crate::{
         intern::EndpointIdInt,
         sasl::{Mechanism, Step},
@@ -119,8 +117,7 @@ mod tests {
     }
 
     async fn run_round_trip_test(server_password: &str, client_password: &str) {
-        let pool = Arc::new(ThreadPool::new());
-        pool.spawn_workers(1);
+        let pool = ThreadPool::new(1);
 
         let ep = EndpointId::from("foo");
         let ep = EndpointIdInt::from(ep);

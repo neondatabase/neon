@@ -134,8 +134,8 @@ struct ProxyCliArgs {
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     scram_protocol_timeout: tokio::time::Duration,
     /// size of the threadpool for password hashing
-    #[clap(long, default_value_t = 16)]
-    scram_thread_pool_size: usize,
+    #[clap(long, default_value_t = 4)]
+    scram_thread_pool_size: u8,
     /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
@@ -628,15 +628,12 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
     };
     let authentication_config = AuthenticationConfig {
-        thread_pool: Arc::new(ThreadPool::new()),
+        thread_pool: ThreadPool::new(args.scram_thread_pool_size),
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
-    authentication_config
-        .thread_pool
-        .spawn_workers(args.scram_thread_pool_size);
 
     let mut redis_rps_limit = args.redis_rps_limit.clone();
     RateBucketInfo::validate(&mut redis_rps_limit)?;

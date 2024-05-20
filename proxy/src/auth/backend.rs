@@ -598,16 +598,12 @@ mod tests {
         }
     }
 
-    static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| {
-        let config = AuthenticationConfig {
-            thread_pool: Arc::new(ThreadPool::new()),
-            scram_protocol_timeout: std::time::Duration::from_secs(5),
-            rate_limiter_enabled: true,
-            rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
-            rate_limit_ip_subnet: 64,
-        };
-        config.thread_pool.spawn_workers(1);
-        config
+    static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
+        thread_pool: ThreadPool::new(1),
+        scram_protocol_timeout: std::time::Duration::from_secs(5),
+        rate_limiter_enabled: true,
+        rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
+        rate_limit_ip_subnet: 64,
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {
