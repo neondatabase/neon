@@ -13,6 +13,7 @@ publish = false
 
 ### BEGIN HAKARI SECTION
 [dependencies]
+ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
 aws-config = { version = "1", default-features = false, features = ["rustls", "sso"] }
 aws-runtime = { version = "1", default-features = false, features = ["event-stream", "http-02x", "sigv4a"] }
@@ -22,7 +23,6 @@ aws-smithy-http = { version = "0.60", default-features = false, features = ["eve
 aws-smithy-types = { version = "1", default-features = false, features = ["byte-stream-poll-next", "http-body-0-4-x", "http-body-1-x", "rt-tokio", "test-util"] }
 axum = { version = "0.6", features = ["ws"] }
 base64 = { version = "0.21", features = ["alloc"] }
-base64ct = { version = "1", default-features = false, features = ["std"] }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", features = ["derive", "string"] }
@@ -85,6 +85,7 @@ zstd-safe = { version = "7", default-features = false, features = ["arrays", "le
 zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }
 
 [build-dependencies]
+ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }

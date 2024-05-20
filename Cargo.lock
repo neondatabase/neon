@@ -7446,6 +7446,7 @@ dependencies = [
 name = "workspace_hack"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "aws-config",
  "aws-runtime",
@@ -7455,7 +7456,6 @@ dependencies = [
  "aws-smithy-types",
  "axum",
  "base64 0.21.1",
- "base64ct",
  "bytes",
  "cc",
  "chrono",
