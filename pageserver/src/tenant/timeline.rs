@@ -25,7 +25,7 @@ use pageserver_api::{
     models::{
         AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
         DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
-        TimelineState,
+        LsnLease, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -1503,6 +1503,16 @@ impl Timeline {
             **latest_gc_cutoff_lsn,
         );
         Ok(())
+    }
+
+    /// Obtains a temporary lease blocking garbage collection for the given LSN
+    pub(crate) fn make_lsn_lease(&self, _lsn: Lsn, _ctx: &RequestContext) -> anyhow::Result<LsnLease> {
+        const LEASE_LENGTH: Duration = Duration::from_secs(5 * 60);
+        let lease = LsnLease {
+            valid_until: SystemTime::now() + LEASE_LENGTH,
+        };
+        // TODO: dummy implementation
+        Ok(lease)
     }
 
     /// Flush to disk all data that was written with the put_* functions

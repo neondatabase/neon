@@ -162,6 +162,14 @@ impl std::fmt::Debug for TenantState {
     }
 }
 
+#[serde_as]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LsnLease {
+    #[serde(rename = "valid_until_millis_since_epoch")]
+    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
+    pub valid_until: SystemTime,
+}
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
