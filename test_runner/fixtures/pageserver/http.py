@@ -71,7 +71,7 @@ class HistoricLayerInfo:
             lsn_start=d["lsn_start"],
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
-            l0=d["l0"],
+            l0=d.get("l0"),
         )
 
 
