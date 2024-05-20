@@ -1944,13 +1944,26 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 	CombineHotStanbyFeedbacks(&hsFeedback, wp);
 	if (memcmp(&hsFeedback, &agg_hs_feedback, sizeof hsFeedback) != 0)
 	{
+		FullTransactionId xmin = hsFeedback.xmin;
+		FullTransactionId catalog_xmin = hsFeedback.catalog_xmin;
+		FullTransactionId next_xid = ReadNextFullTransactionId();
+		/*
+		 * Page server is updating nextXid in checkpoint each 1024 transactions,
+		 * so feedback xmin can be actually larger then nextXid and
+		 * function TransactionIdInRecentPast return false in this case,
+		 * preventing update of slot's xmin.
+		 */
+		if (FullTransactionIdPrecedes(next_xid, xmin))
+			xmin = next_xid;
+		if (FullTransactionIdPrecedes(next_xid, catalog_xmin))
+			catalog_xmin = next_xid;
 		agg_hs_feedback = hsFeedback;
 		elog(DEBUG2, "ProcessStandbyHSFeedback(xmin=%d, catalog_xmin=%d", XidFromFullTransactionId(hsFeedback.xmin), XidFromFullTransactionId(hsFeedback.catalog_xmin));
 		ProcessStandbyHSFeedback(hsFeedback.ts,
-								 XidFromFullTransactionId(hsFeedback.xmin),
-								 EpochFromFullTransactionId(hsFeedback.xmin),
-								 XidFromFullTransactionId(hsFeedback.catalog_xmin),
-								 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
+								 XidFromFullTransactionId(xmin),
+								 EpochFromFullTransactionId(xmin),
+								 XidFromFullTransactionId(catalog_xmin),
+								 EpochFromFullTransactionId(catalog_xmin));
 	}
 
 	CheckGracefulShutdown(wp);
