@@ -6166,7 +6166,7 @@ mod tests {
                     },
                     &ctx,
                 )
-                .await?; // force create an image layer for the keys
+                .await?; // force create an image layer for the keys, TODO: check if the image layer is created
         }
 
         async fn get_vectored_impl_wrapper(

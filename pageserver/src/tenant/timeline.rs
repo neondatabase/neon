@@ -348,8 +348,8 @@ pub struct Timeline {
     // though let's keep them both for better error visibility.
     pub initdb_lsn: Lsn,
 
-    /// When did we last calculate the partitioning?
-    pub(crate) partitioning: tokio::sync::Mutex<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
+    /// When did we last calculate the partitioning? Make it pub to test cases.
+    pub(super) partitioning: tokio::sync::Mutex<((KeyPartitioning, SparseKeyPartitioning), Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -4140,8 +4140,6 @@ impl Timeline {
         }; // no partitioning for metadata keys for now
         *partitioning_guard = ((dense_partitioning, sparse_partitioning), lsn);
 
-        info!("repartitioning!");
-
         Ok((partitioning_guard.0.clone(), partitioning_guard.1))
     }
 
@@ -4211,7 +4209,6 @@ impl Timeline {
 
         let mut key_request_accum = KeySpaceAccum::new();
         for range in &partition.ranges {
-            info!("partition: {}..{}", range.start, range.end);
             let mut key = range.start;
             while key < range.end {
                 // Decide whether to retain this key: usually we do, but sharded tenants may
