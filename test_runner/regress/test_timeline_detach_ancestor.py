@@ -515,6 +515,10 @@ def test_compaction_induced_by_detaches_in_history(
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
     client = env.pageserver.http_client()
 
+    def delta_layers(timeline_id: TimelineId):
+        # shorthand for more readable formatting
+        return client.layer_map_info(env.initial_tenant, timeline_id).delta_layers()
+
     with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
         ep.safe_psql("create table integers (i bigint not null);")
         ep.safe_psql("insert into integers (i) values (42)")
@@ -522,9 +526,7 @@ def test_compaction_induced_by_detaches_in_history(
 
         client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
 
-        assert (
-            len(client.layer_map_info(env.initial_tenant, env.initial_timeline).delta_layers()) == 2
-        )
+        assert len(delta_layers(env.initial_timeline)) == 2
 
     more_good_numbers = range(0, 3)
 
@@ -547,9 +549,7 @@ def test_compaction_induced_by_detaches_in_history(
             branch_lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, branch_timeline_id)
             client.timeline_checkpoint(env.initial_tenant, branch_timeline_id)
 
-        assert (
-            len(client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()) == 1
-        )
+        assert len(delta_layers(branch_timeline_id)) == 1
 
     # now fill in the final, most growing timeline
 
@@ -566,9 +566,7 @@ def test_compaction_induced_by_detaches_in_history(
 
         assert last_suffix is not None
 
-        assert (
-            len(client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()) == 5
-        )
+        assert len(delta_layers(branch_timeline_id)) == 5
 
         client.patch_tenant_config_client_side(
             env.initial_tenant, {"compaction_threshold": 5}, None
@@ -584,17 +582,7 @@ def test_compaction_induced_by_detaches_in_history(
         # and we could get unexpected layer counts
         client.timeline_checkpoint(env.initial_tenant, branch_timeline_id, wait_until_uploaded=True)
 
-    assert (
-        len(
-            [
-                filter(
-                    lambda x: x.l0,
-                    client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers(),
-                )
-            ]
-        )
-        == 1
-    )
+    assert len([filter(lambda x: x.l0, delta_layers(branch_timeline_id))]) == 1
 
     skip_main = branches[1:]
     branch_lsn = client.timeline_detail(env.initial_tenant, branch_timeline_id)["ancestor_lsn"]
@@ -616,12 +604,7 @@ def test_compaction_induced_by_detaches_in_history(
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
         assert reparented == set(), "we have no earlier branches at any level"
 
-    post_detach_l0s = list(
-        filter(
-            lambda x: x.l0,
-            client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers(),
-        )
-    )
+    post_detach_l0s = list(filter(lambda x: x.l0, delta_layers(branch_timeline_id)))
     assert len(post_detach_l0s) == 5, "should had inherited 4 L0s, have 5 in total"
 
     # checkpoint does compaction, which in turn decides to run, because
@@ -637,12 +620,7 @@ def test_compaction_induced_by_detaches_in_history(
     # branch_lsn is between 4 and first X.
     client.timeline_checkpoint(env.initial_tenant, branch_timeline_id)
 
-    post_compact_l0s = list(
-        filter(
-            lambda x: x.l0,
-            client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers(),
-        )
-    )
+    post_compact_l0s = list(filter(lambda x: x.l0, delta_layers(branch_timeline_id)))
     assert len(post_compact_l0s) == 1, "only the consecutive inherited L0s should be compacted"
 
     fullbackup_after = test_output_dir / "fullbackup_after.tar"
