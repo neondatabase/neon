@@ -7,11 +7,14 @@ docker-compose -f $COMPOSE_FILE
 COMPUTE_CONTAINER_NAME=docker-compose-compute-1
 TEST_CONTAINER_NAME=docker-compose-neon-test-1
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
+: ${http_proxy:=}
+: ${https_proxy:=}
+export http_proxy https_proxy
 
 cleanup() {
     echo "show container information"
     docker ps
-    docker compose -f $COMPOSE_FILE logs
+    #docker compose -f $COMPOSE_FILE logs
     echo "stop containers..."
     docker compose -f $COMPOSE_FILE down
 }

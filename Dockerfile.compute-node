@@ -942,6 +942,7 @@ COPY --from=plv8-build /plv8.tar.gz /ext-src/
 COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
 COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
+COPY --from=vector-pg-build /pgvector.patch /ext-src/
 COPY --from=pgjwt-pg-build /pgjwt.tar.gz /ext-src
 COPY --from=pg-jsonschema-pg-build /home/nonroot/pg_jsonschema.tar.gz /ext-src
 COPY --from=pg-graphql-pg-build /home/nonroot/pg_graphql.tar.gz /ext-src
@@ -972,22 +973,23 @@ RUN cd /ext-src/ && for f in *.tar.gz; \
     do echo $f; dname=$(echo $f | sed 's/\.tar.*//')-src; \
     rm -rf $dname; mkdir $dname; tar xzf $f --strip-components=1 -C $dname \
     || exit 1; rm -f $f; done
+RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch 
 RUN apt-get update && apt-get install -y libgdal-dev cmake vim
 #RUN cd /ext-src/postgis-src && ./configure --with-sfcgal=/usr/local/bin/sfcgal-config\
 #     --without-protobuf --with-interrupt-tests && make 
-COPY <<EOF /run-tests.sh
+COPY <<-"EOF" /run-tests.sh
 #!/bin/bash
 
 cd /ext-src
 FAILED=
-LIST=$((echo \${SKIP} | sed 's/,/\\n/g'; ls -d *-src) | sort | uniq -u)
-for d in \${LIST}
+LIST=$((echo ${SKIP} | sed 's/,/\n/g'; ls -d *-src) | sort | uniq -u)
+for d in ${LIST}
 do
-	[ -d \${d} ] || continue
-	make -C \${d} installcheck || FAILED="\${d} \${FAILED}"
+	[ -d ${d} ] || continue
+	make -C ${d} installcheck || FAILED="${d} ${FAILED}"
 done
-[ -z "\${FAILED}" ] && exit 0
-echo \${FAILED}
+[ -z "${FAILED}" ] && exit 0
+echo ${FAILED}
 exit 1
 EOF
 RUN chmod 755 /run-tests.sh
