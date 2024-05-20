@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import time
-import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -72,8 +71,9 @@ class HistoricLayerInfo:
             lsn_start=d["lsn_start"],
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
-            l0=d["l0"]
+            l0=d["l0"],
         )
+
 
 @dataclass
 class LayerMapInfo:
@@ -585,7 +585,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
-        wait_until_uploaded=False
+        wait_until_uploaded=False,
     ):
         self.is_testing_enabled_or_skip()
         query = {}

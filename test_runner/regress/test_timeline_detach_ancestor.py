@@ -482,7 +482,9 @@ def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEn
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
 
-def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuilder, test_output_dir, pg_distrib_dir, pg_bin: PgBin):
+def test_compaction_induced_by_detaches_in_history(
+    neon_env_builder: NeonEnvBuilder, test_output_dir, pg_distrib_dir, pg_bin: PgBin
+):
     """
     Assuming the tree of timelines:
 
@@ -500,12 +502,14 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
 
     psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
 
-    env = neon_env_builder.init_start(initial_tenant_conf={
-        # we want to create layers manually so we don't branch on arbitrary
-        # Lsn, but we also do not want to compact L0 -> L1.
-        "compaction_threshold": "99999",
-        "compaction_period": "0s",
-    })
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # we want to create layers manually so we don't branch on arbitrary
+            # Lsn, but we also do not want to compact L0 -> L1.
+            "compaction_threshold": "99999",
+            "compaction_period": "0s",
+        }
+    )
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
     client = env.pageserver.http_client()
 
@@ -515,7 +519,9 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
         branch_lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
         client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
 
-        assert len(client.layer_map_info(env.initial_tenant, env.initial_timeline).delta_layers()) == 2
+        assert (
+            len(client.layer_map_info(env.initial_tenant, env.initial_timeline).delta_layers()) == 2
+        )
 
     more_good_numbers = range(0, 3)
 
@@ -523,21 +529,30 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
 
     for num in more_good_numbers:
         branch_name = f"br-{len(branches)}"
-        branch_timeline_id = env.neon_cli.create_branch(branch_name, ancestor_branch_name=branches[-1][0], tenant_id=env.initial_tenant, ancestor_start_lsn=branch_lsn)
+        branch_timeline_id = env.neon_cli.create_branch(
+            branch_name,
+            ancestor_branch_name=branches[-1][0],
+            tenant_id=env.initial_tenant,
+            ancestor_start_lsn=branch_lsn,
+        )
         branches.append((branch_name, branch_timeline_id))
 
         with env.endpoints.create_start(branches[-1][0], tenant_id=env.initial_tenant) as ep:
-            ep.safe_psql(f"insert into integers (i) select i from generate_series({num}, {num + 100}) as s(i)")
+            ep.safe_psql(
+                f"insert into integers (i) select i from generate_series({num}, {num + 100}) as s(i)"
+            )
             branch_lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, branch_timeline_id)
             client.timeline_checkpoint(env.initial_tenant, branch_timeline_id)
 
-        assert len(client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()) == 1
+        assert (
+            len(client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()) == 1
+        )
 
     # now fill in the final, most growing timeline
 
     branch_name, branch_timeline_id = branches[-1]
     with env.endpoints.create_start(branch_name, tenant_id=env.initial_tenant) as ep:
-        ep.safe_psql(f"insert into integers (i) select i from generate_series(50, 500) s(i)")
+        ep.safe_psql("insert into integers (i) select i from generate_series(50, 500) s(i)")
 
         last_suffix = None
         for suffix in range(0, 4):
@@ -548,9 +563,13 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
 
         assert last_suffix is not None
 
-        assert len(client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()) == 5
+        assert (
+            len(client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()) == 5
+        )
 
-        client.patch_tenant_config_client_side(env.initial_tenant, { "compaction_threshold": 5 }, None)
+        client.patch_tenant_config_client_side(
+            env.initial_tenant, {"compaction_threshold": 5}, None
+        )
 
         client.timeline_compact(env.initial_tenant, branch_timeline_id)
 
@@ -561,7 +580,17 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
         # we need to wait here, because the detaches will do implicit tenant restart
         client.timeline_checkpoint(env.initial_tenant, branch_timeline_id, wait_until_uploaded=True)
 
-    assert len([filter(lambda x: x.l0, client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers())]) == 1, "compaction should leave one L0 untouched"
+    assert (
+        len(
+            [
+                filter(
+                    lambda x: x.l0,
+                    client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers(),
+                )
+            ]
+        )
+        == 1
+    ), "compaction should leave one L0 untouched"
 
     skip_main = branches[1:]
     branch_lsn = client.timeline_detail(env.initial_tenant, branch_timeline_id)["ancestor_lsn"]
@@ -583,7 +612,12 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
         assert reparented == set(), "we have no earlier branches at any level"
 
-    post_detach_l0s = list(filter(lambda x: x.l0, client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()))
+    post_detach_l0s = list(
+        filter(
+            lambda x: x.l0,
+            client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers(),
+        )
+    )
     assert len(post_detach_l0s) == 5, "should had inherited 3 L0s, have 5 in total"
 
     # checkpoint does compaction, which in turn decides to run, because
@@ -599,7 +633,12 @@ def test_compaction_induced_by_detaches_in_history(neon_env_builder: NeonEnvBuil
     # branch_lsn is between 4 and first X.
     client.timeline_checkpoint(env.initial_tenant, branch_timeline_id)
 
-    post_compact_l0s = list(filter(lambda x: x.l0, client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers()))
+    post_compact_l0s = list(
+        filter(
+            lambda x: x.l0,
+            client.layer_map_info(env.initial_tenant, branch_timeline_id).delta_layers(),
+        )
+    )
     assert len(post_compact_l0s) == 1, "only the consecutive inherited L0s should be compacted"
 
     fullbackup_after = test_output_dir / "fullbackup_after.tar"
