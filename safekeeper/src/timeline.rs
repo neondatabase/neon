@@ -821,9 +821,9 @@ impl Timeline {
     /// passed after the last save. This helps to keep remote_consistent_lsn up
     /// to date so that storage nodes restart doesn't cause many pageserver ->
     /// safekeeper reconnections.
-    pub async fn maybe_persist_control_file(self: &Arc<Self>) -> Result<()> {
+    pub async fn maybe_persist_control_file(self: &Arc<Self>, force: bool) -> Result<()> {
         let mut guard = self.write_shared_state().await;
-        let changed = guard.sk.maybe_persist_inmem_control_file().await?;
+        let changed = guard.sk.maybe_persist_inmem_control_file(force).await?;
         guard.skip_update = !changed;
         Ok(())
     }
