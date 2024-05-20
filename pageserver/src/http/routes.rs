@@ -1701,6 +1701,32 @@ async fn handle_tenant_break(
     json_response(StatusCode::OK, ())
 }
 
+// Obtains a lsn lease on the given timeline.
+async fn lsn_lease_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let lsn: Lsn = parse_query_param(&request, "lsn")?
+        .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'lsn' query parameter")))?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+    let result = timeline
+        .make_lsn_lease(lsn, &ctx)
+        .map_err(|e| ApiError::InternalServerError(e.context("lsn lease http handler")))?;
+
+    json_response(StatusCode::OK, result)
+}
+
 // Run GC immediately on given timeline.
 async fn timeline_gc_handler(
     mut request: Request<Body>,
@@ -2700,6 +2726,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/get_timestamp_of_lsn",
             |r| api_handler(r, get_timestamp_of_lsn_handler),
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/lsn_lease",
+            |r| api_handler(r, lsn_lease_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/do_gc",
