@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -52,6 +53,8 @@ class InMemoryLayerInfo:
         )
 
 
+LAYER_NAME_RE = re.compile(r"^(?P<key_start>[0-9A-F]{36})-(?P<key_end>[0-9A-F]{36})__(?P<lsn_start>[0-9A-F]{16})(-(?P<lsn_end>[0-9A-F]{16}))?(-v1-(?P<gen>[0-9A-F]{8}))?$")
+
 @dataclass(frozen=True)
 class HistoricLayerInfo:
     kind: str
@@ -71,6 +74,14 @@ class HistoricLayerInfo:
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
         )
+
+    def is_l0(self) -> bool:
+        m = LAYER_NAME_RE.match(self.layer_file_name)
+        assert m, "re should had matched {self.layer_file_name}"
+        key_start = m.group("key_start")
+        key_end = m.group("key_end")
+        lsn_end = m.group("lsn_end")
+        return key_start == ("0" * 36) and key_end == ("F" * 36) and lsn_end is not None
 
 
 @dataclass
