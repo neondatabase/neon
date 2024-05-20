@@ -120,7 +120,8 @@ pub async fn main_task(
         tli.broker_active
             .store(is_active, std::sync::atomic::Ordering::SeqCst);
 
-        // wait until something changes
+        // wait until something changes. tx channels are stored under Arc, so they will not be
+        // dropped until the manager task is finished.
         tokio::select! {
             _ = cancellation_rx.changed() => {
                 // timeline was deleted
