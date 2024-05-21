@@ -914,3 +914,133 @@ impl Drop for ImageLayerWriter {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use bytes::Bytes;
+    use pageserver_api::{
+        key::Key,
+        shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
+    };
+    use utils::{id::TimelineId, lsn::Lsn};
+
+    use crate::{tenant::harness::TenantHarness, DEFAULT_PG_VERSION};
+
+    use super::ImageLayerWriter;
+
+    #[tokio::test]
+    async fn test_rewrite() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_image_layer_rewrite")?;
+        let (tenant, ctx) = harness.load().await;
+
+        // The LSN at which we will create an image layer to filter
+        let lsn = Lsn(0xdeadbeef0000);
+
+        let timeline_id = TimelineId::generate();
+        let timeline = tenant
+            .create_test_timeline(timeline_id, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        // This key range contains several 0x8000 page stripes, only one of which belongs to shard zero
+        let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
+        let input_end = Key::from_hex("000000067f00000001000000ae0000020000").unwrap();
+        let range = input_start..input_end;
+
+        // Build an image layer to filter
+        let resident = {
+            let mut writer = ImageLayerWriter::new(
+                harness.conf,
+                timeline_id,
+                harness.tenant_shard_id,
+                &range,
+                lsn,
+                &ctx,
+            )
+            .await?;
+
+            let foo_img = Bytes::from_static(&[1, 2, 3, 4]);
+            let mut key = range.start;
+            while key < range.end {
+                writer.put_image(key, foo_img.clone(), &ctx).await?;
+
+                key = key.next();
+            }
+            writer.finish(&timeline, &ctx).await?
+        };
+        let original_size = resident.metadata().file_size();
+
+        // Filter for various shards: this exercises cases like values at start of key range, end of key
+        // range, middle of key range.
+        for shard_number in 0..4 {
+            let mut filtered_writer = ImageLayerWriter::new(
+                harness.conf,
+                timeline_id,
+                harness.tenant_shard_id,
+                &range,
+                lsn,
+                &ctx,
+            )
+            .await?;
+
+            // TenantHarness gave us an unsharded tenant, but we'll use a sharded ShardIdentity
+            // to exercise filter()
+            let shard_identity = ShardIdentity::new(
+                ShardNumber(shard_number),
+                ShardCount::new(4),
+                ShardStripeSize(0x8000),
+            )?;
+
+            let wrote_keys = resident
+                .filter(&shard_identity, &mut filtered_writer, &ctx)
+                .await?;
+            let replacement = if wrote_keys > 0 {
+                Some(filtered_writer.finish(&timeline, &ctx).await?)
+            } else {
+                None
+            };
+
+            // This exact size and those below will need updating as/when the layer encoding changes, but
+            // should be deterministic for a given version of the format, as we used no randomness generating the input.
+            assert_eq!(original_size, 1597440);
+
+            match shard_number {
+                0 => {
+                    // We should have written out just one stripe for our shard identity
+                    assert_eq!(wrote_keys, 0x8000);
+                    let replacement = replacement.unwrap();
+
+                    // We should have dropped some of the data
+                    assert!(replacement.metadata().file_size() < original_size);
+                    assert!(replacement.metadata().file_size() > 0);
+
+                    // Assert that we dropped ~3/4 of the data.
+                    assert_eq!(replacement.metadata().file_size(), 417792);
+                }
+                1 => {
+                    // Shard 1 has no keys in our input range
+                    assert_eq!(wrote_keys, 0x0);
+                    assert!(replacement.is_none());
+                }
+                2 => {
+                    // Shard 2 has one stripes in the input range
+                    assert_eq!(wrote_keys, 0x8000);
+                    let replacement = replacement.unwrap();
+                    assert!(replacement.metadata().file_size() < original_size);
+                    assert!(replacement.metadata().file_size() > 0);
+                    assert_eq!(replacement.metadata().file_size(), 417792);
+                }
+                3 => {
+                    // Shard 3 has two stripes in the input range
+                    assert_eq!(wrote_keys, 0x10000);
+                    let replacement = replacement.unwrap();
+                    assert!(replacement.metadata().file_size() < original_size);
+                    assert!(replacement.metadata().file_size() > 0);
+                    assert_eq!(replacement.metadata().file_size(), 811008);
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        Ok(())
+    }
+}
