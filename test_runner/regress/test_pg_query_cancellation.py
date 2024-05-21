@@ -95,7 +95,7 @@ def test_cancellations(neon_simple_env: NeonEnv):
         connect_works_correctly(failpoint, ep, ps, ps_http)
 
 
-ENABLED_FAILPOINTS = set()
+ENABLED_FAILPOINTS: Set[str] = set()
 
 
 def connect_works_correctly(
