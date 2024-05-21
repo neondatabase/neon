@@ -101,7 +101,13 @@ pub async fn update_task(
                 handle,
             });
         } else {
-            info!("stepping down from backup: {}", election_dbg_str);
+            if !need_backup {
+                // don't need backup at all
+                info!("stepping down from backup, need_backup={}", need_backup);
+            } else {
+                // someone else has been elected
+                info!("stepping down from backup: {}", election_dbg_str);
+            }
             shut_down_task(entry).await;
         }
     }
