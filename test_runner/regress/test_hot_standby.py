@@ -204,3 +204,91 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
             log_replica_lag(primary, secondary)
             res = s_cur.fetchone()
             assert res[0] == 10000
+
+
+def run_pgbench(connstr: str, pg_bin: PgBin):
+    log.info(f"Start a pgbench workload on pg {connstr}")
+    # s10 is about 150MB of data. In debug mode init takes about 15s on SSD.
+    pg_bin.run_capture(["pgbench", "-i", "-s10", connstr])
+    log.info("pgbench init done")
+    pg_bin.run_capture(["pgbench", "-T60", connstr])
+
+
+# assert that pgbench_accounts and its index are created.
+def pgbench_accounts_initialized(ep):
+    ep.safe_psql_scalar("select 'pgbench_accounts_pkey'::regclass")
+
+
+# Test that hot_standby_feedback works in neon (it is forwarded through
+# safekeepers). That is, ensure queries on standby don't fail during load on
+# primary under the following conditions:
+# - pgbench bombards primary with updates.
+# - On the secondary we run long select of the updated table.
+# - Set small max_standby_streaming_delay: hs feedback should prevent conflicts
+#   so apply doesn't need to wait.
+# - Do agressive vacuum on primary which still shouldn't create conflicts.
+#   Actually this appears to be redundant due to microvacuum existence.
+#
+# Without hs feedback enabled we'd see 'User query might have needed to see row
+# versions that must be removed.' errors.
+def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    env = neon_env_builder.init_start()
+    agressive_vacuum_conf = [
+        "log_autovacuum_min_duration = 0",
+        "autovacuum_naptime = 10s",
+        "autovacuum_vacuum_threshold = 25",
+        "autovacuum_vacuum_scale_factor = 0.1",
+        "autovacuum_vacuum_cost_delay = -1",
+    ]
+    with env.endpoints.create_start(
+        branch_name="main", endpoint_id="primary", config_lines=agressive_vacuum_conf
+    ) as primary:
+        # It would be great to have more strict max_standby_streaming_delay=0s here, but then sometimes it fails with
+        # 'User was holding shared buffer pin for too long.'.
+        with env.endpoints.new_replica_start(
+            origin=primary,
+            endpoint_id="secondary",
+            config_lines=[
+                "max_standby_streaming_delay=2s",
+                "neon.protocol_version=2",
+                "hot_standby_feedback=true",
+            ],
+        ) as secondary:
+            log.info(
+                f"primary connstr is {primary.connstr()}, secondary connstr {secondary.connstr()}"
+            )
+            t = threading.Thread(target=run_pgbench, args=(primary.connstr(), pg_bin))
+            t.start()
+            # Wait until pgbench_accounts is created + filled on replica *and*
+            # index is created. Otherwise index creation would conflict with
+            # read queries and hs feedback won't save us.
+            wait_until(60, 1.0, partial(pgbench_accounts_initialized, secondary))
+
+            # Test should fail if hs feedback is disabled anyway, but cross
+            # check that walproposer sets some xmin.
+            def xmin_is_not_null():
+                slot_xmin = primary.safe_psql_scalar(
+                    "select xmin from pg_replication_slots where slot_name = 'wal_proposer_slot'",
+                    log_query=False,
+                )
+                log.info(f"xmin is {slot_xmin}")
+                assert int(slot_xmin) > 0
+
+            wait_until(10, 1.0, xmin_is_not_null)
+            for _ in range(1, 5):
+                # in debug mode takes about 5-7s
+                balance = secondary.safe_psql_scalar("select sum(abalance) from pgbench_accounts")
+                log.info(f"balance={balance}")
+                log_replica_lag(primary, secondary)
+            t.join()
+
+        # check xmin is reset when standby is gone
+        def xmin_is_null():
+            slot_xmin = primary.safe_psql_scalar(
+                "select xmin from pg_replication_slots where slot_name = 'wal_proposer_slot'",
+                log_query=False,
+            )
+            log.info(f"xmin is {slot_xmin}")
+            assert slot_xmin is None
+
+        wait_until(10, 1.0, xmin_is_null)
