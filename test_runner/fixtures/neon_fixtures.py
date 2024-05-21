@@ -4288,6 +4288,17 @@ def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
         time.sleep(1)
 
 
+def log_replica_lag(primary: Endpoint, secondary: Endpoint):
+    last_replay_lsn = Lsn(
+        secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
+    )
+    primary_lsn = Lsn(
+        primary.safe_psql_scalar("SELECT pg_current_wal_flush_lsn()", log_query=False)
+    )
+    lag = primary_lsn - last_replay_lsn
+    log.info(f"primary_lsn={primary_lsn}, replay_lsn={last_replay_lsn}, lag={lag}")
+
+
 def wait_for_last_flush_lsn(
     env: NeonEnv,
     endpoint: Endpoint,
