@@ -7,7 +7,7 @@ use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::LocationConfigMode;
 use pageserver_api::shard::{
-    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+    ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
 };
 use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::{distributions::Alphanumeric, Rng};
@@ -127,6 +127,8 @@ pub(crate) enum ShardSelector {
     First,
     /// Pick the shard that holds this key
     Page(Key),
+    /// The shard ID is known: pick the given shard
+    Known(ShardIndex),
 }
 
 /// A convenience for use with the re_attach ControlPlaneClient function: rather
@@ -2066,6 +2068,11 @@ impl TenantManager {
                             if Some(tenant.shard_identity.number) == want_shard {
                                 return ShardResolveResult::Found(tenant.clone());
                             }
+                        }
+                        ShardSelector::Known(shard)
+                            if tenant.shard_identity.shard_index() == shard =>
+                        {
+                            return ShardResolveResult::Found(tenant.clone());
                         }
                         _ => continue,
                     }
