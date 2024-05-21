@@ -248,15 +248,11 @@ def _import(
     path to the backup archive file"""
     log.info(f"start_backup_lsn = {lsn}")
 
-    # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
-    # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
-
     # Get a fullbackup from pageserver
     query = f"fullbackup { env.initial_tenant} {timeline} {lsn}"
     tar_output_file = test_output_dir / "fullbackup.tar"
     cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query, "-o", str(tar_output_file)]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.run_capture(cmd)
 
     # Stop the first pageserver instance, erase all its data
     env.endpoints.stop_all()
@@ -316,7 +312,7 @@ def _import(
         "-o",
         str(new_tar_output_file),
     ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.run_capture(cmd)
 
     # Check it's the same as the first fullbackup
     # TODO pageserver should be checking checksum
