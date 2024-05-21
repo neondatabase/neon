@@ -1,4 +1,5 @@
 from contextlib import closing
+from typing import Set
 
 import pytest
 from fixtures.log_helper import log
@@ -6,7 +7,7 @@ from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonPageserver
 from fixtures.pageserver.http import PageserverHttpClient
 from psycopg2.errors import QueryCanceled
 
-CRITICAL_PG_PS_WAIT_FAILPOINTS = {
+CRITICAL_PG_PS_WAIT_FAILPOINTS: Set[str] = {
     "ps::connection-start::pre-login",
     "ps::connection-start::startup-packet",
     "ps::connection-start::process-query",
