@@ -1,3 +1,8 @@
+//! The timeline manager task is responsible for managing the timeline's background tasks.
+//! It is spawned alongside each timeline and exits when the timeline is deleted.
+//! It watches for changes in the timeline state and decides when to spawn or kill background tasks.
+//! It also can manage some reactive state, like should the timeline be active for broker pushes or not.
+
 use std::{sync::Arc, time::Duration};
 
 use tracing::{info, instrument, warn};
@@ -94,6 +99,7 @@ pub async fn main_task(
         }
 
         let is_active = is_wal_backup_required
+            || num_computes > 0
             || state_snapshot.remote_consistent_lsn < state_snapshot.commit_lsn;
 
         // update the broker timeline set
@@ -116,9 +122,9 @@ pub async fn main_task(
 
         // update the state in Arc<Timeline>
         tli.wal_backup_active
-            .store(is_wal_backup_required, std::sync::atomic::Ordering::SeqCst);
+            .store(backup_task.is_some(), std::sync::atomic::Ordering::Relaxed);
         tli.broker_active
-            .store(is_active, std::sync::atomic::Ordering::SeqCst);
+            .store(is_active, std::sync::atomic::Ordering::Relaxed);
 
         // wait until something changes. tx channels are stored under Arc, so they will not be
         // dropped until the manager task is finished.
