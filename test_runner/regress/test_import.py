@@ -303,8 +303,6 @@ def _import(
     pg_bin.take_fullbackup(env.pageserver, tenant, timeline, lsn, new_tar_output_file)
 
     # Check it's the same as the first fullbackup
-    # TODO pageserver should be checking checksum
-    assert os.path.getsize(tar_output_file) == os.path.getsize(new_tar_output_file)
     assert_pageserver_backups_equal(tar_output_file, new_tar_output_file, set())
 
     # Check that gc works
