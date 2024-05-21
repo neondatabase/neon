@@ -12,11 +12,7 @@ from typing import IO, List, Set, Tuple, Union
 import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-    PgBin,
-    wait_for_last_flush_lsn,
-)
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.pageserver.http import HistoricLayerInfo
 from fixtures.pageserver.utils import wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage
@@ -158,16 +154,9 @@ def test_ancestor_detach_branched_from(
     # run fullbackup to make sure there are no off by one errors
     # take this on the parent
     fullbackup_before = test_output_dir / "fullbackup-before.tar"
-    cmd = [
-        "psql",
-        "--no-psqlrc",
-        env.pageserver.connstr(),
-        "-c",
-        f"fullbackup {env.initial_tenant} {env.initial_timeline} {branch_at}",
-        "-o",
-        str(fullbackup_before),
-    ]
-    pg_bin.run_capture(cmd)
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, env.initial_timeline, branch_at, fullbackup_before
+    )
 
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
     assert all_reparented == set()
@@ -198,16 +187,9 @@ def test_ancestor_detach_branched_from(
 
     # take this on the detached, at same lsn
     fullbackup_after = test_output_dir / "fullbackup-after.tar"
-    cmd = [
-        "psql",
-        "--no-psqlrc",
-        env.pageserver.connstr(),
-        "-c",
-        f"fullbackup {env.initial_tenant} {timeline_id} {branch_at}",
-        "-o",
-        str(fullbackup_after),
-    ]
-    pg_bin.run_capture(cmd)
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, timeline_id, branch_at, fullbackup_after
+    )
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
@@ -585,16 +567,9 @@ def test_compaction_induced_by_detaches_in_history(
 
     # take the fullbackup before and after inheriting the new L0s
     fullbackup_before = test_output_dir / "fullbackup-before.tar"
-    cmd = [
-        "psql",
-        "--no-psqlrc",
-        env.pageserver.connstr(),
-        "-c",
-        f"fullbackup {env.initial_tenant} {branch_timeline_id} {branch_lsn}",
-        "-o",
-        str(fullbackup_before),
-    ]
-    pg_bin.run_capture(cmd)
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, branch_timeline_id, branch_lsn, fullbackup_before
+    )
 
     for _, timeline_id in skip_main:
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
@@ -620,16 +595,9 @@ def test_compaction_induced_by_detaches_in_history(
     assert len(post_compact_l0s) == 1, "only the consecutive inherited L0s should be compacted"
 
     fullbackup_after = test_output_dir / "fullbackup_after.tar"
-    cmd = [
-        "psql",
-        "--no-psqlrc",
-        env.pageserver.connstr(),
-        "-c",
-        f"fullbackup {env.initial_tenant} {branch_timeline_id} {branch_lsn}",
-        "-o",
-        str(fullbackup_after),
-    ]
-    pg_bin.run_capture(cmd)
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, branch_timeline_id, branch_lsn, fullbackup_after
+    )
 
     # we don't need to skip any files, because zenith.signal will be identical
     tar_cmp(fullbackup_before, fullbackup_after, set())

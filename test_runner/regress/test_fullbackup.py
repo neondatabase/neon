@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from fixtures.common_types import Lsn, TimelineId
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -23,12 +23,7 @@ def test_fullbackup(
 ):
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_fullbackup")
-    endpoint_main = env.endpoints.create_start("test_fullbackup")
-
-    with endpoint_main.cursor() as cur:
-        timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
-
+    with env.endpoints.create_start("main") as endpoint_main, endpoint_main.cursor() as cur:
         # data loading may take a while, so increase statement timeout
         cur.execute("SET statement_timeout='300s'")
         cur.execute(
@@ -43,10 +38,10 @@ def test_fullbackup(
     # Get and unpack fullbackup from pageserver
     restored_dir_path = env.repo_dir / "restored_datadir"
     os.mkdir(restored_dir_path, 0o750)
-    query = f"fullbackup {env.initial_tenant} {timeline} {lsn}"
     tar_output_file = test_output_dir / "fullbackup.tar"
-    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query, "-o", str(tar_output_file)]
-    pg_bin.run_capture(cmd)
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, env.initial_timeline, lsn, tar_output_file
+    )
     subprocess_capture(
         env.repo_dir, ["tar", "-xf", str(tar_output_file), "-C", str(restored_dir_path)]
     )

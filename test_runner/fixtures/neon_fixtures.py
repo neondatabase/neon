@@ -2788,6 +2788,28 @@ class PgBin:
         log.info(f"last checkpoint at {checkpoint_lsn}")
         return Lsn(checkpoint_lsn)
 
+    def take_fullbackup(
+        self,
+        pageserver: NeonPageserver,
+        tenant: TenantId,
+        timeline: TimelineId,
+        lsn: Lsn,
+        output: Path,
+    ):
+        """
+        Request fullbackup from pageserver, store it at 'output'.
+        """
+        cmd = [
+            "psql",
+            "--no-psqlrc",
+            pageserver.connstr(),
+            "-c",
+            f"fullbackup {tenant} {timeline} {lsn}",
+            "-o",
+            str(output),
+        ]
+        self.run_capture(cmd)
+
 
 @pytest.fixture(scope="function")
 def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -> PgBin:
