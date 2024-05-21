@@ -23,7 +23,12 @@ def test_fullbackup(
 ):
     env = neon_env_builder.init_start()
 
-    with env.endpoints.create_start("main") as endpoint_main, endpoint_main.cursor() as cur:
+    # endpoint needs to be alive until the fullbackup so that we have
+    # prev_record_lsn for the vanilla_pg to start in read-write mode
+    # for some reason this does not happen if endpoint is shutdown.
+    endpoint_main = env.endpoints.create_start("main")
+
+    with endpoint_main.cursor() as cur:
         # data loading may take a while, so increase statement timeout
         cur.execute("SET statement_timeout='300s'")
         cur.execute(
