@@ -584,7 +584,7 @@ impl RemoteTimelineClient {
         // ahead of what's _actually_ on the remote during index upload.
         upload_queue.dirty.metadata = metadata.clone();
 
-        self.schedule_index_upload(upload_queue);
+        self.schedule_index_upload(upload_queue)?;
 
         Ok(())
     }
@@ -605,7 +605,7 @@ impl RemoteTimelineClient {
 
         upload_queue.dirty.metadata.apply(update);
 
-        self.schedule_index_upload(upload_queue);
+        self.schedule_index_upload(upload_queue)?;
 
         Ok(())
     }
@@ -618,7 +618,7 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
         upload_queue.dirty.last_aux_file_policy = last_aux_file_policy;
-        self.schedule_index_upload(upload_queue);
+        self.schedule_index_upload(upload_queue)?;
         Ok(())
     }
     ///
@@ -636,14 +636,21 @@ impl RemoteTimelineClient {
         let upload_queue = guard.initialized_mut()?;
 
         if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-            self.schedule_index_upload(upload_queue);
+            self.schedule_index_upload(upload_queue)?;
         }
 
         Ok(())
     }
 
     /// Launch an index-file upload operation in the background (internal function)
-    fn schedule_index_upload(self: &Arc<Self>, upload_queue: &mut UploadQueueInitialized) {
+    fn schedule_index_upload(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+    ) -> anyhow::Result<()> {
+        let serialized =
+            serde_json::to_vec(&upload_queue.dirty).context("serialize index_part.json")?;
+        let serialized = bytes::Bytes::from(serialized);
+
         let disk_consistent_lsn = upload_queue.dirty.metadata.disk_consistent_lsn();
 
         let index_part = &upload_queue.dirty;
@@ -672,8 +679,6 @@ impl RemoteTimelineClient {
         let original_ancestor_lsn = index_part.lineage.original_ancestor_lsn();
 
         // TODO: these need to return an error
-        let serialized = serde_json::to_vec(&upload_queue.dirty).unwrap();
-        let serialized = bytes::Bytes::from(serialized);
 
         let op = UploadOp::UploadMetadata {
             serialized,
@@ -688,6 +693,7 @@ impl RemoteTimelineClient {
 
         // Launch the task immediately, if possible
         self.launch_queued_tasks(upload_queue);
+        Ok(())
     }
 
     pub(crate) async fn schedule_reparenting_and_wait(
@@ -709,7 +715,7 @@ impl RemoteTimelineClient {
             upload_queue.dirty.metadata.reparent(new_parent);
             upload_queue.dirty.lineage.record_previous_ancestor(&prev);
 
-            self.schedule_index_upload(upload_queue);
+            self.schedule_index_upload(upload_queue)?;
 
             self.schedule_barrier0(upload_queue)
         };
@@ -740,7 +746,7 @@ impl RemoteTimelineClient {
                     .insert(layer.layer_desc().layer_name(), layer.metadata());
             }
 
-            self.schedule_index_upload(upload_queue);
+            self.schedule_index_upload(upload_queue)?;
 
             let barrier = self.schedule_barrier0(upload_queue);
             self.launch_queued_tasks(upload_queue);
@@ -803,8 +809,8 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        let with_metadata =
-            self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names.iter().cloned());
+        let with_metadata = self
+            .schedule_unlinking_of_layers_from_index_part0(upload_queue, names.iter().cloned())?;
 
         self.schedule_deletion_of_unlinked0(upload_queue, with_metadata);
 
@@ -828,7 +834,7 @@ impl RemoteTimelineClient {
 
         let names = gc_layers.iter().map(|x| x.layer_desc().layer_name());
 
-        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names)?;
 
         self.launch_queued_tasks(upload_queue);
 
@@ -841,7 +847,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
         names: I,
-    ) -> Vec<(LayerName, LayerFileMetadata)>
+    ) -> anyhow::Result<Vec<(LayerName, LayerFileMetadata)>>
     where
         I: IntoIterator<Item = LayerName>,
     {
@@ -883,10 +889,10 @@ impl RemoteTimelineClient {
         // index_part update, because that needs to be uploaded before we can actually delete the
         // files.
         if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-            self.schedule_index_upload(upload_queue);
+            self.schedule_index_upload(upload_queue)?;
         }
 
-        with_metadata
+        Ok(with_metadata)
     }
 
     /// Schedules deletion for layer files which have previously been unlinked from the
@@ -977,7 +983,7 @@ impl RemoteTimelineClient {
 
         let names = compacted_from.iter().map(|x| x.layer_desc().layer_name());
 
-        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names)?;
         self.launch_queued_tasks(upload_queue);
 
         Ok(())
