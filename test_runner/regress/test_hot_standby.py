@@ -1,9 +1,20 @@
 import os
 import re
+import threading
 import time
+from functools import partial
 
+import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, tenant_get_shards, wait_replica_caughtup
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PgBin,
+    log_replica_lag,
+    tenant_get_shards,
+    wait_replica_caughtup,
+)
+from fixtures.utils import wait_until
 
 
 # Check for corrupted WAL messages which might otherwise go unnoticed if
@@ -104,19 +115,28 @@ def test_2_replicas_start(neon_simple_env: NeonEnv):
                 wait_replica_caughtup(primary, secondary2)
 
 
-# We had an issue that a standby server made GetPage requests with an
-# old LSN, based on the last-written LSN cache, to avoid waits in the
-# pageserver.  However, requesting a page with a very old LSN, such
-# that the GC horizon has already advanced past it, results in an
-# error from the pageserver:
-# "Bad request: tried to request a page version that was garbage collected"
+# Test two different scenarios related to gc of data needed by hot standby.
 #
-# To avoid that, the compute<-> pageserver protocol was updated so
-# that that the standby now sends two LSNs, the old last-written LSN
-# and the current replay LSN.
+# When pause_apply is False, standby is mostly caught up with the primary.
+# However, in compute <-> pageserver protocol version 1 only one LSN had been
+# sent to the pageserver in page request, and to avoid waits in the pageserver
+# it was last-written LSN cache value. If page hasn't been updated for a long
+# time that resulted in an error from the pageserver: "Bad request: tried to
+# request a page version that was garbage collected". For primary this wasn't a
+# problem because pageserver always bumped LSN to the newest one; for standy
+# that would be incorrect since we might get page fresher then apply LSN. Hence,
+# in protocol version v2 two LSNs were introduced: main request_lsn (apply LSN
+# in case of standby) and not_modified_since which could be used as an
+# optimization to avoid waiting.
 #
 # https://github.com/neondatabase/neon/issues/6211
-def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder):
+#
+# When pause_apply is True we model standby lagging behind primary (e.g. due to
+# high max_standby_streaming_delay). To prevent pageserver from removing data
+# still needed by the standby apply LSN is propagated in standby -> safekeepers
+# -> broker -> pageserver flow so that pageserver could hold off gc for it.
+@pytest.mark.parametrize("pause_apply", [False, True])
+def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
     tenant_conf = {
         # set PITR interval to be small, so we can do GC
         "pitr_interval": "0 s",
@@ -160,6 +180,9 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder):
             # so we still remember the LSNs of the pages.
             s_cur.execute("SELECT clear_buffer_cache()")
 
+            if pause_apply:
+                s_cur.execute("SELECT pg_wal_replay_pause()")
+
             # Do other stuff on the primary, to advance the WAL
             p_cur.execute("CREATE TABLE test2 AS SELECT generate_series(1, 1000000) AS g")
 
@@ -176,6 +199,8 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder):
             # generates use old not_modified_since LSNs, older than
             # the GC cutoff, but new request LSNs. (In protocol
             # version 1 there was only one LSN, and this failed.)
+            log_replica_lag(primary, secondary)
             s_cur.execute("SELECT COUNT(*) FROM test")
+            log_replica_lag(primary, secondary)
             res = s_cur.fetchone()
             assert res[0] == 10000
