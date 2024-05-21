@@ -162,6 +162,8 @@ impl std::fmt::Debug for TenantState {
     }
 }
 
+/// A temporary lease to a specific lsn inside a timeline.
+/// Access to the lsn is guaranteed by the pageserver until the expiration indicated by `valid_until`.
 #[serde_as]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LsnLease {
