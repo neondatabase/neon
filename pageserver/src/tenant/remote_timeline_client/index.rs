@@ -11,7 +11,6 @@ use utils::id::TimelineId;
 
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
-use crate::tenant::upload_queue::UploadQueueInitialized;
 use crate::tenant::Generation;
 use pageserver_api::shard::ShardIndex;
 
@@ -80,26 +79,6 @@ impl IndexPart {
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
-    fn new(
-        layers_and_metadata: &HashMap<LayerName, LayerFileMetadata>,
-        disk_consistent_lsn: Lsn,
-        metadata: TimelineMetadata,
-        lineage: Lineage,
-        last_aux_file_policy: Option<AuxFilePolicy>,
-    ) -> Self {
-        let layer_metadata = layers_and_metadata.clone();
-
-        Self {
-            version: Self::LATEST_VERSION,
-            layer_metadata,
-            disk_consistent_lsn,
-            metadata,
-            deleted_at: None,
-            lineage,
-            last_aux_file_policy,
-        }
-    }
-
     pub(crate) fn empty(metadata: TimelineMetadata) -> Self {
         IndexPart {
             version: Self::LATEST_VERSION,
@@ -137,22 +116,6 @@ impl IndexPart {
 
     pub(crate) fn last_aux_file_policy(&self) -> Option<AuxFilePolicy> {
         self.last_aux_file_policy
-    }
-}
-
-impl From<&UploadQueueInitialized> for IndexPart {
-    fn from(uq: &UploadQueueInitialized) -> Self {
-        let disk_consistent_lsn = uq.latest_metadata.disk_consistent_lsn();
-        let metadata = uq.latest_metadata.clone();
-        let lineage = uq.latest_lineage.clone();
-
-        Self::new(
-            &uq.latest_files,
-            disk_consistent_lsn,
-            metadata,
-            lineage,
-            uq.last_aux_file_policy,
-        )
     }
 }
 

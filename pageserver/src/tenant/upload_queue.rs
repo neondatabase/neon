@@ -3,12 +3,10 @@ use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
-use crate::tenant::remote_timeline_client::index::Lineage;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
 use chrono::NaiveDateTime;
-use pageserver_api::models::AuxFilePolicy;
 use std::sync::Arc;
 use tracing::info;
 use utils::lsn::AtomicLsn;
@@ -51,24 +49,9 @@ pub(crate) struct UploadQueueInitialized {
     /// projected field.
     pub(crate) dirty: IndexPart,
 
-    /// All layer files stored in the remote storage, taking into account all
-    /// in-progress and queued operations
-    pub(crate) latest_files: HashMap<LayerName, LayerFileMetadata>,
-
     /// How many file uploads or deletions been scheduled, since the
     /// last (scheduling of) metadata index upload?
     pub(crate) latest_files_changes_since_metadata_upload_scheduled: u64,
-
-    /// Metadata stored in the remote storage, taking into account all
-    /// in-progress and queued operations.
-    /// DANGER: do not return to outside world, e.g., safekeepers.
-    pub(crate) latest_metadata: TimelineMetadata,
-
-    /// Part of the flattened "next" `index_part.json`.
-    pub(crate) latest_lineage: Lineage,
-
-    /// The last aux file policy used on this timeline.
-    pub(crate) last_aux_file_policy: Option<AuxFilePolicy>,
 
     /// `disk_consistent_lsn` from the last metadata file that was successfully
     /// uploaded. `Lsn(0)` if nothing was uploaded yet.
@@ -182,10 +165,7 @@ impl UploadQueue {
 
         let state = UploadQueueInitialized {
             dirty: IndexPart::empty(metadata.clone()),
-            latest_files: HashMap::new(),
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            latest_metadata: metadata.clone(),
-            latest_lineage: Lineage::default(),
             projected_remote_consistent_lsn: None,
             visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
             // what follows are boring default initializations
@@ -199,7 +179,6 @@ impl UploadQueue {
             dangling_files: HashMap::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
-            last_aux_file_policy: Default::default(),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -217,11 +196,6 @@ impl UploadQueue {
             }
         }
 
-        let mut files = HashMap::with_capacity(index_part.layer_metadata.len());
-        for (layer_name, layer_metadata) in &index_part.layer_metadata {
-            files.insert(layer_name.to_owned(), layer_metadata.clone());
-        }
-
         info!(
             "initializing upload queue with remote index_part.disk_consistent_lsn: {}",
             index_part.metadata.disk_consistent_lsn()
@@ -229,10 +203,7 @@ impl UploadQueue {
 
         let state = UploadQueueInitialized {
             dirty: index_part.clone(),
-            latest_files: files,
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            latest_metadata: index_part.metadata.clone(),
-            latest_lineage: index_part.lineage.clone(),
             projected_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
             visible_remote_consistent_lsn: Arc::new(
                 index_part.metadata.disk_consistent_lsn().into(),
@@ -248,7 +219,6 @@ impl UploadQueue {
             dangling_files: HashMap::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
-            last_aux_file_policy: index_part.last_aux_file_policy(),
         };
 
         *self = UploadQueue::Initialized(state);

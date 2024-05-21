@@ -444,12 +444,15 @@ impl RemoteTimelineClient {
     pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
         // technically this is a dirty read, but given how timeline detach ancestor is implemented
         // via tenant restart, the lineage has always been uploaded.
+        todo!(
+            "need projection or something
         self.upload_queue
             .lock()
             .unwrap()
             .initialized_mut()
             .map(|uq| uq.latest_lineage.is_previous_ancestor_lsn(lsn))
-            .unwrap_or(false)
+            .unwrap_or(false)"
+        )
     }
 
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
@@ -584,7 +587,7 @@ impl RemoteTimelineClient {
 
         // As documented in the struct definition, it's ok for latest_metadata to be
         // ahead of what's _actually_ on the remote during index upload.
-        upload_queue.latest_metadata = metadata.clone();
+        upload_queue.dirty.metadata = metadata.clone();
 
         self.schedule_index_upload(upload_queue);
 
@@ -605,7 +608,7 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        upload_queue.latest_metadata.apply(update);
+        upload_queue.dirty.metadata.apply(update);
 
         self.schedule_index_upload(upload_queue);
 
@@ -619,7 +622,7 @@ impl RemoteTimelineClient {
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
-        upload_queue.last_aux_file_policy = last_aux_file_policy;
+        upload_queue.dirty.last_aux_file_policy = last_aux_file_policy;
         self.schedule_index_upload(upload_queue);
         Ok(())
     }
@@ -646,17 +649,18 @@ impl RemoteTimelineClient {
 
     /// Launch an index-file upload operation in the background (internal function)
     fn schedule_index_upload(self: &Arc<Self>, upload_queue: &mut UploadQueueInitialized) {
-        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
+        let disk_consistent_lsn = upload_queue.dirty.metadata.disk_consistent_lsn();
+
+        let index_part = &upload_queue.dirty;
 
         info!(
             "scheduling metadata upload up to consistent LSN {disk_consistent_lsn} with {} files ({} changed)",
-            upload_queue.latest_files.len(),
+            index_part.layer_metadata.len(),
             upload_queue.latest_files_changes_since_metadata_upload_scheduled,
         );
 
         let mention_having_future_layers = if cfg!(feature = "testing") {
-            upload_queue
-                .dirty
+            index_part
                 .layer_metadata
                 .keys()
                 .any(|x| x.is_in_future(disk_consistent_lsn))
@@ -664,13 +668,13 @@ impl RemoteTimelineClient {
             false
         };
 
-        let uploaded_remote_physical_size = upload_queue
-            .dirty
+        let uploaded_remote_physical_size = index_part
             .layer_metadata
             .values()
             .map(|ilmd| ilmd.file_size)
             .sum::<u64>();
 
+        // TODO: these need to return an error
         let serialized = serde_json::to_vec(&upload_queue.dirty).unwrap();
         let serialized = bytes::Bytes::from(serialized);
 
@@ -698,14 +702,14 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
-            let Some(prev) = upload_queue.latest_metadata.ancestor_timeline() else {
+            let Some(prev) = upload_queue.dirty.metadata.ancestor_timeline() else {
                 return Err(anyhow::anyhow!(
                     "cannot reparent without a current ancestor"
                 ));
             };
 
-            upload_queue.latest_metadata.reparent(new_parent);
-            upload_queue.latest_lineage.record_previous_ancestor(&prev);
+            upload_queue.dirty.metadata.reparent(new_parent);
+            upload_queue.dirty.lineage.record_previous_ancestor(&prev);
 
             self.schedule_index_upload(upload_queue);
 
@@ -728,12 +732,13 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
-            upload_queue.latest_metadata.detach_from_ancestor(&adopted);
-            upload_queue.latest_lineage.record_detaching(&adopted);
+            upload_queue.dirty.metadata.detach_from_ancestor(&adopted);
+            upload_queue.dirty.lineage.record_detaching(&adopted);
 
             for layer in layers {
                 upload_queue
-                    .latest_files
+                    .dirty
+                    .layer_metadata
                     .insert(layer.layer_desc().layer_name(), layer.metadata());
             }
 
@@ -769,7 +774,8 @@ impl RemoteTimelineClient {
         let metadata = layer.metadata();
 
         upload_queue
-            .latest_files
+            .dirty
+            .layer_metadata
             .insert(layer.layer_desc().layer_name(), metadata.clone());
         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
 
@@ -847,7 +853,7 @@ impl RemoteTimelineClient {
         let with_metadata: Vec<_> = names
             .into_iter()
             .filter_map(|name| {
-                let meta = upload_queue.latest_files.remove(&name);
+                let meta = upload_queue.dirty.layer_metadata.remove(&name);
 
                 if let Some(meta) = meta {
                     upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
@@ -1108,7 +1114,7 @@ impl RemoteTimelineClient {
             let deleted_at = Utc::now().naive_utc();
             stopped.deleted_at = SetDeletedFlagProgress::InProgress(deleted_at);
 
-            let mut index_part = IndexPart::from(&stopped.upload_queue_for_deletion);
+            let mut index_part = stopped.upload_queue_for_deletion.dirty.clone();
             index_part.deleted_at = Some(deleted_at);
             index_part
         };
@@ -1323,7 +1329,8 @@ impl RemoteTimelineClient {
 
             stopped
                 .upload_queue_for_deletion
-                .latest_files
+                .dirty
+                .layer_metadata
                 .drain()
                 .map(|(file_name, meta)| {
                     remote_layer_path(
@@ -1876,10 +1883,7 @@ impl RemoteTimelineClient {
                     let upload_queue_for_deletion = UploadQueueInitialized {
                         task_counter: 0,
                         dirty: initialized.dirty.clone(),
-                        latest_files: initialized.latest_files.clone(),
                         latest_files_changes_since_metadata_upload_scheduled: 0,
-                        latest_metadata: initialized.latest_metadata.clone(),
-                        latest_lineage: initialized.latest_lineage.clone(),
                         projected_remote_consistent_lsn: None,
                         visible_remote_consistent_lsn: initialized
                             .visible_remote_consistent_lsn
@@ -1893,7 +1897,6 @@ impl RemoteTimelineClient {
                         dangling_files: HashMap::default(),
                         shutting_down: false,
                         shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
-                        last_aux_file_policy: initialized.last_aux_file_policy,
                     };
 
                     let upload_queue = std::mem::replace(
