@@ -270,7 +270,7 @@ paths:
         schema:
           type: string
           format: hex
-    put:
+    post:
       description: Obtain lease for the given LSN
       parameters:
         - name: lsn

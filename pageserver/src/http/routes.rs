@@ -2727,7 +2727,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/get_timestamp_of_lsn",
             |r| api_handler(r, get_timestamp_of_lsn_handler),
         )
-        .put(
+        .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/lsn_lease",
             |r| api_handler(r, lsn_lease_handler),
         )
