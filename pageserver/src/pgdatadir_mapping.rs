@@ -873,8 +873,12 @@ impl Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
-        if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
-            result.add_key(AUX_FILES_KEY);
+
+        // Remove v1 keyspace if the user has fully switched to v2.
+        if self.last_aux_file_policy.load() != Some(AuxFilePolicy::V2) {
+            if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
+                result.add_key(AUX_FILES_KEY);
+            }
         }
 
         Ok((

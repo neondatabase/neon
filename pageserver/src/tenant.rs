@@ -3970,7 +3970,7 @@ mod tests {
     use crate::DEFAULT_PG_VERSION;
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
-    use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
+    use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::CompactionAlgorithm;
     use rand::{thread_rng, Rng};
@@ -5995,6 +5995,10 @@ mod tests {
             files.get("pg_logical/mappings/test3"),
             Some(&bytes::Bytes::from_static(b"last"))
         );
+
+        // Check if we are going to remove v1 aux files.
+        let (mut dense_keyspace, _) = tline.collect_keyspace(lsn, &ctx).await.unwrap();
+        assert!(dense_keyspace.remove_overlapping_with(&KeySpace::single(AUX_FILES_KEY..AUX_FILES_KEY.next())).is_empty());
     }
 
     #[tokio::test]
