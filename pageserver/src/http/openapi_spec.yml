@@ -628,9 +628,7 @@ paths:
     put:
       description: |
         Detach a timeline from its ancestor and reparent all ancestors timelines with lower `ancestor_lsn`.
-
-        Current implementation is not retryable across failure cases, but will be enhanced in future.
-
+        Current implementation might not be retryable across failure cases, but will be enhanced in future.
         Detaching should be expected to be expensive operation. Timeouts should be retried.
       responses:
         "200":
@@ -645,7 +643,7 @@ paths:
         "400":
           description: |
             Number of early checks meaning the timeline cannot be detached now:
-              - timeline ancestor has an ancestor: not supported, see RFC
+              - the ancestor of timeline has an ancestor: not supported, see RFC
           content:
             application/json:
               schema:
@@ -661,8 +659,7 @@ paths:
         "409":
           description: |
             The timeline can never be detached:
-              - timeline has no ancestor:
-                  - implies that the timeline has not been detached before
+              - timeline has no ancestor, implying that the timeline has never had an ancestor
           content:
             application/json:
               schema:
