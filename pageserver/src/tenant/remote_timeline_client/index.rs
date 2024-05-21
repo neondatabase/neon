@@ -201,14 +201,8 @@ impl Lineage {
             Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
     }
 
-    /// The queried lsn is most likely the basebackup lsn, and this answers question "is it allowed
-    /// to start a read/write primary at this lsn".
-    ///
-    /// Returns true if the Lsn was previously a branch point.
-    pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
-        self.original_ancestor
-            .as_ref()
-            .is_some_and(|(_, ancestor_lsn, _)| lsn == *ancestor_lsn)
+    pub(crate) fn original_ancestor_lsn(&self) -> Option<Lsn> {
+        self.original_ancestor.map(|(_, lsn, _)| lsn)
     }
 }
 

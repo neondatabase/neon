@@ -64,6 +64,9 @@ pub(crate) struct UploadQueueInitialized {
     pub(crate) projected_remote_consistent_lsn: Option<Lsn>,
     pub(crate) visible_remote_consistent_lsn: Arc<AtomicLsn>,
 
+    /// For timelines detached from their ancestor, this was their original `ancestor_lsn`.
+    pub(crate) original_ancestor_lsn: Option<Lsn>,
+
     // Breakdown of different kinds of tasks currently in-progress
     pub(crate) num_inprogress_layer_uploads: usize,
     pub(crate) num_inprogress_metadata_uploads: usize,
@@ -168,6 +171,7 @@ impl UploadQueue {
             latest_files_changes_since_metadata_upload_scheduled: 0,
             projected_remote_consistent_lsn: None,
             visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
+            original_ancestor_lsn: None,
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -208,6 +212,7 @@ impl UploadQueue {
             visible_remote_consistent_lsn: Arc::new(
                 index_part.metadata.disk_consistent_lsn().into(),
             ),
+            original_ancestor_lsn: index_part.lineage.original_ancestor_lsn(),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -280,6 +285,7 @@ pub(crate) enum UploadOp {
         serialized: bytes::Bytes,
         mention_having_future_layers: bool,
         uploaded_remote_physical_size: u64,
+        original_ancestor_lsn: Option<Lsn>,
         disk_consistent_lsn: Lsn,
     },
 

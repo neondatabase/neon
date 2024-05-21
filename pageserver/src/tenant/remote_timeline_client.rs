@@ -442,17 +442,12 @@ impl RemoteTimelineClient {
     /// Returns true if this timeline was previously detached at this Lsn and the remote timeline
     /// client is currently initialized.
     pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
-        // technically this is a dirty read, but given how timeline detach ancestor is implemented
-        // via tenant restart, the lineage has always been uploaded.
-        todo!(
-            "need projection or something
         self.upload_queue
             .lock()
             .unwrap()
             .initialized_mut()
-            .map(|uq| uq.latest_lineage.is_previous_ancestor_lsn(lsn))
-            .unwrap_or(false)"
-        )
+            .map(|uq| uq.original_ancestor_lsn == Some(lsn))
+            .unwrap_or(false)
     }
 
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
@@ -674,6 +669,8 @@ impl RemoteTimelineClient {
             .map(|ilmd| ilmd.file_size)
             .sum::<u64>();
 
+        let original_ancestor_lsn = index_part.lineage.original_ancestor_lsn();
+
         // TODO: these need to return an error
         let serialized = serde_json::to_vec(&upload_queue.dirty).unwrap();
         let serialized = bytes::Bytes::from(serialized);
@@ -682,6 +679,7 @@ impl RemoteTimelineClient {
             serialized,
             mention_having_future_layers,
             uploaded_remote_physical_size,
+            original_ancestor_lsn,
             disk_consistent_lsn,
         };
         self.metric_begin(&op);
@@ -1623,6 +1621,7 @@ impl RemoteTimelineClient {
                     mention_having_future_layers,
                     uploaded_remote_physical_size,
                     disk_consistent_lsn,
+                    ..
                 } => {
                     let res = upload::upload_index_part(
                         &self.storage_impl,
@@ -1747,10 +1746,13 @@ impl RemoteTimelineClient {
                 }
                 UploadOp::UploadMetadata {
                     disk_consistent_lsn: lsn,
+                    original_ancestor_lsn,
                     ..
                 } => {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
                     // XXX monotonicity check?
+
+                    upload_queue.original_ancestor_lsn = original_ancestor_lsn;
 
                     upload_queue.projected_remote_consistent_lsn = Some(lsn);
                     if self.generation.is_none() {
@@ -1888,6 +1890,7 @@ impl RemoteTimelineClient {
                         visible_remote_consistent_lsn: initialized
                             .visible_remote_consistent_lsn
                             .clone(),
+                        original_ancestor_lsn: initialized.original_ancestor_lsn,
                         num_inprogress_layer_uploads: 0,
                         num_inprogress_metadata_uploads: 0,
                         num_inprogress_deletions: 0,
