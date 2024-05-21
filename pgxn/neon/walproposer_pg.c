@@ -1852,34 +1852,30 @@ static void
 CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
 {
 	hs->ts = 0;
-	hs->xmin.value = ~0;		/* largest unsigned value */
-	hs->catalog_xmin.value = ~0;	/* largest unsigned value */
+	hs->xmin = InvalidFullTransactionId;
+	hs->catalog_xmin = InvalidFullTransactionId;
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
-		if (wp->safekeeper[i].appendResponse.hs.ts != 0)
+
+		if (wp->safekeeper[i].state == SS_ACTIVE)
 		{
 			HotStandbyFeedback *skhs = &wp->safekeeper[i].appendResponse.hs;
 
 			if (FullTransactionIdIsNormal(skhs->xmin)
-				&& FullTransactionIdPrecedes(skhs->xmin, hs->xmin))
+				&& (!FullTransactionIdIsValid(hs->xmin) || FullTransactionIdPrecedes(skhs->xmin, hs->xmin)))
 			{
 				hs->xmin = skhs->xmin;
 				hs->ts = skhs->ts;
 			}
 			if (FullTransactionIdIsNormal(skhs->catalog_xmin)
-				&& FullTransactionIdPrecedes(skhs->catalog_xmin, hs->xmin))
+				&& (!FullTransactionIdIsValid(hs->catalog_xmin) || FullTransactionIdPrecedes(skhs->catalog_xmin, hs->catalog_xmin)))
 			{
 				hs->catalog_xmin = skhs->catalog_xmin;
 				hs->ts = skhs->ts;
 			}
 		}
 	}
-
-	if (hs->xmin.value == ~0)
-		hs->xmin = InvalidFullTransactionId;
-	if (hs->catalog_xmin.value == ~0)
-		hs->catalog_xmin = InvalidFullTransactionId;
 }
 
 /*
@@ -1946,14 +1942,28 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 	}
 
 	CombineHotStanbyFeedbacks(&hsFeedback, wp);
-	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &agg_hs_feedback, sizeof hsFeedback) != 0)
+	if (memcmp(&hsFeedback, &agg_hs_feedback, sizeof hsFeedback) != 0)
 	{
+		FullTransactionId xmin = hsFeedback.xmin;
+		FullTransactionId catalog_xmin = hsFeedback.catalog_xmin;
+		FullTransactionId next_xid = ReadNextFullTransactionId();
+		/*
+		 * Page server is updating nextXid in checkpoint each 1024 transactions,
+		 * so feedback xmin can be actually larger then nextXid and
+		 * function TransactionIdInRecentPast return false in this case,
+		 * preventing update of slot's xmin.
+		 */
+		if (FullTransactionIdPrecedes(next_xid, xmin))
+			xmin = next_xid;
+		if (FullTransactionIdPrecedes(next_xid, catalog_xmin))
+			catalog_xmin = next_xid;
 		agg_hs_feedback = hsFeedback;
+		elog(DEBUG2, "ProcessStandbyHSFeedback(xmin=%d, catalog_xmin=%d", XidFromFullTransactionId(hsFeedback.xmin), XidFromFullTransactionId(hsFeedback.catalog_xmin));
 		ProcessStandbyHSFeedback(hsFeedback.ts,
-								 XidFromFullTransactionId(hsFeedback.xmin),
-								 EpochFromFullTransactionId(hsFeedback.xmin),
-								 XidFromFullTransactionId(hsFeedback.catalog_xmin),
-								 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
+								 XidFromFullTransactionId(xmin),
+								 EpochFromFullTransactionId(xmin),
+								 XidFromFullTransactionId(catalog_xmin),
+								 EpochFromFullTransactionId(catalog_xmin));
 	}
 
 	CheckGracefulShutdown(wp);
