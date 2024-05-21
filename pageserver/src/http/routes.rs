@@ -1701,7 +1701,7 @@ async fn handle_tenant_break(
     json_response(StatusCode::OK, ())
 }
 
-// Obtains a lsn lease on the given timeline.
+// Obtains an lsn lease on the given timeline.
 async fn lsn_lease_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
