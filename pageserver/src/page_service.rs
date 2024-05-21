@@ -618,6 +618,7 @@ impl PageServerHandler {
 
             let (response, span) = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::exists");
                     let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_rel_exists_request(tenant_id, timeline_id, &req, &ctx)
@@ -627,6 +628,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::Nblocks(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                     let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &ctx)
@@ -636,6 +638,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetPage(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::getpage");
                     // shard_id is filled in by the handler
                     let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.request_lsn);
                     (
@@ -646,6 +649,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::DbSize(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                     let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
                     (
                         self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
@@ -655,6 +659,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetSlruSegment(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                     let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &ctx)

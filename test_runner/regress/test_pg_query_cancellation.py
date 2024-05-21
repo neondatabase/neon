@@ -1,4 +1,3 @@
-import random
 from contextlib import closing
 
 import pytest
@@ -7,16 +6,37 @@ from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonPageserver
 from fixtures.pageserver.http import PageserverHttpClient
 from psycopg2.errors import QueryCanceled
 
-CRITICAL_PG_PS_WAIT_FAILPOINTS = [
+CRITICAL_PG_PS_WAIT_FAILPOINTS = {
     "ps::connection-start::pre-login",
     "ps::connection-start::startup-packet",
     "ps::connection-start::process-query",
-    "ps::handle-pagerequest-message",
-]
+    "ps::handle-pagerequest-message::exists",
+    "ps::handle-pagerequest-message::nblocks",
+    "ps::handle-pagerequest-message::getpage",
+    "ps::handle-pagerequest-message::dbsize",
+    # We don't yet have a good way to on-demand guarantee the download of an
+    # SLRU segment, so that's disabled for now.
+    # "ps::handle-pagerequest-message::slrusegment",
+}
+
+PG_PS_START_FAILPOINTS = {
+    "ps::connection-start::pre-login",
+    "ps::connection-start::startup-packet",
+    "ps::connection-start::process-query",
+}
+SMGR_EXISTS = "ps::handle-pagerequest-message::exists"
+SMGR_NBLOCKS = "ps::handle-pagerequest-message::nblocks"
+SMGR_GETPAGE = "ps::handle-pagerequest-message::getpage"
+SMGR_DBSIZE = "ps::handle-pagerequest-message::dbsize"
+
+"""
+Test that we can handle connection delays and cancellations at various
+unfortunate connection startup and request states.
+"""
 
 
 # @pytest.mark.parametrize('failpoint', CRITICAL_PG_PS_WAIT_FAILPOINTS)
-def test_cancelations(neon_simple_env: NeonEnv):
+def test_cancellations(neon_simple_env: NeonEnv):
     env = neon_simple_env
     ps = env.pageserver
     ps_http = ps.http_client()
@@ -69,10 +89,12 @@ def test_cancelations(neon_simple_env: NeonEnv):
     # preloaded into any caches.
 
     ep.stop()
-    random.shuffle(CRITICAL_PG_PS_WAIT_FAILPOINTS)
 
     for failpoint in CRITICAL_PG_PS_WAIT_FAILPOINTS:
         connect_works_correctly(failpoint, ep, ps, ps_http)
+
+
+ENABLED_FAILPOINTS = set()
 
 
 def connect_works_correctly(
@@ -90,20 +112,31 @@ def connect_works_correctly(
     ep.start()
 
     def fp_enable():
+        global ENABLED_FAILPOINTS
         ps_http.configure_failpoints(
             [
                 (failpoint, "pause"),
             ]
         )
-        log.debug('Enabled failpoint "%s"', failpoint, stacklevel=2)
+        ENABLED_FAILPOINTS = ENABLED_FAILPOINTS | {failpoint}
+        log.info(
+            'Enabled failpoint "%s", current_active=%s', failpoint, ENABLED_FAILPOINTS, stacklevel=2
+        )
 
     def fp_disable():
+        global ENABLED_FAILPOINTS
         ps_http.configure_failpoints(
             [
                 (failpoint, "off"),
             ]
         )
-        log.debug('Disabled failpoint "%s"', failpoint, stacklevel=2)
+        ENABLED_FAILPOINTS = ENABLED_FAILPOINTS - {failpoint}
+        log.info(
+            'Disabled failpoint "%s", current_active=%s',
+            failpoint,
+            ENABLED_FAILPOINTS,
+            stacklevel=2,
+        )
 
     def check_buffers(cur):
         cur.execute(
@@ -124,10 +157,20 @@ def connect_works_correctly(
         )
         return cur.fetchone()
 
+    def exec_may_cancel(query, cursor, result, cancels):
+        if cancels:
+            with pytest.raises(QueryCanceled):
+                cursor.execute(query)
+                assert cursor.fetchone() == result
+        else:
+            cursor.execute(query)
+            assert cursor.fetchone() == result
+
     fp_disable()
 
-    # Warm caches required for new connections, without reading any caches.
-    with closing(ep.connect(options=options)) as conn:
+    # Warm caches required for new connections, so that they can run without
+    # requiring catalog reads.
+    with closing(ep.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -135,8 +178,6 @@ def connect_works_correctly(
                 """
             )
             assert cur.fetchone() == (1,)
-            cur.execute("SHOW statement_timeout;")
-            assert cur.fetchone() == ("500ms",)
 
             assert check_buffers(cur) is None
             # Ensure all caches required for connection start are correctly
@@ -147,9 +188,7 @@ def connect_works_correctly(
                 """
                 select array_agg(distinct (pg_prewarm(c.oid::regclass, 'buffer') >= 0))
                 from pg_class c
-                where c.reltablespace = (
-                    select oid from pg_tablespace where spcname = 'pg_global'
-                );
+                where c.oid < 16384 AND c.relkind IN ('i', 'r');
                 """
             )
             assert cur.fetchone() == ([True],)
@@ -157,21 +196,23 @@ def connect_works_correctly(
     # Enable failpoint
     fp_enable()
 
-    with closing(ep.connect(options=options)) as conn:
+    with closing(ep.connect(options=options, autocommit=True)) as conn:
         with conn.cursor() as cur:
+            cur.execute("SHOW statement_timeout;")
+            assert cur.fetchone() == ("500ms",)
             assert check_buffers(cur) is None
-
-            with pytest.raises(QueryCanceled):
-                cur.execute(
-                    """
-                    SELECT min(id) FROM test1;
-                    """
-                )
-                assert cur.fetchone() == (1,)
+            exec_may_cancel(
+                """
+                SELECT min(id) FROM test1;
+                """,
+                cur,
+                (1,),
+                failpoint in (CRITICAL_PG_PS_WAIT_FAILPOINTS - {SMGR_EXISTS, SMGR_DBSIZE}),
+            )
 
     fp_disable()
 
-    with closing(ep.connect(options=options)) as conn:
+    with closing(ep.connect(options=options, autocommit=True)) as conn:
         with conn.cursor() as cur:
             # Do a select on the data, putting some buffers into the prefetch
             # queue.
@@ -186,42 +227,56 @@ def connect_works_correctly(
             ps.start()
             fp_enable()
 
-            with pytest.raises(QueryCanceled):
-                cur.execute(
-                    """
-                    SELECT COUNT(id) FROM test1;
-                    """
-                )
-                assert cur.fetchone() == (1024,)
+            exec_may_cancel(
+                """
+                SELECT COUNT(id) FROM test1;
+                """,
+                cur,
+                (1024,),
+                failpoint
+                in (CRITICAL_PG_PS_WAIT_FAILPOINTS - {SMGR_EXISTS, SMGR_NBLOCKS, SMGR_DBSIZE}),
+            )
 
-    with closing(ep.connect(options=options)) as conn:
+    with closing(ep.connect(options=options, autocommit=True)) as conn:
         with conn.cursor() as cur:
-            with pytest.raises(QueryCanceled):
-                cur.execute(
-                    """
-                    SELECT COUNT(id) FROM test2;
-                    """
-                )
-                cur.fetchone()
-                assert cur.fetchone() == (1024,)
+            exec_may_cancel(
+                """
+                SELECT COUNT(id) FROM test2;
+                """,
+                cur,
+                (1024,),
+                failpoint in (CRITICAL_PG_PS_WAIT_FAILPOINTS - {SMGR_EXISTS, SMGR_DBSIZE}),
+            )
 
-        fp_disable()
+            fp_disable()
+            fp_enable()
 
-        with conn.cursor() as cur:
+            exec_may_cancel(
+                """
+                SELECT 0 < pg_database_size(CURRENT_DATABASE());
+                """,
+                cur,
+                (True,),
+                failpoint
+                in (CRITICAL_PG_PS_WAIT_FAILPOINTS - {SMGR_EXISTS, SMGR_GETPAGE, SMGR_NBLOCKS}),
+            )
+
+            fp_disable()
+
             cur.execute(
                 """
-                SELECT count(id), min(id), max(id) FROM test2;
+                SELECT count(id), count(distinct payload), min(id), max(id), sum(id) FROM test2;
                 """
             )
 
-            assert cur.fetchone() == (1024, 1025, 2048)
+            assert cur.fetchone() == (1024, 1024, 1025, 2048, 1573376)
 
             cur.execute(
                 """
-                SELECT count(id), min(id), max(id) FROM test1;
+                SELECT count(id), count(distinct payload), min(id), max(id), sum(id) FROM test1;
                 """
             )
 
-            assert cur.fetchone() == (1024, 1, 1024)
+            assert cur.fetchone() == (1024, 1024, 1, 1024, 524800)
 
     ep.stop()
