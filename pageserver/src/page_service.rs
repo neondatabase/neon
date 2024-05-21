@@ -1599,16 +1599,14 @@ where
                 None
             };
 
-            let gzip = if let Some(third_param) = params.get(3) {
-                if *third_param == "--gzip" {
-                    true
-                } else {
+            let gzip = match params.get(3) {
+                Some(&"--gzip") => true,
+                None => false,
+                Some(third_param) => {
                     return Err(QueryError::Other(anyhow::anyhow!(
                         "Parameter in position 3 unknown {third_param}",
-                    )));
+                    )))
                 }
-            } else {
-                false
             };
 
             let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&ctx);
