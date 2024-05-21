@@ -988,7 +988,7 @@ jobs:
           done
 
       - name: Add latest tag to images
-        if: github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy'
+        if: github.ref_name == 'main'
         run: |
           for repo in neondatabase 369495373322.dkr.ecr.eu-central-1.amazonaws.com; do
             docker buildx imagetools create -t $repo/neon:latest \
