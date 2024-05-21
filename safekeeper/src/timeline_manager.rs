@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tracing::{info, instrument, warn};
-use utils::lsn::Lsn;
+use utils::{lsn::Lsn, sync::gate::GateGuard};
 
 use crate::{
     metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
@@ -41,6 +41,7 @@ pub async fn main_task(
     tli: Arc<Timeline>,
     conf: SafeKeeperConf,
     broker_active_set: Arc<TimelinesSet>,
+    _gate_guard: GateGuard,
 ) {
     let mut cancellation_rx = match tli.get_cancellation_rx() {
         Ok(rx) => rx,

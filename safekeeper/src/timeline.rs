@@ -6,6 +6,7 @@ use camino::Utf8PathBuf;
 use postgres_ffi::XLogSegNo;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use utils::sync::gate::Gate;
 
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
@@ -347,6 +348,9 @@ pub struct Timeline {
     /// monitor this channel and stop eventually after receiving `true` from this channel.
     cancellation_rx: watch::Receiver<bool>,
 
+    /// Gate to be held by background tasks, blocks timeline deletion
+    pub(crate) gate: Gate,
+
     /// Directory where timeline state is stored.
     pub timeline_dir: Utf8PathBuf,
 
@@ -390,6 +394,7 @@ impl Timeline {
             walreceivers,
             cancellation_rx,
             cancellation_tx,
+            gate: Gate::default(),
             timeline_dir: conf.timeline_dir(&ttid),
             walsenders_keep_horizon: conf.walsenders_keep_horizon,
             broker_active: AtomicBool::new(false),
@@ -428,6 +433,7 @@ impl Timeline {
             walreceivers,
             cancellation_rx,
             cancellation_tx,
+            gate: Gate::default(),
             timeline_dir: conf.timeline_dir(&ttid),
             walsenders_keep_horizon: conf.walsenders_keep_horizon,
             broker_active: AtomicBool::new(false),
@@ -487,10 +493,16 @@ impl Timeline {
     ) {
         // Start manager task which will monitor timeline state and update
         // background tasks.
+        let Ok(gate_guard) = self.gate.enter() else {
+            // We were already shut down
+            return;
+        };
+
         tokio::spawn(timeline_manager::main_task(
             self.clone(),
             conf.clone(),
             broker_active_set,
+            gate_guard,
         ));
 
         // Start recovery task which always runs on the timeline.
@@ -514,6 +526,9 @@ impl Timeline {
         only_local: bool,
     ) -> Result<bool> {
         self.cancel(shared_state);
+
+        // Make sure any background tasks are gone before we start deleting things from storage
+        self.gate.close().await;
 
         // TODO: It's better to wait for s3 offloader termination before
         // removing data from s3. Though since s3 doesn't have transactions it
