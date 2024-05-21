@@ -24,7 +24,10 @@ use rand::{rngs::SmallRng, SeedableRng};
 use sha2::Sha256;
 use tokio::sync::oneshot;
 
-use crate::intern::EndpointIdInt;
+use crate::{
+    intern::EndpointIdInt,
+    metrics::{ThreadPoolMetrics, ThreadPoolWorkerId},
+};
 
 pub struct ThreadPool {
     queue: Injector<JobSpec>,
@@ -34,6 +37,8 @@ pub struct ThreadPool {
     /// lower 8 bits = number of sleeping threads
     /// next 8 bits = number of idle threads (searching for work)
     counters: AtomicU64,
+
+    pub metrics: Arc<ThreadPoolMetrics>,
 }
 
 #[derive(PartialEq)]
@@ -57,6 +62,7 @@ impl ThreadPool {
             parkers,
             // threads start searching for work
             counters: AtomicU64::new((n_workers as u64) << 8),
+            metrics: Arc::new(ThreadPoolMetrics::new(n_workers as usize)),
         });
 
         for (i, worker) in workers.into_iter().enumerate() {
@@ -76,6 +82,7 @@ impl ThreadPool {
 
         let queue_was_empty = self.queue.is_empty();
 
+        self.metrics.injector_queue_depth.inc();
         self.queue.push(JobSpec {
             response: tx,
             pbkdf2,
@@ -145,6 +152,9 @@ impl ThreadPool {
         loop {
             match self.queue.steal_batch_and_pop(worker) {
                 crossbeam_deque::Steal::Success(job) => {
+                    self.metrics
+                        .injector_queue_depth
+                        .set(self.queue.len() as i64);
                     // no longer idle
                     self.counters.fetch_sub(256, Ordering::SeqCst);
                     return Some(job);
@@ -199,9 +209,10 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
 
     let mut rng = SmallRng::from_entropy();
 
-    // used to determine whether we should temporarily skip tasks
-    // for fairness
-    let mut sketch = CountMinSketch::new(32, 8);
+    // used to determine whether we should temporarily skip tasks for fairness.
+    // 99% of estimates will overcount by no more than 1 samples
+    let mut sketch =
+        CountMinSketch::with_params((1.0 / (SKETCH_RESET_INTERVAL as f64)).sqrt(), 0.01);
 
     let (condvar, lock) = &pool.parkers[index];
 
@@ -209,6 +220,11 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
         // wait for notification of work
         {
             let mut lock = lock.lock();
+
+            // queue is empty
+            pool.metrics
+                .worker_queue_depth
+                .set(ThreadPoolWorkerId(index), 0);
 
             // subtract 1 from idle count, add 1 to sleeping count.
             pool.counters.fetch_sub(255, Ordering::SeqCst);
@@ -226,20 +242,34 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
                 None => continue 'wait,
             };
 
+            pool.metrics
+                .worker_queue_depth
+                .set(ThreadPoolWorkerId(index), worker.len() as i64);
+
             // receiver is closed, cancel the task
             if !job.response.is_closed() {
-                let rate = sketch.inc(&job.endpoint);
+                let rate = sketch.inc_by(&job.endpoint, job.pbkdf2.cost());
 
-                const P: f64 = 32.0;
+                const P: f64 = 2000.0;
                 // probability decreases as rate increases.
                 // lower probability, higher chance of being skipped
+                //
+                // estimates (rate in terms of 4096 rounds):
                 // rate = 0    => probability = 100%
-                // rate = 10   => probability = 92.7%
-                // rate = 50   => probability = 78.6%
-                // rate = 500  => probability = 55.2%
+                // rate = 10   => probability = 71.3%
+                // rate = 50   => probability = 62.1%
+                // rate = 500  => probability = 52.3%
                 // rate = 1021 => probability = 49.8%
+                //
+                // My expectation is that the pool queue will only begin backing up at ~1000rps
+                // in which case the SKETCH_RESET_INTERVAL represents 1 second. Thus, the rates above
+                // are in requests per second.
                 let probability = P.ln() / (P + rate as f64).ln();
-                if rng.gen_bool(probability) {
+                if pool.queue.len() > 32 || rng.gen_bool(probability) {
+                    pool.metrics
+                        .worker_task_turns_total
+                        .inc(ThreadPoolWorkerId(index));
+
                     match job.pbkdf2.turn() {
                         std::task::Poll::Ready(result) => {
                             let _ = job.response.send(result);
@@ -247,6 +277,10 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
                         std::task::Poll::Pending => worker.push(job),
                     }
                 } else {
+                    pool.metrics
+                        .worker_task_skips_total
+                        .inc(ThreadPoolWorkerId(index));
+
                     // skip for now
                     worker.push(job)
                 }
@@ -254,7 +288,7 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
 
             // if we get stuck with a few long lived jobs in the queue
             // it's better to try and steal from the queue too for fairness
-            if i % STEAL_INTERVAL == 0 && !worker.is_empty() {
+            if i % STEAL_INTERVAL == 0 {
                 let _ = pool.queue.steal_batch(&worker);
             }
 
@@ -273,10 +307,25 @@ struct CountMinSketch {
     width: usize,
     depth: usize,
     // buckets, width*depth
-    buckets: Vec<u64>,
+    buckets: Vec<u32>,
 }
 
 impl CountMinSketch {
+    /// Given parameters (ε, δ),
+    ///   set width = ceil(e/ε)
+    ///   set depth = ceil(ln(1/δ))
+    ///
+    /// guarantees:
+    /// actual <= estimate
+    /// estimate <= actual + ε * N with probability 1 - δ
+    /// where N is the cardinality of the stream
+    fn with_params(epsilon: f64, delta: f64) -> Self {
+        CountMinSketch::new(
+            (std::f64::consts::E / epsilon).ceil() as usize,
+            (1.0_f64 / delta).ln().ceil() as usize,
+        )
+    }
+
     fn new(width: usize, depth: usize) -> Self {
         Self {
             hashers: (0..width).map(|_| ahash::RandomState::new()).collect(),
@@ -286,25 +335,16 @@ impl CountMinSketch {
         }
     }
 
-    fn inc<T: Hash>(&mut self, t: &T) -> u64 {
+    fn inc_by<T: Hash>(&mut self, t: &T, x: u32) -> u32 {
         let mut min = 0;
         for w in 0..self.width {
             let hash = self.hashers[w].hash_one(t) as usize;
             let bucket = &mut self.buckets[w * self.depth + hash % self.depth];
-            *bucket = bucket.saturating_add(1);
+            *bucket = bucket.saturating_add(x);
             min = std::cmp::min(min, *bucket);
         }
         min
     }
-
-    // fn get<T: Hash>(&mut self, t: &T) -> u64 {
-    //     let mut min = 0;
-    //     for w in 0..self.width {
-    //         let hash = self.hashers[w].hash_one(t) as usize;
-    //         min = std::cmp::min(min, self.buckets[w * self.depth + hash % self.depth]);
-    //     }
-    //     min
-    // }
 
     fn reset(&mut self) {
         self.buckets.clear();
@@ -347,6 +387,10 @@ impl Pbkdf2 {
         }
     }
 
+    fn cost(&self) -> u32 {
+        (self.iterations).clamp(0, 4096)
+    }
+
     fn turn(&mut self) -> std::task::Poll<[u8; 32]> {
         let Self {
             hmac,
@@ -355,6 +399,7 @@ impl Pbkdf2 {
             iterations,
         } = self;
 
+        // only do 4096 iterations per turn before sharing the thread for fairness
         let n = (*iterations).clamp(0, 4096);
         for _ in 0..n {
             *prev = hmac.clone().chain_update(*prev).finalize().into_bytes();

@@ -283,6 +283,8 @@ async fn main() -> anyhow::Result<()> {
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
 
+    Metrics::install(config.authentication_config.thread_pool.metrics.clone());
+
     info!("Authentication backend: {}", config.auth_backend);
     info!("Using region: {}", config.aws_region);
 
