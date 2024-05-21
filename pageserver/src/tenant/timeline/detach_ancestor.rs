@@ -95,6 +95,11 @@ pub(super) async fn prepare(
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
+        // TODO: check if we have already been detached; for this we need to read the stored data
+        // on remote client, for that we need a follow-up which makes uploads cheaper and maintains
+        // a projection of the commited data.
+        //
+        // the error is wrong per openapi
         return Err(NoAncestor);
     };
 
@@ -104,7 +109,7 @@ pub(super) async fn prepare(
 
     if ancestor.ancestor_timeline.is_some() {
         // non-technical requirement; we could flatten N ancestors just as easily but we chose
-        // not to
+        // not to, at least initially
         return Err(TooManyAncestors);
     }
 
