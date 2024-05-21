@@ -789,6 +789,8 @@ pub enum HistoricLayerInfo {
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        l0: bool,
     },
     Image {
         layer_file_name: String,
