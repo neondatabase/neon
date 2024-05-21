@@ -21,7 +21,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.utils import subprocess_capture
+from fixtures.utils import assert_pageserver_backups_equal, subprocess_capture
 
 
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
@@ -305,6 +305,7 @@ def _import(
     # Check it's the same as the first fullbackup
     # TODO pageserver should be checking checksum
     assert os.path.getsize(tar_output_file) == os.path.getsize(new_tar_output_file)
+    assert_pageserver_backups_equal(tar_output_file, new_tar_output_file, set())
 
     # Check that gc works
     pageserver_http = env.pageserver.http_client()

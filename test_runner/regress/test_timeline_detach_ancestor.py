@@ -1,13 +1,9 @@
 import datetime
 import enum
-import tarfile
-import time
 from concurrent.futures import ThreadPoolExecutor
-from hashlib import sha256
-from pathlib import Path
 from queue import Empty, Queue
 from threading import Barrier
-from typing import IO, List, Set, Tuple, Union
+from typing import List, Tuple
 
 import pytest
 from fixtures.common_types import Lsn, TimelineId
@@ -16,6 +12,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_ls
 from fixtures.pageserver.http import HistoricLayerInfo
 from fixtures.pageserver.utils import wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage
+from fixtures.utils import assert_pageserver_backups_equal
 
 
 def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
@@ -198,52 +195,7 @@ def test_ancestor_detach_branched_from(
     # as there is always "PREV_LSN: invalid" for "before"
     skip_files = {"zenith.signal"}
 
-    tar_cmp(fullbackup_before, fullbackup_after, skip_files)
-
-
-def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
-    """
-    This is essentially:
-
-    lines=$(comm -3 \
-        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
-        <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
-        | wc -l)
-    [ "$lines" = "0" ]
-
-    But in a more mac friendly fashion.
-    """
-    started_at = time.time()
-
-    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
-        assert reader is not None
-        digest = sha256(usedforsecurity=False)
-        while True:
-            buf = reader.read(64 * 1024)
-            if not buf:
-                break
-            digest.update(buf)
-        return digest.digest()
-
-    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
-        with tarfile.open(p) as f:
-            matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
-            ret = list(
-                map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files)
-            )
-            ret.sort(key=lambda t: t[0])
-            return ret
-
-    left_list, right_list = map(build_hash_list, [left, right])
-
-    try:
-        assert len(left_list) == len(right_list)
-
-        for left_tuple, right_tuple in zip(left_list, right_list):
-            assert left_tuple == right_tuple
-    finally:
-        elapsed = time.time() - started_at
-        log.info(f"tar_cmp completed in {elapsed}s")
+    assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, skip_files)
 
 
 def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
@@ -600,7 +552,7 @@ def test_compaction_induced_by_detaches_in_history(
     )
 
     # we don't need to skip any files, because zenith.signal will be identical
-    tar_cmp(fullbackup_before, fullbackup_after, set())
+    assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
 
 
 # TODO:
