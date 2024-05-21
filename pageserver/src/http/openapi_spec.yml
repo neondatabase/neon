@@ -257,9 +257,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/LsnByTimestampResponse"
 
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/lsn_lease:
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/lsn_lease:
     parameters:
-      - name: tenant_id
+      - name: tenant_shard_id
         in: path
         required: true
         schema:
