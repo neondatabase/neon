@@ -569,6 +569,39 @@ impl<'a> TenantDownloader<'a> {
             heatmap.timelines.len()
         );
 
+        // Get or initialize the local disk state for the timelines we will update
+        let mut timeline_states = HashMap::new();
+        for timeline in &heatmap.timelines {
+            let timeline_state = self
+                .secondary_state
+                .detail
+                .lock()
+                .unwrap()
+                .timelines
+                .get(&timeline.timeline_id)
+                .cloned();
+
+            let timeline_state = match timeline_state {
+                Some(t) => t,
+                None => {
+                    // We have no existing state: need to scan local disk for layers first.
+                    let timeline_state =
+                        init_timeline_state(self.conf, tenant_shard_id, timeline).await;
+
+                    // Re-acquire detail lock now that we're done with async load from local FS
+                    self.secondary_state
+                        .detail
+                        .lock()
+                        .unwrap()
+                        .timelines
+                        .insert(timeline.timeline_id, timeline_state.clone());
+                    timeline_state
+                }
+            };
+
+            timeline_states.insert(timeline.timeline_id, timeline_state);
+        }
+
         // Clean up any local layers that aren't in the heatmap.  We do this first for all timelines, on the general
         // principle that deletions should be done before writes wherever possible, and so that we can use this
         // phase to initialize our SecondaryProgress.
@@ -579,6 +612,10 @@ impl<'a> TenantDownloader<'a> {
 
         // Download the layers in the heatmap
         for timeline in heatmap.timelines {
+            let timeline_state = timeline_states
+                .remove(&timeline.timeline_id)
+                .expect("Just populated above");
+
             if self.secondary_state.cancel.is_cancelled() {
                 tracing::debug!(
                     "Cancelled before downloading timeline {}",
@@ -588,7 +625,7 @@ impl<'a> TenantDownloader<'a> {
             }
 
             let timeline_id = timeline.timeline_id;
-            self.download_timeline(timeline, ctx)
+            self.download_timeline(timeline, timeline_state, ctx)
                 .instrument(tracing::info_span!(
                     "secondary_download_timeline",
                     tenant_id=%tenant_shard_id.tenant_id,
@@ -800,6 +837,7 @@ impl<'a> TenantDownloader<'a> {
     async fn download_timeline(
         &self,
         timeline: HeatMapTimeline,
+        timeline_state: SecondaryDetailTimeline,
         ctx: &RequestContext,
     ) -> Result<(), UpdateError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
@@ -807,34 +845,6 @@ impl<'a> TenantDownloader<'a> {
 
         // Accumulate updates to the state
         let mut touched = Vec::new();
-
-        // Clone a view of what layers already exist on disk
-        let timeline_state = self
-            .secondary_state
-            .detail
-            .lock()
-            .unwrap()
-            .timelines
-            .get(&timeline.timeline_id)
-            .cloned();
-
-        let timeline_state = match timeline_state {
-            Some(t) => t,
-            None => {
-                // We have no existing state: need to scan local disk for layers first.
-                let timeline_state =
-                    init_timeline_state(self.conf, tenant_shard_id, &timeline).await;
-
-                // Re-acquire detail lock now that we're done with async load from local FS
-                self.secondary_state
-                    .detail
-                    .lock()
-                    .unwrap()
-                    .timelines
-                    .insert(timeline.timeline_id, timeline_state.clone());
-                timeline_state
-            }
-        };
 
         tracing::debug!(timeline_id=%timeline.timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
 
