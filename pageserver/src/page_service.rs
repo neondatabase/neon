@@ -1521,8 +1521,8 @@ where
 
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
-        if let Some(params_raw) = query_string.strip_prefix("pagestream_v2 ") {
-            let params = params_raw.split(' ').collect::<Vec<_>>();
+        let parts = query_string.split_whitespace().collect::<Vec<_>>();
+        if let Some(params) = parts.strip_prefix(&["pagestream_v2"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for pagestream command"
@@ -1547,8 +1547,7 @@ where
                 ctx,
             )
             .await?;
-        } else if let Some(params_raw) = query_string.strip_prefix("pagestream ") {
-            let params = params_raw.split(' ').collect::<Vec<_>>();
+        } else if let Some(params) = parts.strip_prefix(&["pagestream"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for pagestream command"
@@ -1573,9 +1572,7 @@ where
                 ctx,
             )
             .await?;
-        } else if let Some(params_raw) = query_string.strip_prefix("basebackup ") {
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
-
+        } else if let Some(params) = parts.strip_prefix(&["basebackup"]) {
             if params.len() < 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for basebackup command"
@@ -1635,9 +1632,7 @@ where
             res?;
         }
         // return pair of prev_lsn and last_lsn
-        else if let Some(params_raw) = query_string.strip_prefix("get_last_record_rlsn ") {
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
-
+        else if let Some(params) = parts.strip_prefix(&["get_last_record_rlsn"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for get_last_record_rlsn command"
@@ -1679,9 +1674,7 @@ where
             .await?;
         }
         // same as basebackup, but result includes relational data as well
-        else if let Some(params_raw) = query_string.strip_prefix("fullbackup ") {
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
-
+        else if let Some(params) = parts.strip_prefix(&["fullbackup"]) {
             if params.len() < 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for fullbackup command"
@@ -1730,7 +1723,7 @@ where
             )
             .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if let Some(params_raw) = query_string.strip_prefix("import basebackup ") {
+        } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
             // Assumes the tenant already exists on this pageserver.
             //
@@ -1742,7 +1735,7 @@ where
             // 2. Run:
             // cat my_backup/base.tar | psql -h $PAGESERVER \
             //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            let params = &parts[2..];
             if params.len() != 5 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for import basebackup command"
@@ -1786,12 +1779,12 @@ where
                     ))?
                 }
             };
-        } else if let Some(params_raw) = query_string.strip_prefix("import wal ") {
+        } else if query_string.starts_with("import wal ") {
             // Import the `pg_wal` section of a basebackup.
             //
             // Files are scheduled to be persisted to remote storage, and the
             // caller should poll the http api to check when that is done.
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            let params = &parts[2..];
             if params.len() != 4 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for import wal command"
@@ -1829,8 +1822,8 @@ where
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if let Some(params_raw) = query_string.strip_prefix("lease lsn ") {
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+        } else if query_string.starts_with("lease lsn ") {
+            let params = &parts[2..];
             if params.len() != 3 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number {} for lease lsn command",
@@ -1866,9 +1859,8 @@ where
                     ))?
                 }
             };
-        } else if let Some(params_raw) = query_string.strip_prefix("show ") {
+        } else if let Some(params) = parts.strip_prefix(&["show"]) {
             // show <tenant_id>
-            let params = params_raw.split(' ').collect::<Vec<_>>();
             if params.len() != 1 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for config command"
