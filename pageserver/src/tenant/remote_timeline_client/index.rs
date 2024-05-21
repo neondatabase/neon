@@ -100,6 +100,18 @@ impl IndexPart {
         }
     }
 
+    pub(crate) fn empty(metadata: TimelineMetadata) -> Self {
+        IndexPart {
+            version: Self::LATEST_VERSION,
+            layer_metadata: Default::default(),
+            disk_consistent_lsn: metadata.disk_consistent_lsn(),
+            metadata,
+            deleted_at: None,
+            lineage: Default::default(),
+            last_aux_file_policy: None,
+        }
+    }
+
     pub fn get_version(&self) -> usize {
         self.version
     }
@@ -120,14 +132,7 @@ impl IndexPart {
 
     #[cfg(test)]
     pub(crate) fn example() -> Self {
-        let example_metadata = TimelineMetadata::example();
-        Self::new(
-            &HashMap::new(),
-            example_metadata.disk_consistent_lsn(),
-            example_metadata,
-            Default::default(),
-            Some(AuxFilePolicy::V1),
-        )
+        Self::empty(TimelineMetadata::example())
     }
 
     pub(crate) fn last_aux_file_policy(&self) -> Option<AuxFilePolicy> {

@@ -45,6 +45,12 @@ pub(crate) struct UploadQueueInitialized {
     /// Counter to assign task IDs
     pub(crate) task_counter: u64,
 
+    /// The next uploaded index_part.json; assumed to be dirty.
+    ///
+    /// Should not be read, directly except for layer file updates. Instead you should add a
+    /// projected field.
+    pub(crate) dirty: IndexPart,
+
     /// All layer files stored in the remote storage, taking into account all
     /// in-progress and queued operations
     pub(crate) latest_files: HashMap<LayerName, LayerFileMetadata>,
@@ -175,7 +181,7 @@ impl UploadQueue {
         info!("initializing upload queue for empty remote");
 
         let state = UploadQueueInitialized {
-            // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
+            dirty: IndexPart::empty(metadata.clone()),
             latest_files: HashMap::new(),
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: metadata.clone(),
@@ -222,6 +228,7 @@ impl UploadQueue {
         );
 
         let state = UploadQueueInitialized {
+            dirty: index_part.clone(),
             latest_files: files,
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: index_part.metadata.clone(),
@@ -299,7 +306,12 @@ pub(crate) enum UploadOp {
     UploadLayer(ResidentLayer, LayerFileMetadata),
 
     /// Upload the metadata file
-    UploadMetadata(Box<IndexPart>, Lsn),
+    UploadMetadata {
+        serialized: bytes::Bytes,
+        mention_having_future_layers: bool,
+        uploaded_remote_physical_size: u64,
+        disk_consistent_lsn: Lsn,
+    },
 
     /// Delete layer files
     Delete(Delete),
@@ -322,8 +334,11 @@ impl std::fmt::Display for UploadOp {
                     layer, metadata.file_size, metadata.generation
                 )
             }
-            UploadOp::UploadMetadata(_, lsn) => {
-                write!(f, "UploadMetadata(lsn: {})", lsn)
+            UploadOp::UploadMetadata {
+                disk_consistent_lsn,
+                ..
+            } => {
+                write!(f, "UploadMetadata(lsn: {disk_consistent_lsn})")
             }
             UploadOp::Delete(delete) => {
                 write!(f, "Delete({} layers)", delete.layers.len())

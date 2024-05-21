@@ -2172,12 +2172,14 @@ impl Tenant {
             };
 
             for child_shard in child_shards {
+                let serialized = serde_json::to_vec(&index_part)?;
+                let serialized = bytes::Bytes::from(serialized);
                 upload_index_part(
                     &self.remote_storage,
                     child_shard,
                     &timeline.timeline_id,
                     self.generation,
-                    &index_part,
+                    serialized,
                     &self.cancel,
                 )
                 .await?;
