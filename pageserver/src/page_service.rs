@@ -1521,8 +1521,7 @@ where
 
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
-        if query_string.starts_with("pagestream_v2 ") {
-            let (_, params_raw) = query_string.split_at("pagestream_v2 ".len());
+        if let Some(params_raw) = query_string.strip_prefix("pagestream_v2 ") {
             let params = params_raw.split(' ').collect::<Vec<_>>();
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
@@ -1548,8 +1547,7 @@ where
                 ctx,
             )
             .await?;
-        } else if query_string.starts_with("pagestream ") {
-            let (_, params_raw) = query_string.split_at("pagestream ".len());
+        } else if let Some(params_raw) = query_string.strip_prefix("pagestream ") {
             let params = params_raw.split(' ').collect::<Vec<_>>();
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
@@ -1575,8 +1573,7 @@ where
                 ctx,
             )
             .await?;
-        } else if query_string.starts_with("basebackup ") {
-            let (_, params_raw) = query_string.split_at("basebackup ".len());
+        } else if let Some(params_raw) = query_string.strip_prefix("basebackup ") {
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
             if params.len() < 2 {
@@ -1639,8 +1636,7 @@ where
             res?;
         }
         // return pair of prev_lsn and last_lsn
-        else if query_string.starts_with("get_last_record_rlsn ") {
-            let (_, params_raw) = query_string.split_at("get_last_record_rlsn ".len());
+        else if let Some(params_raw) = query_string.strip_prefix("get_last_record_rlsn ") {
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
             if params.len() != 2 {
@@ -1684,8 +1680,7 @@ where
             .await?;
         }
         // same as basebackup, but result includes relational data as well
-        else if query_string.starts_with("fullbackup ") {
-            let (_, params_raw) = query_string.split_at("fullbackup ".len());
+        else if let Some(params_raw) = query_string.strip_prefix("fullbackup ") {
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
             if params.len() < 2 {
@@ -1736,7 +1731,7 @@ where
             )
             .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("import basebackup ") {
+        } else if let Some(params_raw) = query_string.strip_prefix("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
             // Assumes the tenant already exists on this pageserver.
             //
@@ -1748,7 +1743,6 @@ where
             // 2. Run:
             // cat my_backup/base.tar | psql -h $PAGESERVER \
             //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
-            let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             if params.len() != 5 {
                 return Err(QueryError::Other(anyhow::anyhow!(
@@ -1793,12 +1787,11 @@ where
                     ))?
                 }
             };
-        } else if query_string.starts_with("import wal ") {
+        } else if let Some(params_raw) = query_string.strip_prefix("import wal ") {
             // Import the `pg_wal` section of a basebackup.
             //
             // Files are scheduled to be persisted to remote storage, and the
             // caller should poll the http api to check when that is done.
-            let (_, params_raw) = query_string.split_at("import wal ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             if params.len() != 4 {
                 return Err(QueryError::Other(anyhow::anyhow!(
@@ -1837,8 +1830,7 @@ where
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("lease lsn ") {
-            let (_, params_raw) = query_string.split_at("lease lsn ".len());
+        } else if let Some(params_raw) = query_string.strip_prefix("lease lsn ") {
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
             if params.len() != 3 {
                 return Err(QueryError::Other(anyhow::anyhow!(
@@ -1875,9 +1867,8 @@ where
                     ))?
                 }
             };
-        } else if query_string.starts_with("show ") {
+        } else if let Some(params_raw) = query_string.strip_prefix("show ") {
             // show <tenant_id>
-            let (_, params_raw) = query_string.split_at("show ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
             if params.len() != 1 {
                 return Err(QueryError::Other(anyhow::anyhow!(
