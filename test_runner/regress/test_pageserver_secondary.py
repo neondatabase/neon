@@ -575,7 +575,10 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
     tenant_timelines = {}
 
     # This mirrors a constant in `downloader.rs`
-    freshen_interval_secs = 60
+    default_download_period_secs = 60
+
+    # The upload period, which will also be the download once the secondary has seen its first heatmap
+    upload_period_secs = 20
 
     for _i in range(0, tenant_count):
         tenant_id = TenantId.generate()
@@ -587,7 +590,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
             placement_policy='{"Attached":1}',
             # Run with a low heatmap period so that we can avoid having to do synthetic API calls
             # to trigger the upload promptly.
-            conf={"heatmap_period": "1s"},
+            conf={"heatmap_period": f"{upload_period_secs}s"},
         )
         env.neon_cli.create_timeline("main2", tenant_id, timeline_b)
 
@@ -597,7 +600,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
 
     # Wait long enough that the background downloads should happen; we expect all the inital layers
     # of all the initial timelines to show up on the secondary location of each tenant.
-    time.sleep(freshen_interval_secs * 1.5)
+    time.sleep(default_download_period_secs * 1.5)
 
     for tenant_id, timelines in tenant_timelines.items():
         attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
@@ -613,8 +616,8 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         # Delete the second timeline: this should be reflected later on the secondary
         env.storage_controller.pageserver_api().timeline_delete(tenant_id, timelines[1])
 
-    # Wait long enough for the secondary locations to see the deletion
-    time.sleep(freshen_interval_secs * 1.5)
+    # Wait long enough for the secondary locations to see the deletion: 2x period plus a grace factor
+    time.sleep(upload_period_secs * 2.5)
 
     for tenant_id, timelines in tenant_timelines.items():
         attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
@@ -626,6 +629,9 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         assert ps_secondary.list_layers(tenant_id, timelines[0])
 
         # This one was deleted
+        log.info(
+            f"Checking for secondary timeline deletion {tenant_id}/{timeline_id} on node {ps_secondary.id}"
+        )
         assert not ps_secondary.list_layers(tenant_id, timelines[1])
 
     t_end = time.time()
@@ -640,7 +646,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
 
     download_rate = (total_heatmap_downloads / tenant_count) / (t_end - t_start)
 
-    expect_download_rate = 1.0 / freshen_interval_secs
+    expect_download_rate = 1.0 / upload_period_secs
     log.info(f"Download rate: {download_rate * 60}/min vs expected {expect_download_rate * 60}/min")
 
     assert download_rate < expect_download_rate * 2

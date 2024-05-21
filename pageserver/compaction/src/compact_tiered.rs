@@ -25,7 +25,7 @@ use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
 use crate::helpers::{
-    accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with,
+    accum_key_values, keyspace_total_size, merge_delta_keys_buffered, overlaps_with, PAGE_SZ,
 };
 use crate::interface::*;
 use utils::lsn::Lsn;
@@ -379,7 +379,7 @@ where
                 .get_keyspace(&job.key_range, job.lsn_range.end, ctx)
                 .await?,
             &self.shard_identity,
-        ) * 8192;
+        ) * PAGE_SZ;
 
         let wal_size = job
             .input_layers
@@ -441,7 +441,7 @@ where
         let mut window = KeyspaceWindow::new(
             E::Key::MIN..E::Key::MAX,
             keyspace,
-            self.target_file_size / 8192,
+            self.target_file_size / PAGE_SZ,
         );
         while let Some(key_range) = window.choose_next_image(&self.shard_identity) {
             new_jobs.push(CompactionJob::<E> {
@@ -663,8 +663,8 @@ where
     }
 }
 
-// Sliding window through keyspace and values
-// This is used by over_with_images to decide on good split points
+/// Sliding window through keyspace and values for image layer
+/// This is used by [`LevelCompactionState::cover_with_images`] to decide on good split points
 struct KeyspaceWindow<K> {
     head: KeyspaceWindowHead<K>,
 
@@ -804,9 +804,9 @@ struct WindowElement<K> {
     accum_size: u64,
 }
 
-// Sliding window through keyspace and values
-//
-// This is used to decide what layer to write next, from the beginning of the window.
+/// Sliding window through keyspace and values for delta layer tiling
+///
+/// This is used to decide which delta layer to write next.
 struct Window<K> {
     elems: VecDeque<WindowElement<K>>,
 
@@ -830,11 +830,13 @@ where
     fn feed(&mut self, key: K, size: u64) {
         let last_size;
         if let Some(last) = self.elems.back_mut() {
-            assert!(last.last_key <= key);
-            if key == last.last_key {
-                last.accum_size += size;
-                return;
-            }
+            // We require the keys to be strictly increasing for the window.
+            // Keys should already have been deduplicated by `accum_key_values`
+            assert!(
+                last.last_key < key,
+                "last_key(={}) >= key(={key})",
+                last.last_key
+            );
             last_size = last.accum_size;
         } else {
             last_size = 0;
@@ -922,7 +924,7 @@ where
         // If we're willing to stretch it up to 1.25 target size, could we
         // gobble up the rest of the work? This avoids creating very small
         // "tail" layers at the end of the keyspace
-        if !has_more && self.remain_size() < target_size * 5 / 3 {
+        if !has_more && self.remain_size() < target_size * 5 / 4 {
             self.commit_upto(self.elems.len());
         } else {
             let delta_split_at = self.find_size_split(target_size);

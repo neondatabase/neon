@@ -25,6 +25,7 @@ from fixtures.neon_fixtures import (
     S3Scrubber,
     generate_uploads_and_deletions,
 )
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     assert_tenant_state,
@@ -632,39 +633,86 @@ def test_upgrade_generationless_local_file_paths(
     generation numbers: it should accept these layer files, and avoid doing
     a delete/download cycle on them.
     """
-    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_tenant(
+        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}'
+    )
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
     workload.write_rows(1000)
 
-    env.pageserver.stop()
+    attached_pageserver = env.get_tenant_pageserver(tenant_id)
+    secondary_pageserver = list([ps for ps in env.pageservers if ps.id != attached_pageserver.id])[
+        0
+    ]
+
+    attached_pageserver.http_client().tenant_heatmap_upload(tenant_id)
+    secondary_pageserver.http_client().tenant_secondary_download(tenant_id)
 
     # Rename the local paths to legacy format, to simulate what
-    # we would see when upgrading
-    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
-    files_renamed = 0
-    for filename in os.listdir(timeline_dir):
-        path = os.path.join(timeline_dir, filename)
-        log.info(f"Found file {path}")
-        if path.endswith("-v1-00000001"):
-            new_path = path[:-12]
-            os.rename(path, new_path)
-            log.info(f"Renamed {path} -> {new_path}")
-            files_renamed += 1
+    # we would see when upgrading.  Do this on both attached and secondary locations, as we will
+    # test the behavior of both.
+    for pageserver in env.pageservers:
+        pageserver.stop()
+        timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
+        files_renamed = 0
+        for filename in os.listdir(timeline_dir):
+            path = os.path.join(timeline_dir, filename)
+            log.info(f"Found file {path}")
+            if path.endswith("-v1-00000001"):
+                new_path = path[:-12]
+                os.rename(path, new_path)
+                log.info(f"Renamed {path} -> {new_path}")
+                files_renamed += 1
 
-    assert files_renamed > 0
+        assert files_renamed > 0
 
-    env.pageserver.start()
+        pageserver.start()
 
     workload.validate()
 
     # Assert that there were no on-demand downloads
     assert (
-        env.pageserver.http_client().get_metric_value(
+        attached_pageserver.http_client().get_metric_value(
             "pageserver_remote_ondemand_downloaded_layers_total"
         )
         == 0
     )
+
+    # Do a secondary download and ensure there were no layer downloads
+    secondary_pageserver.http_client().tenant_secondary_download(tenant_id)
+    assert (
+        secondary_pageserver.http_client().get_metric_value(
+            "pageserver_secondary_download_layer_total"
+        )
+        == 0
+    )
+
+    # Check that when we evict and promote one of the legacy-named layers, everything works as
+    # expected
+    local_layers = list(
+        (
+            parse_layer_file_name(path.name),
+            os.path.join(attached_pageserver.timeline_dir(tenant_id, timeline_id), path),
+        )
+        for path in attached_pageserver.list_layers(tenant_id, timeline_id)
+    )
+    (victim_layer_name, victim_path) = local_layers[0]
+    assert os.path.exists(victim_path)
+
+    attached_pageserver.http_client().evict_layer(
+        tenant_id, timeline_id, victim_layer_name.to_str()
+    )
+    assert not os.path.exists(victim_path)
+
+    attached_pageserver.http_client().download_layer(
+        tenant_id, timeline_id, victim_layer_name.to_str()
+    )
+    # We should download into the same local path we started with
+    assert os.path.exists(victim_path)

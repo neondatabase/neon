@@ -20,7 +20,9 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::TimelineState;
+use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::WalRedoManagerStatus;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::ShardStripeSize;
@@ -528,6 +530,7 @@ impl Tenant {
         index_part: Option<IndexPart>,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
+        last_aux_file_policy: Option<AuxFilePolicy>,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
@@ -538,6 +541,10 @@ impl Tenant {
             ancestor.clone(),
             resources,
             CreateTimelineCause::Load,
+            // This could be derived from ancestor branch + index part. Though the only caller of `timeline_init_and_sync` is `load_remote_timeline`,
+            // there will potentially be other caller of this function in the future, and we don't know whether `index_part` or `ancestor` takes precedence.
+            // Therefore, we pass this field explicitly for now, and remove it once we fully migrate to aux file v2.
+            last_aux_file_policy,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -552,6 +559,10 @@ impl Tenant {
 
         if let Some(index_part) = index_part.as_ref() {
             timeline.remote_client.init_upload_queue(index_part)?;
+
+            timeline
+                .last_aux_file_policy
+                .store(index_part.last_aux_file_policy());
         } else {
             // No data on the remote storage, but we have local metadata file. We can end up
             // here with timeline_create being interrupted before finishing index part upload.
@@ -1172,12 +1183,15 @@ impl Tenant {
             None
         };
 
+        let last_aux_file_policy = index_part.last_aux_file_policy();
+
         self.timeline_init_and_sync(
             timeline_id,
             resources,
             Some(index_part),
             remote_metadata,
             ancestor,
+            last_aux_file_policy,
             ctx,
         )
         .await
@@ -1356,6 +1370,7 @@ impl Tenant {
             &new_metadata,
             create_guard,
             initdb_lsn,
+            None,
             None,
         )
         .await
@@ -2196,6 +2211,31 @@ impl Tenant {
 
         Ok(())
     }
+
+    pub(crate) fn get_sizes(&self) -> TopTenantShardItem {
+        let mut result = TopTenantShardItem {
+            id: self.tenant_shard_id,
+            resident_size: 0,
+            physical_size: 0,
+            max_logical_size: 0,
+        };
+
+        for timeline in self.timelines.lock().unwrap().values() {
+            result.resident_size += timeline.metrics.resident_physical_size_gauge.get();
+
+            result.physical_size += timeline
+                .remote_client
+                .metrics
+                .remote_physical_size_gauge
+                .get();
+            result.max_logical_size = std::cmp::max(
+                result.max_logical_size,
+                timeline.metrics.current_logical_size_gauge.get(),
+            );
+        }
+
+        result
+    }
 }
 
 /// Given a Vec of timelines and their ancestors (timeline_id, ancestor_id),
@@ -2415,6 +2455,7 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
+        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -2443,6 +2484,7 @@ impl Tenant {
             resources,
             pg_version,
             state,
+            last_aux_file_policy,
             self.cancel.child_token(),
         );
 
@@ -3093,6 +3135,7 @@ impl Tenant {
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
+                src_timeline.last_aux_file_policy.load(),
             )
             .await?;
 
@@ -3286,6 +3329,7 @@ impl Tenant {
                 timeline_create_guard,
                 pgdata_lsn,
                 None,
+                None,
             )
             .await?;
 
@@ -3357,6 +3401,7 @@ impl Tenant {
         create_guard: TimelineCreateGuard<'a>,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
+        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> anyhow::Result<UninitializedTimeline> {
         let tenant_shard_id = self.tenant_shard_id;
 
@@ -3372,6 +3417,7 @@ impl Tenant {
                 ancestor,
                 resources,
                 CreateTimelineCause::Load,
+                last_aux_file_policy,
             )
             .context("Failed to create timeline data structure")?;
 
@@ -3922,7 +3968,7 @@ mod tests {
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
     use crate::DEFAULT_PG_VERSION;
-    use bytes::BytesMut;
+    use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
     use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
@@ -4731,7 +4777,12 @@ mod tests {
             info!("Doing vectored read on {:?}", read);
 
             let vectored_res = tline
-                .get_vectored_impl(read.clone(), reads_lsn, ValuesReconstructState::new(), &ctx)
+                .get_vectored_impl(
+                    read.clone(),
+                    reads_lsn,
+                    &mut ValuesReconstructState::new(),
+                    &ctx,
+                )
                 .await;
             tline
                 .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
@@ -4780,7 +4831,7 @@ mod tests {
             .get_vectored_impl(
                 aux_keyspace.clone(),
                 read_lsn,
-                ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(),
                 &ctx,
             )
             .await;
@@ -4925,7 +4976,7 @@ mod tests {
             .get_vectored_impl(
                 read.clone(),
                 current_lsn,
-                ValuesReconstructState::new(),
+                &mut ValuesReconstructState::new(),
                 &ctx,
             )
             .await?;
@@ -5060,7 +5111,7 @@ mod tests {
                         ranges: vec![child_gap_at_key..child_gap_at_key.next()],
                     },
                     query_lsn,
-                    ValuesReconstructState::new(),
+                    &mut ValuesReconstructState::new(),
                     &ctx,
                 )
                 .await;
@@ -5501,7 +5552,7 @@ mod tests {
             .await?;
 
         const NUM_KEYS: usize = 1000;
-        const STEP: usize = 100; // random update + scan base_key + idx * STEP
+        const STEP: usize = 10000; // random update + scan base_key + idx * STEP
 
         let cancel = CancellationToken::new();
 
@@ -5534,7 +5585,7 @@ mod tests {
 
         let keyspace = KeySpace::single(base_key..base_key.add((NUM_KEYS * STEP) as u32));
 
-        for _ in 0..10 {
+        for iter in 0..=10 {
             // Read all the blocks
             for (blknum, last_lsn) in updated.iter().enumerate() {
                 test_key.field6 = (blknum * STEP) as u32;
@@ -5549,7 +5600,7 @@ mod tests {
                 .get_vectored_impl(
                     keyspace.clone(),
                     lsn,
-                    ValuesReconstructState::default(),
+                    &mut ValuesReconstructState::default(),
                     &ctx,
                 )
                 .await?
@@ -5585,13 +5636,733 @@ mod tests {
                 updated[blknum] = lsn;
             }
 
-            // Perform a cycle of flush, compact, and GC
+            // Perform two cycles of flush, compact, and GC
+            for round in 0..2 {
+                tline.freeze_and_flush().await?;
+                tline
+                    .compact(
+                        &cancel,
+                        if iter % 5 == 0 && round == 0 {
+                            let mut flags = EnumSet::new();
+                            flags.insert(CompactFlags::ForceImageLayerCreation);
+                            flags.insert(CompactFlags::ForceRepartition);
+                            flags
+                        } else {
+                            EnumSet::empty()
+                        },
+                        &ctx,
+                    )
+                    .await?;
+                tenant
+                    .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_compaction_trigger() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_compaction_trigger")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        base_key.field1 = AUX_KEY_PREFIX;
+        let test_key = base_key;
+        let mut lsn = Lsn(0x10);
+
+        for _ in 0..20 {
+            lsn = Lsn(lsn.0 + 0x10);
+            let mut writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(test_img(&format!("{} at {}", 0, lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+            tline.freeze_and_flush().await?; // force create a delta layer
+        }
+
+        let before_num_l0_delta_files = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .get_level0_deltas()?
+            .len();
+
+        tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+
+        let after_num_l0_delta_files = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .get_level0_deltas()?
+            .len();
+
+        assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
+
+        assert_eq!(
+            tline.get(test_key, lsn, &ctx).await?,
+            test_img(&format!("{} at {}", 0, lsn))
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_branch_copies_dirty_aux_file_flag() {
+        let harness = TenantHarness::create("test_branch_copies_dirty_aux_file_flag").unwrap();
+
+        // the default aux file policy to switch is v1 if not set by the admins
+        assert_eq!(
+            harness.tenant_conf.switch_aux_file_policy,
+            AuxFilePolicy::V1
+        );
+        let (tenant, ctx) = harness.load().await;
+
+        let mut lsn = Lsn(0x08);
+
+        let tline: Arc<Timeline> = tenant
+            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        // no aux file is written at this point, so the persistent flag should be unset
+        assert_eq!(tline.last_aux_file_policy.load(), None);
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test1", b"first", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        // there is no tenant manager to pass the configuration through, so lets mimic it
+        tenant.set_new_location_config(
+            AttachedTenantConf::try_from(LocationConf::attached_single(
+                TenantConfOpt {
+                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
+                    ..Default::default()
+                },
+                tenant.generation,
+                &pageserver_api::models::ShardParameters::default(),
+            ))
+            .unwrap(),
+        );
+
+        assert_eq!(
+            tline.get_switch_aux_file_policy(),
+            AuxFilePolicy::V2,
+            "wanted state has been updated"
+        );
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::V1),
+            "aux file is written with switch_aux_file_policy unset (which is v1), so we should keep v1"
+        );
+
+        // we can read everything from the storage
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            Some(&bytes::Bytes::from_static(b"first"))
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test2", b"second", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::V1),
+            "keep v1 storage format when new files are written"
+        );
+
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test2"),
+            Some(&bytes::Bytes::from_static(b"second"))
+        );
+
+        let child = tenant
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
+            .await
+            .unwrap();
+
+        // child copies the last flag even if that is not on remote storage yet
+        assert_eq!(child.get_switch_aux_file_policy(), AuxFilePolicy::V2);
+        assert_eq!(child.last_aux_file_policy.load(), Some(AuxFilePolicy::V1));
+
+        let files = child.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(files.get("pg_logical/mappings/test1"), None);
+        assert_eq!(files.get("pg_logical/mappings/test2"), None);
+
+        // even if we crash here without flushing parent timeline with it's new
+        // last_aux_file_policy we are safe, because child was never meant to access ancestor's
+        // files. the ancestor can even switch back to V1 because of a migration safely.
+    }
+
+    #[tokio::test]
+    async fn aux_file_policy_switch() {
+        let mut harness = TenantHarness::create("aux_file_policy_switch").unwrap();
+        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::CrossValidation; // set to cross-validation mode
+        let (tenant, ctx) = harness.load().await;
+
+        let mut lsn = Lsn(0x08);
+
+        let tline: Arc<Timeline> = tenant
+            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            None,
+            "no aux file is written so it should be unset"
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test1", b"first", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        // there is no tenant manager to pass the configuration through, so lets mimic it
+        tenant.set_new_location_config(
+            AttachedTenantConf::try_from(LocationConf::attached_single(
+                TenantConfOpt {
+                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
+                    ..Default::default()
+                },
+                tenant.generation,
+                &pageserver_api::models::ShardParameters::default(),
+            ))
+            .unwrap(),
+        );
+
+        assert_eq!(
+            tline.get_switch_aux_file_policy(),
+            AuxFilePolicy::V2,
+            "wanted state has been updated"
+        );
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::CrossValidation),
+            "dirty index_part.json reflected state is yet to be updated"
+        );
+
+        // we can still read the auxfile v1 before we ingest anything new
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            Some(&bytes::Bytes::from_static(b"first"))
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test2", b"second", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::V2),
+            "ingesting a file should apply the wanted switch state when applicable"
+        );
+
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            Some(&bytes::Bytes::from_static(b"first")),
+            "cross validation writes to both v1 and v2 so this should be available in v2"
+        );
+        assert_eq!(
+            files.get("pg_logical/mappings/test2"),
+            Some(&bytes::Bytes::from_static(b"second"))
+        );
+
+        // mimic again by trying to flip it from V2 to V1 (not switched to while ingesting a file)
+        tenant.set_new_location_config(
+            AttachedTenantConf::try_from(LocationConf::attached_single(
+                TenantConfOpt {
+                    switch_aux_file_policy: Some(AuxFilePolicy::V1),
+                    ..Default::default()
+                },
+                tenant.generation,
+                &pageserver_api::models::ShardParameters::default(),
+            ))
+            .unwrap(),
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test2", b"third", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        assert_eq!(
+            tline.get_switch_aux_file_policy(),
+            AuxFilePolicy::V1,
+            "wanted state has been updated again, even if invalid request"
+        );
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::V2),
+            "ingesting a file should apply the wanted switch state when applicable"
+        );
+
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            Some(&bytes::Bytes::from_static(b"first"))
+        );
+        assert_eq!(
+            files.get("pg_logical/mappings/test2"),
+            Some(&bytes::Bytes::from_static(b"third"))
+        );
+
+        // mimic again by trying to flip it from from V1 to V2 (not switched to while ingesting a file)
+        tenant.set_new_location_config(
+            AttachedTenantConf::try_from(LocationConf::attached_single(
+                TenantConfOpt {
+                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
+                    ..Default::default()
+                },
+                tenant.generation,
+                &pageserver_api::models::ShardParameters::default(),
+            ))
+            .unwrap(),
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test3", b"last", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        assert_eq!(tline.get_switch_aux_file_policy(), AuxFilePolicy::V2);
+
+        assert_eq!(tline.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
+
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            Some(&bytes::Bytes::from_static(b"first"))
+        );
+        assert_eq!(
+            files.get("pg_logical/mappings/test2"),
+            Some(&bytes::Bytes::from_static(b"third"))
+        );
+        assert_eq!(
+            files.get("pg_logical/mappings/test3"),
+            Some(&bytes::Bytes::from_static(b"last"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_metadata_image_creation() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_image_creation")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        const NUM_KEYS: usize = 1000;
+        const STEP: usize = 10000; // random update + scan base_key + idx * STEP
+
+        let cancel = CancellationToken::new();
+
+        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        base_key.field1 = AUX_KEY_PREFIX;
+        let mut test_key = base_key;
+        let mut lsn = Lsn(0x10);
+
+        async fn scan_with_statistics(
+            tline: &Timeline,
+            keyspace: &KeySpace,
+            lsn: Lsn,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
+            let mut reconstruct_state = ValuesReconstructState::default();
+            let res = tline
+                .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
+                .await?;
+            Ok((res, reconstruct_state.get_delta_layers_visited() as usize))
+        }
+
+        #[allow(clippy::needless_range_loop)]
+        for blknum in 0..NUM_KEYS {
+            lsn = Lsn(lsn.0 + 0x10);
+            test_key.field6 = (blknum * STEP) as u32;
+            let mut writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+        }
+
+        let keyspace = KeySpace::single(base_key..base_key.add((NUM_KEYS * STEP) as u32));
+
+        for iter in 1..=10 {
+            for _ in 0..NUM_KEYS {
+                lsn = Lsn(lsn.0 + 0x10);
+                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                test_key.field6 = (blknum * STEP) as u32;
+                let mut writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &ctx,
+                    )
+                    .await?;
+                writer.finish_write(lsn);
+                drop(writer);
+            }
+
             tline.freeze_and_flush().await?;
-            tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
+
+            if iter % 5 == 0 {
+                let (_, before_delta_file_accessed) =
+                    scan_with_statistics(&tline, &keyspace, lsn, &ctx).await?;
+                tline
+                    .compact(
+                        &cancel,
+                        {
+                            let mut flags = EnumSet::new();
+                            flags.insert(CompactFlags::ForceImageLayerCreation);
+                            flags.insert(CompactFlags::ForceRepartition);
+                            flags
+                        },
+                        &ctx,
+                    )
+                    .await?;
+                let (_, after_delta_file_accessed) =
+                    scan_with_statistics(&tline, &keyspace, lsn, &ctx).await?;
+                assert!(after_delta_file_accessed < before_delta_file_accessed, "after_delta_file_accessed={after_delta_file_accessed}, before_delta_file_accessed={before_delta_file_accessed}");
+                // Given that we already produced an image layer, there should be no delta layer needed for the scan, but still setting a low threshold there for unforeseen circumstances.
+                assert!(
+                    after_delta_file_accessed <= 2,
+                    "after_delta_file_accessed={after_delta_file_accessed}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_vectored_missing_data_key_reads() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_vectored_missing_data_key_reads")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        let base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        let base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
+        let base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
+
+        let mut lsn = Lsn(0x20);
+
+        {
+            let mut writer = tline.writer().await;
+            writer
+                .put(base_key, lsn, &Value::Image(test_img("data key 1")), &ctx)
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+
+            tline.freeze_and_flush().await?; // this will create a image layer
+        }
+
+        let child = tenant
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
+            .await
+            .unwrap();
+
+        lsn.0 += 0x10;
+
+        {
+            let mut writer = child.writer().await;
+            writer
+                .put(
+                    base_key_child,
+                    lsn,
+                    &Value::Image(test_img("data key 2")),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+
+            child.freeze_and_flush().await?; // this will create a delta
+
+            {
+                // update the partitioning to include the test key space, otherwise they
+                // will be dropped by image layer creation
+                let mut guard = child.partitioning.lock().await;
+                let ((partitioning, _), partition_lsn) = &mut *guard;
+                partitioning
+                    .parts
+                    .push(KeySpace::single(base_key..base_key_nonexist)); // exclude the nonexist key
+                *partition_lsn = lsn;
+            }
+
+            child
+                .compact(
+                    &cancel,
+                    {
+                        let mut set = EnumSet::empty();
+                        set.insert(CompactFlags::ForceImageLayerCreation);
+                        set
+                    },
+                    &ctx,
+                )
+                .await?; // force create an image layer for the keys, TODO: check if the image layer is created
+        }
+
+        async fn get_vectored_impl_wrapper(
+            tline: &Arc<Timeline>,
+            key: Key,
+            lsn: Lsn,
+            ctx: &RequestContext,
+        ) -> Result<Option<Bytes>, GetVectoredError> {
+            let mut reconstruct_state = ValuesReconstructState::new();
+            let mut res = tline
+                .get_vectored_impl(
+                    KeySpace::single(key..key.next()),
+                    lsn,
+                    &mut reconstruct_state,
+                    ctx,
+                )
+                .await?;
+            Ok(res.pop_last().map(|(k, v)| {
+                assert_eq!(k, key);
+                v.unwrap()
+            }))
+        }
+
+        // test vectored get on parent timeline
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_key, lsn, &ctx).await?,
+            Some(test_img("data key 1"))
+        );
+        assert!(get_vectored_impl_wrapper(&tline, base_key_child, lsn, &ctx)
+            .await
+            .unwrap_err()
+            .is_missing_key_error());
+        assert!(
+            get_vectored_impl_wrapper(&tline, base_key_nonexist, lsn, &ctx)
+                .await
+                .unwrap_err()
+                .is_missing_key_error()
+        );
+
+        // test vectored get on child timeline
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key, lsn, &ctx).await?,
+            Some(test_img("data key 1"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key_child, lsn, &ctx).await?,
+            Some(test_img("data key 2"))
+        );
+        assert!(
+            get_vectored_impl_wrapper(&child, base_key_nonexist, lsn, &ctx)
+                .await
+                .unwrap_err()
+                .is_missing_key_error()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_vectored_missing_metadata_key_reads() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+        let mut base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
+        let mut base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
+        base_key.field1 = AUX_KEY_PREFIX;
+        base_key_child.field1 = AUX_KEY_PREFIX;
+        base_key_nonexist.field1 = AUX_KEY_PREFIX;
+
+        let mut lsn = Lsn(0x20);
+
+        {
+            let mut writer = tline.writer().await;
+            writer
+                .put(
+                    base_key,
+                    lsn,
+                    &Value::Image(test_img("metadata key 1")),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+
+            tline.freeze_and_flush().await?; // this will create an image layer
+
+            tline
+                .compact(
+                    &cancel,
+                    {
+                        let mut set = EnumSet::empty();
+                        set.insert(CompactFlags::ForceImageLayerCreation);
+                        set.insert(CompactFlags::ForceRepartition);
+                        set
+                    },
+                    &ctx,
+                )
+                .await?; // force create an image layer for metadata keys
             tenant
                 .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
                 .await?;
         }
+
+        let child = tenant
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
+            .await
+            .unwrap();
+
+        lsn.0 += 0x10;
+
+        {
+            let mut writer = child.writer().await;
+            writer
+                .put(
+                    base_key_child,
+                    lsn,
+                    &Value::Image(test_img("metadata key 2")),
+                    &ctx,
+                )
+                .await?;
+            writer.finish_write(lsn);
+            drop(writer);
+
+            child.freeze_and_flush().await?;
+
+            child
+                .compact(
+                    &cancel,
+                    {
+                        let mut set = EnumSet::empty();
+                        set.insert(CompactFlags::ForceImageLayerCreation);
+                        set.insert(CompactFlags::ForceRepartition);
+                        set
+                    },
+                    &ctx,
+                )
+                .await?; // force create an image layer for metadata keys
+            tenant
+                .gc_iteration(Some(child.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .await?;
+        }
+
+        async fn get_vectored_impl_wrapper(
+            tline: &Arc<Timeline>,
+            key: Key,
+            lsn: Lsn,
+            ctx: &RequestContext,
+        ) -> Result<Option<Bytes>, GetVectoredError> {
+            let mut reconstruct_state = ValuesReconstructState::new();
+            let mut res = tline
+                .get_vectored_impl(
+                    KeySpace::single(key..key.next()),
+                    lsn,
+                    &mut reconstruct_state,
+                    ctx,
+                )
+                .await?;
+            Ok(res.pop_last().map(|(k, v)| {
+                assert_eq!(k, key);
+                v.unwrap()
+            }))
+        }
+
+        // test vectored get on parent timeline
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_key, lsn, &ctx).await?,
+            Some(test_img("metadata key 1"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_key_child, lsn, &ctx).await?,
+            None
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, base_key_nonexist, lsn, &ctx).await?,
+            None
+        );
+
+        // test vectored get on child timeline
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key, lsn, &ctx).await?,
+            None
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key_child, lsn, &ctx).await?,
+            Some(test_img("metadata key 2"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&child, base_key_nonexist, lsn, &ctx).await?,
+            None
+        );
 
         Ok(())
     }
