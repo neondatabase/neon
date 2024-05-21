@@ -1593,7 +1593,7 @@ where
             let lsn = if let Some(lsn_str) = params.get(2) {
                 Some(
                     Lsn::from_str(lsn_str)
-                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                        .with_context(|| format!("Failed to parse Lsn from {lsn_str}"))?,
                 )
             } else {
                 None
@@ -1694,7 +1694,7 @@ where
             let lsn = if let Some(lsn_str) = params.get(2) {
                 Some(
                     Lsn::from_str(lsn_str)
-                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                        .with_context(|| format!("Failed to parse Lsn from {lsn_str}"))?,
                 )
             } else {
                 None
@@ -1702,7 +1702,7 @@ where
             let prev_lsn = if let Some(prev_lsn_str) = params.get(3) {
                 Some(
                     Lsn::from_str(prev_lsn_str)
-                        .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?,
+                        .with_context(|| format!("Failed to parse Lsn from {prev_lsn_str}"))?,
                 )
             } else {
                 None
