@@ -60,10 +60,15 @@ class HistoricLayerInfo:
     lsn_start: str
     lsn_end: Optional[str]
     remote: bool
-    l0: Optional[str]
+    # None for image layers, true if pageserver thinks this is an L0 delta layer
+    l0: Optional[bool]
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
+        # instead of parsing the key range lets keep the definition of "L0" in pageserver
+        l0_ness = d.get("l0")
+        assert l0_ness is None or isinstance(l0_ness, bool)
+
         return HistoricLayerInfo(
             kind=d["kind"],
             layer_file_name=d["layer_file_name"],
@@ -71,7 +76,7 @@ class HistoricLayerInfo:
             lsn_start=d["lsn_start"],
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
-            l0=d.get("l0"),
+            l0=l0_ness,
         )
 
 
