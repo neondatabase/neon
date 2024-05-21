@@ -883,22 +883,39 @@ jobs:
           curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
+        run: |
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
         run: |
-          docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          docker pull neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Build vm image
         run: |
           ./vm-builder \
             -spec=vm-image-spec.yaml \
-            -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
-            -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+            -src=neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
+            -dst=neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Pushing vm-compute-node image
         run: |
-          docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          docker push neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
 
   test-images:
     needs: [ check-permissions, tag, neon-image, compute-node-image ]
@@ -963,11 +980,11 @@ jobs:
           username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-      - name: Copy vm-compute-node images to Docker Hub
+      - name: Copy vm-compute-node images to ECR
         run: |
           for version in ${VERSIONS}; do
-            docker buildx imagetools create -t neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
-                                               369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
+            docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
+                                               neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
           done
 
       - name: Add latest tag to images
