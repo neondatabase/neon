@@ -1901,14 +1901,14 @@ async fn timeline_detach_ancestor_handler(
         let ctx = RequestContext::new(TaskKind::DetachAncestor, DownloadBehavior::Download);
         let ctx = &ctx;
 
+        // FIXME: why is there no conversion?
         let timeline = tenant
             .get_timeline(timeline_id, true)
             .map_err(|e| ApiError::NotFound(e.into()))?;
 
         let (_guard, prepared) = timeline
             .prepare_to_detach_from_ancestor(&tenant, options, ctx)
-            .await
-            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            .await?;
 
         let res = state
             .tenant_manager

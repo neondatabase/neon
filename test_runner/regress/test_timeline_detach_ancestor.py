@@ -8,9 +8,13 @@ from typing import List, Tuple
 import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
-from fixtures.pageserver.http import HistoricLayerInfo
-from fixtures.pageserver.utils import wait_timeline_detail_404
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    PgBin,
+    wait_for_last_flush_lsn,
+)
+from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
+from fixtures.pageserver.utils import wait_tenant_status_404, wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage
 from fixtures.utils import assert_pageserver_backups_equal
 
@@ -553,6 +557,32 @@ def test_compaction_induced_by_detaches_in_history(
 
     # we don't need to skip any files, because zenith.signal will be identical
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
+
+
+def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    client = env.pageserver.http_client()
+
+    with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, env.initial_timeline)
+    assert info.value.status_code == 409
+
+    first_branch = env.neon_cli.create_branch("first_branch")
+    second_branch = env.neon_cli.create_branch("second_branch", ancestor_branch_name="first_branch")
+
+    # funnily enough this does not have a prefix
+    with pytest.raises(PageserverApiException, match="too many ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, second_branch)
+    assert info.value.status_code == 400
+
+    client.tenant_delete(env.initial_tenant)
+    wait_tenant_status_404(client, env.initial_tenant, 10, 1)
+
+    with pytest.raises(PageserverApiException) as e:
+        client.detach_ancestor(env.initial_tenant, first_branch)
+    assert e.value.status_code == 404
 
 
 # TODO:
