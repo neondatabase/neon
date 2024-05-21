@@ -167,10 +167,16 @@ impl std::fmt::Debug for TenantState {
 #[serde_as]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LsnLease {
-    #[serde(rename = "valid_until_millis_since_epoch")]
-    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
+    #[serde_as(as = "SystemTimeAsRfc3339Millis")]
     pub valid_until: SystemTime,
 }
+s
+serde_with::serde_conv!(
+    SystemTimeAsRfc3339Millis,
+    SystemTime,
+    |time: &SystemTime| humantime::format_rfc3339_millis(*time).to_string(),
+    |value: String| -> Result<_, humantime::TimestampError> { humantime::parse_rfc3339(&value) }
+);
 
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -1014,11 +1014,11 @@ components:
     LsnLease:
       type: object
       required:
-        - valid_until_millis_since_epoch
+        - valid_until
       properties:
-        valid_until_millis_since_epoch:
-          type: integer
-          format: int64
+        valid_until:
+          type: string
+          format: date-time
 
     PageserverUtilization:
       type: object
