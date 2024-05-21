@@ -1593,22 +1593,21 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            let lsn = if params.len() >= 3 {
+            let lsn = if let Some(lsn_str) = params.get(2) {
                 Some(
-                    Lsn::from_str(params[2])
+                    Lsn::from_str(lsn_str)
                         .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
                 )
             } else {
                 None
             };
 
-            let gzip = if params.len() >= 4 {
-                if params[3] == "--gzip" {
+            let gzip = if let Some(third_param) = params.get(3) {
+                if *third_param == "--gzip" {
                     true
                 } else {
                     return Err(QueryError::Other(anyhow::anyhow!(
-                        "Parameter in position 3 unknown {}",
-                        params[3],
+                        "Parameter in position 3 unknown {third_param}",
                     )));
                 }
             } else {
@@ -1699,17 +1698,17 @@ where
                 .record("timeline_id", field::display(timeline_id));
 
             // The caller is responsible for providing correct lsn and prev_lsn.
-            let lsn = if params.len() > 2 {
+            let lsn = if let Some(lsn_str) = params.get(2) {
                 Some(
-                    Lsn::from_str(params[2])
+                    Lsn::from_str(lsn_str)
                         .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
                 )
             } else {
                 None
             };
-            let prev_lsn = if params.len() > 3 {
+            let prev_lsn = if let Some(prev_lsn_str) = params.get(3) {
                 Some(
-                    Lsn::from_str(params[3])
+                    Lsn::from_str(prev_lsn_str)
                         .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?,
                 )
             } else {
