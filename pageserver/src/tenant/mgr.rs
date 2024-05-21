@@ -7,7 +7,7 @@ use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::LocationConfigMode;
 use pageserver_api::shard::{
-    ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId
+    ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
 };
 use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::{distributions::Alphanumeric, Rng};
@@ -2069,7 +2069,9 @@ impl TenantManager {
                                 return ShardResolveResult::Found(tenant.clone());
                             }
                         }
-                        ShardSelector::Known(shard) if tenant.shard_identity.shard_index() == shard => {
+                        ShardSelector::Known(shard)
+                            if tenant.shard_identity.shard_index() == shard =>
+                        {
                             return ShardResolveResult::Found(tenant.clone());
                         }
                         _ => continue,

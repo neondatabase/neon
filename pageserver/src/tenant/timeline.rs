@@ -1506,7 +1506,11 @@ impl Timeline {
     }
 
     /// Obtains a temporary lease blocking garbage collection for the given LSN
-    pub(crate) fn make_lsn_lease(&self, _lsn: Lsn, _ctx: &RequestContext) -> anyhow::Result<LsnLease> {
+    pub(crate) fn make_lsn_lease(
+        &self,
+        _lsn: Lsn,
+        _ctx: &RequestContext,
+    ) -> anyhow::Result<LsnLease> {
         const LEASE_LENGTH: Duration = Duration::from_secs(5 * 60);
         let lease = LsnLease {
             valid_until: SystemTime::now() + LEASE_LENGTH,

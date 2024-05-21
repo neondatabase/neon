@@ -170,7 +170,7 @@ pub struct LsnLease {
     #[serde_as(as = "SystemTimeAsRfc3339Millis")]
     pub valid_until: SystemTime,
 }
-s
+
 serde_with::serde_conv!(
     SystemTimeAsRfc3339Millis,
     SystemTime,
