@@ -991,6 +991,10 @@ jobs:
         timeout-minutes: 20
         run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
 
+      - name: Test extensions
+        timeout-minutes: 25
+        run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test_extensions.sh
+
       - name: Print logs and clean up
         if: always()
         run: |
