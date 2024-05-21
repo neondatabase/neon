@@ -56,7 +56,7 @@ class InMemoryLayerInfo:
 class HistoricLayerInfo:
     kind: str
     layer_file_name: str
-    layer_file_size: Optional[int]
+    layer_file_size: int
     lsn_start: str
     lsn_end: Optional[str]
     remote: bool
@@ -69,10 +69,13 @@ class HistoricLayerInfo:
         l0_ness = d.get("l0")
         assert l0_ness is None or isinstance(l0_ness, bool)
 
+        size = d["layer_file_size"]
+        assert isinstance(size, int)
+
         return HistoricLayerInfo(
             kind=d["kind"],
             layer_file_name=d["layer_file_name"],
-            layer_file_size=d.get("layer_file_size"),
+            layer_file_size=size,
             lsn_start=d["lsn_start"],
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
