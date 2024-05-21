@@ -709,16 +709,8 @@ pageserver_disconnect_shard(shardno_t shard_no)
 	 * of the wait event sets or the psql connection, or failed when we tried
 	 * to attach wait events to the WaitEventSets.
 	 */
-	if (shard->wes_write)
-		FreeWaitEventSet(shard->wes_write);
-	if (shard->wes_read)
-		FreeWaitEventSet(shard->wes_read);
-	if (shard->conn)
-		PQfinish(shard->conn);
+	CLEANUP_AND_DISCONNECT(shard);
 
-	shard->conn = NULL;
-	shard->wes_read = NULL;
-	shard->wes_write = NULL;
 	shard->state = PS_Disconnected;
 }
 
