@@ -5996,7 +5996,7 @@ mod tests {
             Some(&bytes::Bytes::from_static(b"last"))
         );
 
-        // Check if we are going to remove v1 aux files.
+        // Check that we are going to remove v1 aux files.
         let (mut dense_keyspace, _) = tline.collect_keyspace(lsn, &ctx).await.unwrap();
         assert!(dense_keyspace.remove_overlapping_with(&KeySpace::single(AUX_FILES_KEY..AUX_FILES_KEY.next())).is_empty());
     }
