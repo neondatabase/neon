@@ -12,7 +12,7 @@ use crate::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use utils::{completion, generation::Generation, id::TimelineId, lsn::Lsn};
+use utils::{completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -39,6 +39,25 @@ pub(crate) enum Error {
 
     #[error("unexpected error")]
     Unexpected(#[source] anyhow::Error),
+}
+
+impl From<Error> for ApiError {
+    fn from(value: Error) -> Self {
+        match value {
+            e @ Error::NoAncestor => ApiError::Conflict(e.to_string()),
+            e @ Error::TooManyAncestors => ApiError::BadRequest(e.into()),
+            e @ Error::ShuttingDown => ApiError::InternalServerError(e.into()),
+            Error::OtherTimelineDetachOngoing(_) => {
+                ApiError::ResourceUnavailable("other timeline detach is already ongoing".into())
+            }
+            e @ Error::FlushAncestor(_)
+            | e @ Error::RewrittenDeltaDownloadFailed(_)
+            | e @ Error::CopyDeltaPrefix(_)
+            | e @ Error::UploadRewritten(_)
+            | e @ Error::CopyFailed(_)
+            | e @ Error::Unexpected(_) => ApiError::InternalServerError(e.into()),
+        }
+    }
 }
 
 pub(crate) struct PreparedTimelineDetach {
