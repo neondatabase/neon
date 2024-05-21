@@ -646,25 +646,44 @@ paths:
           description: |
             Number of early checks meaning the timeline cannot be detached now:
               - timeline ancestor has an ancestor: not supported, see RFC
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
         "404":
-          description: |
-            No such tenant or timeline exists.
+          description: Tenant or timeline not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
 
         "409":
           description: |
             The timeline can never be detached:
               - timeline has no ancestor:
                   - implies that the timeline has not been detached before
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
 
         "500":
           description: |
             Transient error, for example, pageserver restart happened while processing the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
         "503":
           description: |
             Temporarily unavailable, please retry. Possible reasons:
               - another timeline detach for the same tenant is underway, please retry later
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
 
 
   /v1/tenant/:
