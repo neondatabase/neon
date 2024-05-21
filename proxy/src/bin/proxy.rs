@@ -283,8 +283,6 @@ async fn main() -> anyhow::Result<()> {
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
 
-    Metrics::install(config.authentication_config.thread_pool.metrics.clone());
-
     info!("Authentication backend: {}", config.auth_backend);
     info!("Using region: {}", config.aws_region);
 
@@ -495,6 +493,9 @@ async fn main() -> anyhow::Result<()> {
 
 /// ProxyConfig is created at proxy startup, and lives forever.
 fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
+    let thread_pool = ThreadPool::new(args.scram_thread_pool_size);
+    Metrics::install(thread_pool.metrics.clone());
+
     let tls_config = match (&args.tls_key, &args.tls_cert) {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
             key_path,
@@ -630,7 +631,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
     };
     let authentication_config = AuthenticationConfig {
-        thread_pool: ThreadPool::new(args.scram_thread_pool_size),
+        thread_pool,
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
