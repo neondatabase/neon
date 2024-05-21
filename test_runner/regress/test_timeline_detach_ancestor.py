@@ -68,7 +68,6 @@ SHUTDOWN_ALLOWED_ERRORS = [
 @pytest.mark.parametrize("write_to_branch_first", [True, False])
 def test_ancestor_detach_branched_from(
     test_output_dir,
-    pg_distrib_dir,
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
     branchpoint: Branchpoint,
@@ -80,7 +79,6 @@ def test_ancestor_detach_branched_from(
     """
     env = neon_env_builder.init_start()
 
-    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
     client = env.pageserver.http_client()
@@ -169,7 +167,7 @@ def test_ancestor_detach_branched_from(
         "-o",
         str(fullbackup_before),
     ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.run_capture(cmd)
 
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
     assert all_reparented == set()
@@ -209,7 +207,7 @@ def test_ancestor_detach_branched_from(
         "-o",
         str(fullbackup_after),
     ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.run_capture(cmd)
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
@@ -483,7 +481,7 @@ def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEn
 
 
 def test_compaction_induced_by_detaches_in_history(
-    neon_env_builder: NeonEnvBuilder, test_output_dir, pg_distrib_dir, pg_bin: PgBin
+    neon_env_builder: NeonEnvBuilder, test_output_dir, pg_bin: PgBin
 ):
     """
     Assuming the tree of timelines:
@@ -499,8 +497,6 @@ def test_compaction_induced_by_detaches_in_history(
     L1s, we want to make sure "compaction in the history" does not leave the
     timeline broken.
     """
-
-    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -598,7 +594,7 @@ def test_compaction_induced_by_detaches_in_history(
         "-o",
         str(fullbackup_before),
     ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.run_capture(cmd)
 
     for _, timeline_id in skip_main:
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
@@ -633,7 +629,7 @@ def test_compaction_induced_by_detaches_in_history(
         "-o",
         str(fullbackup_after),
     ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.run_capture(cmd)
 
     # we don't need to skip any files, because zenith.signal will be identical
     tar_cmp(fullbackup_before, fullbackup_after, set())
