@@ -2319,25 +2319,16 @@ async fn force_aux_policy_switch_handler(
 
     let state = get_state(&r);
 
-    let process = || async move {
-        let tenant = state
-            .tenant_manager
-            .get_attached_tenant_shard(tenant_shard_id)?;
-        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
-        let timeline =
-            active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
-                .await?;
-        timeline.do_switch_aux_policy(policy)?;
-        Ok(())
-    };
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+    timeline.do_switch_aux_policy(policy)?;
 
-    match process().await {
-        Ok(st) => json_response(StatusCode::OK, st),
-        Err(err) => json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::InternalServerError(err).to_string(),
-        ),
-    }
+    json_response(StatusCode::OK, Ok(()))
 }
 
 async fn put_io_engine_handler(
