@@ -21,7 +21,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.utils import subprocess_capture
+from fixtures.utils import assert_pageserver_backups_equal, subprocess_capture
 
 
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
@@ -248,15 +248,9 @@ def _import(
     path to the backup archive file"""
     log.info(f"start_backup_lsn = {lsn}")
 
-    # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
-    # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
-
     # Get a fullbackup from pageserver
-    query = f"fullbackup { env.initial_tenant} {timeline} {lsn}"
     tar_output_file = test_output_dir / "fullbackup.tar"
-    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query, "-o", str(tar_output_file)]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.take_fullbackup(env.pageserver, env.initial_tenant, timeline, lsn, tar_output_file)
 
     # Stop the first pageserver instance, erase all its data
     env.endpoints.stop_all()
@@ -305,22 +299,11 @@ def _import(
     assert endpoint.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
 
     # Take another fullbackup
-    query = f"fullbackup { tenant} {timeline} {lsn}"
     new_tar_output_file = test_output_dir / "fullbackup-new.tar"
-    cmd = [
-        "psql",
-        "--no-psqlrc",
-        env.pageserver.connstr(),
-        "-c",
-        query,
-        "-o",
-        str(new_tar_output_file),
-    ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.take_fullbackup(env.pageserver, tenant, timeline, lsn, new_tar_output_file)
 
     # Check it's the same as the first fullbackup
-    # TODO pageserver should be checking checksum
-    assert os.path.getsize(tar_output_file) == os.path.getsize(new_tar_output_file)
+    assert_pageserver_backups_equal(tar_output_file, new_tar_output_file, set())
 
     # Check that gc works
     pageserver_http = env.pageserver.http_client()
