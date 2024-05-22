@@ -73,7 +73,7 @@ for pg_version in 16; do
             mkdir $d
             docker cp $TEST_CONTAINER_NAME:/ext-src/$d/regression.diffs $d || true
             docker cp $TEST_CONTAINER_NAME:/ext-src/$d/regression.out $d || true
-            cat $d/regression.out $d/regression.diff || true
+            cat $d/regression.out $d/regression.diffs || true
         done
     rm -rf $FAILED
     cleanup
