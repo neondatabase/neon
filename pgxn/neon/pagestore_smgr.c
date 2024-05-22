@@ -3216,7 +3216,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	BufferTag	tag;
 	uint32		hash;
 	LWLock	   *partitionLock;
-	Buffer		buffer;
+	int			buf_id;
 	bool		no_redo_needed;
 
 	if (old_redo_read_buffer_filter && old_redo_read_buffer_filter(record, block_id))
@@ -3254,9 +3254,9 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	else
 	{
 		/* Try to find the relevant buffer */
-		buffer = BufTableLookup(&tag, hash);
+		buf_id = BufTableLookup(&tag, hash);
 
-		no_redo_needed = buffer < 0;
+		no_redo_needed = buf_id < 0;
 	}
 	/* In both cases st lwlsn past this WAL record */
 	SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
