@@ -287,7 +287,7 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
             total_historic_bytes += sum(
                 layer.layer_file_size
                 for layer in layer_map.historic_layers
-                if layer.layer_file_size is not None and Lsn(layer.lsn_start) > initdb_lsn
+                if Lsn(layer.lsn_start) > initdb_lsn
             )
             total_ephemeral_layers += len(layer_map.in_memory_layers)
 
