@@ -1798,6 +1798,12 @@ impl<'a> DatadirModification<'a> {
         self.tline.get(key, lsn, ctx).await
     }
 
+    /// Only used during unit tests, force putting a key into the modification.
+    #[cfg(test)]
+    pub(crate) fn put_for_test(&mut self, key: Key, val: Value) {
+        self.put(key, val);
+    }
+
     fn put(&mut self, key: Key, val: Value) {
         let values = self.pending_updates.entry(key).or_default();
         // Replace the previous value if it exists at the same lsn
