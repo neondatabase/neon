@@ -41,7 +41,7 @@ pub struct IndexPart {
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
     // It's duplicated for convenience when reading the serialized structure, but is
     // private because internally we would read from metadata instead.
-    disk_consistent_lsn: Lsn,
+    pub(super) disk_consistent_lsn: Lsn,
 
     #[serde(rename = "metadata_bytes")]
     pub metadata: TimelineMetadata,

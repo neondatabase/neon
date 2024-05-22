@@ -647,11 +647,13 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
     ) -> anyhow::Result<()> {
+        let disk_consistent_lsn = upload_queue.dirty.metadata.disk_consistent_lsn();
+        // fix up the duplicated field
+        upload_queue.dirty.disk_consistent_lsn = disk_consistent_lsn;
+
         let serialized =
             serde_json::to_vec(&upload_queue.dirty).context("serialize index_part.json")?;
         let serialized = bytes::Bytes::from(serialized);
-
-        let disk_consistent_lsn = upload_queue.dirty.metadata.disk_consistent_lsn();
 
         let index_part = &upload_queue.dirty;
 
