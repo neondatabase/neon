@@ -627,15 +627,15 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         if now > initial_download_deadline:
             raise RuntimeError("Timed out waiting for initial secondary download")
         else:
-            await_timeline = timelines[-1]
-            log.info(
-                f"Waiting for downloads of timeline {await_timeline} on secondary pageserver {ps_secondary.id}"
-            )
-            await_log(
-                ps_secondary,
-                initial_download_deadline,
-                f".*{await_timeline}.*Wrote timeline_detail.*",
-            )
+            for timeline_id in timelines:
+                log.info(
+                    f"Waiting for downloads of timeline {timeline_id} on secondary pageserver {ps_secondary.id}"
+                )
+                await_log(
+                    ps_secondary,
+                    initial_download_deadline,
+                    f".*{timeline_id}.*Wrote timeline_detail.*",
+                )
 
         for timeline_id in timelines:
             log.info(
