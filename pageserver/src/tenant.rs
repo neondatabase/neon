@@ -6028,7 +6028,7 @@ mod tests {
             modification.commit(&ctx).await.unwrap();
         }
 
-        tline.force_switch_aux_policy(AuxFilePolicy::V2).unwrap();
+        tline.do_switch_aux_policy(AuxFilePolicy::V2).unwrap();
 
         assert_eq!(
             tline.last_aux_file_policy.load(),

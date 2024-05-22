@@ -2327,7 +2327,7 @@ async fn force_aux_policy_switch_handler(
         let timeline =
             active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
                 .await?;
-        timeline.force_switch_aux_policy(policy)?;
+        timeline.do_switch_aux_policy(policy)?;
         Ok(())
     };
 
@@ -2417,19 +2417,9 @@ async fn list_aux_files(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
-    let process = || async move {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        let files = timeline.list_aux_files(body.lsn, &ctx).await?;
-        Ok::<_, anyhow::Error>(files)
-    };
-
-    match process().await {
-        Ok(st) => json_response(StatusCode::OK, st),
-        Err(err) => json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::InternalServerError(err).to_string(),
-        ),
-    }
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let files = timeline.list_aux_files(body.lsn, &ctx).await?;
+    json_response(StatusCode::OK, files)
 }
 
 async fn ingest_aux_files(
