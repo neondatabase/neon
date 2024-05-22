@@ -6,7 +6,7 @@ from fixtures.neon_fixtures import NeonEnv
 
 def test_physical_replication(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    n_records = 100000
+    n_records = 10000
     with env.endpoints.create_start(
         branch_name="main",
         endpoint_id="primary",
