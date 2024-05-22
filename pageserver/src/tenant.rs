@@ -3973,7 +3973,7 @@ mod tests {
     use hex_literal::hex;
     use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
-    use pageserver_api::models::CompactionAlgorithm;
+    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use rand::{thread_rng, Rng};
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
@@ -5169,7 +5169,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name)?;
-        harness.tenant_conf.compaction_algorithm = compaction_algorithm;
+        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+            kind: compaction_algorithm,
+        };
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -5526,7 +5528,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name)?;
-        harness.tenant_conf.compaction_algorithm = compaction_algorithm;
+        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+            kind: compaction_algorithm,
+        };
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)

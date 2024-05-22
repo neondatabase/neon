@@ -194,8 +194,8 @@ def test_sharding_compaction(
 
 
 class CompactionAlgorithm(str, enum.Enum):
-    LEGACY = "Legacy"
-    TIERED = "Tiered"
+    LEGACY = "legacy"
+    TIERED = "tiered"
 
 
 @pytest.mark.parametrize(
