@@ -179,6 +179,13 @@ where
             // Schedule some work, if concurrency limit permits it
             self.spawn_pending();
 
+            // This message is printed every scheduling iteration as proof of liveness when looking at logs
+            tracing::info!(
+                "Status: {} tasks running, {} pending",
+                self.running.len(),
+                self.pending.len()
+            );
+
             // Between scheduling iterations, we will:
             //  - Drain any complete tasks and spawn pending tasks
             //  - Handle incoming administrative commands

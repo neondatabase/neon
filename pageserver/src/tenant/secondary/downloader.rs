@@ -93,7 +93,7 @@ pub(super) async fn downloader_task(
 
     scheduler
         .run(command_queue, background_jobs_can_start, cancel)
-        .instrument(info_span!("secondary_downloads"))
+        .instrument(info_span!("secondary_download_scheduler"))
         .await
 }
 
