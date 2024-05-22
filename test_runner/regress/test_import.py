@@ -296,6 +296,7 @@ def _import(
     assert endpoint.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
 
     import time
+
     time.sleep(5)
 
     # Take another fullbackup
