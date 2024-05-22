@@ -295,7 +295,7 @@ def _import(
     wait_for_upload(client, tenant, timeline, lsn)
 
     # Check it worked
-    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
+    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant, lsn=lsn)
     assert endpoint.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
 
     # Take another fullbackup
