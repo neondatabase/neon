@@ -1489,14 +1489,7 @@ impl<'a> DatadirModification<'a> {
                 if aux_files_key_v1.is_empty() {
                     None
                 } else {
-                    self.tline
-                        .last_aux_file_policy
-                        .store(Some(AuxFilePolicy::V1));
-                    self.tline
-                        .remote_client
-                        .schedule_index_upload_for_aux_file_policy_update(Some(
-                            AuxFilePolicy::V1,
-                        ))?;
+                    self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
                     Some(AuxFilePolicy::V1)
                 }
             } else {
@@ -1504,10 +1497,7 @@ impl<'a> DatadirModification<'a> {
             };
 
             if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
-                self.tline.last_aux_file_policy.store(Some(switch_policy));
-                self.tline
-                    .remote_client
-                    .schedule_index_upload_for_aux_file_policy_update(Some(switch_policy))?;
+                self.tline.do_switch_aux_policy(switch_policy)?;
                 info!(current=?current_policy, next=?switch_policy, "switching aux file policy");
                 switch_policy
             } else {

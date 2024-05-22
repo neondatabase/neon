@@ -16,6 +16,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
@@ -2307,6 +2308,31 @@ async fn post_tracing_event_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn force_aux_policy_switch_handler(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+    let tenant_shard_id: TenantShardId = parse_request_param(&r, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&r, "timeline_id")?;
+    let policy: AuxFilePolicy = json_request(&mut r).await?;
+
+    let state = get_state(&r);
+
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+    timeline
+        .do_switch_aux_policy(policy)
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn put_io_engine_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
@@ -2384,19 +2410,9 @@ async fn list_aux_files(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
-    let process = || async move {
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        let files = timeline.list_aux_files(body.lsn, &ctx).await?;
-        Ok::<_, anyhow::Error>(files)
-    };
-
-    match process().await {
-        Ok(st) => json_response(StatusCode::OK, st),
-        Err(err) => json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::InternalServerError(err).to_string(),
-        ),
-    }
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let files = timeline.list_aux_files(body.lsn, &ctx).await?;
+    json_response(StatusCode::OK, files)
 }
 
 async fn ingest_aux_files(
@@ -2414,24 +2430,22 @@ async fn ingest_aux_files(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
-    let process = || async move {
-        let mut modification = timeline.begin_modification(Lsn(
-            timeline.get_last_record_lsn().0 + 8
-        ) /* advance LSN by 8 */);
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        for (fname, content) in body.aux_files {
-            modification
-                .put_file(&fname, content.as_bytes(), &ctx)
-                .await?;
-        }
-        modification.commit(&ctx).await?;
-        Ok::<_, anyhow::Error>(())
-    };
-
-    match process().await {
-        Ok(st) => json_response(StatusCode::OK, st),
-        Err(err) => Err(ApiError::InternalServerError(err)),
+    let mut modification = timeline.begin_modification(
+        Lsn(timeline.get_last_record_lsn().0 + 8), /* advance LSN by 8 */
+    );
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    for (fname, content) in body.aux_files {
+        modification
+            .put_file(&fname, content.as_bytes(), &ctx)
+            .await
+            .map_err(ApiError::InternalServerError)?;
     }
+    modification
+        .commit(&ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
 }
 
 /// Report on the largest tenants on this pageserver, for the storage controller to identify
@@ -2814,6 +2828,10 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",
+            |r| api_handler(r, force_aux_policy_switch_handler),
+        )
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/ingest_aux_files",

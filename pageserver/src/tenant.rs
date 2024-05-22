@@ -6000,6 +6000,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aux_file_policy_force_switch() {
+        let mut harness = TenantHarness::create("aux_file_policy_force_switch").unwrap();
+        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V1;
+        let (tenant, ctx) = harness.load().await;
+
+        let mut lsn = Lsn(0x08);
+
+        let tline: Arc<Timeline> = tenant
+            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            None,
+            "no aux file is written so it should be unset"
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test1", b"first", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        tline.do_switch_aux_policy(AuxFilePolicy::V2).unwrap();
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::V2),
+            "dirty index_part.json reflected state is yet to be updated"
+        );
+
+        // lose all data from v1
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(files.get("pg_logical/mappings/test1"), None);
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test2", b"second", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        // read data ingested in v2
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test2"),
+            Some(&bytes::Bytes::from_static(b"second"))
+        );
+        // lose all data from v1
+        assert_eq!(files.get("pg_logical/mappings/test1"), None);
+    }
+
+    #[tokio::test]
     async fn aux_file_policy_auto_detect() {
         let mut harness = TenantHarness::create("aux_file_policy_auto_detect").unwrap();
         harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V2; // set to cross-validation mode
