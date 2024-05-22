@@ -272,7 +272,9 @@ where
         while !self.pending.is_empty() && self.running.len() < self.concurrency {
             // unwrap: loop condition includes !is_empty()
             let pending = self.pending.pop_front().unwrap();
-            self.do_spawn(pending);
+            if !self.running.contains_key(pending.get_tenant_shard_id()) {
+                self.do_spawn(pending);
+            }
         }
     }
 
