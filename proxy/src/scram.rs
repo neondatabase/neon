@@ -10,6 +10,7 @@ mod countmin;
 mod exchange;
 mod key;
 mod messages;
+mod pbkdf2;
 mod secret;
 mod signature;
 pub mod threadpool;

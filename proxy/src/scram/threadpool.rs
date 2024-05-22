@@ -10,15 +10,10 @@ use std::sync::{
 };
 
 use crossbeam_deque::{Injector, Stealer, Worker};
-use hmac::{
-    digest::{consts::U32, generic_array::GenericArray},
-    Hmac, Mac,
-};
 use itertools::Itertools;
 use parking_lot::{Condvar, Mutex};
 use rand::Rng;
 use rand::{rngs::SmallRng, SeedableRng};
-use sha2::Sha256;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -26,6 +21,8 @@ use crate::{
     metrics::{ThreadPoolMetrics, ThreadPoolWorkerId},
     scram::countmin::CountMinSketch,
 };
+
+use super::pbkdf2::Pbkdf2;
 
 pub struct ThreadPool {
     queue: Injector<JobSpec>,
@@ -202,9 +199,8 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
     let mut rng = SmallRng::from_entropy();
 
     // used to determine whether we should temporarily skip tasks for fairness.
-    // 99% of estimates will overcount by no more than 1 samples
-    let mut sketch =
-        CountMinSketch::with_params((1.0 / (SKETCH_RESET_INTERVAL as f64)).sqrt(), 0.01);
+    // 99% of estimates will overcount by no more than 4096 samples
+    let mut sketch = CountMinSketch::with_params(1.0 / (SKETCH_RESET_INTERVAL as f64), 0.01);
 
     let (condvar, lock) = &pool.parkers[index];
 
@@ -295,66 +291,6 @@ struct JobSpec {
     response: oneshot::Sender<[u8; 32]>,
     pbkdf2: Pbkdf2,
     endpoint: EndpointIdInt,
-}
-
-pub struct Pbkdf2 {
-    hmac: Hmac<Sha256>,
-    prev: GenericArray<u8, U32>,
-    hi: GenericArray<u8, U32>,
-    iterations: u32,
-}
-
-// inspired from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
-impl Pbkdf2 {
-    pub fn start(str: &[u8], salt: &[u8], iterations: u32) -> Self {
-        let hmac =
-            Hmac::<Sha256>::new_from_slice(str).expect("HMAC is able to accept all key sizes");
-
-        let prev = hmac
-            .clone()
-            .chain_update(salt)
-            .chain_update(1u32.to_be_bytes())
-            .finalize()
-            .into_bytes();
-
-        Self {
-            hmac,
-            // one consumed for the hash above
-            iterations: iterations - 1,
-            hi: prev,
-            prev,
-        }
-    }
-
-    fn cost(&self) -> u32 {
-        (self.iterations).clamp(0, 4096)
-    }
-
-    fn turn(&mut self) -> std::task::Poll<[u8; 32]> {
-        let Self {
-            hmac,
-            prev,
-            hi,
-            iterations,
-        } = self;
-
-        // only do 4096 iterations per turn before sharing the thread for fairness
-        let n = (*iterations).clamp(0, 4096);
-        for _ in 0..n {
-            *prev = hmac.clone().chain_update(*prev).finalize().into_bytes();
-
-            for (hi, prev) in hi.iter_mut().zip(*prev) {
-                *hi ^= prev;
-            }
-        }
-
-        *iterations -= n;
-        if *iterations == 0 {
-            std::task::Poll::Ready((*hi).into())
-        } else {
-            std::task::Poll::Pending
-        }
-    }
 }
 
 #[cfg(test)]

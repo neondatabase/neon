@@ -8,9 +8,10 @@ use sha2::Sha256;
 use super::messages::{
     ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
 };
+use super::pbkdf2::Pbkdf2;
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
-use super::threadpool::{Pbkdf2, ThreadPool};
+use super::threadpool::ThreadPool;
 use super::ScramKey;
 use crate::config;
 use crate::intern::EndpointIdInt;

@@ -143,6 +143,7 @@ mod tests {
         assert_eq!(eval_precision(1000, 4096.0, 0.99), 1000);
 
         // seems to be more precise than the literature indicates?
+        // probably numbers are too small to truly represent the probabilities.
         assert_eq!(eval_precision(100, 4096.0, 0.90), 100);
         assert_eq!(eval_precision(1000, 4096.0, 0.90), 1000);
         assert_eq!(eval_precision(100, 4096.0, 0.1), 98);

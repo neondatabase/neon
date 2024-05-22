@@ -107,6 +107,7 @@ workspace_hack.workspace = true
 camino-tempfile.workspace = true
 fallible-iterator.workspace = true
 tokio-tungstenite.workspace = true
+pbkdf2 = { workspace = true, features = ["simple", "std"] }
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
