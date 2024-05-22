@@ -51,6 +51,7 @@ impl From<Error> for ApiError {
             Error::OtherTimelineDetachOngoing(_) => {
                 ApiError::ResourceUnavailable("other timeline detach is already ongoing".into())
             }
+            // All of these contain shutdown errors, in fact, it's the most common
             e @ Error::FlushAncestor(_)
             | e @ Error::RewrittenDeltaDownloadFailed(_)
             | e @ Error::CopyDeltaPrefix(_)

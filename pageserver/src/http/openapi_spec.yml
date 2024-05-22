@@ -667,8 +667,9 @@ paths:
 
         "500":
           description: |
-            Transient error, for example, pageserver shutdown happened while processing the request.
-            Must be retried.
+            Transient error, for example, pageserver shutdown happened while
+            processing the request but we were unable to distinguish that. Must
+            be retried.
           content:
             application/json:
               schema:
@@ -678,6 +679,7 @@ paths:
           description: |
             Temporarily unavailable, please retry. Possible reasons:
               - another timeline detach for the same tenant is underway, please retry later
+              - detected shutdown error
           content:
             application/json:
               schema:
