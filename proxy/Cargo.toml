@@ -9,6 +9,7 @@ default = []
 testing = []
 
 [dependencies]
+ahash.workspace = true
 anyhow.workspace = true
 async-compression.workspace = true
 async-trait.workspace = true
@@ -24,6 +25,7 @@ camino.workspace = true
 chrono.workspace = true
 clap.workspace = true
 consumption_metrics.workspace = true
+crossbeam-deque.workspace = true
 dashmap.workspace = true
 env_logger.workspace = true
 framed-websockets.workspace = true
@@ -52,7 +54,6 @@ opentelemetry.workspace = true
 parking_lot.workspace = true
 parquet.workspace = true
 parquet_derive.workspace = true
-pbkdf2 = { workspace = true, features = ["simple", "std"] }
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 pq_proto.workspace = true
@@ -106,6 +107,7 @@ workspace_hack.workspace = true
 camino-tempfile.workspace = true
 fallible-iterator.workspace = true
 tokio-tungstenite.workspace = true
+pbkdf2 = { workspace = true, features = ["simple", "std"] }
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
