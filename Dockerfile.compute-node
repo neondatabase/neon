@@ -979,6 +979,7 @@ RUN apt-get update && apt-get install -y libgdal-dev cmake vim
 #     --without-protobuf --with-interrupt-tests && make 
 COPY <<-"EOF" /run-tests.sh
 #!/bin/bash
+set -x
 
 cd /ext-src
 FAILED=
@@ -988,6 +989,7 @@ do
 	[ -d ${d} ] || continue
 	make -C ${d} installcheck
     rc=$?
+    echo "Return code: $rc"
     [ $rc -gt 0 ] && FAILED="${d} ${FAILED}"
     [ $rc -ge 2 ] && break
 done

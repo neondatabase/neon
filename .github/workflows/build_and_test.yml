@@ -775,59 +775,6 @@ jobs:
         run: |
           rm -rf .docker-custom
 
-  neon-test-image: 
-    needs: [ check-permissions, build-build-tools-image, tag ]
-    runs-on: [ self-hosted, gen3, large ]
-
-    strategy:
-      fail-fast: false
-      matrix:
-        version: [ v16 ]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-          fetch-depth: 0
-      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
-      # The default value is ~/.docker
-      - name: Set custom docker config directory
-        run: |
-          mkdir -p .docker-custom
-          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v2
-        with:
-          # Disable parallelism for docker buildkit.
-          # As we already build everything with `make -j$(nproc)`, running it in additional level of parallelisam blows up the Runner.
-          config-inline: |
-            [worker.oci]
-              max-parallelism = 1
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-
-      - name: Build compute-node image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          build-args: |
-            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            PG_VERSION=${{ matrix.version }}
-            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
-          provenance: false
-          push: true
-          pull: true
-          file: Dockerfile.compute-node
-          target: neon-pg-ext-test
-          cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache
-          cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache,mode=max
-          tags: |
-            neondatabase/neon-test-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
-
   compute-node-image:
     needs: [ check-permissions, build-build-tools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
@@ -887,6 +834,26 @@ jobs:
           tags: |
             369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
             neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+      
+      - name: Build neon-test image
+        if: ${{ matrix.version == 'v16' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            PG_VERSION=${{ matrix.version }}
+            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile.compute-node
+          target: neon-pg-ext-test
+          cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache
+          cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache,mode=max
+          tags: |
+            neondatabase/neon-test-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
