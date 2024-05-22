@@ -1625,7 +1625,7 @@ class NeonCli(AbstractNeonCli):
             args.extend(["-c", "switch_aux_file_policy:v1"])
 
         if aux_file_v2 is AuxFileStore.CrossValidation:
-            args.extend(["-c", "switch_aux_file_policy:cross_validation"])
+            args.extend(["-c", "switch_aux_file_policy:cross-validation"])
 
         if set_default:
             args.append("--set-default")
