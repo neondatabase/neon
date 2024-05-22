@@ -987,21 +987,21 @@ jobs:
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
           done
 
-      - name: Add latest tag to images
-        if: github.ref_name == 'main'
+      - name: Add test tag to images
+        # if: github.ref_name == 'main'
         run: |
           for repo in neondatabase 369495373322.dkr.ecr.eu-central-1.amazonaws.com; do
-            docker buildx imagetools create -t $repo/neon:latest \
+            docker buildx imagetools create -t $repo/neon:test \
                                                $repo/neon:${{ needs.tag.outputs.build-tag }}
 
-            docker buildx imagetools create -t $repo/compute-tools:latest \
+            docker buildx imagetools create -t $repo/compute-tools:test \
                                                $repo/compute-tools:${{ needs.tag.outputs.build-tag }}
 
             for version in ${VERSIONS}; do
-              docker buildx imagetools create -t $repo/compute-node-${version}:latest \
+              docker buildx imagetools create -t $repo/compute-node-${version}:test \
                                                  $repo/compute-node-${version}:${{ needs.tag.outputs.build-tag }}
 
-              docker buildx imagetools create -t $repo/vm-compute-node-${version}:latest \
+              docker buildx imagetools create -t $repo/vm-compute-node-${version}:test \
                                                  $repo/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
             done
           done
