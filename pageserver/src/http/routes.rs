@@ -2328,7 +2328,7 @@ async fn force_aux_policy_switch_handler(
             .await?;
     timeline
         .do_switch_aux_policy(policy)
-        .map_err(|e| ApiError::InternalServerError(e))?;
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -2438,12 +2438,12 @@ async fn ingest_aux_files(
         modification
             .put_file(&fname, content.as_bytes(), &ctx)
             .await
-            .map_err(|e| ApiError::InternalServerError(e))?;
+            .map_err(ApiError::InternalServerError)?;
     }
     modification
         .commit(&ctx)
         .await
-        .map_err(|e| ApiError::InternalServerError(e))?;
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
