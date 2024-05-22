@@ -2,6 +2,9 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, wait_for_last_flush_lsn, wait_replica_caughtup
 
 
+# This test replica startup in case of large number of active subtransactions at primary node.
+# Number of known transaction xids is limited and if we do not limit number of transactions
+# restored from CLOG, then it will cause crash of replica.
 def test_replication_start_subxid_overflow(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
@@ -26,6 +29,7 @@ def test_replication_start_subxid_overflow(neon_simple_env: NeonEnv):
                    end; $$ language plpgsql"""
                 )
                 p_cur.execute("select create_subxacts(100000)")
+                p_cur.execute("select txid_current()")
                 xid = p_cur.fetchall()[0][0]
                 log.info(f"Master transaction {xid}")
                 with env.endpoints.new_replica_start(
