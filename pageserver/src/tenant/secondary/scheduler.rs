@@ -258,7 +258,11 @@ where
 
         self.tasks.spawn(fut);
 
-        self.running.insert(tenant_shard_id, in_progress);
+        let replaced = self.running.insert(tenant_shard_id, in_progress);
+        debug_assert!(replaced.is_none());
+        if replaced.is_some() {
+            tracing::warn!(%tenant_shard_id, "Unexpectedly spawned a task when one was already running")
+        }
     }
 
     /// For all pending tenants that are elegible for execution, spawn their task.
