@@ -74,6 +74,7 @@ use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
+use crate::tenant::GetTimelineError;
 use crate::tenant::SpawnMode;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::{config::PageServerConf, tenant::mgr};
@@ -276,6 +277,13 @@ impl From<GetTenantError> for ApiError {
             }
             GetTenantError::MapState(e) => ApiError::ResourceUnavailable(format!("{e}").into()),
         }
+    }
+}
+
+impl From<GetTimelineError> for ApiError {
+    fn from(gte: GetTimelineError) -> Self {
+        // Rationale: tenant is activated only after eligble timelines activate
+        ApiError::NotFound(gte.into())
     }
 }
 
@@ -643,9 +651,7 @@ async fn timeline_preserve_initdb_handler(
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
 
-        let timeline = tenant
-            .get_timeline(timeline_id, false)
-            .map_err(|e| ApiError::NotFound(e.into()))?;
+        let timeline = tenant.get_timeline(timeline_id, false)?;
 
         timeline
             .preserve_initdb_archive()
@@ -687,9 +693,7 @@ async fn timeline_detail_handler(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-        let timeline = tenant
-            .get_timeline(timeline_id, false)
-            .map_err(|e| ApiError::NotFound(e.into()))?;
+        let timeline = tenant.get_timeline(timeline_id, false)?;
 
         let timeline_info = build_timeline_info(
             &timeline,
@@ -1901,10 +1905,7 @@ async fn timeline_detach_ancestor_handler(
         let ctx = RequestContext::new(TaskKind::DetachAncestor, DownloadBehavior::Download);
         let ctx = &ctx;
 
-        // FIXME: why is there no conversion?
-        let timeline = tenant
-            .get_timeline(timeline_id, true)
-            .map_err(|e| ApiError::NotFound(e.into()))?;
+        let timeline = tenant.get_timeline(timeline_id, true)?;
 
         let (_guard, prepared) = timeline
             .prepare_to_detach_from_ancestor(&tenant, options, ctx)
@@ -2042,9 +2043,7 @@ async fn active_timeline_of_active_tenant(
 
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-    tenant
-        .get_timeline(timeline_id, true)
-        .map_err(|e| ApiError::NotFound(e.into()))
+    Ok(tenant.get_timeline(timeline_id, true)?)
 }
 
 async fn always_panic_handler(
