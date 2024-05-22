@@ -47,7 +47,7 @@ impl From<Error> for ApiError {
             e @ Error::NoAncestor => ApiError::Conflict(e.to_string()),
             // TODO: ApiError converts the anyhow using debug formatting ... just stop using ApiError?
             e @ Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{}", e)),
-            e @ Error::ShuttingDown => ApiError::InternalServerError(e.into()),
+            Error::ShuttingDown => ApiError::ShuttingDown,
             Error::OtherTimelineDetachOngoing(_) => {
                 ApiError::ResourceUnavailable("other timeline detach is already ongoing".into())
             }
