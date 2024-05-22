@@ -986,7 +986,10 @@ LIST=$((echo ${SKIP} | sed 's/,/\n/g'; ls -d *-src) | sort | uniq -u)
 for d in ${LIST}
 do
 	[ -d ${d} ] || continue
-	make -C ${d} installcheck || FAILED="${d} ${FAILED}"
+	make -C ${d} installcheck
+    rc=$?
+    [ $rc -gt 0 ] && FAILED="${d} ${FAILED}"
+    [ $rc -ge 2 ] && break
 done
 [ -z "${FAILED}" ] && exit 0
 echo ${FAILED}

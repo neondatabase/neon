@@ -42,8 +42,7 @@ for pg_version in 16; do
             cleanup
             exit 1
         fi
-        result=`docker compose -f $COMPOSE_FILE logs "compute_is_ready" | grep "accepting connections" | wc -l`
-        if [ $result -eq 1 ]; then
+        if docker compose -f $COMPOSE_FILE logs "compute_is_ready" | grep -q "accepting connections"; then
             echo "OK. The compute is ready to connect."
             break
         fi
@@ -62,7 +61,7 @@ for pg_version in 16; do
     docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
     rm -rf $TMPDIR
     if docker exec -e SKIP=rum-src,pg_cron-src,timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_hint_plan-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
-        $TEST_CONTAINER_NAME /run-tests.sh > testout.txt
+        $TEST_CONTAINER_NAME /run-tests.sh | tee testout.txt
     then
         cleanup
         exit 0
