@@ -2326,9 +2326,11 @@ async fn force_aux_policy_switch_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    timeline.do_switch_aux_policy(policy)?;
+    timeline
+        .do_switch_aux_policy(policy)
+        .map_err(|e| ApiError::InternalServerError(e))?;
 
-    json_response(StatusCode::OK, Ok(()))
+    json_response(StatusCode::OK, ())
 }
 
 async fn put_io_engine_handler(
@@ -2428,24 +2430,22 @@ async fn ingest_aux_files(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
 
-    let process = || async move {
-        let mut modification = timeline.begin_modification(Lsn(
-            timeline.get_last_record_lsn().0 + 8
-        ) /* advance LSN by 8 */);
-        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-        for (fname, content) in body.aux_files {
-            modification
-                .put_file(&fname, content.as_bytes(), &ctx)
-                .await?;
-        }
-        modification.commit(&ctx).await?;
-        Ok::<_, anyhow::Error>(())
-    };
-
-    match process().await {
-        Ok(st) => json_response(StatusCode::OK, st),
-        Err(err) => Err(ApiError::InternalServerError(err)),
+    let mut modification = timeline.begin_modification(
+        Lsn(timeline.get_last_record_lsn().0 + 8), /* advance LSN by 8 */
+    );
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    for (fname, content) in body.aux_files {
+        modification
+            .put_file(&fname, content.as_bytes(), &ctx)
+            .await
+            .map_err(|e| ApiError::InternalServerError(e))?;
     }
+    modification
+        .commit(&ctx)
+        .await
+        .map_err(|e| ApiError::InternalServerError(e))?;
+
+    json_response(StatusCode::OK, ())
 }
 
 /// Report on the largest tenants on this pageserver, for the storage controller to identify
