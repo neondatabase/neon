@@ -9,7 +9,6 @@ use std::{
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
-    str::FromStr,
     sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
 };
@@ -1402,6 +1401,7 @@ impl PagestreamBeMessage {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::str::FromStr;
 
     use super::*;
 
@@ -1669,6 +1669,9 @@ mod tests {
     fn test_aux_parse() {
         assert_eq!(AuxFilePolicy::from_str("V2").unwrap(), AuxFilePolicy::V2);
         assert_eq!(AuxFilePolicy::from_str("v2").unwrap(), AuxFilePolicy::V2);
-        assert_eq!(AuxFilePolicy::from_str("cross-validation").unwrap(), AuxFilePolicy::CrossValidation);
+        assert_eq!(
+            AuxFilePolicy::from_str("cross-validation").unwrap(),
+            AuxFilePolicy::CrossValidation
+        );
     }
 }
