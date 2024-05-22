@@ -91,8 +91,7 @@
 //!
 //! The *actual* remote state lags behind the *desired* remote state while
 //! there are in-flight operations.
-//! We keep track of the desired remote state in
-//! [`UploadQueueInitialized::latest_files`] and [`UploadQueueInitialized::latest_metadata`].
+//! We keep track of the desired remote state in [`UploadQueueInitialized::dirty`].
 //! It is initialized based on the [`IndexPart`] that was passed during init
 //! and updated with every `schedule_*` function call.
 //! All this is necessary necessary to compute the future [`IndexPart`]s
