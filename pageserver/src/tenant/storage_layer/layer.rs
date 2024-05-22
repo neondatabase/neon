@@ -1333,7 +1333,7 @@ impl LayerInner {
 
         is_good_to_continue(&rx.borrow_and_update())?;
 
-        let Ok(_gate) = timeline.gate.enter() else {
+        let Ok(gate) = timeline.gate.enter() else {
             return Err(EvictionCancelled::TimelineGone);
         };
 
@@ -1420,6 +1420,7 @@ impl LayerInner {
         // reads. We will need to add cancellation for that if necessary.
         Self::spawn_blocking(move || {
             let _span = span.entered();
+            let _gate = gate;
 
             let res = self.evict_blocking(&timeline, &permit);
 
