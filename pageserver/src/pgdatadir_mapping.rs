@@ -1504,10 +1504,7 @@ impl<'a> DatadirModification<'a> {
             };
 
             if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
-                self.tline.last_aux_file_policy.store(Some(switch_policy));
-                self.tline
-                    .remote_client
-                    .schedule_index_upload_for_aux_file_policy_update(Some(switch_policy))?;
+                self.tline.force_switch_aux_policy(switch_policy)?;
                 info!(current=?current_policy, next=?switch_policy, "switching aux file policy");
                 switch_policy
             } else {

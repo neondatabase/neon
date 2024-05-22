@@ -2327,10 +2327,7 @@ async fn force_aux_policy_switch_handler(
         let timeline =
             active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
                 .await?;
-        timeline.last_aux_file_policy.store(Some(policy));
-        timeline
-            .remote_client
-            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
+        timeline.force_switch_aux_policy(policy)?;
         Ok(())
     };
 

@@ -4606,6 +4606,14 @@ impl Timeline {
     ) -> Result<Vec<TimelineId>, anyhow::Error> {
         detach_ancestor::complete(self, tenant, prepared, ctx).await
     }
+
+    /// Switch aux file policy and schedule upload to the index part.
+    pub(crate) fn force_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
+        self.last_aux_file_policy.store(Some(policy));
+        self.remote_client
+            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
+        Ok(())
+    }
 }
 
 /// Top-level failure to compact.
