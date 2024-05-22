@@ -178,6 +178,13 @@ impl PgConnectionConfig {
     }
 }
 
+impl fmt::Display for PgConnectionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // The password is intentionally hidden and not part of this display string.
+        write!(f, "postgresql://{}:{}", self.host, self.port)
+    }
+}
+
 impl fmt::Debug for PgConnectionConfig {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // We want `password: Some(REDACTED-STRING)`, not `password: Some("REDACTED-STRING")`
