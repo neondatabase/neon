@@ -934,7 +934,7 @@ jobs:
       matrix:
         version: [ v14, v15, v16 ]
     env:
-      VM_BUILDER_VERSION: v0.28.1
+      VM_BUILDER_VERSION: v0.29.3
 
     steps:
       - name: Checkout
