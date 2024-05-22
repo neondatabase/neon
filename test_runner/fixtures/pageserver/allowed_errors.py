@@ -70,6 +70,7 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # this is expected given our collaborative shutdown approach for the UploadQueue
     ".*Compaction failed.*, retrying in .*: Other\\(queue is in state Stopped.*",
     ".*Compaction failed.*, retrying in .*: ShuttingDown",
+    ".*Compaction failed.*, retrying in .*: timeline shutting down.*",
     # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
     ".*Error processing HTTP request: NotFound: Timeline .* was not found",
     ".*took more than expected to complete.*",
@@ -91,6 +92,10 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*WARN deletion backend: calling control plane generation validation API failed.*error sending request.*",
     # Can happen when the test shuts down the storage controller while it is calling the utilization API
     ".*WARN.*path=/v1/utilization .*request was dropped before completing",
+    # Can happen during shutdown
+    ".*scheduling deletion on drop failed: queue is in state Stopped.*",
+    # Can happen during shutdown
+    ".*ignoring failure to find gc cutoffs: timeline shutting down.*",
 )
 
 
