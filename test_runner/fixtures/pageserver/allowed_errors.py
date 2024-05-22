@@ -95,6 +95,8 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
 
     # Can happen during shutdown
     ".*scheduling deletion on drop failed: queue is in state Stopped.*",
+    # Can happen during shutdown
+    ".*ignoring failure to find gc cutoffs: timeline shutting down.*",
 )
 
 
