@@ -97,7 +97,7 @@ impl IndexPart {
 
     /// If you want this under normal operations, read it from self.metadata:
     /// this method is just for the scrubber to use when validating an index.
-    pub fn get_disk_consistent_lsn(&self) -> Lsn {
+    pub fn duplicated_disk_consistent_lsn(&self) -> Lsn {
         self.disk_consistent_lsn
     }
 
