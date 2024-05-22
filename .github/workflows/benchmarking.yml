@@ -356,7 +356,7 @@ jobs:
       fail-fast: false
 
     env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
+      TEST_PG_BENCH_DURATIONS_MATRIX: "5m"
       TEST_PG_BENCH_SCALES_MATRIX: "1"
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 16
@@ -369,9 +369,6 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
       options: --init
-
-    # Increase timeout to 8h, default timeout is 6h
-    timeout-minutes: 480
 
     steps:
     - uses: actions/checkout@v4
