@@ -4,12 +4,9 @@
 //! 1. Fairness per endpoint.
 //! 2. Yield support for high iteration counts.
 
-use std::{
-    hash::Hash,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
 };
 
 use crossbeam_deque::{Injector, Stealer, Worker};
@@ -27,6 +24,7 @@ use tokio::sync::oneshot;
 use crate::{
     intern::EndpointIdInt,
     metrics::{ThreadPoolMetrics, ThreadPoolWorkerId},
+    scram::countmin::CountMinSketch,
 };
 
 pub struct ThreadPool {
@@ -191,12 +189,6 @@ impl ThreadPool {
             }
         }
     }
-
-    // pub fn shutdown(&self) {
-    //     let mut lock = self.lock.lock();
-    //     *lock = State::Shutdown;
-    //     self.condvar.notify_all();
-    // }
 }
 
 fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
@@ -248,7 +240,7 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
 
             // receiver is closed, cancel the task
             if !job.response.is_closed() {
-                let rate = sketch.inc_by(&job.endpoint, job.pbkdf2.cost());
+                let rate = sketch.inc_and_return(&job.endpoint, job.pbkdf2.cost());
 
                 const P: f64 = 2000.0;
                 // probability decreases as rate increases.
@@ -296,59 +288,6 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
                 sketch.reset();
             }
         }
-    }
-}
-
-/// estimator of hash jobs per second.
-/// <https://en.wikipedia.org/wiki/Count%E2%80%93min_sketch>
-struct CountMinSketch {
-    // one for each width
-    hashers: Vec<ahash::RandomState>,
-    width: usize,
-    depth: usize,
-    // buckets, width*depth
-    buckets: Vec<u32>,
-}
-
-impl CountMinSketch {
-    /// Given parameters (ε, δ),
-    ///   set width = ceil(e/ε)
-    ///   set depth = ceil(ln(1/δ))
-    ///
-    /// guarantees:
-    /// actual <= estimate
-    /// estimate <= actual + ε * N with probability 1 - δ
-    /// where N is the cardinality of the stream
-    fn with_params(epsilon: f64, delta: f64) -> Self {
-        CountMinSketch::new(
-            (std::f64::consts::E / epsilon).ceil() as usize,
-            (1.0_f64 / delta).ln().ceil() as usize,
-        )
-    }
-
-    fn new(width: usize, depth: usize) -> Self {
-        Self {
-            hashers: (0..width).map(|_| ahash::RandomState::new()).collect(),
-            width,
-            depth,
-            buckets: vec![0; width * depth],
-        }
-    }
-
-    fn inc_by<T: Hash>(&mut self, t: &T, x: u32) -> u32 {
-        let mut min = 0;
-        for w in 0..self.width {
-            let hash = self.hashers[w].hash_one(t) as usize;
-            let bucket = &mut self.buckets[w * self.depth + hash % self.depth];
-            *bucket = bucket.saturating_add(x);
-            min = std::cmp::min(min, *bucket);
-        }
-        min
-    }
-
-    fn reset(&mut self) {
-        self.buckets.clear();
-        self.buckets.resize(self.width * self.depth, 0);
     }
 }
 
