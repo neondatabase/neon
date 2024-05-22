@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 # A test script for postgres extensions
 # Currently supports only v16
