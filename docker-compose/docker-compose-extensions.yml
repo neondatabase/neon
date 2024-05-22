@@ -196,7 +196,7 @@ services:
       - compute
 
   neon-test:
-    image: ${REPOSITORY:-neondatabase}/neon-test:${TAG:-latest}
+    image: ${REPOSITORY:-neondatabase}/neon-test-v${PG_VERSION:-16}:${TAG:-latest}
     entrypoint:
       - "/bin/bash"
       - "-c"
