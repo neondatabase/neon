@@ -347,37 +347,33 @@ impl<'de> serde::de::Visitor<'de> for LayerNameVisitor {
 mod test {
     use super::*;
     #[test]
-    fn image_layer_parse() -> anyhow::Result<()> {
+    fn image_layer_parse() {
         let expected = LayerName::Image(ImageLayerName {
             key_range: Key::from_i128(0)
                 ..Key::from_hex("000000067F00000001000004DF0000000006").unwrap(),
             lsn: Lsn::from_hex("00000000014FED58").unwrap(),
         });
-        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-v1-00000001").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-v1-00000001").unwrap();
         assert_eq!(parsed, expected,);
 
         // Omitting generation suffix is valid
-        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58").unwrap();
         assert_eq!(parsed, expected,);
-
-        Ok(())
     }
 
     #[test]
-    fn delta_layer_parse() -> anyhow::Result<()> {
+    fn delta_layer_parse() {
         let expected = LayerName::Delta(DeltaLayerName {
             key_range: Key::from_i128(0)
                 ..Key::from_hex("000000067F00000001000004DF0000000006").unwrap(),
             lsn_range: Lsn::from_hex("00000000014FED58").unwrap()
                 ..Lsn::from_hex("000000000154C481").unwrap(),
         });
-        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481-v1-00000001").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481-v1-00000001").unwrap();
         assert_eq!(parsed, expected);
 
         // Omitting generation suffix is valid
-        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481").map_err(|s| anyhow::anyhow!(s))?;
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481").unwrap();
         assert_eq!(parsed, expected);
-
-        Ok(())
     }
 }

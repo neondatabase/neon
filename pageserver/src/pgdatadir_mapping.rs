@@ -9,7 +9,6 @@
 use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::metrics::WAL_INGEST;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
 use crate::{aux_file, repository::*};
@@ -40,7 +39,11 @@ use utils::bin_ser::DeserializeError;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
-const MAX_AUX_FILE_DELTAS: usize = 1024;
+/// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
+pub const MAX_AUX_FILE_DELTAS: usize = 1024;
+
+/// Max number of aux-file-related delta layers. The compaction will create a new image layer once this threshold is reached.
+pub const MAX_AUX_FILE_V2_DELTAS: usize = 64;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -1698,8 +1701,6 @@ impl<'a> DatadirModification<'a> {
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut writer = self.tline.writer().await;
 
-        let timer = WAL_INGEST.time_spent_on_ingest.start_timer();
-
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
@@ -1738,8 +1739,6 @@ impl<'a> DatadirModification<'a> {
         for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
             writer.update_directory_entries_count(kind, count as u64);
         }
-
-        timer.observe_duration();
 
         Ok(())
     }

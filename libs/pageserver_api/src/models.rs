@@ -162,6 +162,22 @@ impl std::fmt::Debug for TenantState {
     }
 }
 
+/// A temporary lease to a specific lsn inside a timeline.
+/// Access to the lsn is guaranteed by the pageserver until the expiration indicated by `valid_until`.
+#[serde_as]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LsnLease {
+    #[serde_as(as = "SystemTimeAsRfc3339Millis")]
+    pub valid_until: SystemTime,
+}
+
+serde_with::serde_conv!(
+    SystemTimeAsRfc3339Millis,
+    SystemTime,
+    |time: &SystemTime| humantime::format_rfc3339_millis(*time).to_string(),
+    |value: String| -> Result<_, humantime::TimestampError> { humantime::parse_rfc3339(&value) }
+);
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
@@ -789,6 +805,8 @@ pub enum HistoricLayerInfo {
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        l0: bool,
     },
     Image {
         layer_file_name: String,

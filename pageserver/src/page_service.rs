@@ -19,6 +19,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::ShardIndex;
 use pageserver_api::shard::ShardNumber;
+use pageserver_api::shard::TenantShardId;
 use postgres_backend::{is_expected_io_error, AuthType, PostgresBackend, QueryError};
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
@@ -33,6 +34,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
@@ -905,6 +907,39 @@ impl PageServerHandler {
         }
     }
 
+    #[instrument(skip_all, fields(shard_id, %lsn))]
+    async fn handle_make_lsn_lease<IO>(
+        &self,
+        pgb: &mut PostgresBackend<IO>,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), QueryError>
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        let shard_selector = ShardSelector::Known(tenant_shard_id.to_index());
+        let timeline = self
+            .get_active_tenant_timeline(tenant_shard_id.tenant_id, timeline_id, shard_selector)
+            .await?;
+        let lease = timeline.make_lsn_lease(lsn, ctx)?;
+        let valid_until = lease
+            .valid_until
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|e| QueryError::Other(e.into()))?;
+
+        pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
+            b"valid_until",
+        )]))?
+        .write_message_noflush(&BeMessage::DataRow(&[Some(
+            &valid_until.as_millis().to_be_bytes(),
+        )]))?
+        .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+
+        Ok(())
+    }
+
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_rel_exists_request(
         &mut self,
@@ -1486,9 +1521,8 @@ where
 
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
-        if query_string.starts_with("pagestream_v2 ") {
-            let (_, params_raw) = query_string.split_at("pagestream_v2 ".len());
-            let params = params_raw.split(' ').collect::<Vec<_>>();
+        let parts = query_string.split_whitespace().collect::<Vec<_>>();
+        if let Some(params) = parts.strip_prefix(&["pagestream_v2"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for pagestream command"
@@ -1513,9 +1547,7 @@ where
                 ctx,
             )
             .await?;
-        } else if query_string.starts_with("pagestream ") {
-            let (_, params_raw) = query_string.split_at("pagestream ".len());
-            let params = params_raw.split(' ').collect::<Vec<_>>();
+        } else if let Some(params) = parts.strip_prefix(&["pagestream"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for pagestream command"
@@ -1540,10 +1572,7 @@ where
                 ctx,
             )
             .await?;
-        } else if query_string.starts_with("basebackup ") {
-            let (_, params_raw) = query_string.split_at("basebackup ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
-
+        } else if let Some(params) = parts.strip_prefix(&["basebackup"]) {
             if params.len() < 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for basebackup command"
@@ -1561,26 +1590,23 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            let lsn = if params.len() >= 3 {
+            let lsn = if let Some(lsn_str) = params.get(2) {
                 Some(
-                    Lsn::from_str(params[2])
-                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                    Lsn::from_str(lsn_str)
+                        .with_context(|| format!("Failed to parse Lsn from {lsn_str}"))?,
                 )
             } else {
                 None
             };
 
-            let gzip = if params.len() >= 4 {
-                if params[3] == "--gzip" {
-                    true
-                } else {
+            let gzip = match params.get(3) {
+                Some(&"--gzip") => true,
+                None => false,
+                Some(third_param) => {
                     return Err(QueryError::Other(anyhow::anyhow!(
-                        "Parameter in position 3 unknown {}",
-                        params[3],
-                    )));
+                        "Parameter in position 3 unknown {third_param}",
+                    )))
                 }
-            } else {
-                false
             };
 
             let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&ctx);
@@ -1604,10 +1630,7 @@ where
             res?;
         }
         // return pair of prev_lsn and last_lsn
-        else if query_string.starts_with("get_last_record_rlsn ") {
-            let (_, params_raw) = query_string.split_at("get_last_record_rlsn ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
-
+        else if let Some(params) = parts.strip_prefix(&["get_last_record_rlsn"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for get_last_record_rlsn command"
@@ -1649,10 +1672,7 @@ where
             .await?;
         }
         // same as basebackup, but result includes relational data as well
-        else if query_string.starts_with("fullbackup ") {
-            let (_, params_raw) = query_string.split_at("fullbackup ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
-
+        else if let Some(params) = parts.strip_prefix(&["fullbackup"]) {
             if params.len() < 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for fullbackup command"
@@ -1669,18 +1689,18 @@ where
                 .record("timeline_id", field::display(timeline_id));
 
             // The caller is responsible for providing correct lsn and prev_lsn.
-            let lsn = if params.len() > 2 {
+            let lsn = if let Some(lsn_str) = params.get(2) {
                 Some(
-                    Lsn::from_str(params[2])
-                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                    Lsn::from_str(lsn_str)
+                        .with_context(|| format!("Failed to parse Lsn from {lsn_str}"))?,
                 )
             } else {
                 None
             };
-            let prev_lsn = if params.len() > 3 {
+            let prev_lsn = if let Some(prev_lsn_str) = params.get(3) {
                 Some(
-                    Lsn::from_str(params[3])
-                        .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?,
+                    Lsn::from_str(prev_lsn_str)
+                        .with_context(|| format!("Failed to parse Lsn from {prev_lsn_str}"))?,
                 )
             } else {
                 None
@@ -1713,8 +1733,7 @@ where
             // 2. Run:
             // cat my_backup/base.tar | psql -h $PAGESERVER \
             //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
-            let (_, params_raw) = query_string.split_at("import basebackup ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            let params = &parts[2..];
             if params.len() != 5 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for import basebackup command"
@@ -1763,8 +1782,7 @@ where
             //
             // Files are scheduled to be persisted to remote storage, and the
             // caller should poll the http api to check when that is done.
-            let (_, params_raw) = query_string.split_at("import wal ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            let params = &parts[2..];
             if params.len() != 4 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for import wal command"
@@ -1802,10 +1820,45 @@ where
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("show ") {
+        } else if query_string.starts_with("lease lsn ") {
+            let params = &parts[2..];
+            if params.len() != 3 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number {} for lease lsn command",
+                    params.len()
+                )));
+            }
+
+            let tenant_shard_id = TenantShardId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_shard_id))
+                .record("timeline_id", field::display(timeline_id));
+
+            self.check_permission(Some(tenant_shard_id.tenant_id))?;
+
+            // The caller is responsible for providing correct lsn.
+            let lsn = Lsn::from_str(params[2])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
+
+            match self
+                .handle_make_lsn_lease(pgb, tenant_shard_id, timeline_id, lsn, &ctx)
+                .await
+            {
+                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
+                Err(e) => {
+                    error!("error obtaining lsn lease for {lsn}: {e:?}");
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(
+                        &e.to_string(),
+                        Some(e.pg_error_code()),
+                    ))?
+                }
+            };
+        } else if let Some(params) = parts.strip_prefix(&["show"]) {
             // show <tenant_id>
-            let (_, params_raw) = query_string.split_at("show ".len());
-            let params = params_raw.split(' ').collect::<Vec<_>>();
             if params.len() != 1 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for config command"
