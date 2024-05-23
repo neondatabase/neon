@@ -1349,6 +1349,10 @@ PageIsEmptyHeapPage(char *buffer)
 	return memcmp(buffer, empty_page.data, BLCKSZ) == 0;
 }
 
+/*
+ * A page is being evicted from the shared buffer cache. Update the
+ * last-written LSN of the page, and WAL-log it if needed.
+ */
 static void
 #if PG_MAJORVERSION_NUM < 16
 neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool force)
@@ -1357,12 +1361,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 #endif
 {
 	XLogRecPtr	lsn = PageGetLSN((Page) buffer);
-
-	if (ShutdownRequestPending)
-		return;
-	/* Don't log any pages if we're not allowed to do so. */
-	if (!XLogInsertAllowed())
-		return;
+	bool		log_page;
 
 	/*
 	 * Whenever a VM or FSM page is evicted, WAL-log it. FSM and (some) VM
@@ -1371,9 +1370,21 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 	 * correctness, the non-logged updates are not critical. But we want to
 	 * have a reasonably up-to-date VM and FSM in the page server.
 	 */
-	if ((force || forknum == FSM_FORKNUM || forknum == VISIBILITYMAP_FORKNUM) && !RecoveryInProgress())
+	log_page = false;
+	if (force)
 	{
-		/* FSM is never WAL-logged and we don't care. */
+		Assert(XLogInsertAllowed());
+		log_page = true;
+	}
+	else if (XLogInsertAllowed() &&
+			 !ShutdownRequestPending &&
+			 (forknum == FSM_FORKNUM || forknum == VISIBILITYMAP_FORKNUM))
+	{
+		log_page = true;
+	}
+
+	if (log_page)
+	{
 		XLogRecPtr	recptr;
 
 		recptr = log_newpage_copy(&InfoFromSMgrRel(reln), forknum, blocknum,
@@ -1386,7 +1397,8 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 						RelFileInfoFmt(InfoFromSMgrRel(reln)),
 						forknum, LSN_FORMAT_ARGS(lsn))));
 	}
-	else if (lsn == InvalidXLogRecPtr)
+
+	if (lsn == InvalidXLogRecPtr)
 	{
 		/*
 		 * When PostgreSQL extends a relation, it calls smgrextend() with an
@@ -1422,19 +1434,31 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
 		}
-		else
+		else if (forknum != FSM_FORKNUM && forknum != VISIBILITYMAP_FORKNUM)
 		{
-			ereport(PANIC,
+			/*
+			 * Its a bad sign if there is a page with zero LSN in the buffer
+			 * cache in a standby, too. However, PANICing seems like a cure
+			 * worse than the disease, as the damage has likely already been
+			 * done in the primary. So in a standby, make this an assertion,
+			 * and in a release build just LOG the error and soldier on. We
+			 * update the last-written LSN of the page with a conservative
+			 * value in that case, which is the last replayed LSN.
+			 */
+			ereport(RecoveryInProgress() ? LOG : PANIC,
 					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
 							blocknum,
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
+			Assert(false);
+
+			lsn = GetXLogReplayRecPtr(NULL); /* in standby mode, soldier on */
 		}
 	}
 	else
 	{
 		ereport(SmgrTrace,
-				(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is already wal logged at lsn=%X/%X",
+				(errmsg(NEON_TAG "Evicting page %u of relation %u/%u/%u.%u with lsn=%X/%X",
 						blocknum,
 						RelFileInfoFmt(InfoFromSMgrRel(reln)),
 						forknum, LSN_FORMAT_ARGS(lsn))));
@@ -1527,8 +1551,92 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
 
 	if (RecoveryInProgress())
 	{
-		/* Request the page at the last replayed LSN. */
-		result.request_lsn = GetXLogReplayRecPtr(NULL);
+		/*---
+		 * In broad strokes, a replica always requests the page at the current
+		 * replay LSN. But looking closer, what exactly is the replay LSN? Is
+		 * it the last replayed record, or the record being replayed? And does
+		 * the startup process performing the replay need to do something
+		 * differently than backends running queries? Let's take a closer look
+		 * at the different scenarios:
+		 *
+		 * 1. Startup process reads a page, last_written_lsn is old.
+		 *
+		 * Read the old version of the page. We will apply the WAL record on
+		 * it to bring it up-to-date.
+		 *
+		 * We could read the new version, with the changes from this WAL
+		 * record already applied, to offload the work of replaying the record
+		 * to the pageserver. The pageserver might not have received the WAL
+		 * record yet, though, so a read of the old page version and applying
+		 * the record ourselves is likely faster. Also, the redo function
+		 * might be surprised if the changes have already applied. That's
+		 * normal during crash recovery, but not in hot standby.
+		 *
+		 * 2. Startup process reads a page, last_written_lsn == record we're
+		 *    replaying.
+		 *
+		 * Can this happen? There are a few theoretical cases when it might:
+		 *
+		 * A) The redo function reads the same page twice. We had already read
+		 *    and applied the changes once, and now we're reading it for the
+		 *    second time.  That would be a rather silly thing for a redo
+		 *    function to do, and I'm not aware of any that would do it.
+		 *
+		 * B) The redo function modifies multiple pages, and it already
+		 *    applied the changes to one of the pages, released the lock on
+		 *    it, and is now reading a second page.  Furthermore, the first
+		 *    page was already evicted from the buffer cache, and also from
+		 *    the last-written LSN cache, so that the per-relation or global
+		 *    last-written LSN was already updated. All the WAL redo functions
+		 *    hold the locks on pages that they modify, until all the changes
+		 *    have been modified (?), which would make that impossible.
+		 *    However, we skip the locking, if the page isn't currently in the
+		 *    page cache (see neon_redo_read_buffer_filter below).
+		 *
+		 * Even if the one of the above cases were possible in theory, they
+		 * would also require the pages being modified by the redo function to
+		 * be immediately evicted from the page cache.
+		 *
+		 * So this probably does not happen in practice. But if it does, we
+		 * request the new version, including the changes from the record
+		 * being replayed. That seems like the correct behavior in any case.
+		 *
+		 * 3. Backend process reads a page with old last-written LSN
+		 *
+		 * Nothing special here. Read the old version.
+		 *
+		 * 4. Backend process reads a page with last_written_lsn == record being replayed
+		 *
+		 * This can happen, if the redo function has started to run, and saw
+		 * that the page isn't present in the page cache (see
+		 * neon_redo_read_buffer_filter below).  Normally, in a normal
+		 * Postgres server, the redo function would hold a lock on the page,
+		 * so we would get blocked waiting the redo function to release the
+		 * lock. To emulate that, wait for the WAL replay of the record to
+		 * finish.
+		 */
+		/* Request the page at the end of the last fully replayed LSN. */
+		XLogRecPtr replay_lsn = GetXLogReplayRecPtr(NULL);
+
+		if (last_written_lsn > replay_lsn)
+		{
+			/* GetCurrentReplayRecPtr was introduced in v15 */
+#if PG_VERSION_NUM >= 150000
+			Assert(last_written_lsn == GetCurrentReplayRecPtr(NULL));
+#endif
+
+			/*
+			 * Cases 2 and 4. If this is a backend (case 4), the
+			 * neon_read_at_lsn() call later will wait for the WAL record to be
+			 * fully replayed.
+			 */
+			result.request_lsn = last_written_lsn;
+		}
+		else
+		{
+			/* cases 1 and 3 */
+			result.request_lsn = replay_lsn;
+		}
 		result.not_modified_since = last_written_lsn;
 		result.effective_request_lsn = result.request_lsn;
 		Assert(last_written_lsn <= result.request_lsn);
@@ -3216,7 +3324,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	BufferTag	tag;
 	uint32		hash;
 	LWLock	   *partitionLock;
-	Buffer		buffer;
+	int			buf_id;
 	bool		no_redo_needed;
 
 	if (old_redo_read_buffer_filter && old_redo_read_buffer_filter(record, block_id))
@@ -3254,20 +3362,20 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	else
 	{
 		/* Try to find the relevant buffer */
-		buffer = BufTableLookup(&tag, hash);
+		buf_id = BufTableLookup(&tag, hash);
 
-		no_redo_needed = buffer < 0;
+		no_redo_needed = buf_id < 0;
 	}
-	/* In both cases st lwlsn past this WAL record */
-	SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
 
 	/*
 	 * we don't have the buffer in memory, update lwLsn past this record, also
 	 * evict page from file cache
 	 */
 	if (no_redo_needed)
+	{
+		SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
 		lfc_evict(rinfo, forknum, blkno);
-
+	}
 
 	LWLockRelease(partitionLock);
 

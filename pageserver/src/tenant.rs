@@ -3964,18 +3964,20 @@ mod tests {
 
     use super::*;
     use crate::keyspace::KeySpaceAccum;
+    use crate::pgdatadir_mapping::AuxFilesDirectory;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
     use crate::DEFAULT_PG_VERSION;
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
-    use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
+    use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
-    use pageserver_api::models::CompactionAlgorithm;
+    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use rand::{thread_rng, Rng};
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
+    use utils::bin_ser::BeSer;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -5167,7 +5169,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name)?;
-        harness.tenant_conf.compaction_algorithm = compaction_algorithm;
+        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+            kind: compaction_algorithm,
+        };
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -5524,7 +5528,9 @@ mod tests {
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
         let mut harness = TenantHarness::create(name)?;
-        harness.tenant_conf.compaction_algorithm = compaction_algorithm;
+        harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
+            kind: compaction_algorithm,
+        };
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
@@ -5994,6 +6000,130 @@ mod tests {
         assert_eq!(
             files.get("pg_logical/mappings/test3"),
             Some(&bytes::Bytes::from_static(b"last"))
+        );
+    }
+
+    #[tokio::test]
+    async fn aux_file_policy_force_switch() {
+        let mut harness = TenantHarness::create("aux_file_policy_force_switch").unwrap();
+        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V1;
+        let (tenant, ctx) = harness.load().await;
+
+        let mut lsn = Lsn(0x08);
+
+        let tline: Arc<Timeline> = tenant
+            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            None,
+            "no aux file is written so it should be unset"
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test1", b"first", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        tline.do_switch_aux_policy(AuxFilePolicy::V2).unwrap();
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::V2),
+            "dirty index_part.json reflected state is yet to be updated"
+        );
+
+        // lose all data from v1
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(files.get("pg_logical/mappings/test1"), None);
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test2", b"second", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        // read data ingested in v2
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test2"),
+            Some(&bytes::Bytes::from_static(b"second"))
+        );
+        // lose all data from v1
+        assert_eq!(files.get("pg_logical/mappings/test1"), None);
+    }
+
+    #[tokio::test]
+    async fn aux_file_policy_auto_detect() {
+        let mut harness = TenantHarness::create("aux_file_policy_auto_detect").unwrap();
+        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V2; // set to cross-validation mode
+        let (tenant, ctx) = harness.load().await;
+
+        let mut lsn = Lsn(0x08);
+
+        let tline: Arc<Timeline> = tenant
+            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            None,
+            "no aux file is written so it should be unset"
+        );
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+                files: vec![(
+                    "test_file".to_string(),
+                    Bytes::copy_from_slice(b"test_file"),
+                )]
+                .into_iter()
+                .collect(),
+            })
+            .unwrap();
+            modification.put_for_test(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        {
+            lsn += 8;
+            let mut modification = tline.begin_modification(lsn);
+            modification
+                .put_file("pg_logical/mappings/test1", b"first", &ctx)
+                .await
+                .unwrap();
+            modification.commit(&ctx).await.unwrap();
+        }
+
+        assert_eq!(
+            tline.last_aux_file_policy.load(),
+            Some(AuxFilePolicy::V1),
+            "keep using v1 because there are aux files writting with v1"
+        );
+
+        // we can still read the auxfile v1
+        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
+        assert_eq!(
+            files.get("pg_logical/mappings/test1"),
+            Some(&bytes::Bytes::from_static(b"first"))
+        );
+        assert_eq!(
+            files.get("test_file"),
+            Some(&bytes::Bytes::from_static(b"test_file"))
         );
     }
 
