@@ -319,9 +319,7 @@ impl std::fmt::Display for UploadOp {
                 write!(
                     f,
                     "UploadLayer({}, size={:?}, gen={:?})",
-                    layer,
-                    metadata.file_size,
-                    metadata.generation
+                    layer, metadata.file_size, metadata.generation
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => {

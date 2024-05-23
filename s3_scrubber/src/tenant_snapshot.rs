@@ -161,10 +161,7 @@ impl SnapshotDownloader {
         ttid: TenantShardTimelineId,
         index_part: Box<IndexPart>,
         index_part_generation: Generation,
-        ancestor_layers: &mut HashMap<
-            TenantShardTimelineId,
-            HashMap<LayerName, LayerFileMetadata>,
-        >,
+        ancestor_layers: &mut HashMap<TenantShardTimelineId, HashMap<LayerName, LayerFileMetadata>>,
     ) -> anyhow::Result<()> {
         let index_bytes = serde_json::to_string(&index_part).unwrap();
 
