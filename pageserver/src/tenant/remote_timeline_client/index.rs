@@ -39,7 +39,7 @@ pub struct IndexPart {
     ///
     /// Older versions of `IndexPart` will not have this property or have only a part of metadata
     /// that latest version stores.
-    pub layer_metadata: HashMap<LayerName, IndexLayerMetadata>,
+    pub layer_metadata: HashMap<LayerName, LayerFileMetadata>,
 
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
     // It's duplicated for convenience when reading the serialized structure, but is
@@ -91,7 +91,7 @@ impl IndexPart {
     ) -> Self {
         let layer_metadata = layers_and_metadata
             .iter()
-            .map(|(k, v)| (k.to_owned(), IndexLayerMetadata::from(v)))
+            .map(|(k, v)| (k.to_owned(), LayerFileMetadata::from(v)))
             .collect();
 
         Self {
@@ -197,8 +197,6 @@ impl LayerFileMetadata {
     }
 }
 
-pub type IndexLayerMetadata = LayerFileMetadata;
-
 /// Limited history of earlier ancestors.
 ///
 /// A timeline can have more than 1 earlier ancestor, in the rare case that it was repeatedly
@@ -288,12 +286,12 @@ mod tests {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded()
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
@@ -330,12 +328,12 @@ mod tests {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded()
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
@@ -373,12 +371,12 @@ mod tests {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 2,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded()
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
@@ -461,12 +459,12 @@ mod tests {
         let expected = IndexPart {
             version: 4,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded()
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
@@ -503,12 +501,12 @@ mod tests {
         let expected = IndexPart {
             version: 5,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014EF420-00000000014EF499".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014EF420-00000000014EF499".parse().unwrap(), LayerFileMetadata {
                     file_size: 23289856,
                     generation: Generation::new(1),
                     shard: ShardIndex::unsharded(),
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014EF499-00000000015A7619".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014EF499-00000000015A7619".parse().unwrap(), LayerFileMetadata {
                     file_size: 1015808,
                     generation: Generation::new(1),
                     shard: ShardIndex::unsharded(),
@@ -550,12 +548,12 @@ mod tests {
         let expected = IndexPart {
             version: 6,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded()
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
