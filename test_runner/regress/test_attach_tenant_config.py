@@ -17,9 +17,13 @@ def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    # eviction might be the first one after an attach to access the layers
-    env.pageserver.allowed_errors.append(
-        ".*unexpectedly on-demand downloading remote layer .* for task kind Eviction"
+    env.pageserver.allowed_errors.extend(
+        [
+            # eviction might be the first one after an attach to access the layers
+            ".*unexpectedly on-demand downloading remote layer .* for task kind Eviction",
+            # detach can happen before we get to validate the generation number
+            ".*deletion backend: Dropped remote consistent LSN updates for tenant.*",
+        ]
     )
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     return env
