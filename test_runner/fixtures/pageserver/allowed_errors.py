@@ -70,7 +70,7 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # this is expected given our collaborative shutdown approach for the UploadQueue
     ".*Compaction failed.*, retrying in .*: Other\\(queue is in state Stopped.*",
     ".*Compaction failed.*, retrying in .*: ShuttingDown",
-    ".*Compaction failed.*, retrying in .*: timeline shutting down.*",
+    ".*Compaction failed.*, retrying in .*: Other\\(timeline shutting down.*",
     # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
     ".*Error processing HTTP request: NotFound: Timeline .* was not found",
     ".*took more than expected to complete.*",
