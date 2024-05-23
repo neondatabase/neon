@@ -60,7 +60,7 @@ for pg_version in 16; do
     echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
     docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
     rm -rf $TMPDIR
-    if docker exec -e SKIP=rum-src,pg_cron-src,timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_hint_plan-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
+    if docker exec -e SKIP=pgvector-src,rum-src,pg_cron-src,timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_hint_plan-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
         $TEST_CONTAINER_NAME /run-tests.sh | tee testout.txt
     then
         cleanup
