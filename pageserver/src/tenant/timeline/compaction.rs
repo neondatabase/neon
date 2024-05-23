@@ -1178,7 +1178,7 @@ impl TimelineAdaptor {
         let start = Key::MIN;
         let ImageLayerCreationOutcome {
             image,
-            next_start_key: _next_start_key,
+            next_start_key: _,
         } = self
             .timeline
             .create_image_layer_for_rel_blocks(
