@@ -163,12 +163,12 @@ def test_replication_start_subxid_overflow3(neon_simple_env: NeonEnv):
     n_connections = max_connections - 2
     n_subxids = 100
 
-    # Start one top tranaction in primary, with lots of subtransactions. This fills up the
-    # known-assigned XIDs space in the standby.
+    # Start one top tranaction in primary, with lots of subtransactions. This uses up much the
+    # known-assigned XIDs space in the standby, but doesn't cause it to overflow.
     large_p_conn = primary.connect()
     large_p_cur = large_p_conn.cursor()
     large_p_cur.execute("begin")
-    large_p_cur.execute("select create_subxacts(20000)")
+    large_p_cur.execute("select create_subxacts(2000)")
 
     # Create a replica at this LSN
     wait_for_last_flush_lsn(env, primary, env.initial_tenant, env.initial_timeline)
