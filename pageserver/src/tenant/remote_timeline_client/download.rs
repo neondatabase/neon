@@ -208,6 +208,7 @@ async fn download_object<'a>(
                         BytesMut::with_capacity(super::BUFFER_SIZE),
                     );
 
+
                     // Cancellation: if our cancellation token fires here, we will return an error and leave
                     // an inccomplete download on disk.  Callers are responsible for cleaning that up: for example
                     // download_layer_file calls this function with a temporary path, so it is safe to leak that
@@ -219,15 +220,13 @@ async fn download_object<'a>(
                             },
                             next = futures::StreamExt::next(&mut download.download_stream) => {
                                 let chunk = match next {
-                                    None => {break;},
-                                    Some(Err(e)) =>return Err(e.into()),
+                                    None => break,
+                                    Some(Err(e)) => return Err(e.into()),
                                     Some(Ok(chunk)) => chunk
                                 };
 
-                            buffered
-                                .write_buffered(tokio_epoll_uring::BoundedBuf::slice_full(chunk), ctx)
-                                .await?;
-                                }
+                                buffered.write_buffered(tokio_epoll_uring::BoundedBuf::slice_full(chunk), ctx).await?;
+                            }
                         }
                     }
 
