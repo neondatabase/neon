@@ -94,6 +94,10 @@ static char *hexdump_page(char *page);
 
 const int	SmgrTrace = DEBUG5;
 
+#define NEON_PANIC_CONNECTION_STATE(shard_no, elvl, message, ...) \
+	neon_shard_log(shard_no, elvl, "Broken connection state: " message, \
+				   ##__VA_ARGS__)
+
 page_server_api *page_server;
 
 /* unlogged relation build states */
@@ -526,6 +530,8 @@ prefetch_flush_requests(void)
  *
  * NOTE: this function may indirectly update MyPState->pfs_hash; which
  * invalidates any active pointers into the hash table.
+ * NOTE: callers should make sure they can handle query cancellations in this
+ * function's call path.
  */
 static bool
 prefetch_wait_for(uint64 ring_index)
@@ -561,6 +567,8 @@ prefetch_wait_for(uint64 ring_index)
  *
  * NOTE: this function may indirectly update MyPState->pfs_hash; which
  * invalidates any active pointers into the hash table.
+ *
+ * NOTE: this does IO, and can get canceled out-of-line.
  */
 static bool
 prefetch_read(PrefetchRequest *slot)
@@ -571,6 +579,14 @@ prefetch_read(PrefetchRequest *slot)
 	Assert(slot->status == PRFS_REQUESTED);
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_receive);
+
+	if (slot->status != PRFS_REQUESTED ||
+		slot->response != NULL ||
+		slot->my_ring_index != MyPState->ring_receive)
+		neon_shard_log(slot->shard_no, ERROR,
+					   "Incorrect prefetch read: status=%d response=%llx my=%llu receive=%llu",
+					   slot->status, (size_t) (void *) slot->response,
+					   slot->my_ring_index, MyPState->ring_receive);
 
 	old = MemoryContextSwitchTo(MyPState->errctx);
 	response = (NeonResponse *) page_server->receive(slot->shard_no);
@@ -589,6 +605,11 @@ prefetch_read(PrefetchRequest *slot)
 	}
 	else
 	{
+		neon_shard_log(slot->shard_no, WARNING,
+					   "No response from reading prefetch entry %llu: %u/%u/%u.%u block %u. This can be caused by a concurrent disconnect",
+					   slot->my_ring_index,
+					   RelFileInfoFmt(BufTagGetNRelFileInfo(slot->buftag)),
+					   slot->buftag.forkNum, slot->buftag.blockNum);
 		return false;
 	}
 }
@@ -603,6 +624,7 @@ void
 prefetch_on_ps_disconnect(void)
 {
 	MyPState->ring_flush = MyPState->ring_unused;
+
 	while (MyPState->ring_receive < MyPState->ring_unused)
 	{
 		PrefetchRequest *slot;
@@ -625,6 +647,7 @@ prefetch_on_ps_disconnect(void)
 		slot->status = PRFS_TAG_REMAINS;
 		MyPState->n_requests_inflight -= 1;
 		MyPState->ring_receive += 1;
+
 		prefetch_set_unused(ring_index);
 	}
 }
@@ -691,6 +714,8 @@ static void
 prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns)
 {
 	bool		found;
+	uint64		mySlotNo = slot->my_ring_index;
+
 	NeonGetPageRequest request = {
 		.req.tag = T_NeonGetPageRequest,
 		/* lsn and not_modified_since are filled in below */
@@ -698,6 +723,8 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 		.forknum = slot->buftag.forkNum,
 		.blkno = slot->buftag.blockNum,
 	};
+
+	Assert(mySlotNo == MyPState->ring_unused);
 
 	if (force_request_lsns)
 		slot->request_lsns = *force_request_lsns;
@@ -711,7 +738,11 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
 
-	while (!page_server->send(slot->shard_no, (NeonRequest *) &request));
+	while (!page_server->send(slot->shard_no, (NeonRequest *) &request))
+	{
+		Assert(mySlotNo == MyPState->ring_unused);
+		/* loop */
+	}
 
 	/* update prefetch state */
 	MyPState->n_requests_inflight += 1;
@@ -722,7 +753,6 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 
 	/* update slot state */
 	slot->status = PRFS_REQUESTED;
-
 	prfh_insert(MyPState->prf_hash, slot, &found);
 	Assert(!found);
 }
@@ -894,6 +924,10 @@ Retry:
 	return ring_index;
 }
 
+/*
+ * Note: this function can get canceled and use a long jump to the next catch
+ * context. Take care.
+ */
 static NeonResponse *
 page_server_request(void const *req)
 {
@@ -925,19 +959,38 @@ page_server_request(void const *req)
 	 * Current sharding model assumes that all metadata is present only at shard 0.
 	 * We still need to call get_shard_no() to check if shard map is up-to-date.
 	 */
-	if (((NeonRequest *) req)->tag != T_NeonGetPageRequest || ((NeonGetPageRequest *) req)->forknum != MAIN_FORKNUM)
+	if (((NeonRequest *) req)->tag != T_NeonGetPageRequest ||
+		((NeonGetPageRequest *) req)->forknum != MAIN_FORKNUM)
 	{
 		shard_no = 0;
 	}
 
 	do
 	{
-		while (!page_server->send(shard_no, (NeonRequest *) req) || !page_server->flush(shard_no));
-		consume_prefetch_responses();
-		resp = page_server->receive(shard_no);
-	} while (resp == NULL);
-	return resp;
+		PG_TRY();
+		{
+			while (!page_server->send(shard_no, (NeonRequest *) req)
+				   || !page_server->flush(shard_no))
+			{
+				/* do nothing */
+			}
+			consume_prefetch_responses();
+			resp = page_server->receive(shard_no);
+		}
+		PG_CATCH();
+		{
+			/*
+			 * Cancellation in this code needs to be handled better at some
+			 * point, but this currently seems fine for now.
+			 */
+			page_server->disconnect(shard_no);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
+	} while (resp == NULL);
+
+	return resp;
 }
 
 
@@ -1905,7 +1958,9 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_exists", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected Exists (0x%02x) or Error (0x%02x) response to ExistsRequest, but got 0x%02x",
+										T_NeonExistsResponse, T_NeonErrorResponse, resp->tag);
 	}
 	pfree(resp);
 	return exists;
@@ -2357,7 +2412,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	/*
 	 * Try to find prefetched page in the list of received pages.
 	 */
-  Retry:
+Retry:
 	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
 
 	if (entry != NULL)
@@ -2443,7 +2498,9 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_read_at_lsn", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(slot->shard_no, PANIC,
+										"Expected GetPage (0x%02x) or Error (0x%02x) response to GetPageRequest, but got 0x%02x",
+										T_NeonGetPageResponse, T_NeonErrorResponse, resp->tag);
 	}
 
 	/* buffer was used, clean up for later reuse */
@@ -2714,7 +2771,9 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_nblocks", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected Nblocks (0x%02x) or Error (0x%02x) response to NblocksRequest, but got 0x%02x",
+										T_NeonNblocksResponse, T_NeonErrorResponse, resp->tag);
 	}
 	update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
 
@@ -2767,7 +2826,9 @@ neon_dbsize(Oid dbNode)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_dbsize", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected DbSize (0x%02x) or Error (0x%02x) response to DbSizeRequest, but got 0x%02x",
+										T_NeonDbSizeResponse, T_NeonErrorResponse, resp->tag);
 	}
 
 	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
@@ -3106,7 +3167,9 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_read_slru_segment", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected GetSlruSegment (0x%02x) or Error (0x%02x) response to GetSlruSegmentRequest, but got 0x%02x",
+										T_NeonGetSlruSegmentResponse, T_NeonErrorResponse, resp->tag);
 	}
 	pfree(resp);
 
