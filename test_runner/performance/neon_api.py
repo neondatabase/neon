@@ -6,7 +6,7 @@ import requests
 from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
-    from typing import Any, Optional
+    from typing import Any, Literal, Optional
 
 
 def neon_create_project(
@@ -88,12 +88,20 @@ def neon_restart_endpoint(
     return cast("dict[str, Any]", resp.json())
 
 
-def neon_create_ro_endpoint(
+def neon_create_endpoint(
     neon_api_key: str,
     neon_api_base_url: str,
     project_id: str,
     branch_id: str,
+    endpoint_type: Literal["read_write", "read_only"],
 ) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "endpoint": {
+            "branch_id": branch_id,
+            "type": endpoint_type,
+        },
+    }
+
     resp = requests.post(
         f"{neon_api_base_url}/projects/{project_id}/endpoints",
         headers={
@@ -101,11 +109,7 @@ def neon_create_ro_endpoint(
             "Content-Type": "application/json",
             "Authorization": f"Bearer {neon_api_key}",
         },
-        json={
-            "endpoint": {
-                "branch_id": branch_id,
-            },
-        },
+        json=data,
     )
 
     assert resp.status_code == 200
