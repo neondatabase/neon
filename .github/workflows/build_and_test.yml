@@ -853,7 +853,7 @@ jobs:
           cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache
           cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache,mode=max
           tags: |
-            neondatabase/neon-test-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
+            neondatabase/neon-test-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
