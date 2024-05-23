@@ -5,10 +5,10 @@ use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
 use std::sync::Arc;
-use storage_controller::chaos_injector::ChaosInjector;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
+use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
     Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
 };
