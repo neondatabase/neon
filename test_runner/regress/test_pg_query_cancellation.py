@@ -36,7 +36,6 @@ unfortunate connection startup and request states.
 """
 
 
-# @pytest.mark.parametrize('failpoint', CRITICAL_PG_PS_WAIT_FAILPOINTS)
 def test_cancellations(neon_simple_env: NeonEnv):
     env = neon_simple_env
     ps = env.pageserver
