@@ -1081,7 +1081,7 @@ PL/pgSQL function anon.mask_drop_view(oid) line 3 at EXECUTE
 SQL statement "SELECT anon.mask_drop_view(oid)
   FROM pg_catalog.pg_class
   WHERE relnamespace=quote_ident(pg_catalog.current_setting('anon.sourceschema'))::REGNAMESPACE
-  AND relkind IN ('r','p','f') -- relations or partitions or foreign tables"
+  AND relkind IN ('r','p','f')"
 PL/pgSQL function anon.stop_dynamic_masking() line 22 at PERFORM
 ROLLBACK TO fail_stop_engine;
 RESET ROLE;
