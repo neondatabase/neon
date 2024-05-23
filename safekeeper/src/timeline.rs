@@ -104,11 +104,16 @@ pub type ReadGuardSharedState<'a> = RwLockReadGuard<'a, SharedState>;
 pub struct WriteGuardSharedState<'a> {
     tli: Arc<Timeline>,
     guard: RwLockWriteGuard<'a, SharedState>,
+    skip_update: bool,
 }
 
 impl<'a> WriteGuardSharedState<'a> {
     fn new(tli: Arc<Timeline>, guard: RwLockWriteGuard<'a, SharedState>) -> Self {
-        WriteGuardSharedState { tli, guard }
+        WriteGuardSharedState {
+            tli,
+            guard,
+            skip_update: false,
+        }
     }
 }
 
@@ -149,10 +154,12 @@ impl<'a> Drop for WriteGuardSharedState<'a> {
             }
         });
 
-        // send notification about shared state update
-        self.tli.shared_state_version_tx.send_modify(|old| {
-            *old += 1;
-        });
+        if !self.skip_update {
+            // send notification about shared state update
+            self.tli.shared_state_version_tx.send_modify(|old| {
+                *old += 1;
+            });
+        }
     }
 }
 
@@ -802,7 +809,11 @@ impl Timeline {
 
         // update last_removed_segno
         let mut shared_state = self.write_shared_state().await;
-        shared_state.last_removed_segno = horizon_segno;
+        if shared_state.last_removed_segno != horizon_segno {
+            shared_state.last_removed_segno = horizon_segno;
+        } else {
+            shared_state.skip_update = true;
+        }
         Ok(())
     }
 
@@ -811,11 +822,10 @@ impl Timeline {
     /// to date so that storage nodes restart doesn't cause many pageserver ->
     /// safekeeper reconnections.
     pub async fn maybe_persist_control_file(self: &Arc<Self>) -> Result<()> {
-        self.write_shared_state()
-            .await
-            .sk
-            .maybe_persist_inmem_control_file()
-            .await
+        let mut guard = self.write_shared_state().await;
+        let changed = guard.sk.maybe_persist_inmem_control_file().await?;
+        guard.skip_update = !changed;
+        Ok(())
     }
 
     /// Gather timeline data for metrics.
