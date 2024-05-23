@@ -7,6 +7,7 @@ from pathlib import Path
 from queue import SimpleQueue
 from typing import Any, Dict, Set
 
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -17,7 +18,6 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     remote_storage_to_toml_inline_table,
 )
-from fixtures.types import TenantId, TimelineId
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response

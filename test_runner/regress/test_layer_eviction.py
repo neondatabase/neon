@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import (
     flush_ep_to_pageserver,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.types import parse_layer_file_name
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import wait_for_upload
 from fixtures.remote_storage import RemoteStorageKind
 
@@ -159,7 +159,9 @@ def test_basic_eviction(
 def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start()
+    # don't create initial tenant, we'll create it manually with custom config
+    env = neon_env_builder.init_configs()
+    env.start()
 
     tenant_config = {
         "pitr_interval": "1s",  # set to non-zero, so GC actually does something
@@ -270,14 +272,14 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
             resident_physical_size_metric == 0
         ), "ensure that resident_physical_size metric is zero"
         assert resident_physical_size_metric == sum(
-            layer.layer_file_size or 0 for layer in info.historic_layers if not layer.remote
+            layer.layer_file_size for layer in info.historic_layers if not layer.remote
         ), "ensure that resident_physical_size metric corresponds to layer map dump"
 
         remote_physical_size_metric = ps_http.get_timeline_metric(
             tenant_id, timeline_id, "pageserver_remote_physical_size"
         )
         assert remote_physical_size_metric == sum(
-            layer.layer_file_size or 0 for layer in info.historic_layers if layer.remote
+            layer.layer_file_size for layer in info.historic_layers if layer.remote
         ), "ensure that remote_physical_size metric corresponds to layer map dump"
 
     log.info("before runnning GC, ensure that remote_physical size is zero")

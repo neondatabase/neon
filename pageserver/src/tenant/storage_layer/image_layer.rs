@@ -54,6 +54,7 @@ use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
@@ -65,8 +66,10 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::ImageFileName;
-use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer, ValuesReconstructState};
+use super::layer_name::ImageLayerName;
+use super::{
+    AsLayerDesc, Layer, LayerName, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -155,6 +158,7 @@ pub struct ImageLayerInner {
     index_start_blk: u32,
     index_root_blk: u32,
 
+    key_range: Range<Key>,
     lsn: Lsn,
 
     file: VirtualFile,
@@ -231,7 +235,7 @@ impl ImageLayer {
         conf: &PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        fname: &ImageFileName,
+        fname: &ImageLayerName,
     ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -267,13 +271,13 @@ impl ImageLayer {
             .and_then(|res| res)?;
 
         // not production code
-        let actual_filename = path.file_name().unwrap().to_owned();
-        let expected_filename = self.layer_desc().filename().file_name();
+        let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
+        let expected_layer_name = self.layer_desc().layer_name();
 
-        if actual_filename != expected_filename {
+        if actual_layer_name != expected_layer_name {
             println!("warning: filename does not match what is expected from in-file summary");
-            println!("actual: {:?}", actual_filename);
-            println!("expected: {:?}", expected_filename);
+            println!("actual: {:?}", actual_layer_name.to_string());
+            println!("expected: {:?}", expected_layer_name.to_string());
         }
 
         Ok(loaded)
@@ -340,6 +344,7 @@ impl ImageLayer {
         let mut file = VirtualFile::open_with_options(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
+            ctx,
         )
         .await
         .with_context(|| format!("Failed to open file '{}'", path))?;
@@ -374,7 +379,7 @@ impl ImageLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
-        let file = match VirtualFile::open(path).await {
+        let file = match VirtualFile::open(path, ctx).await {
             Ok(file) => file,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
         };
@@ -415,6 +420,7 @@ impl ImageLayerInner {
             file,
             file_id,
             max_vectored_read_bytes,
+            key_range: actual_summary.key_range,
         }))
     }
 
@@ -471,8 +477,10 @@ impl ImageLayerInner {
             .await
             .map_err(GetVectoredError::Other)?;
 
-        self.do_reads_and_update_state(reads, reconstruct_state)
+        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
+
+        reconstruct_state.on_image_layer_visited(&self.key_range);
 
         Ok(())
     }
@@ -534,6 +542,7 @@ impl ImageLayerInner {
         &self,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
     ) {
         let max_vectored_read_bytes = self
             .max_vectored_read_bytes
@@ -562,7 +571,7 @@ impl ImageLayerInner {
             }
 
             let buf = BytesMut::with_capacity(buf_size);
-            let res = vectored_blob_reader.read_blobs(&read, buf).await;
+            let res = vectored_blob_reader.read_blobs(&read, buf, ctx).await;
 
             match res {
                 Ok(blobs_buf) => {
@@ -628,6 +637,7 @@ impl ImageLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
@@ -635,7 +645,7 @@ impl ImageLayerWriterInner {
             conf,
             timeline_id,
             tenant_shard_id,
-            &ImageFileName {
+            &ImageLayerName {
                 key_range: key_range.clone(),
                 lsn,
             },
@@ -647,6 +657,7 @@ impl ImageLayerWriterInner {
                 virtual_file::OpenOptions::new()
                     .write(true)
                     .create_new(true),
+                ctx,
             )
             .await?
         };
@@ -801,10 +812,11 @@ impl ImageLayerWriter {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn)
+                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn, ctx)
                     .await?,
             ),
         })

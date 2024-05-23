@@ -13,7 +13,7 @@ use crate::metadata_stream::stream_listing;
 use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
 use futures_util::StreamExt;
 use pageserver::tenant::remote_timeline_client::parse_remote_index_path;
-use pageserver::tenant::storage_layer::LayerFileName;
+use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use remote_storage::RemotePath;
 
@@ -110,7 +110,7 @@ pub(crate) fn branch_cleanup_and_check_errors(
                     for (layer, metadata) in index_part.layer_metadata {
                         if metadata.file_size == 0 {
                             result.errors.push(format!(
-                                "index_part.json contains a layer {} that has 0 size in its layer metadata", layer.file_name(),
+                                "index_part.json contains a layer {} that has 0 size in its layer metadata", layer,
                             ))
                         }
 
@@ -121,7 +121,7 @@ pub(crate) fn branch_cleanup_and_check_errors(
                             // layer we think is missing.
                             result.errors.push(format!(
                                 "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage",
-                                layer.file_name(),
+                                layer,
                                 metadata.generation.get_suffix(),
                                 metadata.shard
                             ))
@@ -170,8 +170,7 @@ pub(crate) struct LayerRef {
 /// the tenant to query whether an object exists.
 #[derive(Default)]
 pub(crate) struct TenantObjectListing {
-    shard_timelines:
-        HashMap<(ShardIndex, TimelineId), HashMap<(LayerFileName, Generation), LayerRef>>,
+    shard_timelines: HashMap<(ShardIndex, TimelineId), HashMap<(LayerName, Generation), LayerRef>>,
 }
 
 impl TenantObjectListing {
@@ -180,7 +179,7 @@ impl TenantObjectListing {
     pub(crate) fn push(
         &mut self,
         ttid: TenantShardTimelineId,
-        layers: HashSet<(LayerFileName, Generation)>,
+        layers: HashSet<(LayerName, Generation)>,
     ) {
         let shard_index = ShardIndex::new(
             ttid.tenant_shard_id.shard_number,
@@ -208,7 +207,7 @@ impl TenantObjectListing {
     pub(crate) fn check_ref(
         &mut self,
         timeline_id: TimelineId,
-        layer_file: &LayerFileName,
+        layer_file: &LayerName,
         metadata: &IndexLayerMetadata,
     ) -> bool {
         let Some(shard_tl) = self.shard_timelines.get_mut(&(metadata.shard, timeline_id)) else {
@@ -224,7 +223,7 @@ impl TenantObjectListing {
         true
     }
 
-    pub(crate) fn get_orphans(&self) -> Vec<(ShardIndex, TimelineId, LayerFileName, Generation)> {
+    pub(crate) fn get_orphans(&self) -> Vec<(ShardIndex, TimelineId, LayerName, Generation)> {
         let mut result = Vec::new();
         for ((shard_index, timeline_id), layers) in &self.shard_timelines {
             for ((layer_file, generation), layer_ref) in layers {
@@ -247,25 +246,25 @@ pub(crate) struct S3TimelineBlobData {
 #[derive(Debug)]
 pub(crate) enum BlobDataParseResult {
     Parsed {
-        index_part: IndexPart,
+        index_part: Box<IndexPart>,
         index_part_generation: Generation,
-        s3_layers: HashSet<(LayerFileName, Generation)>,
+        s3_layers: HashSet<(LayerName, Generation)>,
     },
     /// The remains of a deleted Timeline (i.e. an initdb archive only)
     Relic,
     Incorrect(Vec<String>),
 }
 
-fn parse_layer_object_name(name: &str) -> Result<(LayerFileName, Generation), String> {
+fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generation), String> {
     match name.rsplit_once('-') {
         // FIXME: this is gross, just use a regex?
         Some((layer_filename, gen)) if gen.len() == 8 => {
-            let layer = layer_filename.parse::<LayerFileName>()?;
+            let layer = layer_filename.parse::<LayerName>()?;
             let gen =
                 Generation::parse_suffix(gen).ok_or("Malformed generation suffix".to_string())?;
             Ok((layer, gen))
         }
-        _ => Ok((name.parse::<LayerFileName>()?, Generation::none())),
+        _ => Ok((name.parse::<LayerName>()?, Generation::none())),
     }
 }
 
@@ -369,7 +368,7 @@ pub(crate) async fn list_timeline_blobs(
             Ok(index_part) => {
                 return Ok(S3TimelineBlobData {
                     blob_data: BlobDataParseResult::Parsed {
-                        index_part,
+                        index_part: Box::new(index_part),
                         index_part_generation,
                         s3_layers,
                     },

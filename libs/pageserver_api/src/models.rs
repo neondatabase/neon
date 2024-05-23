@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
-    str::FromStr,
+    sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
 };
 
@@ -161,6 +161,22 @@ impl std::fmt::Debug for TenantState {
     }
 }
 
+/// A temporary lease to a specific lsn inside a timeline.
+/// Access to the lsn is guaranteed by the pageserver until the expiration indicated by `valid_until`.
+#[serde_as]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LsnLease {
+    #[serde_as(as = "SystemTimeAsRfc3339Millis")]
+    pub valid_until: SystemTime,
+}
+
+serde_with::serde_conv!(
+    SystemTimeAsRfc3339Millis,
+    SystemTime,
+    |time: &SystemTime| humantime::format_rfc3339_millis(*time).to_string(),
+    |value: String| -> Result<_, humantime::TimestampError> { humantime::parse_rfc3339(&value) }
+);
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
@@ -289,7 +305,7 @@ pub struct TenantConfig {
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
-    pub compaction_algorithm: Option<CompactionAlgorithm>,
+    pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
     pub image_creation_threshold: Option<usize>,
@@ -308,27 +324,99 @@ pub struct TenantConfig {
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`
+/// tenant config. When the first aux file written, the policy will be persisted in the
+/// `index_part.json` file and has a limited migration path.
+///
+/// Currently, we only allow the following migration path:
+///
+/// Unset -> V1
+///       -> V2
+///       -> CrossValidation -> V2
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
 pub enum AuxFilePolicy {
+    /// V1 aux file policy: store everything in AUX_FILE_KEY
+    #[strum(ascii_case_insensitive)]
     V1,
+    /// V2 aux file policy: store in the AUX_FILE keyspace
+    #[strum(ascii_case_insensitive)]
     V2,
+    /// Cross validation runs both formats on the write path and does validation
+    /// on the read path.
+    #[strum(ascii_case_insensitive)]
     CrossValidation,
 }
 
-impl FromStr for AuxFilePolicy {
-    type Err = anyhow::Error;
+impl AuxFilePolicy {
+    pub fn is_valid_migration_path(from: Option<Self>, to: Self) -> bool {
+        matches!(
+            (from, to),
+            (None, _) | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2)
+        )
+    }
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.to_lowercase();
-        if s == "v1" {
-            Ok(Self::V1)
-        } else if s == "v2" {
-            Ok(Self::V2)
-        } else if s == "crossvalidation" || s == "cross_validation" {
-            Ok(Self::CrossValidation)
-        } else {
-            anyhow::bail!("cannot parse {} to aux file policy", s)
+    /// If a tenant writes aux files without setting `switch_aux_policy`, this value will be used.
+    pub fn default_tenant_config() -> Self {
+        Self::V1
+    }
+}
+
+/// The aux file policy memory flag. Users can store `Option<AuxFilePolicy>` into this atomic flag. 0 == unspecified.
+pub struct AtomicAuxFilePolicy(AtomicUsize);
+
+impl AtomicAuxFilePolicy {
+    pub fn new(policy: Option<AuxFilePolicy>) -> Self {
+        Self(AtomicUsize::new(
+            policy.map(AuxFilePolicy::to_usize).unwrap_or_default(),
+        ))
+    }
+
+    pub fn load(&self) -> Option<AuxFilePolicy> {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            other => Some(AuxFilePolicy::from_usize(other)),
         }
+    }
+
+    pub fn store(&self, policy: Option<AuxFilePolicy>) {
+        self.0.store(
+            policy.map(AuxFilePolicy::to_usize).unwrap_or_default(),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+}
+
+impl AuxFilePolicy {
+    pub fn to_usize(self) -> usize {
+        match self {
+            Self::V1 => 1,
+            Self::CrossValidation => 2,
+            Self::V2 => 3,
+        }
+    }
+
+    pub fn try_from_usize(this: usize) -> Option<Self> {
+        match this {
+            1 => Some(Self::V1),
+            2 => Some(Self::CrossValidation),
+            3 => Some(Self::V2),
+            _ => None,
+        }
+    }
+
+    pub fn from_usize(this: usize) -> Self {
+        Self::try_from_usize(this).unwrap()
     }
 }
 
@@ -350,11 +438,26 @@ impl EvictionPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
 pub enum CompactionAlgorithm {
     Legacy,
     Tiered,
+}
+
+#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionAlgorithmSettings {
+    pub kind: CompactionAlgorithm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -604,6 +707,9 @@ pub struct TimelineInfo {
     pub state: TimelineState,
 
     pub walreceiver_status: String,
+
+    /// The last aux file policy being used on this timeline
+    pub last_aux_file_policy: Option<AuxFilePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -710,6 +816,8 @@ pub enum HistoricLayerInfo {
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        l0: bool,
     },
     Image {
         layer_file_name: String,
@@ -745,11 +853,31 @@ impl HistoricLayerInfo {
         };
         *field = value;
     }
+    pub fn layer_file_size(&self) -> u64 {
+        match self {
+            HistoricLayerInfo::Delta {
+                layer_file_size, ..
+            } => *layer_file_size,
+            HistoricLayerInfo::Image {
+                layer_file_size, ..
+            } => *layer_file_size,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadRemoteLayersTaskSpawnRequest {
     pub max_concurrent_downloads: NonZeroUsize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IngestAuxFilesRequest {
+    pub aux_files: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListAuxFilesRequest {
+    pub lsn: Lsn,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -776,9 +904,6 @@ pub struct TimelineGcRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRedoManagerProcessStatus {
     pub pid: u32,
-    /// The strum-generated `into::<&'static str>()` for `pageserver::walredo::ProcessKind`.
-    /// `ProcessKind` are a transitory thing, so, they have no enum representation in `pageserver_api`.
-    pub kind: Cow<'static, str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -815,6 +940,55 @@ pub struct TenantScanRemoteStorageShard {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct TenantScanRemoteStorageResponse {
     pub shards: Vec<TenantScanRemoteStorageShard>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantSorting {
+    ResidentSize,
+    MaxLogicalSize,
+}
+
+impl Default for TenantSorting {
+    fn default() -> Self {
+        Self::ResidentSize
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TopTenantShardsRequest {
+    // How would you like to sort the tenants?
+    pub order_by: TenantSorting,
+
+    // How many results?
+    pub limit: usize,
+
+    // Omit tenants with more than this many shards (e.g. if this is the max number of shards
+    // that the caller would ever split to)
+    pub where_shards_lt: Option<ShardCount>,
+
+    // Omit tenants where the ordering metric is less than this (this is an optimization to
+    // let us quickly exclude numerous tiny shards)
+    pub where_gt: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct TopTenantShardItem {
+    pub id: TenantShardId,
+
+    /// Total size of layers on local disk for all timelines in this tenant
+    pub resident_size: u64,
+
+    /// Total size of layers in remote storage for all timelines in this tenant
+    pub physical_size: u64,
+
+    /// The largest logical size of a timeline within this tenant
+    pub max_logical_size: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct TopTenantShardsResponse {
+    pub shards: Vec<TopTenantShardItem>,
 }
 
 pub mod virtual_file {
@@ -1242,6 +1416,7 @@ impl PagestreamBeMessage {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::str::FromStr;
 
     use super::*;
 
@@ -1448,5 +1623,70 @@ mod tests {
             let actual: &'static str = rendered.into();
             assert_eq!(actual, expected, "example on {line}");
         }
+    }
+
+    #[test]
+    fn test_aux_file_migration_path() {
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            None,
+            AuxFilePolicy::V1
+        ));
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            None,
+            AuxFilePolicy::V2
+        ));
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            None,
+            AuxFilePolicy::CrossValidation
+        ));
+        // Self-migration is not a valid migration path, and the caller should handle it by itself.
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V1),
+            AuxFilePolicy::V1
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V2),
+            AuxFilePolicy::V2
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::CrossValidation),
+            AuxFilePolicy::CrossValidation
+        ));
+        // Migrations not allowed
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::CrossValidation),
+            AuxFilePolicy::V1
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V1),
+            AuxFilePolicy::V2
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V2),
+            AuxFilePolicy::V1
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V2),
+            AuxFilePolicy::CrossValidation
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V1),
+            AuxFilePolicy::CrossValidation
+        ));
+        // Migrations allowed
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::CrossValidation),
+            AuxFilePolicy::V2
+        ));
+    }
+
+    #[test]
+    fn test_aux_parse() {
+        assert_eq!(AuxFilePolicy::from_str("V2").unwrap(), AuxFilePolicy::V2);
+        assert_eq!(AuxFilePolicy::from_str("v2").unwrap(), AuxFilePolicy::V2);
+        assert_eq!(
+            AuxFilePolicy::from_str("cross-validation").unwrap(),
+            AuxFilePolicy::CrossValidation
+        );
     }
 }

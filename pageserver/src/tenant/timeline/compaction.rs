@@ -116,9 +116,13 @@ impl Timeline {
 
                 // 3. Create new image layers for partitions that have been modified
                 // "enough".
-                let dense_layers = self
+                let mut partitioning = dense_partitioning;
+                partitioning
+                    .parts
+                    .extend(sparse_partitioning.into_dense().parts);
+                let image_layers = self
                     .create_image_layers(
-                        &dense_partitioning,
+                        &partitioning,
                         lsn,
                         if flags.contains(CompactFlags::ForceImageLayerCreation) {
                             ImageLayerCreationMode::Force
@@ -130,24 +134,8 @@ impl Timeline {
                     .await
                     .map_err(anyhow::Error::from)?;
 
-                // For now, nothing will be produced...
-                let sparse_layers = self
-                    .create_image_layers(
-                        &sparse_partitioning.clone().into_dense(),
-                        lsn,
-                        if flags.contains(CompactFlags::ForceImageLayerCreation) {
-                            ImageLayerCreationMode::Force
-                        } else {
-                            ImageLayerCreationMode::Try
-                        },
-                        &image_ctx,
-                    )
-                    .await
-                    .map_err(anyhow::Error::from)?;
-                assert!(sparse_layers.is_empty());
-
-                self.upload_new_image_layers(dense_layers)?;
-                dense_partitioning.parts.len()
+                self.upload_new_image_layers(image_layers)?;
+                partitioning.parts.len()
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -295,13 +283,11 @@ impl Timeline {
         // Update the LayerMap so that readers will use the new layers, and enqueue it for writing to remote storage
         self.rewrite_layers(replace_layers, drop_layers).await?;
 
-        if let Some(remote_client) = self.remote_client.as_ref() {
-            // We wait for all uploads to complete before finishing this compaction stage.  This is not
-            // necessary for correctness, but it simplifies testing, and avoids proceeding with another
-            // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
-            // load.
-            remote_client.wait_completion().await?;
-        }
+        // We wait for all uploads to complete before finishing this compaction stage.  This is not
+        // necessary for correctness, but it simplifies testing, and avoids proceeding with another
+        // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
+        // load.
+        self.remote_client.wait_completion().await?;
 
         Ok(())
     }
@@ -501,8 +487,11 @@ impl Timeline {
 
         for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
             if let Some(prev_key) = prev {
-                // just first fast filter
-                if next_key.to_i128() - prev_key.to_i128() >= min_hole_range {
+                // just first fast filter, do not create hole entries for metadata keys. The last hole in the
+                // compaction is the gap between data key and metadata keys.
+                if next_key.to_i128() - prev_key.to_i128() >= min_hole_range
+                    && !Key::is_metadata_key(&prev_key)
+                {
                     let key_range = prev_key..next_key;
                     // Measuring hole by just subtraction of i128 representation of key range boundaries
                     // has not so much sense, because largest holes will corresponds field1/field2 changes.
@@ -700,6 +689,7 @@ impl Timeline {
                                 debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
                                 lsn_range.clone()
                             },
+                            ctx,
                         )
                         .await?,
                     );
@@ -755,6 +745,7 @@ impl Timeline {
                 &self
                     .conf
                     .timeline_path(&self.tenant_shard_id, &self.timeline_id),
+                ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -1093,6 +1084,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range.start,
             lsn_range.clone(),
+            ctx,
         )
         .await?;
 
@@ -1167,6 +1159,7 @@ impl TimelineAdaptor {
             self.timeline.tenant_shard_id,
             key_range,
             lsn,
+            ctx,
         )
         .await?;
 

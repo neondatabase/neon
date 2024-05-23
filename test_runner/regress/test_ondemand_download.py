@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 from typing import Any, DefaultDict, Dict, Tuple
 
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -21,7 +22,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
 )
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn
 from fixtures.utils import query_scalar, wait_until
 
 
@@ -540,7 +540,6 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
 
     for layer in layers.historic_layers:
         log.info(f"pre-compact:  {layer}")
-        assert layer.layer_file_size is not None, "we must know layer file sizes"
         layer_sizes += layer.layer_file_size
         pageserver_http.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
 

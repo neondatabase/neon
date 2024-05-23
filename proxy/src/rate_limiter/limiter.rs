@@ -128,10 +128,16 @@ impl std::str::FromStr for RateBucketInfo {
 }
 
 impl RateBucketInfo {
-    pub const DEFAULT_ENDPOINT_SET: [Self; 3] = [
+    pub const DEFAULT_SET: [Self; 3] = [
         Self::new(300, Duration::from_secs(1)),
         Self::new(200, Duration::from_secs(60)),
         Self::new(100, Duration::from_secs(600)),
+    ];
+
+    pub const DEFAULT_ENDPOINT_SET: [Self; 3] = [
+        Self::new(500, Duration::from_secs(1)),
+        Self::new(300, Duration::from_secs(60)),
+        Self::new(200, Duration::from_secs(600)),
     ];
 
     pub fn validate(info: &mut [Self]) -> anyhow::Result<()> {
@@ -266,7 +272,7 @@ mod tests {
 
     #[test]
     fn default_rate_buckets() {
-        let mut defaults = RateBucketInfo::DEFAULT_ENDPOINT_SET;
+        let mut defaults = RateBucketInfo::DEFAULT_SET;
         RateBucketInfo::validate(&mut defaults[..]).unwrap();
     }
 
@@ -333,11 +339,8 @@ mod tests {
         let rand = rand::rngs::StdRng::from_seed([1; 32]);
         let hasher = BuildHasherDefault::<FxHasher>::default();
 
-        let limiter = BucketRateLimiter::new_with_rand_and_hasher(
-            &RateBucketInfo::DEFAULT_ENDPOINT_SET,
-            rand,
-            hasher,
-        );
+        let limiter =
+            BucketRateLimiter::new_with_rand_and_hasher(&RateBucketInfo::DEFAULT_SET, rand, hasher);
         for i in 0..1_000_000 {
             limiter.check(i, 1);
         }

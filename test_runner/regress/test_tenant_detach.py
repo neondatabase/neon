@@ -7,6 +7,7 @@ from typing import List, Optional
 
 import asyncpg
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -22,7 +23,6 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import (
     RemoteStorageKind,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
 from prometheus_client.samples import Sample
 

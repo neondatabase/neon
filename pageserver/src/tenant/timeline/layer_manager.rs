@@ -9,6 +9,7 @@ use utils::{
 
 use crate::{
     config::PageServerConf,
+    context::RequestContext,
     metrics::TimelineMetrics,
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
@@ -69,6 +70,7 @@ impl LayerManager {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
+        ctx: &RequestContext,
     ) -> Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
 
@@ -105,7 +107,7 @@ impl LayerManager {
             );
 
             let new_layer =
-                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn).await?;
+                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn, ctx).await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
@@ -294,7 +296,7 @@ impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
             .get(&desc.key())
-            .with_context(|| format!("get layer from desc: {}", desc.filename()))
+            .with_context(|| format!("get layer from desc: {}", desc.layer_name()))
             .expect("not found")
             .clone()
     }

@@ -1,9 +1,9 @@
 from typing import Optional
 
 import pytest
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, tenant_get_shards
-from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
 

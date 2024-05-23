@@ -2,19 +2,22 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import toml
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 
-def test_pageserver_init_node_id(
-    neon_simple_env: NeonEnv, neon_binpath: Path, pg_distrib_dir: Path
-):
+def test_pageserver_init_node_id(neon_simple_env: NeonEnv, neon_binpath: Path):
+    """
+    NB: The neon_local doesn't use `--init` mode anymore, but our production
+    deployment still does => https://github.com/neondatabase/aws/pull/1322
+    """
     workdir = neon_simple_env.pageserver.workdir
     pageserver_config = workdir / "pageserver.toml"
     pageserver_bin = neon_binpath / "pageserver"
@@ -28,18 +31,38 @@ def test_pageserver_init_node_id(
             stderr=subprocess.PIPE,
         )
 
-    # remove initial config and stop existing pageserver
-    pageserver_config.unlink()
     neon_simple_env.pageserver.stop()
 
-    bad_init = run_pageserver(["--init", "-c", f'pg_distrib_dir="{pg_distrib_dir}"'])
+    with open(neon_simple_env.pageserver.config_toml_path, "r") as f:
+        ps_config = toml.load(f)
+
+    required_config_keys = [
+        "pg_distrib_dir",
+        "listen_pg_addr",
+        "listen_http_addr",
+        "pg_auth_type",
+        "http_auth_type",
+        # TODO: only needed for NEON_PAGESERVER_PANIC_ON_UNSPECIFIED_COMPACTION_ALGORITHM in https://github.com/neondatabase/neon/pull/7748
+        # "tenant_config",
+    ]
+    required_config_overrides = [
+        f"--config-override={toml.dumps({k: ps_config[k]})}" for k in required_config_keys
+    ]
+
+    pageserver_config.unlink()
+
+    bad_init = run_pageserver(["--init", *required_config_overrides])
     assert (
         bad_init.returncode == 1
     ), "pageserver should not be able to init new config without the node id"
     assert 'missing config value "id"' in bad_init.stderr
     assert not pageserver_config.exists(), "config file should not be created after init error"
 
-    good_init_cmd = ["--init", "-c", "id = 12345", "-c", f'pg_distrib_dir="{pg_distrib_dir}"']
+    good_init_cmd = [
+        "--init",
+        f"--config-override=id={ps_config['id']}",
+        *required_config_overrides,
+    ]
     completed_init = run_pageserver(good_init_cmd)
     assert (
         completed_init.returncode == 0

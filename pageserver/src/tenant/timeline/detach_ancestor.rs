@@ -12,7 +12,7 @@ use crate::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use utils::{completion, generation::Generation, id::TimelineId, lsn::Lsn};
+use utils::{completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -22,8 +22,6 @@ pub(crate) enum Error {
     TooManyAncestors,
     #[error("shutting down, please retry later")]
     ShuttingDown,
-    #[error("detached timeline must receive writes before the operation")]
-    DetachedTimelineNeedsWrites,
     #[error("flushing failed")]
     FlushAncestor(#[source] anyhow::Error),
     #[error("layer download failed")]
@@ -43,6 +41,27 @@ pub(crate) enum Error {
     Unexpected(#[source] anyhow::Error),
 }
 
+impl From<Error> for ApiError {
+    fn from(value: Error) -> Self {
+        match value {
+            e @ Error::NoAncestor => ApiError::Conflict(e.to_string()),
+            // TODO: ApiError converts the anyhow using debug formatting ... just stop using ApiError?
+            e @ Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{}", e)),
+            Error::ShuttingDown => ApiError::ShuttingDown,
+            Error::OtherTimelineDetachOngoing(_) => {
+                ApiError::ResourceUnavailable("other timeline detach is already ongoing".into())
+            }
+            // All of these contain shutdown errors, in fact, it's the most common
+            e @ Error::FlushAncestor(_)
+            | e @ Error::RewrittenDeltaDownloadFailed(_)
+            | e @ Error::CopyDeltaPrefix(_)
+            | e @ Error::UploadRewritten(_)
+            | e @ Error::CopyFailed(_)
+            | e @ Error::Unexpected(_) => ApiError::InternalServerError(e.into()),
+        }
+    }
+}
+
 pub(crate) struct PreparedTimelineDetach {
     layers: Vec<Layer>,
 }
@@ -58,7 +77,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             rewrite_concurrency: std::num::NonZeroUsize::new(2).unwrap(),
-            copy_concurrency: std::num::NonZeroUsize::new(10).unwrap(),
+            copy_concurrency: std::num::NonZeroUsize::new(100).unwrap(),
         }
     }
 }
@@ -72,15 +91,16 @@ pub(super) async fn prepare(
 ) -> Result<(completion::Completion, PreparedTimelineDetach), Error> {
     use Error::*;
 
-    if detached.remote_client.as_ref().is_none() {
-        unimplemented!("no new code for running without remote storage");
-    }
-
     let Some((ancestor, ancestor_lsn)) = detached
         .ancestor_timeline
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
+        // TODO: check if we have already been detached; for this we need to read the stored data
+        // on remote client, for that we need a follow-up which makes uploads cheaper and maintains
+        // a projection of the commited data.
+        //
+        // the error is wrong per openapi
         return Err(NoAncestor);
     };
 
@@ -90,16 +110,8 @@ pub(super) async fn prepare(
 
     if ancestor.ancestor_timeline.is_some() {
         // non-technical requirement; we could flatten N ancestors just as easily but we chose
-        // not to
+        // not to, at least initially
         return Err(TooManyAncestors);
-    }
-
-    if detached.get_prev_record_lsn() == Lsn::INVALID
-        || detached.disk_consistent_lsn.load() == ancestor_lsn
-    {
-        // this is to avoid a problem that after detaching we would be unable to start up the
-        // compute because of "PREV_LSN: invalid".
-        return Err(DetachedTimelineNeedsWrites);
     }
 
     // before we acquire the gate, we must mark the ancestor as having a detach operation
@@ -225,6 +237,7 @@ pub(super) async fn prepare(
                 &detached
                     .conf
                     .timeline_path(&detached.tenant_shard_id, &detached.timeline_id),
+                ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -324,8 +337,6 @@ async fn upload_rewritten_layer(
     // FIXME: better shuttingdown error
     target
         .remote_client
-        .as_ref()
-        .unwrap()
         .upload_layer_file(&copied, cancel)
         .await
         .map_err(UploadRewritten)?;
@@ -349,6 +360,7 @@ async fn copy_lsn_prefix(
         target_timeline.tenant_shard_id,
         layer.layer_desc().key_range.start,
         layer.layer_desc().lsn_range.start..end_lsn,
+        ctx,
     )
     .await
     .map_err(CopyDeltaPrefix)?;
@@ -407,15 +419,13 @@ async fn remote_copy(
     let owned = crate::tenant::storage_layer::Layer::for_evicted(
         adoptee.conf,
         adoptee,
-        adopted.layer_desc().filename(),
+        adopted.layer_desc().layer_name(),
         metadata,
     );
 
     // FIXME: better shuttingdown error
     adoptee
         .remote_client
-        .as_ref()
-        .unwrap()
         .copy_timeline_layer(adopted, &owned, cancel)
         .await
         .map(move |()| owned)
@@ -429,11 +439,6 @@ pub(super) async fn complete(
     prepared: PreparedTimelineDetach,
     _ctx: &RequestContext,
 ) -> Result<Vec<TimelineId>, anyhow::Error> {
-    let rtc = detached
-        .remote_client
-        .as_ref()
-        .expect("has to have a remote timeline client for timeline ancestor detach");
-
     let PreparedTimelineDetach { layers } = prepared;
 
     let ancestor = detached
@@ -450,11 +455,13 @@ pub(super) async fn complete(
     //
     // this is not perfect, but it avoids us a retry happening after a compaction or gc on restart
     // which could give us a completely wrong layer combination.
-    rtc.schedule_adding_existing_layers_to_index_detach_and_wait(
-        &layers,
-        (ancestor.timeline_id, ancestor_lsn),
-    )
-    .await?;
+    detached
+        .remote_client
+        .schedule_adding_existing_layers_to_index_detach_and_wait(
+            &layers,
+            (ancestor.timeline_id, ancestor_lsn),
+        )
+        .await?;
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -499,8 +506,6 @@ pub(super) async fn complete(
                 async move {
                     let res = timeline
                         .remote_client
-                        .as_ref()
-                        .expect("reparented has to have remote client because detached has one")
                         .schedule_reparenting_and_wait(&new_parent)
                         .await;
 

@@ -102,7 +102,7 @@ impl<'a> BlockReaderRef<'a> {
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
             #[cfg(test)]
-            VirtualFile(r) => r.read_blk(blknum).await,
+            VirtualFile(r) => r.read_blk(blknum, ctx).await,
         }
     }
 }
@@ -177,10 +177,11 @@ impl<'a> FileBlockReader<'a> {
         &self,
         buf: PageWriteGuard<'static>,
         blkno: u32,
+        ctx: &RequestContext,
     ) -> Result<PageWriteGuard<'static>, std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
         self.file
-            .read_exact_at_page(buf, blkno as u64 * PAGE_SZ as u64)
+            .read_exact_at_page(buf, blkno as u64 * PAGE_SZ as u64, ctx)
             .await
     }
     /// Read a block.
@@ -206,7 +207,7 @@ impl<'a> FileBlockReader<'a> {
             ReadBufResult::Found(guard) => Ok(guard.into()),
             ReadBufResult::NotFound(write_guard) => {
                 // Read the page from disk into the buffer
-                let write_guard = self.fill_buffer(write_guard, blknum).await?;
+                let write_guard = self.fill_buffer(write_guard, blknum, ctx).await?;
                 Ok(write_guard.mark_valid().into())
             }
         }

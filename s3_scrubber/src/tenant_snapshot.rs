@@ -12,7 +12,7 @@ use aws_sdk_s3::Client;
 use camino::Utf8PathBuf;
 use futures::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::IndexLayerMetadata;
-use pageserver::tenant::storage_layer::LayerFileName;
+use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use pageserver_api::shard::TenantShardId;
 use utils::generation::Generation;
@@ -48,16 +48,16 @@ impl SnapshotDownloader {
     async fn download_layer(
         &self,
         ttid: TenantShardTimelineId,
-        layer_name: LayerFileName,
+        layer_name: LayerName,
         layer_metadata: IndexLayerMetadata,
-    ) -> anyhow::Result<(LayerFileName, IndexLayerMetadata)> {
+    ) -> anyhow::Result<(LayerName, IndexLayerMetadata)> {
         // Note this is local as in a local copy of S3 data, not local as in the pageserver's local format.  They use
         // different layer names (remote-style has the generation suffix)
         let local_path = self.output_path.join(format!(
             "{}/timelines/{}/{}{}",
             ttid.tenant_shard_id,
             ttid.timeline_id,
-            layer_name.file_name(),
+            layer_name,
             layer_metadata.generation.get_suffix()
         ));
 
@@ -76,7 +76,7 @@ impl SnapshotDownloader {
             let remote_layer_path = format!(
                 "{}{}{}",
                 timeline_root.prefix_in_bucket,
-                layer_name.file_name(),
+                layer_name,
                 layer_metadata.generation.get_suffix()
             );
 
@@ -110,7 +110,7 @@ impl SnapshotDownloader {
     async fn download_layers(
         &self,
         ttid: TenantShardTimelineId,
-        layers: Vec<(LayerFileName, IndexLayerMetadata)>,
+        layers: Vec<(LayerName, IndexLayerMetadata)>,
     ) -> anyhow::Result<()> {
         let layer_count = layers.len();
         tracing::info!("Downloading {} layers for timeline {ttid}...", layer_count);
@@ -138,7 +138,7 @@ impl SnapshotDownloader {
                     tracing::info!(
                         "[{download_count}/{layer_count}] OK: {} bytes {ttid} {}",
                         layer_metadata.file_size,
-                        layer_name.file_name()
+                        layer_name
                     );
                 }
                 Err(e) => {
@@ -159,11 +159,11 @@ impl SnapshotDownloader {
     async fn download_timeline(
         &self,
         ttid: TenantShardTimelineId,
-        index_part: IndexPart,
+        index_part: Box<IndexPart>,
         index_part_generation: Generation,
         ancestor_layers: &mut HashMap<
             TenantShardTimelineId,
-            HashMap<LayerFileName, IndexLayerMetadata>,
+            HashMap<LayerName, IndexLayerMetadata>,
         >,
     ) -> anyhow::Result<()> {
         let index_bytes = serde_json::to_string(&index_part).unwrap();
@@ -234,7 +234,7 @@ impl SnapshotDownloader {
         // happen if this tenant has been split at some point)
         let mut ancestor_layers: HashMap<
             TenantShardTimelineId,
-            HashMap<LayerFileName, IndexLayerMetadata>,
+            HashMap<LayerName, IndexLayerMetadata>,
         > = Default::default();
 
         for shard in shards.into_iter().filter(|s| s.shard_count == shard_count) {

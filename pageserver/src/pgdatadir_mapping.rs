@@ -9,7 +9,6 @@
 use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::metrics::WAL_INGEST;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
 use crate::{aux_file, repository::*};
@@ -35,12 +34,16 @@ use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
-const MAX_AUX_FILE_DELTAS: usize = 1024;
+/// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
+pub const MAX_AUX_FILE_DELTAS: usize = 1024;
+
+/// Max number of aux-file-related delta layers. The compaction will create a new image layer once this threshold is reached.
+pub const MAX_AUX_FILE_V2_DELTAS: usize = 64;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -699,13 +702,17 @@ impl Timeline {
             .await
             .context("scan")?;
         let mut result = HashMap::new();
+        let mut sz = 0;
         for (_, v) in kv {
             let v = v.context("get value")?;
             let v = aux_file::decode_file_value_bytes(&v).context("value decode")?;
             for (fname, content) in v {
+                sz += fname.len();
+                sz += content.len();
                 result.insert(fname, content);
             }
         }
+        self.aux_file_size_estimator.on_base_backup(sz);
         Ok(result)
     }
 
@@ -714,10 +721,11 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        match self.get_switch_aux_file_policy() {
-            AuxFilePolicy::V1 => self.list_aux_files_v1(lsn, ctx).await,
-            AuxFilePolicy::V2 => self.list_aux_files_v2(lsn, ctx).await,
-            AuxFilePolicy::CrossValidation => {
+        let current_policy = self.last_aux_file_policy.load();
+        match current_policy {
+            Some(AuxFilePolicy::V1) | None => self.list_aux_files_v1(lsn, ctx).await,
+            Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
+            Some(AuxFilePolicy::CrossValidation) => {
                 let v1_result = self.list_aux_files_v1(lsn, ctx).await;
                 let v2_result = self.list_aux_files_v2(lsn, ctx).await;
                 match (v1_result, v2_result) {
@@ -1465,7 +1473,40 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let policy = self.tline.get_switch_aux_file_policy();
+        let switch_policy = self.tline.get_switch_aux_file_policy();
+
+        let policy = {
+            let current_policy = self.tline.last_aux_file_policy.load();
+            // Allowed switch path:
+            // * no aux files -> v1/v2/cross-validation
+            // * cross-validation->v2
+
+            let current_policy = if current_policy.is_none() {
+                // This path will only be hit once per tenant: we will decide the final policy in this code block.
+                // The next call to `put_file` will always have `last_aux_file_policy != None`.
+                let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
+                let aux_files_key_v1 = self.tline.list_aux_files_v1(lsn, ctx).await?;
+                if aux_files_key_v1.is_empty() {
+                    None
+                } else {
+                    self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
+                    Some(AuxFilePolicy::V1)
+                }
+            } else {
+                current_policy
+            };
+
+            if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
+                self.tline.do_switch_aux_policy(switch_policy)?;
+                info!(current=?current_policy, next=?switch_policy, "switching aux file policy");
+                switch_policy
+            } else {
+                // This branch handles non-valid migration path, and the case that switch_policy == current_policy.
+                // And actually, because the migration path always allow unspecified -> *, this unwrap_or will never be hit.
+                current_policy.unwrap_or(AuxFilePolicy::default_tenant_config())
+            }
+        };
+
         if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
             let key = aux_file::encode_aux_file_key(path);
             // retrieve the key from the engine
@@ -1474,23 +1515,45 @@ impl<'a> DatadirModification<'a> {
                 Err(PageReconstructError::MissingKey(_)) => None,
                 Err(e) => return Err(e.into()),
             };
-            let files = if let Some(ref old_val) = old_val {
+            let files: Vec<(&str, &[u8])> = if let Some(ref old_val) = old_val {
                 aux_file::decode_file_value(old_val)?
             } else {
                 Vec::new()
             };
-            let new_files = if content.is_empty() {
-                files
-                    .into_iter()
-                    .filter(|(p, _)| &path != p)
-                    .collect::<Vec<_>>()
-            } else {
-                files
-                    .into_iter()
-                    .filter(|(p, _)| &path != p)
-                    .chain(std::iter::once((path, content)))
-                    .collect::<Vec<_>>()
-            };
+            let mut other_files = Vec::with_capacity(files.len());
+            let mut modifying_file = None;
+            for file @ (p, content) in files {
+                if path == p {
+                    assert!(
+                        modifying_file.is_none(),
+                        "duplicated entries found for {}",
+                        path
+                    );
+                    modifying_file = Some(content);
+                } else {
+                    other_files.push(file);
+                }
+            }
+            let mut new_files = other_files;
+            match (modifying_file, content.is_empty()) {
+                (Some(old_content), false) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_update(old_content.len(), content.len());
+                    new_files.push((path, content));
+                }
+                (Some(old_content), true) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_remove(old_content.len());
+                    // not adding the file key to the final `new_files` vec.
+                }
+                (None, false) => {
+                    self.tline.aux_file_size_estimator.on_add(content.len());
+                    new_files.push((path, content));
+                }
+                (None, true) => anyhow::bail!("removing non-existing aux file: {}", path),
+            }
             let new_val = aux_file::encode_file_value(&new_files)?;
             self.put(key, Value::Image(new_val.into()));
         }
@@ -1651,8 +1714,6 @@ impl<'a> DatadirModification<'a> {
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut writer = self.tline.writer().await;
 
-        let timer = WAL_INGEST.time_spent_on_ingest.start_timer();
-
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
@@ -1671,7 +1732,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         if !self.pending_deletions.is_empty() {
-            writer.delete_batch(&self.pending_deletions).await?;
+            writer.delete_batch(&self.pending_deletions, ctx).await?;
             self.pending_deletions.clear();
         }
 
@@ -1691,8 +1752,6 @@ impl<'a> DatadirModification<'a> {
         for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
             writer.update_directory_entries_count(kind, count as u64);
         }
-
-        timer.observe_duration();
 
         Ok(())
     }
@@ -1727,6 +1786,12 @@ impl<'a> DatadirModification<'a> {
         }
         let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
         self.tline.get(key, lsn, ctx).await
+    }
+
+    /// Only used during unit tests, force putting a key into the modification.
+    #[cfg(test)]
+    pub(crate) fn put_for_test(&mut self, key: Key, val: Value) {
+        self.put(key, val);
     }
 
     fn put(&mut self, key: Key, val: Value) {

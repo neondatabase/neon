@@ -12,8 +12,8 @@ import boto3
 import toml
 from mypy_boto3_s3 import S3Client
 
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.types import TenantId, TimelineId
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
 TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"
@@ -50,7 +50,7 @@ class MockS3Server:
         # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
         # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
         # if a process is started from the shell process.
-        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", "s3", f"-p{port}"])
+        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", f"-p{port}"])
         error = None
         try:
             return_code = self.subprocess.poll()

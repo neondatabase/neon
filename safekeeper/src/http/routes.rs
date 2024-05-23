@@ -350,6 +350,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         backup_lsn: sk_info.backup_lsn.0,
         local_start_lsn: sk_info.local_start_lsn.0,
         availability_zone: None,
+        standby_horizon: sk_info.standby_horizon.0,
     };
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
@@ -519,6 +520,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .get("/v1/status", |r| request_span(r, status_handler))
         .put("/v1/failpoints", |r| {
             request_span(r, move |r| async {
+                check_permission(&r, None)?;
                 let cancel = CancellationToken::new();
                 failpoints_handler(r, cancel).await
             })

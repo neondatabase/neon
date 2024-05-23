@@ -5,6 +5,7 @@ from typing import cast
 
 import pytest
 import requests
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
@@ -13,7 +14,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion, skip_on_postgres
-from fixtures.types import TenantId, TimelineId
 
 
 def helper_compare_timeline_list(

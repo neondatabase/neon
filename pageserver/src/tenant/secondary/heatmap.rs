@@ -1,8 +1,6 @@
 use std::time::SystemTime;
 
-use crate::tenant::{
-    remote_timeline_client::index::IndexLayerMetadata, storage_layer::LayerFileName,
-};
+use crate::tenant::{remote_timeline_client::index::IndexLayerMetadata, storage_layer::LayerName};
 
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr, TimestampSeconds};
@@ -17,6 +15,14 @@ pub(super) struct HeatMapTenant {
     pub(super) generation: Generation,
 
     pub(super) timelines: Vec<HeatMapTimeline>,
+
+    /// Uploaders provide their own upload period in the heatmap, as a hint to downloaders
+    /// of how frequently it is worthwhile to check for updates.
+    ///
+    /// This is optional for backward compat, and because we sometimes might upload
+    /// a heatmap explicitly via API for a tenant that has no periodic upload configured.
+    #[serde(default)]
+    pub(super) upload_period_ms: Option<u128>,
 }
 
 #[serde_as]
@@ -31,7 +37,7 @@ pub(crate) struct HeatMapTimeline {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HeatMapLayer {
-    pub(super) name: LayerFileName,
+    pub(super) name: LayerName,
     pub(super) metadata: IndexLayerMetadata,
 
     #[serde_as(as = "TimestampSeconds<i64>")]
@@ -42,7 +48,7 @@ pub(crate) struct HeatMapLayer {
 
 impl HeatMapLayer {
     pub(crate) fn new(
-        name: LayerFileName,
+        name: LayerName,
         metadata: IndexLayerMetadata,
         access_time: SystemTime,
     ) -> Self {
@@ -82,5 +88,22 @@ impl HeatMapTenant {
         }
 
         stats
+    }
+
+    pub(crate) fn strip_atimes(self) -> Self {
+        Self {
+            timelines: self
+                .timelines
+                .into_iter()
+                .map(|mut tl| {
+                    for layer in &mut tl.layers {
+                        layer.access_time = SystemTime::UNIX_EPOCH;
+                    }
+                    tl
+                })
+                .collect(),
+            generation: self.generation,
+            upload_period_ms: self.upload_period_ms,
+        }
     }
 }

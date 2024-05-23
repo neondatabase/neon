@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use tracing::Instrument;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
-use utils::sync::heavier_once_cell;
+use utils::sync::{gate, heavier_once_cell};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -25,7 +25,7 @@ use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 use super::delta_layer::{self, DeltaEntry};
 use super::image_layer;
 use super::{
-    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerFileName, PersistentLayerDesc,
+    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerName, PersistentLayerDesc,
     ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
 };
 
@@ -128,19 +128,17 @@ pub(crate) fn local_layer_path(
     conf: &PageServerConf,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
-    layer_file_name: &LayerFileName,
-    _generation: &Generation,
+    layer_file_name: &LayerName,
+    generation: &Generation,
 ) -> Utf8PathBuf {
     let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
 
-    timeline_path.join(layer_file_name.file_name())
-
-    // TOOD: include generation in the name in now+1 releases.
-    // timeline_path.join(format!(
-    //     "{}{}",
-    //     layer_file_name.file_name(),
-    //     generation.get_suffix()
-    // ))
+    if generation.is_none() {
+        // Without a generation, we may only use legacy path style
+        timeline_path.join(layer_file_name.to_string())
+    } else {
+        timeline_path.join(format!("{}-v1{}", layer_file_name, generation.get_suffix()))
+    }
 }
 
 impl Layer {
@@ -148,7 +146,7 @@ impl Layer {
     pub(crate) fn for_evicted(
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
-        file_name: LayerFileName,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> Self {
         let local_path = local_layer_path(
@@ -189,7 +187,7 @@ impl Layer {
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
         local_path: Utf8PathBuf,
-        file_name: LayerFileName,
+        file_name: LayerName,
         metadata: LayerFileMetadata,
     ) -> ResidentLayer {
         let desc = PersistentLayerDesc::from_filename(
@@ -261,7 +259,7 @@ impl Layer {
                 conf,
                 &timeline.tenant_shard_id,
                 &timeline.timeline_id,
-                &desc.filename(),
+                &desc.layer_name(),
                 &timeline.generation,
             );
 
@@ -587,9 +585,6 @@ struct LayerInner {
     /// [`Timeline::gate`] at the same time.
     timeline: Weak<Timeline>,
 
-    /// Cached knowledge of [`Timeline::remote_client`] being `Some`.
-    have_remote_client: bool,
-
     access_stats: LayerAccessStats,
 
     /// This custom OnceCell is backed by std mutex, but only held for short time periods.
@@ -689,7 +684,7 @@ impl Drop for LayerInner {
         let span = tracing::info_span!(parent: None, "layer_delete", tenant_id = %self.layer_desc().tenant_shard_id.tenant_id, shard_id=%self.layer_desc().tenant_shard_id.shard_slug(), timeline_id = %self.layer_desc().timeline_id);
 
         let path = std::mem::take(&mut self.path);
-        let file_name = self.layer_desc().filename();
+        let file_name = self.layer_desc().layer_name();
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
         let meta = self.metadata();
@@ -734,23 +729,23 @@ impl Drop for LayerInner {
             if removed {
                 timeline.metrics.resident_physical_size_sub(file_size);
             }
-            if let Some(remote_client) = timeline.remote_client.as_ref() {
-                let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
+            let res = timeline
+                .remote_client
+                .schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
-                if let Err(e) = res {
-                    // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
-                    // demonstrating this deadlock (without spawn_blocking): stop will drop
-                    // queued items, which will have ResidentLayer's, and those drops would try
-                    // to re-entrantly lock the RemoteTimelineClient inner state.
-                    if !timeline.is_active() {
-                        tracing::info!("scheduling deletion on drop failed: {e:#}");
-                    } else {
-                        tracing::warn!("scheduling deletion on drop failed: {e:#}");
-                    }
-                    LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+            if let Err(e) = res {
+                // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
+                // demonstrating this deadlock (without spawn_blocking): stop will drop
+                // queued items, which will have ResidentLayer's, and those drops would try
+                // to re-entrantly lock the RemoteTimelineClient inner state.
+                if !timeline.is_active() {
+                    tracing::info!("scheduling deletion on drop failed: {e:#}");
                 } else {
-                    LAYER_IMPL_METRICS.inc_completed_deletes();
+                    tracing::warn!("scheduling deletion on drop failed: {e:#}");
                 }
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+            } else {
+                LAYER_IMPL_METRICS.inc_completed_deletes();
             }
         });
     }
@@ -782,11 +777,12 @@ impl LayerInner {
 
         LayerInner {
             conf,
-            debug_str: { format!("timelines/{}/{}", timeline.timeline_id, desc.filename()).into() },
+            debug_str: {
+                format!("timelines/{}/{}", timeline.timeline_id, desc.layer_name()).into()
+            },
             path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
-            have_remote_client: timeline.remote_client.is_some(),
             access_stats,
             wanted_deleted: AtomicBool::new(false),
             inner,
@@ -815,8 +811,6 @@ impl LayerInner {
     /// in a new attempt to evict OR join the previously started attempt.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, ret, err(level = tracing::Level::DEBUG), fields(layer=%self))]
     pub(crate) async fn evict_and_wait(&self, timeout: Duration) -> Result<(), EvictionError> {
-        assert!(self.have_remote_client);
-
         let mut rx = self.status.as_ref().unwrap().subscribe();
 
         {
@@ -973,10 +967,6 @@ impl LayerInner {
             return Err(DownloadError::NotFile(ft));
         }
 
-        if timeline.remote_client.as_ref().is_none() {
-            return Err(DownloadError::NoRemoteStorage);
-        }
-
         if let Some(ctx) = ctx {
             self.check_expected_download(ctx)?;
         }
@@ -1113,15 +1103,12 @@ impl LayerInner {
         permit: heavier_once_cell::InitPermit,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<DownloadedLayer>> {
-        let client = timeline
+        let result = timeline
             .remote_client
-            .as_ref()
-            .expect("checked before download_init_and_wait");
-
-        let result = client
             .download_layer_file(
-                &self.desc.filename(),
+                &self.desc.layer_name(),
                 &self.metadata(),
+                &self.path,
                 &timeline.cancel,
                 ctx,
             )
@@ -1257,7 +1244,7 @@ impl LayerInner {
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.desc.filename().file_name();
+        let layer_name = self.desc.layer_name().to_string();
 
         let resident = self
             .inner
@@ -1271,18 +1258,19 @@ impl LayerInner {
             let lsn_range = &self.desc.lsn_range;
 
             HistoricLayerInfo::Delta {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
+                l0: crate::tenant::layer_map::LayerMap::is_l0(self.layer_desc()),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
 
             HistoricLayerInfo::Image {
-                layer_file_name,
+                layer_file_name: layer_name,
                 layer_file_size: self.desc.file_size,
                 lsn_start: lsn,
                 remote: !resident,
@@ -1293,19 +1281,9 @@ impl LayerInner {
 
     /// `DownloadedLayer` is being dropped, so it calls this method.
     fn on_downloaded_layer_drop(self: Arc<LayerInner>, only_version: usize) {
-        let can_evict = self.have_remote_client;
-
         // we cannot know without inspecting LayerInner::inner if we should evict or not, even
         // though here it is very likely
         let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, version=%only_version);
-
-        if !can_evict {
-            // it would be nice to assert this case out, but we are in drop
-            span.in_scope(|| {
-                tracing::error!("bug in struct Layer: ResidentOrWantedEvicted has been downgraded while we have no remote storage");
-            });
-            return;
-        }
 
         // NOTE: this scope *must* never call `self.inner.get` because evict_and_wait might
         // drop while the `self.inner` is being locked, leading to a deadlock.
@@ -1355,7 +1333,7 @@ impl LayerInner {
 
         is_good_to_continue(&rx.borrow_and_update())?;
 
-        let Ok(_gate) = timeline.gate.enter() else {
+        let Ok(gate) = timeline.gate.enter() else {
             return Err(EvictionCancelled::TimelineGone);
         };
 
@@ -1443,7 +1421,7 @@ impl LayerInner {
         Self::spawn_blocking(move || {
             let _span = span.entered();
 
-            let res = self.evict_blocking(&timeline, &permit);
+            let res = self.evict_blocking(&timeline, &gate, &permit);
 
             let waiters = self.inner.initializer_count();
 
@@ -1469,6 +1447,7 @@ impl LayerInner {
     fn evict_blocking(
         &self,
         timeline: &Timeline,
+        _gate: &gate::GateGuard,
         _permit: &heavier_once_cell::InitPermit,
     ) -> Result<(), EvictionCancelled> {
         // now accesses to `self.inner.get_or_init*` wait on the semaphore or the `_permit`
@@ -1578,8 +1557,6 @@ pub(crate) enum EvictionError {
 pub(crate) enum DownloadError {
     #[error("timeline has already shutdown")]
     TimelineShutdown,
-    #[error("no remote storage configured")]
-    NoRemoteStorage,
     #[error("context denies downloading")]
     ContextAndConfigReallyDeniesDownloads,
     #[error("downloading is really required but not allowed by this method")]

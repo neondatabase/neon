@@ -13,13 +13,14 @@ publish = false
 
 ### BEGIN HAKARI SECTION
 [dependencies]
+ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
 aws-config = { version = "1", default-features = false, features = ["rustls", "sso"] }
 aws-runtime = { version = "1", default-features = false, features = ["event-stream", "http-02x", "sigv4a"] }
 aws-sigv4 = { version = "1", features = ["http0-compat", "sign-eventstream", "sigv4a"] }
 aws-smithy-async = { version = "1", default-features = false, features = ["rt-tokio"] }
 aws-smithy-http = { version = "0.60", default-features = false, features = ["event-stream"] }
-aws-smithy-types = { version = "1", default-features = false, features = ["byte-stream-poll-next", "http-body-0-4-x", "rt-tokio", "test-util"] }
+aws-smithy-types = { version = "1", default-features = false, features = ["byte-stream-poll-next", "http-body-0-4-x", "http-body-1-x", "rt-tokio", "test-util"] }
 axum = { version = "0.6", features = ["ws"] }
 base64 = { version = "0.21", features = ["alloc"] }
 base64ct = { version = "1", default-features = false, features = ["std"] }
@@ -51,7 +52,7 @@ num-bigint = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
-parquet = { git = "https://github.com/neondatabase/arrow-rs", branch = "neon-fix-bugs", default-features = false, features = ["zstd"] }
+parquet = { git = "https://github.com/apache/arrow-rs", branch = "master", default-features = false, features = ["zstd"] }
 prost = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
@@ -85,6 +86,7 @@ zstd-safe = { version = "7", default-features = false, features = ["arrays", "le
 zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }
 
 [build-dependencies]
+ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
@@ -102,7 +104,7 @@ num-bigint = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
-parquet = { git = "https://github.com/neondatabase/arrow-rs", branch = "neon-fix-bugs", default-features = false, features = ["zstd"] }
+parquet = { git = "https://github.com/apache/arrow-rs", branch = "master", default-features = false, features = ["zstd"] }
 prost = { version = "0.11" }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }

@@ -10,6 +10,7 @@ from typing import Optional
 import psycopg2.errors
 import psycopg2.extras
 import pytest
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -31,7 +32,6 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import TenantId, TimelineId
 from fixtures.utils import get_timeline_dir_size, wait_until
 
 
@@ -415,11 +415,12 @@ def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder
 
     # Disable background compaction as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
-    neon_env_builder.pageserver_config_override = (
-        "tenant_config={checkpoint_distance=100000, compaction_period='10m'}"
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "checkpoint_distance": "100000",
+            "compaction_period": "10m",
+        }
     )
-
-    env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_compaction")
@@ -462,9 +463,14 @@ def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
 
     # Disable background compaction and GC as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
-    neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance=100000, compaction_period='0s', gc_period='0s', pitr_interval='1s'}"
-
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "checkpoint_distance": "100000",
+            "compaction_period": "0s",
+            "gc_period": "0s",
+            "pitr_interval": "1s",
+        }
+    )
     pageserver_http = env.pageserver.http_client()
 
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_gc")
@@ -650,7 +656,7 @@ def get_physical_size_values(
     client = env.pageserver.http_client()
 
     res.layer_map_file_size_sum = sum(
-        layer.layer_file_size or 0
+        layer.layer_file_size
         for layer in client.layer_map_info(tenant_id, timeline_id).historic_layers
     )
 

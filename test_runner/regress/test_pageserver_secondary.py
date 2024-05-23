@@ -5,9 +5,10 @@ import time
 from typing import Any, Dict, Optional
 
 import pytest
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
-from fixtures.pageserver.types import parse_layer_file_name
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
     poll_for_remote_storage_iterations,
@@ -15,7 +16,6 @@ from fixtures.pageserver.utils import (
     wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage
-from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
@@ -575,7 +575,10 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
     tenant_timelines = {}
 
     # This mirrors a constant in `downloader.rs`
-    freshen_interval_secs = 60
+    default_download_period_secs = 60
+
+    # The upload period, which will also be the download once the secondary has seen its first heatmap
+    upload_period_secs = 30
 
     for _i in range(0, tenant_count):
         tenant_id = TenantId.generate()
@@ -587,17 +590,32 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
             placement_policy='{"Attached":1}',
             # Run with a low heatmap period so that we can avoid having to do synthetic API calls
             # to trigger the upload promptly.
-            conf={"heatmap_period": "1s"},
+            conf={"heatmap_period": f"{upload_period_secs}s"},
         )
         env.neon_cli.create_timeline("main2", tenant_id, timeline_b)
 
         tenant_timelines[tenant_id] = [timeline_a, timeline_b]
 
+    def await_log(pageserver, deadline, expression):
+        """
+        Wrapper around assert_log_contains that waits with a deadline rather than timeout
+        """
+        now = time.time()
+        if now > deadline:
+            raise RuntimeError(f"Timed out waiting for {expression}")
+        else:
+            timeout = int(deadline - now) + 1
+            try:
+                wait_until(timeout, 1, lambda: pageserver.assert_log_contains(expression))  # type: ignore
+            except:
+                log.error(f"Timed out waiting for '{expression}'")
+                raise
+
     t_start = time.time()
 
     # Wait long enough that the background downloads should happen; we expect all the inital layers
     # of all the initial timelines to show up on the secondary location of each tenant.
-    time.sleep(freshen_interval_secs * 1.5)
+    initial_download_deadline = time.time() + default_download_period_secs * 3
 
     for tenant_id, timelines in tenant_timelines.items():
         attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
@@ -605,16 +623,32 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         # We only have two: the other one must be secondary
         ps_secondary = next(p for p in env.pageservers if p != ps_attached)
 
+        now = time.time()
+        if now > initial_download_deadline:
+            raise RuntimeError("Timed out waiting for initial secondary download")
+        else:
+            for timeline_id in timelines:
+                log.info(
+                    f"Waiting for downloads of timeline {timeline_id} on secondary pageserver {ps_secondary.id}"
+                )
+                await_log(
+                    ps_secondary,
+                    initial_download_deadline,
+                    f".*{timeline_id}.*Wrote timeline_detail.*",
+                )
+
         for timeline_id in timelines:
-            log.info(f"Checking for secondary timeline {timeline_id} on node {ps_secondary.id}")
+            log.info(
+                f"Checking for secondary timeline downloads {timeline_id} on node {ps_secondary.id}"
+            )
             # One or more layers should be present for all timelines
             assert ps_secondary.list_layers(tenant_id, timeline_id)
 
         # Delete the second timeline: this should be reflected later on the secondary
         env.storage_controller.pageserver_api().timeline_delete(tenant_id, timelines[1])
 
-    # Wait long enough for the secondary locations to see the deletion
-    time.sleep(freshen_interval_secs * 1.5)
+    # Wait long enough for the secondary locations to see the deletion: 2x period plus a grace factor
+    deletion_deadline = time.time() + upload_period_secs * 3
 
     for tenant_id, timelines in tenant_timelines.items():
         attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
@@ -622,11 +656,24 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         # We only have two: the other one must be secondary
         ps_secondary = next(p for p in env.pageservers if p != ps_attached)
 
+        expect_del_timeline = timelines[1]
+        log.info(
+            f"Waiting for deletion of timeline {expect_del_timeline} on secondary pageserver {ps_secondary.id}"
+        )
+        await_log(
+            ps_secondary,
+            deletion_deadline,
+            f".*Timeline no longer in heatmap.*{expect_del_timeline}.*",
+        )
+
         # This one was not deleted
         assert ps_secondary.list_layers(tenant_id, timelines[0])
 
         # This one was deleted
-        assert not ps_secondary.list_layers(tenant_id, timelines[1])
+        log.info(
+            f"Checking for secondary timeline deletion {tenant_id}/{timeline_id} on node {ps_secondary.id}"
+        )
+        assert not ps_secondary.list_layers(tenant_id, expect_del_timeline)
 
     t_end = time.time()
 
@@ -640,7 +687,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
 
     download_rate = (total_heatmap_downloads / tenant_count) / (t_end - t_start)
 
-    expect_download_rate = 1.0 / freshen_interval_secs
+    expect_download_rate = 1.0 / upload_period_secs
     log.info(f"Download rate: {download_rate * 60}/min vs expected {expect_download_rate * 60}/min")
 
     assert download_rate < expect_download_rate * 2

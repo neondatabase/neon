@@ -2,13 +2,13 @@ from dataclasses import dataclass
 from typing import Generator, Optional
 
 import pytest
+from fixtures.common_types import TenantId
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
 )
 from fixtures.pageserver.http import PageserverApiException, TenantConfig
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.types import TenantId
 from fixtures.utils import wait_until
 
 
@@ -162,7 +162,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
         "compaction_algorithm": {
-            "kind": "Tiered",
+            "kind": "tiered",
         },
         "eviction_policy": {
             "kind": "LayerAccessThreshold",
@@ -190,7 +190,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "trace_read_requests": True,
         "walreceiver_connect_timeout": "13m",
         "image_layer_creation_check_threshold": 1,
-        "switch_aux_file_policy": "CrossValidation",
+        "switch_aux_file_policy": "cross-validation",
     }
 
     ps_http = env.pageserver.http_client()

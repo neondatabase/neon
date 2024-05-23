@@ -125,7 +125,7 @@ impl ShardCount {
 
     /// `v` may be zero, or the number of shards in the tenant.  `v` is what
     /// [`Self::literal`] would return.
-    pub fn new(val: u8) -> Self {
+    pub const fn new(val: u8) -> Self {
         Self(val)
     }
 }
@@ -556,6 +556,14 @@ impl ShardIdentity {
             false
         } else {
             !self.is_key_local(key)
+        }
+    }
+
+    /// Obtains the shard number and count combined into a `ShardIndex`.
+    pub fn shard_index(&self) -> ShardIndex {
+        ShardIndex {
+            shard_count: self.count,
+            shard_number: self.number,
         }
     }
 

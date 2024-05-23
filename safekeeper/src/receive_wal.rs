@@ -45,6 +45,9 @@ const DEFAULT_FEEDBACK_CAPACITY: usize = 8;
 pub struct WalReceivers {
     mutex: Mutex<WalReceiversShared>,
     pageserver_feedback_tx: tokio::sync::broadcast::Sender<PageserverFeedback>,
+
+    num_computes_tx: tokio::sync::watch::Sender<usize>,
+    num_computes_rx: tokio::sync::watch::Receiver<usize>,
 }
 
 /// Id under which walreceiver is registered in shmem.
@@ -55,16 +58,21 @@ impl WalReceivers {
         let (pageserver_feedback_tx, _) =
             tokio::sync::broadcast::channel(DEFAULT_FEEDBACK_CAPACITY);
 
+        let (num_computes_tx, num_computes_rx) = tokio::sync::watch::channel(0usize);
+
         Arc::new(WalReceivers {
             mutex: Mutex::new(WalReceiversShared { slots: Vec::new() }),
             pageserver_feedback_tx,
+            num_computes_tx,
+            num_computes_rx,
         })
     }
 
     /// Register new walreceiver. Returned guard provides access to the slot and
     /// automatically deregisters in Drop.
     pub fn register(self: &Arc<WalReceivers>, conn_id: Option<ConnectionId>) -> WalReceiverGuard {
-        let slots = &mut self.mutex.lock().slots;
+        let mut shared = self.mutex.lock();
+        let slots = &mut shared.slots;
         let walreceiver = WalReceiverState {
             conn_id,
             status: WalReceiverStatus::Voting,
@@ -78,6 +86,9 @@ impl WalReceivers {
             slots.push(Some(walreceiver));
             pos
         };
+
+        self.update_num(&shared);
+
         WalReceiverGuard {
             id: pos,
             walreceivers: self.clone(),
@@ -99,7 +110,18 @@ impl WalReceivers {
 
     /// Get number of walreceivers (compute connections).
     pub fn get_num(self: &Arc<WalReceivers>) -> usize {
-        self.mutex.lock().slots.iter().flatten().count()
+        self.mutex.lock().get_num()
+    }
+
+    /// Get channel for number of walreceivers.
+    pub fn get_num_rx(self: &Arc<WalReceivers>) -> tokio::sync::watch::Receiver<usize> {
+        self.num_computes_rx.clone()
+    }
+
+    /// Should get called after every update of slots.
+    fn update_num(self: &Arc<WalReceivers>, shared: &MutexGuard<WalReceiversShared>) {
+        let num = shared.get_num();
+        self.num_computes_tx.send_replace(num);
     }
 
     /// Get state of all walreceivers.
@@ -123,6 +145,7 @@ impl WalReceivers {
     fn unregister(self: &Arc<WalReceivers>, id: WalReceiverId) {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
+        self.update_num(&shared);
     }
 
     /// Broadcast pageserver feedback to connected walproposers.
@@ -135,6 +158,13 @@ impl WalReceivers {
 /// Only a few connections are expected (normally one), so store in Vec.
 struct WalReceiversShared {
     slots: Vec<Option<WalReceiverState>>,
+}
+
+impl WalReceiversShared {
+    /// Get number of walreceivers (compute connections).
+    fn get_num(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,9 +213,19 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
-        if let Err(end) = self.handle_start_wal_push_guts(pgb).await {
+        let mut tli: Option<Arc<Timeline>> = None;
+        if let Err(end) = self.handle_start_wal_push_guts(pgb, &mut tli).await {
             // Log the result and probably send it to the client, closing the stream.
-            pgb.handle_copy_stream_end(end).await;
+            let handle_end_fut = pgb.handle_copy_stream_end(end);
+            // If we managed to create the timeline, augment logging with current LSNs etc.
+            if let Some(tli) = tli {
+                let info = tli.get_safekeeper_info(&self.conf).await;
+                handle_end_fut
+                    .instrument(info_span!("", term=%info.term, last_log_term=%info.last_log_term, flush_lsn=%Lsn(info.flush_lsn), commit_lsn=%Lsn(info.commit_lsn)))
+                    .await;
+            } else {
+                handle_end_fut.await;
+            }
         }
         Ok(())
     }
@@ -193,6 +233,7 @@ impl SafekeeperPostgresHandler {
     pub async fn handle_start_wal_push_guts<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
+        tli: &mut Option<Arc<Timeline>>,
     ) -> Result<(), CopyStreamHandlerEnd> {
         // Notify the libpq client that it's allowed to send `CopyData` messages
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
@@ -222,13 +263,17 @@ impl SafekeeperPostgresHandler {
         // Read first message and create timeline if needed.
         let res = network_reader.read_first_message().await;
 
-        let res = if let Ok((tli, next_msg)) = res {
+        let network_res = if let Ok((timeline, next_msg)) = res {
             let pageserver_feedback_rx: tokio::sync::broadcast::Receiver<PageserverFeedback> =
-                tli.get_walreceivers().pageserver_feedback_tx.subscribe();
+                timeline
+                    .get_walreceivers()
+                    .pageserver_feedback_tx
+                    .subscribe();
+            *tli = Some(timeline.clone());
 
             tokio::select! {
                 // todo: add read|write .context to these errors
-                r = network_reader.run(msg_tx, msg_rx, reply_tx, tli.clone(), next_msg) => r,
+                r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline.clone(), next_msg) => r,
                 r = network_write(pgb, reply_rx, pageserver_feedback_rx) => r,
             }
         } else {
@@ -244,13 +289,13 @@ impl SafekeeperPostgresHandler {
         match acceptor_handle {
             None => {
                 // failed even before spawning; read_network should have error
-                Err(res.expect_err("no error with WalAcceptor not spawn"))
+                Err(network_res.expect_err("no error with WalAcceptor not spawn"))
             }
             Some(handle) => {
                 let wal_acceptor_res = handle.await;
 
                 // If there was any network error, return it.
-                res?;
+                network_res?;
 
                 // Otherwise, WalAcceptor thread must have errored.
                 match wal_acceptor_res {
@@ -441,14 +486,7 @@ impl WalAcceptor {
     /// The main loop. Returns Ok(()) if either msg_rx or reply_tx got closed;
     /// it must mean that network thread terminated.
     async fn run(&mut self) -> anyhow::Result<()> {
-        // Register the connection and defer unregister.
-        // Order of the next two lines is important: we want first to remove our entry and then
-        // update status which depends on registered connections.
-        let _compute_conn_guard = ComputeConnectionGuard {
-            timeline: Arc::clone(&self.tli),
-        };
         let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
-        self.tli.update_status_notify().await?;
 
         // After this timestamp we will stop processing AppendRequests and send a response
         // to the walproposer. walproposer sends at least one AppendRequest per second,
@@ -512,21 +550,5 @@ impl WalAcceptor {
                 next_keepalive = Instant::now() + KEEPALIVE_INTERVAL;
             }
         }
-    }
-}
-
-/// Calls update_status_notify in drop to update timeline status.
-struct ComputeConnectionGuard {
-    timeline: Arc<Timeline>,
-}
-
-impl Drop for ComputeConnectionGuard {
-    fn drop(&mut self) {
-        let tli = self.timeline.clone();
-        tokio::spawn(async move {
-            if let Err(e) = tli.update_status_notify().await {
-                error!("failed to update timeline status: {}", e);
-            }
-        });
     }
 }

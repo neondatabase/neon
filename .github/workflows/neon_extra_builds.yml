@@ -136,7 +136,7 @@ jobs:
   check-linux-arm-build:
     needs: [ check-permissions, build-build-tools-image ]
     timeout-minutes: 90
-    runs-on: [ self-hosted, dev, arm64 ]
+    runs-on: [ self-hosted, small-arm64 ]
 
     env:
       # Use release build only, to have less debug info around
@@ -232,20 +232,20 @@ jobs:
 
       - name: Run cargo build
         run: |
-          mold -run cargo build --locked $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          mold -run cargo build --locked $CARGO_FLAGS $CARGO_FEATURES --bins --tests -j$(nproc)
 
       - name: Run cargo test
         env:
           NEXTEST_RETRIES: 3
         run: |
-          cargo nextest run $CARGO_FEATURES
+          cargo nextest run $CARGO_FEATURES -j$(nproc)
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
           export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo nextest run --package remote_storage --test test_real_s3
+          cargo nextest run --package remote_storage --test test_real_s3 -j$(nproc)
 
           # Run separate tests for real Azure Blob Storage
           # XXX: replace region with `eu-central-1`-like region
@@ -255,12 +255,12 @@ jobs:
           export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
           export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo nextest run --package remote_storage --test test_real_azure
+          cargo nextest run --package remote_storage --test test_real_azure -j$(nproc)
 
   check-codestyle-rust-arm:
     needs: [ check-permissions, build-build-tools-image ]
     timeout-minutes: 90
-    runs-on: [ self-hosted, dev, arm64 ]
+    runs-on: [ self-hosted, small-arm64 ]
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
@@ -268,6 +268,11 @@ jobs:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
+
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [ debug, release ]
 
     steps:
       - name: Fix git ownership
@@ -305,31 +310,35 @@ jobs:
             exit 1
           fi
           echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
+
       - name: Run cargo clippy (debug)
+        if: matrix.build_type == 'debug'
         run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
       - name: Run cargo clippy (release)
+        if: matrix.build_type == 'release'
         run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
       - name: Check documentation generation
-        run: cargo doc --workspace --no-deps --document-private-items
+        if: matrix.build_type == 'release'
+        run: cargo doc --workspace --no-deps --document-private-items -j$(nproc)
         env:
             RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.build_type == 'release' }}
         run: cargo fmt --all -- --check
 
       # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
       - name: Check rust dependencies
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.build_type == 'release' }}
         run: |
           cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
           cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
 
       # https://github.com/EmbarkStudios/cargo-deny
       - name: Check rust licenses/bans/advisories/sources
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.build_type == 'release' }}
         run: cargo deny check
 
   gather-rust-build-stats:
@@ -338,7 +347,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, large ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -369,7 +378,7 @@ jobs:
         run: make walproposer-lib -j$(nproc)
 
       - name: Produce the build stats
-        run: cargo build --all --release --timings
+        run: cargo build --all --release --timings -j$(nproc)
 
       - name: Upload the build stats
         id: upload-stats
