@@ -200,8 +200,8 @@ pub(super) fn cleanup_local_file_for_remote(
     local: &LocalLayerFileMetadata,
     remote: &LayerFileMetadata,
 ) -> anyhow::Result<()> {
-    let local_size = local.metadata.file_size();
-    let remote_size = remote.file_size();
+    let local_size = local.metadata.file_size;
+    let remote_size = remote.file_size;
     let path = &local.local_path;
 
     let file_name = path.file_name().expect("must be file path");

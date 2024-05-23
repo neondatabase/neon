@@ -178,10 +178,6 @@ impl LayerFileMetadata {
             shard,
         }
     }
-
-    pub fn file_size(&self) -> u64 {
-        self.file_size
-    }
 }
 
 /// Limited history of earlier ancestors.

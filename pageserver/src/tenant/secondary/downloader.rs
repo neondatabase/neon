@@ -716,7 +716,7 @@ impl<'a> TenantDownloader<'a> {
                 let mut layer_byte_count: u64 = timeline_state
                     .on_disk_layers
                     .values()
-                    .map(|l| l.metadata.file_size())
+                    .map(|l| l.metadata.file_size)
                     .sum();
 
                 // Remove on-disk layers that are no longer present in heatmap
@@ -727,7 +727,7 @@ impl<'a> TenantDownloader<'a> {
                         .get(layer_file_name)
                         .unwrap()
                         .metadata
-                        .file_size();
+                        .file_size;
 
                     let local_path = local_layer_path(
                         self.conf,
