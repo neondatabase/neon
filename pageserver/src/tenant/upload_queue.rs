@@ -213,10 +213,7 @@ impl UploadQueue {
 
         let mut files = HashMap::with_capacity(index_part.layer_metadata.len());
         for (layer_name, layer_metadata) in &index_part.layer_metadata {
-            files.insert(
-                layer_name.to_owned(),
-                LayerFileMetadata::from(layer_metadata),
-            );
+            files.insert(layer_name.to_owned(), layer_metadata.clone());
         }
 
         info!(

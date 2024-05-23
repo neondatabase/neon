@@ -157,7 +157,7 @@ pub(super) fn reconcile(
         .map(|ip| ip.layer_metadata.iter())
         .into_iter()
         .flatten()
-        .map(|(name, metadata)| (name, LayerFileMetadata::from(metadata)))
+        .map(|(name, metadata)| (name, metadata.clone()))
         .for_each(|(name, metadata)| {
             if let Some(existing) = discovered.get_mut(name) {
                 existing.1 = Some(metadata);

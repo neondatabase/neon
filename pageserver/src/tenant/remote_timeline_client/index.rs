@@ -89,10 +89,7 @@ impl IndexPart {
         lineage: Lineage,
         last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> Self {
-        let layer_metadata = layers_and_metadata
-            .iter()
-            .map(|(k, v)| (k.to_owned(), LayerFileMetadata::from(v)))
-            .collect();
+        let layer_metadata = layers_and_metadata.clone();
 
         Self {
             version: Self::LATEST_VERSION,
@@ -171,16 +168,6 @@ pub struct LayerFileMetadata {
     #[serde(default = "ShardIndex::unsharded")]
     #[serde(skip_serializing_if = "ShardIndex::is_unsharded")]
     pub shard: ShardIndex,
-}
-
-impl From<&'_ LayerFileMetadata> for LayerFileMetadata {
-    fn from(other: &LayerFileMetadata) -> Self {
-        LayerFileMetadata {
-            file_size: other.file_size,
-            generation: other.generation,
-            shard: other.shard,
-        }
-    }
 }
 
 impl LayerFileMetadata {
