@@ -716,7 +716,7 @@ impl<'a> TenantDownloader<'a> {
                 let mut layer_byte_count: u64 = timeline_state
                     .on_disk_layers
                     .values()
-                    .map(|l| l.metadata.file_size())
+                    .map(|l| l.metadata.file_size)
                     .sum();
 
                 // Remove on-disk layers that are no longer present in heatmap
@@ -727,7 +727,7 @@ impl<'a> TenantDownloader<'a> {
                         .get(layer_file_name)
                         .unwrap()
                         .metadata
-                        .file_size();
+                        .file_size;
 
                     let local_path = local_layer_path(
                         self.conf,
@@ -886,9 +886,7 @@ impl<'a> TenantDownloader<'a> {
                     }
                 }
 
-                if on_disk.metadata != LayerFileMetadata::from(&layer.metadata)
-                    || on_disk.access_time != layer.access_time
-                {
+                if on_disk.metadata != layer.metadata || on_disk.access_time != layer.access_time {
                     // We already have this layer on disk.  Update its access time.
                     tracing::debug!(
                         "Access time updated for layer {}: {} -> {}",
@@ -979,7 +977,7 @@ impl<'a> TenantDownloader<'a> {
                             tenant_shard_id,
                             &timeline.timeline_id,
                             t.name,
-                            LayerFileMetadata::from(&t.metadata),
+                            t.metadata.clone(),
                             t.access_time,
                             local_path,
                         ));
@@ -1024,7 +1022,7 @@ impl<'a> TenantDownloader<'a> {
             *tenant_shard_id,
             *timeline_id,
             &layer.name,
-            &LayerFileMetadata::from(&layer.metadata),
+            &layer.metadata,
             &local_path,
             &self.secondary_state.cancel,
             ctx,
@@ -1185,7 +1183,7 @@ async fn init_timeline_state(
                                     tenant_shard_id,
                                     &heatmap.timeline_id,
                                     name,
-                                    LayerFileMetadata::from(&remote_meta.metadata),
+                                    remote_meta.metadata.clone(),
                                     remote_meta.access_time,
                                     file_path,
                                 ),

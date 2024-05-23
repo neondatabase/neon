@@ -380,8 +380,8 @@ impl interface::CompactionLayer<Key> for MockLayer {
     }
     fn file_size(&self) -> u64 {
         match self {
-            MockLayer::Delta(this) => this.file_size(),
-            MockLayer::Image(this) => this.file_size(),
+            MockLayer::Delta(this) => this.file_size,
+            MockLayer::Image(this) => this.file_size,
         }
     }
     fn short_id(&self) -> String {

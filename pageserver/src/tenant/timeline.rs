@@ -1424,7 +1424,7 @@ impl Timeline {
         let layer_map = guard.layer_map();
         let mut size = 0;
         for l in layer_map.iter_historic_layers() {
-            size += l.file_size();
+            size += l.file_size;
         }
         size
     }
@@ -2516,7 +2516,7 @@ impl Timeline {
                         Ok(UseRemote { local, remote }) => {
                             // Remote is authoritative, but we may still choose to retain
                             // the local file if the contents appear to match
-                            if local.metadata.file_size() == remote.file_size() {
+                            if local.metadata.file_size == remote.file_size {
                                 // Use the local file, but take the remote metadata so that we pick up
                                 // the correct generation.
                                 UseLocal(LocalLayerFileMetadata {
@@ -2556,7 +2556,7 @@ impl Timeline {
 
                     let layer = match decision {
                         UseLocal(local) => {
-                            total_physical_size += local.metadata.file_size();
+                            total_physical_size += local.metadata.file_size;
                             Layer::for_resident(conf, &this, local.local_path, name, local.metadata)
                                 .drop_eviction_guard()
                         }
@@ -3071,7 +3071,7 @@ impl Timeline {
 
             HeatMapLayer::new(
                 layer.layer_desc().layer_name(),
-                (&layer.metadata()).into(),
+                layer.metadata(),
                 last_activity_ts,
             )
         });

@@ -157,7 +157,7 @@ pub(super) fn reconcile(
         .map(|ip| ip.layer_metadata.iter())
         .into_iter()
         .flatten()
-        .map(|(name, metadata)| (name, LayerFileMetadata::from(metadata)))
+        .map(|(name, metadata)| (name, metadata.clone()))
         .for_each(|(name, metadata)| {
             if let Some(existing) = discovered.get_mut(name) {
                 existing.1 = Some(metadata);
@@ -200,8 +200,8 @@ pub(super) fn cleanup_local_file_for_remote(
     local: &LocalLayerFileMetadata,
     remote: &LayerFileMetadata,
 ) -> anyhow::Result<()> {
-    let local_size = local.metadata.file_size();
-    let remote_size = remote.file_size();
+    let local_size = local.metadata.file_size;
+    let remote_size = remote.file_size;
     let path = &local.local_path;
 
     let file_name = path.file_name().expect("must be file path");
