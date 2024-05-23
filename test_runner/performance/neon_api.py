@@ -159,3 +159,19 @@ def neon_get_branches(neon_api_key: str, neon_api_base_url: str, project_id: str
     assert resp.status_code == 200
 
     return cast("dict[str, Any]", resp.json())
+
+
+def neon_get_endpoints(
+    neon_api_key: str, neon_api_base_url: str, project_id: str
+) -> dict[str, Any]:
+    resp = requests.get(
+        f"{neon_api_base_url}/projects/{project_id}/endpoints",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {neon_api_key}",
+        },
+    )
+
+    assert resp.status_code == 200
+
+    return cast("dict[str, Any]", resp.json())
