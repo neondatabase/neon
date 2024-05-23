@@ -886,9 +886,7 @@ impl<'a> TenantDownloader<'a> {
                     }
                 }
 
-                if on_disk.metadata != LayerFileMetadata::from(&layer.metadata)
-                    || on_disk.access_time != layer.access_time
-                {
+                if on_disk.metadata != layer.metadata || on_disk.access_time != layer.access_time {
                     // We already have this layer on disk.  Update its access time.
                     tracing::debug!(
                         "Access time updated for layer {}: {} -> {}",

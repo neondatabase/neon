@@ -17,44 +17,6 @@ use pageserver_api::shard::ShardIndex;
 
 use utils::lsn::Lsn;
 
-/// Metadata gathered for each of the layer files.
-///
-/// Fields have to be `Option`s because remote [`IndexPart`]'s can be from different version, which
-/// might have less or more metadata depending if upgrading or rolling back an upgrade.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-//#[cfg_attr(test, derive(Default))]
-pub struct LayerFileMetadata {
-    file_size: u64,
-
-    pub(crate) generation: Generation,
-
-    pub(crate) shard: ShardIndex,
-}
-
-impl From<&'_ IndexLayerMetadata> for LayerFileMetadata {
-    fn from(other: &IndexLayerMetadata) -> Self {
-        LayerFileMetadata {
-            file_size: other.file_size,
-            generation: other.generation,
-            shard: other.shard,
-        }
-    }
-}
-
-impl LayerFileMetadata {
-    pub fn new(file_size: u64, generation: Generation, shard: ShardIndex) -> Self {
-        LayerFileMetadata {
-            file_size,
-            generation,
-            shard,
-        }
-    }
-
-    pub fn file_size(&self) -> u64 {
-        self.file_size
-    }
-}
-
 // TODO seems like another part of the remote storage file format
 // compatibility issue, see https://github.com/neondatabase/neon/issues/3072
 /// In-memory representation of an `index_part.json` file
@@ -194,9 +156,12 @@ impl From<&UploadQueueInitialized> for IndexPart {
     }
 }
 
-/// Serialized form of [`LayerFileMetadata`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct IndexLayerMetadata {
+/// Metadata gathered for each of the layer files.
+///
+/// Fields have to be `Option`s because remote [`IndexPart`]'s can be from different version, which
+/// might have less or more metadata depending if upgrading or rolling back an upgrade.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LayerFileMetadata {
     pub file_size: u64,
 
     #[serde(default = "Generation::none")]
@@ -208,15 +173,31 @@ pub struct IndexLayerMetadata {
     pub shard: ShardIndex,
 }
 
-impl From<&LayerFileMetadata> for IndexLayerMetadata {
+impl From<&'_ LayerFileMetadata> for LayerFileMetadata {
     fn from(other: &LayerFileMetadata) -> Self {
-        IndexLayerMetadata {
+        LayerFileMetadata {
             file_size: other.file_size,
             generation: other.generation,
             shard: other.shard,
         }
     }
 }
+
+impl LayerFileMetadata {
+    pub fn new(file_size: u64, generation: Generation, shard: ShardIndex) -> Self {
+        LayerFileMetadata {
+            file_size,
+            generation,
+            shard,
+        }
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+}
+
+pub type IndexLayerMetadata = LayerFileMetadata;
 
 /// Limited history of earlier ancestors.
 ///
