@@ -4347,7 +4347,7 @@ impl Timeline {
         let delta_file_accessed = reconstruct_state.get_delta_layers_visited();
 
         let trigger_generation = delta_file_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
-        info!(
+        debug!(
             "generate image layers for metadata keys: trigger_generation={trigger_generation}, \
                 delta_file_accessed={delta_file_accessed}, total_kb_retrieved={total_kb_retrieved}, \
                 total_key_retrieved={total_key_retrieved}"
