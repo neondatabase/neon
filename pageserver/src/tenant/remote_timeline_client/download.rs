@@ -207,17 +207,30 @@ async fn download_object<'a>(
                         size_tracking,
                         BytesMut::with_capacity(super::BUFFER_SIZE),
                     );
-                    while let Some(res) =
-                        futures::StreamExt::next(&mut download.download_stream).await
-                    {
-                        let chunk = match res {
-                            Ok(chunk) => chunk,
-                            Err(e) => return Err(e),
-                        };
-                        buffered
-                            .write_buffered(tokio_epoll_uring::BoundedBuf::slice_full(chunk), ctx)
-                            .await?;
+
+                    // Cancellation: if our cancellation token fires here, we will return an error and leave
+                    // an inccomplete download on disk.  Callers are responsible for cleaning that up: for example
+                    // download_layer_file calls this function with a temporary path, so it is safe to leak that
+                    // temp file on shutdown, it is cleaned up on next startup.
+                    loop {
+                        tokio::select! {
+                            _ = cancel.cancelled() => {
+                                return Err(DownloadError::Cancelled)
+                            },
+                            next = futures::StreamExt::next(&mut download.download_stream) => {
+                                let chunk = match next {
+                                    None => {break;},
+                                    Some(Err(e)) =>return Err(e.into()),
+                                    Some(Ok(chunk)) => chunk
+                                };
+
+                            buffered
+                                .write_buffered(tokio_epoll_uring::BoundedBuf::slice_full(chunk), ctx)
+                                .await?;
+                                }
+                        }
                     }
+
                     let size_tracking = buffered.flush_and_into_inner(ctx).await?;
                     Ok(size_tracking.into_inner())
                 }
