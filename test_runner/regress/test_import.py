@@ -292,12 +292,8 @@ def _import(
     wait_for_upload(client, tenant, timeline, lsn)
 
     # Check it worked
-    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
+    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant, lsn=lsn)
     assert endpoint.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
-
-    import time
-
-    time.sleep(5)
 
     # Take another fullbackup
     new_tar_output_file = test_output_dir / "fullbackup-new.tar"
