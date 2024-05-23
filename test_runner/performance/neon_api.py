@@ -31,6 +31,63 @@ def neon_create_project(
     return cast("dict[str, Any]", resp.json())
 
 
+def neon_start_endpoint(
+    neon_api_key: str,
+    neon_api_base_url: str,
+    project_id: str,
+    endpoint_id: str,
+) -> dict[str, Any]:
+    resp = requests.post(
+        f"{neon_api_base_url}/projects/{project_id}/endpoints/{endpoint_id}/start",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {neon_api_key}",
+        },
+    )
+
+    assert resp.status_code == 200
+
+    return cast("dict[str, Any]", resp.json())
+
+
+def neon_suspend_endpoint(
+    neon_api_key: str,
+    neon_api_base_url: str,
+    project_id: str,
+    endpoint_id: str,
+) -> dict[str, Any]:
+    resp = requests.post(
+        f"{neon_api_base_url}/projects/{project_id}/endpoints/{endpoint_id}/suspend",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {neon_api_key}",
+        },
+    )
+
+    assert resp.status_code == 200
+
+    return cast("dict[str, Any]", resp.json())
+
+
+def neon_restart_endpoint(
+    neon_api_key: str,
+    neon_api_base_url: str,
+    project_id: str,
+    endpoint_id: str,
+) -> dict[str, Any]:
+    resp = requests.post(
+        f"{neon_api_base_url}/projects/{project_id}/endpoints/{endpoint_id}/restart",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {neon_api_key}",
+        },
+    )
+
+    assert resp.status_code == 200
+
+    return cast("dict[str, Any]", resp.json())
+
+
 def neon_create_ro_endpoint(
     neon_api_key: str,
     neon_api_base_url: str,
