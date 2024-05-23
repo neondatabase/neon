@@ -172,4 +172,31 @@ mod tests {
             _ = tokio::time::sleep(Duration::from_secs(121)) => {},
         }
     }
+
+    #[tokio::test]
+    async fn notified_but_pollable_after() {
+        let inner = futures::stream::once(futures::future::ready(Ok(bytes::Bytes::from_static(
+            b"hello world",
+        ))));
+        let timeout = Duration::from_secs(120);
+        let cancel = CancellationToken::new();
+
+        cancel.cancel();
+        let stream = DownloadStream::new(cancel_or_timeout(timeout, cancel.clone()), inner);
+        let mut stream = std::pin::pin!(stream);
+
+        let next = stream.next().await;
+        let ioe = next.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                ioe.get_ref().unwrap().downcast_ref::<DownloadError>(),
+                Some(&DownloadError::Cancelled)
+            ),
+            "{ioe:?}"
+        );
+
+        let next = stream.next().await;
+        let bytes = next.unwrap().unwrap();
+        assert_eq!(&b"hello world"[..], bytes);
+    }
 }
