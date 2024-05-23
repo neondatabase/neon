@@ -17,8 +17,6 @@ use pageserver_api::shard::ShardIndex;
 
 use utils::lsn::Lsn;
 
-// TODO seems like another part of the remote storage file format
-// compatibility issue, see https://github.com/neondatabase/neon/issues/3072
 /// In-memory representation of an `index_part.json` file
 ///
 /// Contains the data about all files in the timeline, present remotely and its metadata.
