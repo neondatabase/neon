@@ -541,11 +541,22 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str
 
     left_list, right_list = map(build_hash_list, [left, right])
 
-    try:
-        assert len(left_list) == len(right_list)
+    assert len(left_list) == len(
+        right_list
+    ), f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
 
-        for left_tuple, right_tuple in zip(left_list, right_list):
-            assert left_tuple == right_tuple
-    finally:
-        elapsed = time.time() - started_at
-        log.info(f"assert_pageserver_backups_equal completed in {elapsed}s")
+    mismatching = set()
+
+    for left_tuple, right_tuple in zip(left_list, right_list):
+        left_path, left_hash = left_tuple
+        right_path, right_hash = right_tuple
+        assert (
+            left_path == right_path
+        ), f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        if left_hash != right_hash:
+            mismatching.add(left_path)
+
+    assert len(mismatching) == 0, f"files with hash mismatch: {mismatching}"
+
+    elapsed = time.time() - started_at
+    log.info(f"assert_pageserver_backups_equal completed in {elapsed}s")

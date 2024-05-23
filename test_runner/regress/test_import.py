@@ -163,7 +163,7 @@ def test_import_from_pageserver_small(
 
     num_rows = 3000
     lsn = _generate_data(num_rows, endpoint)
-    _import(num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir, test_output_dir)
+    _import(num_rows, lsn, env, pg_bin, timeline, test_output_dir)
 
 
 @pytest.mark.timeout(1800)
@@ -193,9 +193,7 @@ def test_import_from_pageserver_multisegment(
     log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
     assert logical_size > 1024**3  # = 1GB
 
-    tar_output_file = _import(
-        num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir, test_output_dir
-    )
+    tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline, test_output_dir)
 
     # Check if the backup data contains multiple segment files
     cnt_seg_files = 0
@@ -235,7 +233,6 @@ def _import(
     env: NeonEnv,
     pg_bin: PgBin,
     timeline: TimelineId,
-    pg_distrib_dir: Path,
     test_output_dir: Path,
 ) -> Path:
     """Test importing backup data to the pageserver.
@@ -295,7 +292,7 @@ def _import(
     wait_for_upload(client, tenant, timeline, lsn)
 
     # Check it worked
-    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
+    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant, lsn=lsn)
     assert endpoint.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
 
     # Take another fullbackup
