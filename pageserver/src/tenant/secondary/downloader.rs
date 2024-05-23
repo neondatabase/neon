@@ -414,7 +414,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                     tracing::warn!("Insufficient space while downloading.  Will retry later.");
                 }
                 Err(UpdateError::Cancelled) => {
-                    tracing::debug!("Shut down while downloading");
+                    tracing::info!("Shut down while downloading");
                 },
                 Err(UpdateError::Deserialize(e)) => {
                     tracing::error!("Corrupt content while downloading tenant: {e}");
@@ -940,6 +940,10 @@ impl<'a> TenantDownloader<'a> {
 
             let mut result_stream = futures::stream::iter(chunk).buffered(concurrency);
             let mut result_stream = std::pin::pin!(result_stream);
+
+            // Cancellation: we do _not_ check cancellation token here, because if we dropped these futs we might leave
+            // background I/O running to the timeline directory.  Instead, we rely on `download_layer` to properly respect
+            // cancellation, and run all these futures to completion.
             while let Some(result) = result_stream.next().await {
                 match result {
                     Err(e) => return Err(e),
