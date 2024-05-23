@@ -1,37 +1,19 @@
-From 1c771c6e40c5343eabafba0134dc67a1c5625b10 Mon Sep 17 00:00:00 2001
-From: BodoBolero <peterbendel@neon.tech>
-Date: Thu, 23 May 2024 09:49:35 +0200
-Subject: [PATCH] From: Heikki Linnakangas <heikki.linnakangas@iki.fi> Date:
- Fri, 2 Feb 2024 22:26:45 +0200 Subject: [PATCH 1/1] Make v0.6.0 work with
- Neon
+From 0b0194a57bd0f3598bd57dbedd0df3932330169d Mon Sep 17 00:00:00 2001
+From: Heikki Linnakangas <heikki.linnakangas@iki.fi>
+Date: Fri, 2 Feb 2024 22:26:45 +0200
+Subject: [PATCH 1/1] Make v0.6.0 work with Neon
 
 Now that the WAL-logging happens as a separate step at the end of the
 build, we need a few neon-specific hints to make it work.
-
-Peter Bendel: also remove `-march=native`from OPTFLAGS to get a compatible binary
 ---
- Makefile        |  2 +-
  src/hnswbuild.c | 36 ++++++++++++++++++++++++++++++++++++
- 2 files changed, 37 insertions(+), 1 deletion(-)
+ 1 file changed, 36 insertions(+)
 
-diff --git a/Makefile b/Makefile
-index 7684684..5a56c17 100644
---- a/Makefile
-+++ b/Makefile
-@@ -11,7 +11,7 @@ REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
- REGRESS_OPTS = --inputdir=test --load-extension=$(EXTENSION)
- 
- # To compile for portability, run: make OPTFLAGS=""
--OPTFLAGS = -march=native
-+OPTFLAGS=""
- 
- # Mac ARM doesn't always support -march=native
- ifeq ($(shell uname -s), Darwin)
 diff --git a/src/hnswbuild.c b/src/hnswbuild.c
-index ee94ed9..b3d2fcf 100644
+index 680789b..ec54dea 100644
 --- a/src/hnswbuild.c
 +++ b/src/hnswbuild.c
-@@ -860,9 +860,17 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
+@@ -840,9 +840,17 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
  
  	hnswarea = shm_toc_lookup(toc, PARALLEL_KEY_HNSW_AREA, false);
  
@@ -49,7 +31,7 @@ index ee94ed9..b3d2fcf 100644
  	/* Close relations within worker */
  	index_close(indexRel, indexLockmode);
  	table_close(heapRel, heapLockmode);
-@@ -1117,13 +1125,41 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+@@ -1089,13 +1097,41 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
  	SeedRandom(42);
  #endif
  
@@ -92,5 +74,5 @@ index ee94ed9..b3d2fcf 100644
  }
  
 -- 
-2.39.3 (Apple Git-146)
+2.39.2
 
