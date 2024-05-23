@@ -5,6 +5,7 @@ use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
 use std::sync::Arc;
+use storage_controller::chaos_injector::ChaosInjector;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
@@ -13,6 +14,7 @@ use storage_controller::service::{
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
 
@@ -77,6 +79,10 @@ struct Cli {
     /// How long to wait for the initial database connection to be available.
     #[arg(long, default_value = "5s")]
     db_connect_timeout: humantime::Duration,
+
+    /// Chaos testing
+    #[arg(long, default_value = "5s")]
+    chaos_interval: Option<humantime::Duration>,
 }
 
 enum StrictMode {
@@ -297,6 +303,22 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::info!("Serving on {0}", args.listen);
     let server_task = tokio::task::spawn(server);
 
+    let chaos_task = args.chaos_interval.map(|interval| {
+        let service = service.clone();
+        let cancel = CancellationToken::new();
+        let cancel_bg = cancel.clone();
+        (
+            tokio::task::spawn(
+                async move {
+                    let mut chaos_injector = ChaosInjector::new(service, interval.into());
+                    chaos_injector.run(cancel_bg).await
+                }
+                .instrument(tracing::info_span!("chaos_injector")),
+            ),
+            cancel,
+        )
+    });
+
     // Wait until we receive a signal
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let mut sigquit = tokio::signal::unix::signal(SignalKind::quit())?;
@@ -323,6 +345,11 @@ async fn async_main() -> anyhow::Result<()> {
         tracing::error!("Error joining HTTP server task: {e}")
     }
     tracing::info!("Joined HTTP server task");
+
+    if let Some((chaos_jh, chaos_cancel)) = chaos_task {
+        chaos_cancel.cancel();
+        chaos_jh.await.ok();
+    }
 
     service.shutdown().await;
     tracing::info!("Service shutdown complete");
