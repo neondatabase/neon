@@ -445,7 +445,7 @@ impl RemoteTimelineClient {
             .lock()
             .unwrap()
             .initialized_mut()
-            .map(|uq| uq.original_ancestor_lsn == Some(lsn))
+            .map(|uq| uq.clean.0.lineage.is_previous_ancestor_lsn(lsn))
             .unwrap_or(false)
     }
 
@@ -650,10 +650,6 @@ impl RemoteTimelineClient {
         // fix up the duplicated field
         upload_queue.dirty.disk_consistent_lsn = disk_consistent_lsn;
 
-        let serialized =
-            serde_json::to_vec(&upload_queue.dirty).context("serialize index_part.json")?;
-        let serialized = bytes::Bytes::from(serialized);
-
         let index_part = &upload_queue.dirty;
 
         info!(
@@ -662,31 +658,8 @@ impl RemoteTimelineClient {
             upload_queue.latest_files_changes_since_metadata_upload_scheduled,
         );
 
-        let mention_having_future_layers = if cfg!(feature = "testing") {
-            index_part
-                .layer_metadata
-                .keys()
-                .any(|x| x.is_in_future(disk_consistent_lsn))
-        } else {
-            false
-        };
-
-        let uploaded_remote_physical_size = index_part
-            .layer_metadata
-            .values()
-            .map(|ilmd| ilmd.file_size)
-            .sum::<u64>();
-
-        let original_ancestor_lsn = index_part.lineage.original_ancestor_lsn();
-
-        // TODO: these need to return an error
-
         let op = UploadOp::UploadMetadata {
-            serialized,
-            mention_having_future_layers,
-            uploaded_remote_physical_size,
-            original_ancestor_lsn,
-            disk_consistent_lsn,
+            uploaded: Box::new(index_part.clone()),
         };
         self.metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
@@ -1134,10 +1107,6 @@ impl RemoteTimelineClient {
 
         pausable_failpoint!("persist_deleted_index_part");
 
-        let serialized = serde_json::to_vec(&index_part_with_deleted_at)
-            .map_err(|e| PersistIndexPartWithDeletedFlagError::Other(e.into()))?;
-        let serialized = bytes::Bytes::from(serialized);
-
         backoff::retry(
             || {
                 upload::upload_index_part(
@@ -1145,7 +1114,7 @@ impl RemoteTimelineClient {
                     &self.tenant_shard_id,
                     &self.timeline_id,
                     self.generation,
-                    serialized.clone(),
+                    &index_part_with_deleted_at,
                     &self.cancel,
                 )
             },
@@ -1623,19 +1592,13 @@ impl RemoteTimelineClient {
                     )
                     .await
                 }
-                UploadOp::UploadMetadata {
-                    ref serialized,
-                    mention_having_future_layers,
-                    uploaded_remote_physical_size,
-                    disk_consistent_lsn,
-                    ..
-                } => {
+                UploadOp::UploadMetadata { ref uploaded } => {
                     let res = upload::upload_index_part(
                         &self.storage_impl,
                         &self.tenant_shard_id,
                         &self.timeline_id,
                         self.generation,
-                        serialized.clone(),
+                        uploaded,
                         &self.cancel,
                     )
                     .measure_remote_op(
@@ -1645,12 +1608,21 @@ impl RemoteTimelineClient {
                     )
                     .await;
                     if res.is_ok() {
-                        self.metrics
-                            .remote_physical_size_gauge
-                            .set(*uploaded_remote_physical_size);
-                        if *mention_having_future_layers {
+                        self.update_remote_physical_size_gauge(Some(uploaded));
+                        let mention_having_future_layers = if cfg!(feature = "testing") {
+                            uploaded
+                                .layer_metadata
+                                .keys()
+                                .any(|x| x.is_in_future(uploaded.metadata.disk_consistent_lsn()))
+                        } else {
+                            false
+                        };
+                        if mention_having_future_layers {
                             // find rationale near crate::tenant::timeline::init::cleanup_future_layer
-                            tracing::info!(%disk_consistent_lsn, "uploaded an index_part.json with future layers -- this is ok! if shutdown now, expect future layer cleanup");
+                            tracing::info!(
+                                disk_consistent_lsn = %uploaded.metadata.disk_consistent_lsn(),
+                                "uploaded an index_part.json with future layers -- this is ok! if shutdown now, expect future layer cleanup"
+                            );
                         }
                     }
                     res
@@ -1751,23 +1723,34 @@ impl RemoteTimelineClient {
                     upload_queue.num_inprogress_layer_uploads -= 1;
                     None
                 }
-                UploadOp::UploadMetadata {
-                    disk_consistent_lsn: lsn,
-                    original_ancestor_lsn,
-                    ..
-                } => {
+                UploadOp::UploadMetadata { ref uploaded } => {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
                     // XXX monotonicity check?
 
-                    upload_queue.original_ancestor_lsn = original_ancestor_lsn;
+                    let last_updater = upload_queue.clean.1;
+                    let is_later = last_updater.is_some_and(|task_id| task_id < task.task_id);
 
-                    upload_queue.projected_remote_consistent_lsn = Some(lsn);
-                    if self.generation.is_none() {
-                        // Legacy mode: skip validating generation
-                        upload_queue.visible_remote_consistent_lsn.store(lsn);
-                        None
+                    if is_later || last_updater.is_none() {
+                        // not taking ownership is wasteful
+                        upload_queue.clean.0.clone_from(uploaded);
+                        upload_queue.clean.1 = Some(task.task_id);
+
+                        let lsn = upload_queue.clean.0.metadata.disk_consistent_lsn();
+
+                        // FIXME: read this through clean
+                        upload_queue.projected_remote_consistent_lsn = Some(lsn);
+                        if self.generation.is_none() {
+                            // Legacy mode: skip validating generation
+                            upload_queue.visible_remote_consistent_lsn.store(lsn);
+                            None
+                        } else {
+                            Some((lsn, upload_queue.visible_remote_consistent_lsn.clone()))
+                        }
                     } else {
-                        Some((lsn, upload_queue.visible_remote_consistent_lsn.clone()))
+                        // do we want to log? this is perfectly valid, since the ordering in
+                        // which completing tasks get to lock the upload_queue is not the task
+                        // spawning order.
+                        None
                     }
                 }
                 UploadOp::Delete(_) => {
@@ -1892,12 +1875,12 @@ impl RemoteTimelineClient {
                     let upload_queue_for_deletion = UploadQueueInitialized {
                         task_counter: 0,
                         dirty: initialized.dirty.clone(),
+                        clean: initialized.clean.clone(),
                         latest_files_changes_since_metadata_upload_scheduled: 0,
                         projected_remote_consistent_lsn: None,
                         visible_remote_consistent_lsn: initialized
                             .visible_remote_consistent_lsn
                             .clone(),
-                        original_ancestor_lsn: initialized.original_ancestor_lsn,
                         num_inprogress_layer_uploads: 0,
                         num_inprogress_metadata_uploads: 0,
                         num_inprogress_deletions: 0,

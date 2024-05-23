@@ -12,6 +12,7 @@ use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
 use utils::{backoff, pausable_failpoint};
 
+use super::index::IndexPart;
 use super::Generation;
 use crate::tenant::remote_timeline_client::{
     remote_index_path, remote_initdb_archive_path, remote_initdb_preserved_archive_path,
@@ -27,7 +28,7 @@ pub(crate) async fn upload_index_part<'a>(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     generation: Generation,
-    index_part: Bytes,
+    index_part: &IndexPart,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading new index part");
@@ -37,12 +38,16 @@ pub(crate) async fn upload_index_part<'a>(
     });
     pausable_failpoint!("before-upload-index-pausable");
 
-    let index_part_size = index_part.len();
+    // FIXME: this error comes too late
+    let serialized = index_part.to_s3_bytes()?;
+    let serialized = Bytes::from(serialized);
+
+    let index_part_size = serialized.len();
 
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, generation);
     storage
         .upload_storage_object(
-            futures::stream::once(futures::future::ready(Ok(index_part))),
+            futures::stream::once(futures::future::ready(Ok(serialized))),
             index_part_size,
             &remote_path,
             cancel,

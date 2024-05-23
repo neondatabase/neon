@@ -49,6 +49,12 @@ pub(crate) struct UploadQueueInitialized {
     /// projected field.
     pub(crate) dirty: IndexPart,
 
+    /// The latest remote persisted IndexPart.
+    ///
+    /// Each completed metadata upload will update this. The second item is the task_id which last
+    /// updated the value, used to ensure we never store an older value over a newer one.
+    pub(crate) clean: (IndexPart, Option<u64>),
+
     /// How many file uploads or deletions been scheduled, since the
     /// last (scheduling of) metadata index upload?
     pub(crate) latest_files_changes_since_metadata_upload_scheduled: u64,
@@ -63,9 +69,6 @@ pub(crate) struct UploadQueueInitialized {
     /// we skip validation)
     pub(crate) projected_remote_consistent_lsn: Option<Lsn>,
     pub(crate) visible_remote_consistent_lsn: Arc<AtomicLsn>,
-
-    /// For timelines detached from their ancestor, this was their original `ancestor_lsn`.
-    pub(crate) original_ancestor_lsn: Option<Lsn>,
 
     // Breakdown of different kinds of tasks currently in-progress
     pub(crate) num_inprogress_layer_uploads: usize,
@@ -166,12 +169,14 @@ impl UploadQueue {
 
         info!("initializing upload queue for empty remote");
 
+        let index_part = IndexPart::empty(metadata.clone());
+
         let state = UploadQueueInitialized {
-            dirty: IndexPart::empty(metadata.clone()),
+            dirty: index_part.clone(),
+            clean: (index_part, None),
             latest_files_changes_since_metadata_upload_scheduled: 0,
             projected_remote_consistent_lsn: None,
             visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
-            original_ancestor_lsn: None,
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -207,12 +212,12 @@ impl UploadQueue {
 
         let state = UploadQueueInitialized {
             dirty: index_part.clone(),
+            clean: (index_part.clone(), None),
             latest_files_changes_since_metadata_upload_scheduled: 0,
             projected_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
             visible_remote_consistent_lsn: Arc::new(
                 index_part.metadata.disk_consistent_lsn().into(),
             ),
-            original_ancestor_lsn: index_part.lineage.original_ancestor_lsn(),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -280,19 +285,16 @@ pub(crate) enum UploadOp {
     /// Upload a layer file
     UploadLayer(ResidentLayer, LayerFileMetadata),
 
-    /// Upload the metadata file
+    /// Upload a index_part.json file
     UploadMetadata {
-        serialized: bytes::Bytes,
-        mention_having_future_layers: bool,
-        uploaded_remote_physical_size: u64,
-        original_ancestor_lsn: Option<Lsn>,
-        disk_consistent_lsn: Lsn,
+        /// The next [`UploadQueueInitialized::clean`] after this upload succeeds.
+        uploaded: Box<IndexPart>,
     },
 
     /// Delete layer files
     Delete(Delete),
 
-    /// Barrier. When the barrier operation is reached,
+    /// Barrier. When the barrier operation is reached, the channel is closed.
     Barrier(tokio::sync::watch::Sender<()>),
 
     /// Shutdown; upon encountering this operation no new operations will be spawned, otherwise
@@ -310,11 +312,12 @@ impl std::fmt::Display for UploadOp {
                     layer, metadata.file_size, metadata.generation
                 )
             }
-            UploadOp::UploadMetadata {
-                disk_consistent_lsn,
-                ..
-            } => {
-                write!(f, "UploadMetadata(lsn: {disk_consistent_lsn})")
+            UploadOp::UploadMetadata { uploaded, .. } => {
+                write!(
+                    f,
+                    "UploadMetadata(lsn: {})",
+                    uploaded.metadata.disk_consistent_lsn()
+                )
             }
             UploadOp::Delete(delete) => {
                 write!(f, "Delete({} layers)", delete.layers.len())
