@@ -93,7 +93,7 @@ pub(super) async fn downloader_task(
 
     scheduler
         .run(command_queue, background_jobs_can_start, cancel)
-        .instrument(info_span!("secondary_downloads"))
+        .instrument(info_span!("secondary_download_scheduler"))
         .await
 }
 
@@ -1013,6 +1013,11 @@ impl<'a> TenantDownloader<'a> {
         );
 
         // Note: no backoff::retry wrapper here because download_layer_file does its own retries internally
+        tracing::info!(
+            "Starting download of layer {}, size {}",
+            layer.name,
+            layer.metadata.file_size
+        );
         let downloaded_bytes = match download_layer_file(
             self.conf,
             self.remote_storage,
