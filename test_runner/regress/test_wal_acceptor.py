@@ -359,7 +359,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # We will wait for first segment removal. Make sure they exist for starter.
     first_segments = [
-        os.path.join(sk.data_dir, str(tenant_id), str(timeline_id), "000000010000000000000001")
+        sk.timeline_dir(tenant_id, timeline_id) / "000000010000000000000001"
         for sk in env.safekeepers
     ]
     assert all(os.path.exists(p) for p in first_segments)
@@ -444,7 +444,7 @@ def is_flush_lsn_caught_up(sk: Safekeeper, tenant_id: TenantId, timeline_id: Tim
 def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, target_size_mb):
     http_cli = sk.http_client()
     tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-    sk_wal_size = get_dir_size(os.path.join(sk.data_dir, str(tenant_id), str(timeline_id)))
+    sk_wal_size = get_dir_size(sk.timeline_dir(tenant_id, timeline_id))
     sk_wal_size_mb = sk_wal_size / 1024 / 1024
     log.info(f"Safekeeper id={sk.id} wal_size={sk_wal_size_mb:.2f}MB status={tli_status}")
     return sk_wal_size_mb <= target_size_mb
@@ -1131,8 +1131,8 @@ def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
         )
 
         for f in mismatch:
-            f1 = os.path.join(sk0.timeline_dir(tenant_id, timeline_id), f)
-            f2 = os.path.join(sk.timeline_dir(tenant_id, timeline_id), f)
+            f1 = sk0.timeline_dir(tenant_id, timeline_id) / f
+            f2 = sk.timeline_dir(tenant_id, timeline_id) / f
             stdout_filename = f"{f2}.filediff"
 
             with open(stdout_filename, "w") as stdout_f:
@@ -1630,7 +1630,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE t(key int primary key)")
     sk = env.safekeepers[0]
-    sk_data_dir = Path(sk.data_dir)
+    sk_data_dir = sk.data_dir
     if not auth_enabled:
         sk_http = sk.http_client()
         sk_http_other = sk_http
@@ -1850,9 +1850,7 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     assert lsn > Lsn("0/2000000")
     # Checkpoint timeline beyond lsn.
     src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn)
-    first_segment_p = os.path.join(
-        src_sk.timeline_dir(tenant_id, timeline_id), "000000010000000000000001"
-    )
+    first_segment_p = src_sk.timeline_dir(tenant_id, timeline_id) / "000000010000000000000001"
     log.info(f"first segment exist={os.path.exists(first_segment_p)}")
 
     dst_http.configure_failpoints(("sk-pull-timeline-after-list-pausable", "off"))

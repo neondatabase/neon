@@ -196,7 +196,7 @@ def query_scalar(cur: cursor, query: str) -> Any:
 
 
 # Traverse directory to get total size.
-def get_dir_size(path: str) -> int:
+def get_dir_size(path: Path) -> int:
     """Return size in bytes."""
     totalbytes = 0
     for root, _dirs, files in os.walk(path):
