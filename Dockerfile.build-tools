@@ -17,6 +17,8 @@ RUN set -e \
     curl \
     flex \
     git \
+    gpg \
+    lsb-release \
     gnupg \
     gzip \
     jq \
@@ -31,14 +33,14 @@ RUN set -e \
     libseccomp-dev \
     libsqlite3-dev \
     libssl-dev \
-    libstdc++-10-dev \
+    libstdc++-11-dev \
     libtool \
     libxml2-dev \
     libxmlsec1-dev \
     libxxhash-dev \
     lsof \
     make \
-    netcat \
+    netcat-traditional \
     net-tools \
     openssh-client \
     parallel \
@@ -48,6 +50,7 @@ RUN set -e \
     xz-utils \
     zlib1g-dev \
     zstd \
+    software-properties-common \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
@@ -67,7 +70,7 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
 # LLVM
 ENV LLVM_VERSION=18
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
-    && echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
+    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
     && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
@@ -75,7 +78,7 @@ RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
 
 # PostgreSQL 14
 RUN curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
-    && echo 'deb http://apt.postgresql.org/pub/repos/apt bullseye-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
+    && echo 'deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
     && apt update \
     && apt install -y postgresql-client-14 \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
