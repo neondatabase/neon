@@ -223,6 +223,7 @@ def test_pgbench_remote_simple_update(remote_compare: PgCompare, scale: int, dur
 def test_pgbench_remote_select_only(remote_compare: PgCompare, scale: int, duration: int):
     run_test_pgbench(remote_compare, scale, duration, PgBenchLoadType.SELECT_ONLY)
 
+
 # The following test runs on an existing database that has pgvector extension installed
 # and a table with 1 million embedding vectors loaded and indexed with HNSW.
 #
