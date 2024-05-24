@@ -114,7 +114,7 @@ md5 = "0.7.0"
 measured = { version = "0.0.21", features=["lasso"] }
 measured-process = { version = "0.0.21" }
 memoffset = "0.8"
-native-tls = "0.2"
+native-tls = { version = "0.2", features = ["vendored"] }
 nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
 notify = "6.0.0"
 num_cpus = "1.15"
@@ -171,7 +171,7 @@ thiserror = "1.0"
 tikv-jemallocator = "0.5"
 tikv-jemalloc-ctl = "0.5"
 tokio = { version = "1.17", features = ["macros"] }
-tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
+tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "arpad/statx_sys" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.11.0"
 tokio-rustls = "0.25"
