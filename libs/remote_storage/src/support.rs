@@ -89,13 +89,22 @@ where
 }
 
 /// Fires only on the first cancel or timeout, not on both.
-pub(crate) async fn cancel_or_timeout(
+pub(crate) fn cancel_or_timeout(
     timeout: Duration,
     cancel: CancellationToken,
-) -> TimeoutOrCancel {
-    tokio::select! {
-        _ = tokio::time::sleep(timeout) => TimeoutOrCancel::Timeout,
-        _ = cancel.cancelled() => TimeoutOrCancel::Cancel,
+) -> impl std::future::Future<Output = TimeoutOrCancel> + 'static {
+    // futures are lazy, they don't do anything before being polled.
+    //
+    // "precalculate" the wanted deadline before returning the future, so that we can use pause
+    // failpoint to trigger a timeout in test.
+    let deadline = tokio::time::Instant::now() + timeout;
+    async move {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => TimeoutOrCancel::Timeout,
+            _ = cancel.cancelled() => {
+                TimeoutOrCancel::Cancel
+            },
+        }
     }
 }
 
