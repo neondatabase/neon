@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:bullseye-slim
 
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
@@ -8,49 +8,46 @@ SHELL ["/bin/bash", "-c"]
 RUN set -e \
     && apt update \
     && apt install -y \
-    autoconf \
-    automake \
-    bison \
-    build-essential \
-    ca-certificates \
-    cmake \
-    curl \
-    flex \
-    git \
-    gpg \
-    lsb-release \
-    gnupg \
-    gzip \
-    jq \
-    libcurl4-openssl-dev \
-    libbz2-dev \
-    libffi-dev \
-    liblzma-dev \
-    libncurses5-dev \
-    libncursesw5-dev \
-    libpq-dev \
-    libreadline-dev \
-    libseccomp-dev \
-    libsqlite3-dev \
-    libssl-dev \
-    libstdc++-11-dev \
-    libtool \
-    libxml2-dev \
-    libxmlsec1-dev \
-    libxxhash-dev \
-    lsof \
-    make \
-    netcat-traditional \
-    net-tools \
-    openssh-client \
-    parallel \
-    pkg-config \
-    unzip \
-    wget \
-    xz-utils \
-    zlib1g-dev \
-    zstd \
-    software-properties-common \
+        autoconf \
+        automake \
+        bison \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        flex \
+        git \
+        gnupg \
+        gzip \
+        jq \
+        libcurl4-openssl-dev \
+        libbz2-dev \
+        libffi-dev \
+        liblzma-dev \
+        libncurses5-dev \
+        libncursesw5-dev \
+        libpq-dev \
+        libreadline-dev \
+        libseccomp-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        libstdc++-10-dev \
+        libtool \
+        libxml2-dev \
+        libxmlsec1-dev \
+        libxxhash-dev \
+        lsof \
+        make \
+        netcat \
+        net-tools \
+        openssh-client \
+        parallel \
+        pkg-config \
+        unzip \
+        wget \
+        xz-utils \
+        zlib1g-dev \
+        zstd \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
@@ -70,7 +67,7 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
 # LLVM
 ENV LLVM_VERSION=18
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
-    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
+    && echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
     && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
@@ -78,7 +75,7 @@ RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
 
 # PostgreSQL 14
 RUN curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
-    && echo 'deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
+    && echo 'deb http://apt.postgresql.org/pub/repos/apt bullseye-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
     && apt update \
     && apt install -y postgresql-client-14 \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
@@ -148,9 +145,9 @@ ENV RUSTC_VERSION=1.78.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
-    chmod +x rustup-init && \
-    ./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
-    rm rustup-init && \
+	chmod +x rustup-init && \
+	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
+	rm rustup-init && \
     export PATH="$HOME/.cargo/bin:$PATH" && \
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
