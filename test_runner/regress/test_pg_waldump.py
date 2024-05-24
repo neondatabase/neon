@@ -1,5 +1,4 @@
 import os
-import shutil
 
 from fixtures.neon_fixtures import NeonEnv, PgBin
 from fixtures.utils import subprocess_capture
@@ -48,14 +47,13 @@ def test_pg_waldump(neon_simple_env: NeonEnv, test_output_dir, pg_bin: PgBin):
     endpoint.stop()
 
     assert endpoint.pgdata_dir
-    wal_path = os.path.join(endpoint.pgdata_dir, "pg_wal/000000010000000000000001")
+    seg_path = os.path.join(endpoint.pgdata_dir, "pg_wal/000000010000000000000001")
     pg_waldump_path = os.path.join(pg_bin.pg_bin_path, "pg_waldump")
     # check segment on compute
-    check_wal_segment(pg_waldump_path, wal_path, test_output_dir)
+    check_wal_segment(pg_waldump_path, seg_path, test_output_dir)
 
-    # Check file on safekeepers as well. pg_waldump is strict about file naming, so remove .partial suffix.
+    # Check file on safekeepers as well.
     sk = env.safekeepers[0]
     sk_tli_dir = sk.timeline_dir(tenant_id, timeline_id)
-    non_partial_path = os.path.join(sk_tli_dir, "000000010000000000000001")
-    shutil.copyfile(os.path.join(sk_tli_dir, "000000010000000000000001.partial"), non_partial_path)
-    check_wal_segment(pg_waldump_path, non_partial_path, test_output_dir)
+    seg_path = os.path.join(sk_tli_dir, "000000010000000000000001")
+    check_wal_segment(pg_waldump_path, seg_path, test_output_dir)

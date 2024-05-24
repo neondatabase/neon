@@ -3,9 +3,9 @@
 //! Safekeeper WAL is stored in the timeline directory, in format similar to pg_wal.
 //! PG timeline is always 1, so WAL segments are usually have names like this:
 //! - 000000010000000000000001
-//! - 000000010000000000000002.partial
+//! - 000000010000000000000002
 //!
-//! Note that last file has `.partial` suffix, that's different from postgres.
+//! In the past last file had `.partial` suffix, so code still can read it.
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -102,11 +102,13 @@ pub struct PhysicalStorage {
 
     /// Cached open file for the last segment.
     ///
-    /// If Some(file) is open, then it always:
-    /// - has ".partial" suffix
+    /// If Some(file, is_partial) is open, then it always:
     /// - points to write_lsn, so no seek is needed for writing
     /// - doesn't point to the end of the segment
-    file: Option<File>,
+    ///
+    /// If the file name has .partial suffix (created before suffix was
+    /// removed), the bool is True.
+    file: Option<(File, bool)>,
 
     /// When false, we have just initialized storage using the LSN from find_end_of_wal().
     /// In this case, [`write_lsn`] can be less than actually written WAL on disk. In particular,
@@ -243,29 +245,26 @@ impl PhysicalStorage {
 
             // Note: this doesn't get into observe_flush_seconds metric. But
             // segment init should be separate metric, if any.
-            if let Err(e) =
-                durable_rename(&tmp_path, &wal_file_partial_path, !self.conf.no_sync).await
-            {
+            if let Err(e) = durable_rename(&tmp_path, &wal_file_path, !self.conf.no_sync).await {
                 // Probably rename succeeded, but fsync of it failed. Remove
                 // the file then to avoid using it.
-                remove_file(wal_file_partial_path)
+                remove_file(wal_file_path)
                     .await
                     .or_else(utils::fs_ext::ignore_not_found)?;
                 return Err(e.into());
             }
-            Ok((file, true))
+            Ok((file, false))
         }
     }
 
     /// Write WAL bytes, which are known to be located in a single WAL segment.
     async fn write_in_segment(&mut self, segno: u64, xlogoff: usize, buf: &[u8]) -> Result<()> {
-        let mut file = if let Some(file) = self.file.take() {
-            file
+        let (mut file, is_partial) = if let Some((file, is_partial)) = self.file.take() {
+            (file, is_partial)
         } else {
             let (mut file, is_partial) = self.open_or_create(segno).await?;
-            assert!(is_partial, "unexpected write into non-partial segment file");
             file.seek(SeekFrom::Start(xlogoff as u64)).await?;
-            file
+            (file, is_partial)
         };
 
         file.write_all(buf).await?;
@@ -278,13 +277,15 @@ impl PhysicalStorage {
             // If we reached the end of a WAL segment, flush and close it.
             self.fdatasync_file(&file).await?;
 
-            // Rename partial file to completed file
-            let (wal_file_path, wal_file_partial_path) =
-                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
-            fs::rename(wal_file_partial_path, wal_file_path).await?;
+            // Rename partial file to completed file in case it was legacy .partial file.
+            if is_partial {
+                let (wal_file_path, wal_file_partial_path) =
+                    wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+                fs::rename(wal_file_partial_path, wal_file_path).await?;
+            }
         } else {
             // otherwise, file can be reused later
-            self.file = Some(file);
+            self.file = Some((file, is_partial));
         }
 
         Ok(())
@@ -298,7 +299,7 @@ impl PhysicalStorage {
     async fn write_exact(&mut self, pos: Lsn, mut buf: &[u8]) -> Result<()> {
         if self.write_lsn != pos {
             // need to flush the file before discarding it
-            if let Some(file) = self.file.take() {
+            if let Some((file, _)) = self.file.take() {
                 self.fdatasync_file(&file).await?;
             }
 
@@ -402,9 +403,9 @@ impl Storage for PhysicalStorage {
             return Ok(());
         }
 
-        if let Some(unflushed_file) = self.file.take() {
+        if let Some((unflushed_file, is_partial)) = self.file.take() {
             self.fdatasync_file(&unflushed_file).await?;
-            self.file = Some(unflushed_file);
+            self.file = Some((unflushed_file, is_partial));
         } else {
             // We have unflushed data (write_lsn != flush_lsn), but no file.
             // This should only happen if last file was fully written and flushed,
@@ -445,7 +446,7 @@ impl Storage for PhysicalStorage {
         }
 
         // Close previously opened file, if any
-        if let Some(unflushed_file) = self.file.take() {
+        if let Some((unflushed_file, _)) = self.file.take() {
             self.fdatasync_file(&unflushed_file).await?;
         }
 
@@ -455,19 +456,12 @@ impl Storage for PhysicalStorage {
         // Remove all segments after the given LSN.
         remove_segments_from_disk(&self.timeline_dir, self.wal_seg_size, |x| x > segno).await?;
 
-        let (mut file, is_partial) = self.open_or_create(segno).await?;
+        let (mut file, _) = self.open_or_create(segno).await?;
 
         // Fill end with zeroes
         file.seek(SeekFrom::Start(xlogoff as u64)).await?;
         write_zeroes(&mut file, self.wal_seg_size - xlogoff).await?;
         self.fdatasync_file(&file).await?;
-
-        if !is_partial {
-            // Make segment partial once again
-            let (wal_file_path, wal_file_partial_path) =
-                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
-            fs::rename(wal_file_path, wal_file_partial_path).await?;
-        }
 
         // Update LSNs
         self.write_lsn = end_pos;

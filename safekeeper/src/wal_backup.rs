@@ -469,16 +469,33 @@ async fn backup_object(
         .await
 }
 
+/// Source file should point to path with segment without .partial suffix; we'll
+/// try to append .partial if file without it doesn't exist.
 pub(crate) async fn backup_partial_segment(
     source_file: &Utf8Path,
     target_file: &RemotePath,
     size: usize,
 ) -> Result<()> {
-    let storage = get_configured_remote_storage();
+    let storage: &GenericRemoteStorage = get_configured_remote_storage();
+    let mut partial_path = source_file.to_owned();
+    partial_path.set_extension("partial");
 
-    let file = File::open(&source_file)
-        .await
-        .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
+    // First try opening without .partial prefix, if that fails, open legacy .partial one.
+    let file = match File::open(&source_file).await {
+        Ok(file) => file,
+        Err(full_e) => match File::open(&partial_path).await {
+            Ok(file) => file,
+            Err(partial_e) => {
+                anyhow::bail!(
+                    "failed to open file for partial backup, {} error: '{}', {} error: '{}'",
+                    source_file,
+                    full_e,
+                    partial_path,
+                    partial_e
+                );
+            }
+        },
+    };
 
     // limiting the file to read only the first `size` bytes
     let limited_file = tokio::io::AsyncReadExt::take(file, size as u64);
