@@ -969,7 +969,7 @@ mod test {
             }
             writer.finish(&timeline, &ctx).await.unwrap()
         };
-        let original_size = resident.metadata().file_size();
+        let original_size = resident.metadata().file_size;
 
         // Filter for various shards: this exercises cases like values at start of key range, end of key
         // range, middle of key range.
@@ -1015,11 +1015,11 @@ mod test {
                     let replacement = replacement.unwrap();
 
                     // We should have dropped some of the data
-                    assert!(replacement.metadata().file_size() < original_size);
-                    assert!(replacement.metadata().file_size() > 0);
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
 
                     // Assert that we dropped ~3/4 of the data.
-                    assert_eq!(replacement.metadata().file_size(), 417792);
+                    assert_eq!(replacement.metadata().file_size, 417792);
                 }
                 1 => {
                     // Shard 1 has no keys in our input range
@@ -1030,17 +1030,17 @@ mod test {
                     // Shard 2 has one stripes in the input range
                     assert_eq!(wrote_keys, 0x8000);
                     let replacement = replacement.unwrap();
-                    assert!(replacement.metadata().file_size() < original_size);
-                    assert!(replacement.metadata().file_size() > 0);
-                    assert_eq!(replacement.metadata().file_size(), 417792);
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+                    assert_eq!(replacement.metadata().file_size, 417792);
                 }
                 3 => {
                     // Shard 3 has two stripes in the input range
                     assert_eq!(wrote_keys, 0x10000);
                     let replacement = replacement.unwrap();
-                    assert!(replacement.metadata().file_size() < original_size);
-                    assert!(replacement.metadata().file_size() > 0);
-                    assert_eq!(replacement.metadata().file_size(), 811008);
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+                    assert_eq!(replacement.metadata().file_size, 811008);
                 }
                 _ => unreachable!(),
             }
