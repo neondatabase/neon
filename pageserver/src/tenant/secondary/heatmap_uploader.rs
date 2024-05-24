@@ -53,7 +53,7 @@ pub(super) async fn heatmap_uploader_task(
 
     scheduler
         .run(command_queue, background_jobs_can_start, cancel)
-        .instrument(info_span!("heatmap_uploader"))
+        .instrument(info_span!("heatmap_upload_scheduler"))
         .await
 }
 

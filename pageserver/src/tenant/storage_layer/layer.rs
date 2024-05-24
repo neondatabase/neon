@@ -4,7 +4,7 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::{ShardIndex, TenantShardId};
+use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -23,10 +23,10 @@ use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self, DeltaEntry};
-use super::image_layer;
+use super::image_layer::{self};
 use super::{
-    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerName, PersistentLayerDesc,
-    ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
+    AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
+    PersistentLayerDesc, ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
 };
 
 use utils::generation::Generation;
@@ -161,7 +161,7 @@ impl Layer {
             timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
-            metadata.file_size(),
+            metadata.file_size,
         );
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
@@ -194,7 +194,7 @@ impl Layer {
             timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
-            metadata.file_size(),
+            metadata.file_size,
         );
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
@@ -227,7 +227,7 @@ impl Layer {
 
         timeline
             .metrics
-            .resident_physical_size_add(metadata.file_size());
+            .resident_physical_size_add(metadata.file_size);
 
         ResidentLayer { downloaded, owner }
     }
@@ -1802,21 +1802,37 @@ impl ResidentLayer {
         use LayerKind::*;
 
         let owner = &self.owner.0;
-
         match self.downloaded.get(owner, ctx).await? {
             Delta(ref d) => {
+                // this is valid because the DownloadedLayer::kind is a OnceCell, not a
+                // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
+                // while it's being held.
                 owner
                     .access_stats
                     .record_access(LayerAccessKind::KeyIter, ctx);
 
-                // this is valid because the DownloadedLayer::kind is a OnceCell, not a
-                // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
-                // while it's being held.
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await
                     .with_context(|| format!("Layer index is corrupted for {self}"))
             }
             Image(_) => anyhow::bail!(format!("cannot load_keys on a image layer {self}")),
+        }
+    }
+
+    /// Read all they keys in this layer which match the ShardIdentity, and write them all to
+    /// the provided writer.  Return the number of keys written.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(layer=%self))]
+    pub(crate) async fn filter<'a>(
+        &'a self,
+        shard_identity: &ShardIdentity,
+        writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<usize> {
+        use LayerKind::*;
+
+        match self.downloaded.get(&self.owner.0, ctx).await? {
+            Delta(_) => anyhow::bail!(format!("cannot filter() on a delta layer {self}")),
+            Image(i) => i.filter(shard_identity, writer, ctx).await,
         }
     }
 

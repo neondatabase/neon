@@ -395,7 +395,7 @@ async fn build_timeline_info_common(
         let guard = timeline.last_received_wal.lock().unwrap();
         if let Some(info) = guard.as_ref() {
             (
-                Some(format!("{:?}", info.wal_source_connconf)), // Password is hidden, but it's for statistics only.
+                Some(format!("{}", info.wal_source_connconf)), // Password is hidden, but it's for statistics only.
                 Some(info.last_received_msg_lsn),
                 Some(info.last_received_msg_ts),
             )
