@@ -73,12 +73,30 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let stream = self.project().stream;
+        let this = self.project();
+        let mut stream = this.stream;
+        if this.send.has_remaining() {
+            ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
+            match stream.as_mut().start_send(Frame::binary(this.send.split())) {
+                Ok(()) => {},
+                Err(e) => return Poll::Ready(Err(io_error(e))),
+            }
+        }
+
         stream.poll_flush(cx).map_err(io_error)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let stream = self.project().stream;
+        let this = self.project();
+        let mut stream = this.stream;
+        if this.send.has_remaining() {
+            ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
+            match stream.as_mut().start_send(Frame::binary(this.send.split())) {
+                Ok(()) => {},
+                Err(e) => return Poll::Ready(Err(io_error(e))),
+            }
+        }
+
         stream.poll_close(cx).map_err(io_error)
     }
 }
