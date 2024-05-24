@@ -28,11 +28,11 @@ def neon_create_project(
     if pg_version:
         data["project"]["pg_version"] = int(pg_version)
     if branch_name:
-        data["project"]["branch"]["branch_name"] = branch_name
+        data["project"]["branch"]["name"] = branch_name
     if branch_role_name:
-        data["project"]["branch"]["branch_role_name"] = branch_role_name
+        data["project"]["branch"]["role_name"] = branch_role_name
     if branch_database_name:
-        data["project"]["branch"]["branch_database_name"] = branch_database_name
+        data["project"]["branch"]["database_name"] = branch_database_name
 
     resp = requests.post(
         f"{neon_api_base_url}/projects",
@@ -44,7 +44,7 @@ def neon_create_project(
         json=data,
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 201
 
     return cast("dict[str, Any]", resp.json())
 
@@ -111,7 +111,7 @@ def neon_create_endpoint(
     neon_api_base_url: str,
     project_id: str,
     branch_id: str,
-    endpoint_type: Optional[Literal["read_write", "read_only"]] = None,
+    endpoint_type: Literal["read_write", "read_only"],
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
         "endpoint": {
@@ -131,7 +131,7 @@ def neon_create_endpoint(
         json=data,
     )
 
-    assert resp.status_code == 200
+    assert resp.status_code == 201
 
     return cast("dict[str, Any]", resp.json())
 
@@ -185,6 +185,22 @@ def neon_get_endpoints(
 ) -> dict[str, Any]:
     resp = requests.get(
         f"{neon_api_base_url}/projects/{project_id}/endpoints",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {neon_api_key}",
+        },
+    )
+
+    assert resp.status_code == 200
+
+    return cast("dict[str, Any]", resp.json())
+
+
+def neon_get_operations(
+    neon_api_key: str, neon_api_base_url: str, project_id: str
+) -> dict[str, Any]:
+    resp = requests.get(
+        f"{neon_api_base_url}/projects/{project_id}/operations",
         headers={
             "Accept": "application/json",
             "Authorization": f"Bearer {neon_api_key}",

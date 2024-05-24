@@ -195,7 +195,7 @@ def neon_api_key() -> str:
 
 @pytest.fixture(scope="session")
 def neon_api_base_url() -> str:
-    return os.getenv("NEON_API_BASE_URL", "https://console-stage.neon.build/api/v2/")
+    return os.getenv("NEON_API_BASE_URL", "https://console-stage.neon.build/api/v2/").strip("/")
 
 
 def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "function"]:
