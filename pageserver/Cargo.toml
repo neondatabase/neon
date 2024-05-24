@@ -84,7 +84,7 @@ storage_broker.workspace = true
 tenant_size_model.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true }
 rpds.workspace = true
 enum-map.workspace = true
 enumset = { workspace = true, features = ["serde"]}

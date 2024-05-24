@@ -31,7 +31,7 @@ once_cell.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 postgres_connection.workspace = true
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 routerify.workspace = true
 serde.workspace = true
 serde_json.workspace = true

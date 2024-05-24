@@ -11,10 +11,12 @@ use crate::{
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use std::{io, net::SocketAddr, time::Duration};
+use rustls::{client::danger::ServerCertVerifier, pki_types::InvalidDnsNameError};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::tls::MakeTlsConnect;
+use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{error, info, warn};
 
 const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
@@ -30,7 +32,7 @@ pub enum ConnectionError {
     CouldNotConnect(#[from] io::Error),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
-    TlsError(#[from] native_tls::Error),
+    TlsError(#[from] InvalidDnsNameError),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     WakeComputeError(#[from] WakeComputeError),
@@ -257,7 +259,7 @@ pub struct PostgresConnection {
     /// Socket connected to a compute node.
     pub stream: tokio_postgres::maybe_tls_stream::MaybeTlsStream<
         tokio::net::TcpStream,
-        postgres_native_tls::TlsStream<tokio::net::TcpStream>,
+        tokio_postgres_rustls::RustlsStream<tokio::net::TcpStream>,
     >,
     /// PostgreSQL connection parameters.
     pub params: std::collections::HashMap<String, String>,
@@ -282,12 +284,24 @@ impl ConnCfg {
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
         drop(pause);
 
-        let tls_connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(allow_self_signed_compute)
-            .build()
-            .unwrap();
-        let mut mk_tls = postgres_native_tls::MakeTlsConnector::new(tls_connector);
-        let tls = MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut mk_tls, host)?;
+        let client_config = if allow_self_signed_compute {
+            let verifier = Arc::new(AcceptEverythingVerifier) as Arc<dyn ServerCertVerifier>;
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+        } else {
+            let root_store = rustls::RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            };
+            rustls::ClientConfig::builder().with_root_certificates(root_store)
+        };
+        let client_config = client_config.with_no_client_auth();
+
+        let mut mk_tls = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
+        let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
+            &mut mk_tls,
+            host,
+        )?;
 
         // connect_raw() will not use TLS if sslmode is "disable"
         let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
@@ -338,6 +352,50 @@ fn filtered_options(params: &StartupMessageParams) -> Option<String> {
     }
 
     Some(options)
+}
+
+#[derive(Debug)]
+struct AcceptEverythingVerifier;
+impl ServerCertVerifier for AcceptEverythingVerifier {
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        use rustls::SignatureScheme::*;
+        // The schemes for which `SignatureScheme::supported_in_tls13` returns true.
+        vec![
+            ECDSA_NISTP521_SHA512,
+            ECDSA_NISTP384_SHA384,
+            ECDSA_NISTP256_SHA256,
+            RSA_PSS_SHA512,
+            RSA_PSS_SHA384,
+            RSA_PSS_SHA256,
+            ED25519,
+        ]
+    }
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
 }
 
 #[cfg(test)]

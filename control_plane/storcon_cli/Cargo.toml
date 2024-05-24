@@ -12,7 +12,7 @@ comfy-table.workspace = true
 hyper.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
