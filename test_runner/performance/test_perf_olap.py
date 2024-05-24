@@ -273,7 +273,7 @@ def test_pgvector_indexing(query: LabelledQuery, remote_compare: RemoteCompare):
     An pgvector test that tests HNSW index build performance and parallelism.
 
     The DB prepared manually in advance.
-    See 
+    See
     - test_runner/performance/pgvector/README.md
     - test_runner/performance/pgvector/ddl.sql
     - test_runner/performance/pgvector/loaddata.py
