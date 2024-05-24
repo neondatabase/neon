@@ -5844,6 +5844,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "statx-sys"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69c325f46f705b7a66fb87f0ebb999524a7363f30f05d373277b4ef7f409fe87"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "storage_broker"
 version = "0.1.0"
 dependencies = [
@@ -6266,7 +6275,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#342ddd197a060a8354e8f11f4d12994419fff939"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=arpad/statx_sys#ca8446b8edb5e0aef88520f2fc209a13a834fd25"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6797,11 +6806,12 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#342ddd197a060a8354e8f11f4d12994419fff939"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=arpad/statx_sys#ca8446b8edb5e0aef88520f2fc209a13a834fd25"
 dependencies = [
  "bytes",
  "io-uring",
  "libc",
+ "statx-sys",
 ]
 
 [[package]]
