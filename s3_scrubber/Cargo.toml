@@ -22,7 +22,6 @@ serde_with.workspace = true
 workspace_hack.workspace = true
 utils.workspace = true
 async-stream.workspace = true
-native-tls.workspace = true
 tokio-postgres-rustls.workspace = true
 postgres_ffi.workspace = true
 tokio-stream.workspace = true

@@ -97,7 +97,6 @@ utils.workspace = true
 uuid.workspace = true
 webpki-roots.workspace = true
 x509-parser.workspace = true
-native-tls.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
 

@@ -200,7 +200,6 @@ log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-#postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 tokio-postgres-rustls = {path = "../tokio-postgres-rustls"}
 postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
