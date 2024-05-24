@@ -78,6 +78,10 @@ where
                 let e = Err(std::io::Error::from(e));
                 return Poll::Ready(Some(e));
             }
+        } else {
+            // this would be perfectly valid behaviour for doing a graceful completion on the
+            // download for example, but not one we expect to do right now.
+            tracing::warn!("continuing polling after having cancelled or timeouted");
         }
 
         this.inner.poll_next(cx)
