@@ -909,6 +909,7 @@ impl<'a> TenantDownloader<'a> {
                         strftime(&layer.access_time),
                         strftime(evicted_at)
                     );
+                    self.skip_layer(layer);
                     continue;
                 }
             }
@@ -963,6 +964,15 @@ impl<'a> TenantDownloader<'a> {
         Ok(())
     }
 
+    /// Call this during timeline download if a layer will _not_ be downloaded, to update progress statistics
+    fn skip_layer(&self, layer: HeatMapLayer) {
+        let mut progress = self.secondary_state.progress.lock().unwrap();
+        progress.layers_total = progress.layers_total.saturating_sub(1);
+        progress.bytes_total = progress
+            .bytes_total
+            .saturating_sub(layer.metadata.file_size);
+    }
+
     async fn download_layer(
         &self,
         tenant_shard_id: &TenantShardId,
@@ -1012,13 +1022,7 @@ impl<'a> TenantDownloader<'a> {
                     "Skipped downloading missing layer {}, raced with compaction/gc?",
                     layer.name
                 );
-
-                // If the layer is 404, adjust the progress statistics to reflect that we will not download it.
-                let mut progress = self.secondary_state.progress.lock().unwrap();
-                progress.layers_total = progress.layers_total.saturating_sub(1);
-                progress.bytes_total = progress
-                    .bytes_total
-                    .saturating_sub(layer.metadata.file_size);
+                self.skip_layer(layer);
 
                 return Ok(None);
             }
