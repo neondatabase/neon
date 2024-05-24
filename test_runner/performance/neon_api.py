@@ -10,8 +10,30 @@ if TYPE_CHECKING:
 
 
 def neon_create_project(
-    neon_api_key: str, neon_api_base_url: str, pg_version: PgVersion
+    neon_api_key: str,
+    neon_api_base_url: str,
+    pg_version: Optional[PgVersion] = None,
+    name: Optional[str] = None,
+    branch_name: Optional[str] = None,
+    branch_role_name: Optional[str] = None,
+    branch_database_name: Optional[str] = None,
 ) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "project": {
+            "branch": {},
+        },
+    }
+    if name:
+        data["project"]["name"] = name
+    if pg_version:
+        data["project"]["pg_version"] = int(pg_version)
+    if branch_name:
+        data["project"]["branch"]["branch_name"] = branch_name
+    if branch_role_name:
+        data["project"]["branch"]["branch_role_name"] = branch_role_name
+    if branch_database_name:
+        data["project"]["branch"]["branch_database_name"] = branch_database_name
+
     resp = requests.post(
         f"{neon_api_base_url}/projects",
         headers={
@@ -19,11 +41,7 @@ def neon_create_project(
             "Content-Type": "application/json",
             "Authorization": f"Bearer {neon_api_key}",
         },
-        json={
-            "project": {
-                "pg_version": int(pg_version),
-            },
-        },
+        json=data,
     )
 
     assert resp.status_code == 200
@@ -93,14 +111,15 @@ def neon_create_endpoint(
     neon_api_base_url: str,
     project_id: str,
     branch_id: str,
-    endpoint_type: Literal["read_write", "read_only"],
+    endpoint_type: Optional[Literal["read_write", "read_only"]] = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {
         "endpoint": {
             "branch_id": branch_id,
-            "type": endpoint_type,
         },
     }
+    if endpoint_type:
+        data["endpoint"]["type"] = endpoint_type
 
     resp = requests.post(
         f"{neon_api_base_url}/projects/{project_id}/endpoints",
