@@ -36,7 +36,7 @@ postgres-protocol.workspace = true
 rand.workspace = true
 regex.workspace = true
 scopeguard.workspace = true
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
