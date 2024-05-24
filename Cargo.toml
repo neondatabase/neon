@@ -110,6 +110,7 @@ jsonwebtoken = "9"
 lasso = "0.7"
 leaky-bucket = "1.0.1"
 libc = "0.2"
+lz4_flex = "0.11"
 md5 = "0.7.0"
 measured = { version = "0.0.21", features=["lasso"] }
 measured-process = { version = "0.0.21" }

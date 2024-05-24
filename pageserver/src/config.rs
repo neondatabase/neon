@@ -5,7 +5,7 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{models::ImageCompressionAlgorithm, shard::TenantShardId};
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use serde;
 use serde::de::IntoDeserializer;
@@ -55,6 +55,7 @@ pub mod defaults {
         DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
         DEFAULT_PG_LISTEN_PORT,
     };
+    use pageserver_api::models::ImageCompressionAlgorithm;
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
@@ -94,6 +95,8 @@ pub mod defaults {
     pub const DEFAULT_GET_IMPL: &str = "legacy";
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
+
+    pub const DEFAULT_IMAGE_COMPRESSION: Option<ImageCompressionAlgorithm> = None;
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
@@ -290,6 +293,8 @@ pub struct PageServerConf {
 
     pub validate_vectored_get: bool,
 
+    pub image_compression: Option<ImageCompressionAlgorithm>,
+
     /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
     /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
     /// of ephemeral data.
@@ -400,6 +405,8 @@ struct PageServerConfigBuilder {
 
     validate_vectored_get: BuilderValue<bool>,
 
+    image_compression: BuilderValue<Option<ImageCompressionAlgorithm>>,
+
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
 }
 
@@ -487,6 +494,7 @@ impl PageServerConfigBuilder {
             max_vectored_read_bytes: Set(MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
+            image_compression: Set(DEFAULT_IMAGE_COMPRESSION),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
         }
@@ -672,6 +680,10 @@ impl PageServerConfigBuilder {
         self.validate_vectored_get = BuilderValue::Set(value);
     }
 
+    pub fn get_image_compression(&mut self, value: Option<ImageCompressionAlgorithm>) {
+        self.image_compression = BuilderValue::Set(value);
+    }
+
     pub fn get_ephemeral_bytes_per_memory_kb(&mut self, value: usize) {
         self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
     }
@@ -732,6 +744,7 @@ impl PageServerConfigBuilder {
                 get_impl,
                 max_vectored_read_bytes,
                 validate_vectored_get,
+                image_compression,
                 ephemeral_bytes_per_memory_kb,
             }
             CUSTOM LOGIC
@@ -1026,6 +1039,9 @@ impl PageServerConf {
                 "validate_vectored_get" => {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
                 }
+                "image_compression" => {
+                    builder.get_image_compression(Some(parse_toml_from_str("image_compression", item)?))
+                }
                 "ephemeral_bytes_per_memory_kb" => {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
                 }
@@ -1110,6 +1126,7 @@ impl PageServerConf {
                 NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                     .expect("Invalid default constant"),
             ),
+            image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
         }

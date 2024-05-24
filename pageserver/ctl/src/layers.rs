@@ -55,6 +55,10 @@ pub(crate) enum LayerCmd {
         #[clap(long)]
         new_timeline_id: Option<TimelineId>,
     },
+    Compress {
+        dest_path: Utf8PathBuf,
+        layer_file_path: Utf8PathBuf,
+    },
 }
 
 async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
@@ -239,6 +243,23 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             }
 
             anyhow::bail!("not an image or delta layer: {layer_file_path}");
+        }
+        LayerCmd::Compress {
+            dest_path,
+            layer_file_path,
+        } => {
+            pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
+            pageserver::page_cache::init(100);
+
+            let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+
+            let stats =
+                ImageLayer::compression_statistics(dest_path, layer_file_path, &ctx).await?;
+            println!(
+                "Statistics: {stats:#?}\n{}",
+                serde_json::to_string(&stats).unwrap()
+            );
+            return Ok(());
         }
     }
 }

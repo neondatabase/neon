@@ -46,7 +46,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::LayerAccessKind;
+use pageserver_api::models::{ImageCompressionAlgorithm, LayerAccessKind};
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -365,6 +365,83 @@ impl ImageLayer {
         let (_buf, res) = file.write_all(buf, ctx).await;
         res?;
         Ok(())
+    }
+    pub async fn compression_statistics(
+        dest_repo_path: &Utf8Path,
+        path: &Utf8Path,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Option<ImageCompressionAlgorithm>, u64)>> {
+        fn make_conf(
+            image_compression: Option<ImageCompressionAlgorithm>,
+            dest_repo_path: &Utf8Path,
+        ) -> &'static PageServerConf {
+            let mut conf = PageServerConf::dummy_conf(dest_repo_path.to_owned());
+            conf.image_compression = image_compression;
+            Box::leak(Box::new(conf))
+        }
+        let image_compressions = [
+            None,
+            Some(ImageCompressionAlgorithm::Zstd),
+            Some(ImageCompressionAlgorithm::LZ4),
+        ];
+        let mut stats = Vec::new();
+        for image_compression in image_compressions {
+            let size = Self::compressed_size_for_conf(
+                path,
+                ctx,
+                make_conf(image_compression, dest_repo_path),
+            )
+            .await?;
+            stats.push((image_compression, size));
+        }
+        Ok(stats)
+    }
+
+    async fn compressed_size_for_conf(
+        path: &Utf8Path,
+        ctx: &RequestContext,
+        conf: &'static PageServerConf,
+    ) -> anyhow::Result<u64> {
+        let file =
+            VirtualFile::open_with_options(path, virtual_file::OpenOptions::new().read(true), ctx)
+                .await
+                .with_context(|| format!("Failed to open file '{}'", path))?;
+
+        let file_id = page_cache::next_file_id();
+        let block_reader = FileBlockReader::new(&file, file_id);
+        let summary_blk = block_reader.read_blk(0, ctx).await?;
+        let summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
+        if summary.magic != IMAGE_FILE_MAGIC {
+            anyhow::bail!("magic file mismatch");
+        }
+
+        let tree_reader = DiskBtreeReader::new(
+            summary.index_start_blk,
+            summary.index_root_blk,
+            &block_reader,
+        );
+
+        let mut key_offset_stream =
+            std::pin::pin!(tree_reader.get_stream_from(&[0u8; KEY_SIZE], ctx));
+
+        let mut writer = ImageLayerWriter::new(
+            conf,
+            summary.timeline_id,
+            TenantShardId::unsharded(summary.tenant_id),
+            &summary.key_range,
+            summary.lsn,
+            ctx,
+        )
+        .await?;
+
+        let cursor = block_reader.block_cursor();
+        while let Some(r) = key_offset_stream.next().await {
+            let (key, offset) = r?;
+            let key = Key::from_slice(&key);
+            let content = cursor.read_blob(offset, ctx).await?;
+            writer.put_image(key, content.into(), ctx).await?;
+        }
+        Ok(writer.size())
     }
 }
 
@@ -782,7 +859,10 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(img, ctx).await;
+        let (_img, res) = self
+            .blob_writer
+            .write_blob_compressed(img, ctx, self.conf.image_compression)
+            .await;
         // TODO: re-use the buffer for `img` further upstack
         let off = res?;
 
@@ -921,6 +1001,12 @@ impl ImageLayerWriter {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
+    }
+
+    /// Obtains the current size of the file
+    pub(crate) fn size(&self) -> u64 {
+        let inner = self.inner.as_ref().unwrap();
+        inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
     }
 
     ///

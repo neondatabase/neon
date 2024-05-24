@@ -12,6 +12,8 @@
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
 use bytes::{BufMut, BytesMut};
+use pageserver_api::models::ImageCompressionAlgorithm;
+use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 use crate::context::RequestContext;
@@ -220,35 +222,82 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
+        self.write_blob_compressed(srcbuf, ctx, None).await
+    }
+
+    /// Write a blob of data. Returns the offset that it was written to,
+    /// which can be used to retrieve the data later.
+    pub async fn write_blob_compressed<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        srcbuf: B,
+        ctx: &RequestContext,
+        algorithm: Option<ImageCompressionAlgorithm>,
+    ) -> (B::Buf, Result<u64, Error>) {
         let offset = self.offset;
 
         let len = srcbuf.bytes_init();
 
         let mut io_buf = self.io_buf.take().expect("we always put it back below");
         io_buf.clear();
-        let (io_buf, hdr_res) = async {
+        let mut compressed_buf = None;
+        let ((io_buf, hdr_res), srcbuf) = async {
             if len < 128 {
                 // Short blob. Write a 1-byte length header
                 io_buf.put_u8(len as u8);
-                self.write_all(io_buf, ctx).await
+                (
+                    self.write_all(io_buf, ctx).await,
+                    srcbuf.slice(..).into_inner(),
+                )
             } else {
                 // Write a 4-byte length header
-                if len > 0x7fff_ffff {
+                if len > 0x0fff_ffff {
                     return (
-                        io_buf,
-                        Err(Error::new(
-                            ErrorKind::Other,
-                            format!("blob too large ({len} bytes)"),
-                        )),
+                        (
+                            io_buf,
+                            Err(Error::new(
+                                ErrorKind::Other,
+                                format!("blob too large ({len} bytes)"),
+                            )),
+                        ),
+                        srcbuf.slice(..).into_inner(),
                     );
                 }
-                if len > 0x0fff_ffff {
-                    tracing::warn!("writing blob above future limit ({len} bytes)");
-                }
-                let mut len_buf = (len as u32).to_be_bytes();
-                len_buf[0] |= 0x80;
+                const UNCOMPRESSED: u8 = 0x80;
+                const ZSTD: u8 = UNCOMPRESSED | 0x10;
+                const LZ4: u8 = UNCOMPRESSED | 0x20;
+                let (high_bit_mask, len_written, srcbuf) = match algorithm {
+                    Some(ImageCompressionAlgorithm::Zstd) => {
+                        let mut encoder =
+                            async_compression::tokio::write::ZstdEncoder::new(Vec::new());
+                        let slice = srcbuf.slice(..);
+                        encoder.write_all(&slice[..]).await.unwrap();
+                        encoder.flush().await.unwrap();
+                        let compressed = encoder.into_inner();
+                        if compressed.len() < len {
+                            let compressed_len = len;
+                            compressed_buf = Some(compressed);
+                            (ZSTD, compressed_len, slice.into_inner())
+                        } else {
+                            (0x80, len, slice.into_inner())
+                        }
+                    }
+                    Some(ImageCompressionAlgorithm::LZ4) => {
+                        let slice = srcbuf.slice(..);
+                        let compressed = lz4_flex::block::compress(&slice[..]);
+                        if compressed.len() < len {
+                            let compressed_len = len;
+                            compressed_buf = Some(compressed);
+                            (LZ4, compressed_len, slice.into_inner())
+                        } else {
+                            (0x80, len, slice.into_inner())
+                        }
+                    }
+                    None => (0x80, len, srcbuf.slice(..).into_inner()),
+                };
+                let mut len_buf = (len_written as u32).to_be_bytes();
+                len_buf[0] |= high_bit_mask;
                 io_buf.extend_from_slice(&len_buf[..]);
-                self.write_all(io_buf, ctx).await
+                (self.write_all(io_buf, ctx).await, srcbuf)
             }
         }
         .await;
@@ -257,7 +306,12 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             Ok(_) => (),
             Err(e) => return (Slice::into_inner(srcbuf.slice(..)), Err(e)),
         }
-        let (srcbuf, res) = self.write_all(srcbuf, ctx).await;
+        let (srcbuf, res) = if let Some(compressed_buf) = compressed_buf {
+            let (_buf, res) = self.write_all(compressed_buf, ctx).await;
+            (Slice::into_inner(srcbuf.slice(..)), res)
+        } else {
+            self.write_all(srcbuf, ctx).await
+        };
         (srcbuf, res.map(|_| offset))
     }
 }
