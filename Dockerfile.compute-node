@@ -1207,6 +1207,7 @@ DETAIL:  The current user must have the CREATEROLE attribute.
 ROLLBACK TO fail_seclabel_on_role;
 ROLLBACK;
 EOF
+RUN sed -i 's/REGRESS_OPTS/#REGRESS_OPTS/' /ext-src/pg_cron-src/Makefile
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433
