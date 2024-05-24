@@ -46,6 +46,8 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let active_timelines_set = GlobalTimelines::get_global_broker_active_set();
+
     let mut client =
         storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)?;
     let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
@@ -57,15 +59,9 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
             // sensitive and there is no risk of deadlock as we don't await while
             // lock is held.
             let now = Instant::now();
-            let all_tlis = GlobalTimelines::get_all();
+            let all_tlis = active_timelines_set.get_all();
             let mut n_pushed_tlis = 0;
             for tli in &all_tlis {
-                // filtering alternative futures::stream::iter(all_tlis)
-                //   .filter(|tli| {let tli = tli.clone(); async move { tli.is_active().await}}).collect::<Vec<_>>().await;
-                // doesn't look better, and I'm not sure how to do that without collect.
-                if !tli.is_active().await {
-                    continue;
-                }
                 let sk_info = tli.get_safekeeper_info(&conf).await;
                 yield sk_info;
                 BROKER_PUSHED_UPDATES.inc();
@@ -90,6 +86,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
 }
 
 /// Subscribe and fetch all the interesting data from the broker.
+#[instrument(name = "broker pull", skip_all)]
 async fn pull_loop(conf: SafeKeeperConf, stats: Arc<BrokerStats>) -> Result<()> {
     let mut client = storage_broker::connect(conf.broker_endpoint, conf.broker_keepalive_interval)?;
 

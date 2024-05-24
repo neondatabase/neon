@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_wal_insert_lsn
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_wal_insert_lsn
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
 )
@@ -71,22 +71,17 @@ def test_next_xid(neon_env_builder: NeonEnvBuilder):
 def test_import_at_2bil(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
-    pg_distrib_dir: Path,
-    pg_bin,
+    pg_bin: PgBin,
     vanilla_pg,
 ):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
 
-    # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
-    # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
-
     # Reset the vanilla Postgres instance to somewhat before 2 billion transactions.
     pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, "pg_resetwal")
     cmd = [pg_resetwal_path, "--next-transaction-id=2129920000", "-D", str(vanilla_pg.pgdatadir)]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.run_capture(cmd)
 
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")

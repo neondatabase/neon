@@ -1625,7 +1625,7 @@ class NeonCli(AbstractNeonCli):
             args.extend(["-c", "switch_aux_file_policy:v1"])
 
         if aux_file_v2 is AuxFileStore.CrossValidation:
-            args.extend(["-c", "switch_aux_file_policy:cross_validation"])
+            args.extend(["-c", "switch_aux_file_policy:cross-validation"])
 
         if set_default:
             args.append("--set-default")
@@ -2667,7 +2667,9 @@ class NeonPageserver(PgProtocol, LogUtils):
             tenant_id, generation=self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         )
 
-    def list_layers(self, tenant_id: TenantId, timeline_id: TimelineId) -> list[Path]:
+    def list_layers(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ) -> list[Path]:
         """
         Inspect local storage on a pageserver to discover which layer files are present.
 
@@ -2787,6 +2789,28 @@ class PgBin:
         )[0]
         log.info(f"last checkpoint at {checkpoint_lsn}")
         return Lsn(checkpoint_lsn)
+
+    def take_fullbackup(
+        self,
+        pageserver: NeonPageserver,
+        tenant: TenantId,
+        timeline: TimelineId,
+        lsn: Lsn,
+        output: Path,
+    ):
+        """
+        Request fullbackup from pageserver, store it at 'output'.
+        """
+        cmd = [
+            "psql",
+            "--no-psqlrc",
+            pageserver.connstr(),
+            "-c",
+            f"fullbackup {tenant} {timeline} {lsn}",
+            "-o",
+            str(output),
+        ]
+        self.run_capture(cmd)
 
 
 @pytest.fixture(scope="function")
