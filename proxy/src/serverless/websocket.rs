@@ -52,51 +52,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
         let this = self.project();
         let mut stream = this.stream;
 
-        let rem = 16284 - this.send.len();
-        let min = usize::min(rem, buf.len());
-        this.send.put(&buf[..min]);
+        ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
 
-        let ready = stream.as_mut().poll_ready(cx).map_err(io_error)?;
-
-        match ready {
-            Poll::Ready(_) => {
-                // flush
-                match stream.as_mut().start_send(Frame::binary(this.send.split())) {
-                    Ok(()) => Poll::Ready(Ok(buf.len())),
-                    Err(e) => Poll::Ready(Err(io_error(e))),
-                }
-            }
-            Poll::Pending if min == 0 => Poll::Pending,
-            // we 'wrote' some bytes
-            Poll::Pending => Poll::Ready(Ok(min)),
+        this.send.put(buf);
+        match stream.as_mut().start_send(Frame::binary(this.send.split())) {
+            Ok(()) => Poll::Ready(Ok(buf.len())),
+            Err(e) => Poll::Ready(Err(io_error(e))),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.project();
-        let mut stream = this.stream;
-        if this.send.has_remaining() {
-            ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
-            match stream.as_mut().start_send(Frame::binary(this.send.split())) {
-                Ok(()) => {},
-                Err(e) => return Poll::Ready(Err(io_error(e))),
-            }
-        }
-
+        let stream = self.project().stream;
         stream.poll_flush(cx).map_err(io_error)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.project();
-        let mut stream = this.stream;
-        if this.send.has_remaining() {
-            ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
-            match stream.as_mut().start_send(Frame::binary(this.send.split())) {
-                Ok(()) => {},
-                Err(e) => return Poll::Ready(Err(io_error(e))),
-            }
-        }
-
+        let stream = self.project().stream;
         stream.poll_close(cx).map_err(io_error)
     }
 }
