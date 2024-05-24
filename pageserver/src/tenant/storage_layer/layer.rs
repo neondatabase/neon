@@ -1800,15 +1800,15 @@ impl ResidentLayer {
         use LayerKind::*;
 
         let owner = &self.owner.0;
-        owner
-            .access_stats
-            .record_access(LayerAccessKind::KeyIter, ctx);
-
         match self.downloaded.get(owner, ctx).await? {
             Delta(ref d) => {
                 // this is valid because the DownloadedLayer::kind is a OnceCell, not a
                 // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
                 // while it's being held.
+                owner
+                    .access_stats
+                    .record_access(LayerAccessKind::KeyIter, ctx);
+
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await
                     .with_context(|| format!("Layer index is corrupted for {self}"))
