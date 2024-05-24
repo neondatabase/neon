@@ -23,7 +23,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload_queue_empty,
     wait_until_tenant_active,
 )
-from fixtures.remote_storage import RemoteStorageKind, S3Storage
+from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.utils import query_scalar, wait_until
 
 
@@ -659,8 +659,9 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
 
 
 def test_ondemand_download_cancelled_by_config_location(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
+    # turn off background tasks so that they don't interfere with the downloads
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             "gc_period": "0s",
@@ -775,10 +776,11 @@ def test_ondemand_download_timeouted(neon_env_builder: NeonEnvBuilder):
     """
     Pause using a pausable_failpoint longer than the client timeout to simulate the timeout happening.
     """
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     assert isinstance(neon_env_builder.pageserver_remote_storage, S3Storage)
     neon_env_builder.pageserver_remote_storage.custom_timeout = "1s"
 
+    # turn off background tasks so that they don't interfere with the downloads
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             "gc_period": "0s",
@@ -808,7 +810,7 @@ def test_ondemand_download_timeouted(neon_env_builder: NeonEnvBuilder):
             )
 
             _, offset = wait_until(
-                10, 1, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+                20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
             )
 
             started = time.time()
@@ -831,8 +833,8 @@ def test_ondemand_download_timeouted(neon_env_builder: NeonEnvBuilder):
 
             # capture the next offset for a new synchronization with the failpoint
             _, offset = wait_until(
-                10,
-                1,
+                20,
+                0.5,
                 lambda: env.pageserver.assert_log_contains(
                     f"cfg failpoint: {failpoint} pause", offset
                 ),

@@ -171,6 +171,7 @@ class S3Storage:
     """Is this MOCK_S3 (false) or REAL_S3 (true)"""
     real: bool
     endpoint: Optional[str] = None
+    """formatting deserialized with humantime crate, for example "1s"."""
     custom_timeout: Optional[str] = None
 
     def access_env_vars(self) -> Dict[str, str]:
