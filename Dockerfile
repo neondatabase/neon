@@ -48,30 +48,30 @@ COPY --chown=nonroot . .
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
     && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment" cargo build  \
-      --bin pg_sni_router  \
-      --bin pageserver  \
-      --bin pagectl  \
-      --bin safekeeper  \
-      --bin storage_broker  \
-      --bin storage_controller  \
-      --bin proxy  \
-      --bin neon_local \
-      --locked --release \
+    --bin pg_sni_router  \
+    --bin pageserver  \
+    --bin pagectl  \
+    --bin safekeeper  \
+    --bin storage_broker  \
+    --bin storage_controller  \
+    --bin proxy  \
+    --bin neon_local \
+    --locked --release \
     && cachepot -s
 
 # Build final image
 #
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 WORKDIR /data
 
 RUN set -e \
     && apt update \
     && apt install -y \
-        libreadline-dev \
-        libseccomp-dev \
-        libicu67 \
-        openssl \
-        ca-certificates \
+    libreadline-dev \
+    libseccomp-dev \
+    libicu67 \
+    openssl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && useradd -d /data neon \
     && chown -R neon:neon /data
@@ -94,11 +94,11 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
 RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
     && /usr/local/bin/pageserver -D /data/.neon/ --init \
-       -c "id=1234" \
-       -c "broker_endpoint='http://storage_broker:50051'" \
-       -c "pg_distrib_dir='/usr/local/'" \
-       -c "listen_pg_addr='0.0.0.0:6400'" \
-       -c "listen_http_addr='0.0.0.0:9898'"
+    -c "id=1234" \
+    -c "broker_endpoint='http://storage_broker:50051'" \
+    -c "pg_distrib_dir='/usr/local/'" \
+    -c "listen_pg_addr='0.0.0.0:6400'" \
+    -c "listen_http_addr='0.0.0.0:9898'"
 
 # When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
 # that want a particular postgres version will select it explicitly: this is just a default.
