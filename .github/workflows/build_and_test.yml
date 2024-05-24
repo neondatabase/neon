@@ -727,7 +727,7 @@ jobs:
     needs: [ check-permissions, build-build-tools-image, tag ]
     strategy:
       matrix:
-        arch: [ x64, arm64 ]
+        arch: [ x64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
@@ -785,8 +785,7 @@ jobs:
       - name: Create multi-arch image
         run: |
           docker buildx imagetools create -t neondatabase/neon:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-arm64
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-x64
 
       - uses: docker/login-action@v3
         with:
@@ -805,7 +804,7 @@ jobs:
       fail-fast: false
       matrix:
         version: [ v14, v15, v16 ]
-        arch: [ x64, arm64 ]
+        arch: [ x64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
@@ -899,15 +898,13 @@ jobs:
       - name: Create multi-arch compute-node image
         run: |
           docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
+                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64
 
       - name: Create multi-arch compute-tools image
         if: matrix.version == 'v16'
         run: |
           docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-arm64
+                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-x64
 
       - uses: docker/login-action@v3
         with:
@@ -986,7 +983,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [ x64, arm64 ]
+        arch: [ x64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
