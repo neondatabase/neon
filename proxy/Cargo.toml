@@ -82,6 +82,7 @@ thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
 tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
@@ -97,7 +98,6 @@ uuid.workspace = true
 webpki-roots.workspace = true
 x509-parser.workspace = true
 native-tls.workspace = true
-postgres-native-tls.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
 

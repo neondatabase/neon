@@ -173,7 +173,7 @@ tikv-jemalloc-ctl = "0.5"
 tokio = { version = "1.17", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
-tokio-postgres-rustls = "0.11.0"
+#tokio-postgres-rustls = "0.11.0"
 tokio-rustls = "0.25"
 tokio-stream = "0.1"
 tokio-tar = "0.3"
@@ -191,7 +191,7 @@ url = "2.2"
 urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
-webpki-roots = "0.25"
+webpki-roots = "0.26"
 x509-parser = "0.15"
 
 ## TODO replace this with tracing
@@ -200,7 +200,8 @@ log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+#postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+tokio-postgres-rustls = {path = "../tokio-postgres-rustls"}
 postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
