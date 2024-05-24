@@ -929,8 +929,8 @@ mod test {
     use super::ImageLayerWriter;
 
     #[tokio::test]
-    async fn test_rewrite() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_image_layer_rewrite")?;
+    async fn image_layer_rewrite() {
+        let harness = TenantHarness::create("test_image_layer_rewrite").unwrap();
         let (tenant, ctx) = harness.load().await;
 
         // The LSN at which we will create an image layer to filter
@@ -939,7 +939,8 @@ mod test {
         let timeline_id = TimelineId::generate();
         let timeline = tenant
             .create_test_timeline(timeline_id, lsn, DEFAULT_PG_VERSION, &ctx)
-            .await?;
+            .await
+            .unwrap();
 
         // This key range contains several 0x8000 page stripes, only one of which belongs to shard zero
         let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
@@ -956,16 +957,17 @@ mod test {
                 lsn,
                 &ctx,
             )
-            .await?;
+            .await
+            .unwrap();
 
             let foo_img = Bytes::from_static(&[1, 2, 3, 4]);
             let mut key = range.start;
             while key < range.end {
-                writer.put_image(key, foo_img.clone(), &ctx).await?;
+                writer.put_image(key, foo_img.clone(), &ctx).await.unwrap();
 
                 key = key.next();
             }
-            writer.finish(&timeline, &ctx).await?
+            writer.finish(&timeline, &ctx).await.unwrap()
         };
         let original_size = resident.metadata().file_size();
 
@@ -980,7 +982,8 @@ mod test {
                 lsn,
                 &ctx,
             )
-            .await?;
+            .await
+            .unwrap();
 
             // TenantHarness gave us an unsharded tenant, but we'll use a sharded ShardIdentity
             // to exercise filter()
@@ -988,13 +991,15 @@ mod test {
                 ShardNumber(shard_number),
                 ShardCount::new(4),
                 ShardStripeSize(0x8000),
-            )?;
+            )
+            .unwrap();
 
             let wrote_keys = resident
                 .filter(&shard_identity, &mut filtered_writer, &ctx)
-                .await?;
+                .await
+                .unwrap();
             let replacement = if wrote_keys > 0 {
-                Some(filtered_writer.finish(&timeline, &ctx).await?)
+                Some(filtered_writer.finish(&timeline, &ctx).await.unwrap())
             } else {
                 None
             };
@@ -1040,7 +1045,5 @@ mod test {
                 _ => unreachable!(),
             }
         }
-
-        Ok(())
     }
 }
