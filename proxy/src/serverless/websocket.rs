@@ -53,8 +53,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
         let mut stream = this.stream;
 
         let rem = 16284 - this.send.len();
-        let max = usize::max(rem, buf.len());
-        this.send.put(&buf[..max]);
+        let min = usize::min(rem, buf.len());
+        this.send.put(&buf[..min]);
 
         let ready = stream.as_mut().poll_ready(cx).map_err(io_error)?;
 
@@ -66,9 +66,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
                     Err(e) => Poll::Ready(Err(io_error(e))),
                 }
             }
-            Poll::Pending if max == 0 => Poll::Pending,
+            Poll::Pending if min == 0 => Poll::Pending,
             // we 'wrote' some bytes
-            Poll::Pending => Poll::Ready(Ok(max)),
+            Poll::Pending => Poll::Ready(Ok(min)),
         }
     }
 
