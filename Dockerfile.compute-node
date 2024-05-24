@@ -1176,7 +1176,7 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 RUN apt update &&  \
     apt install --no-install-recommends -y \
         gdb \
-        libicu67 \
+        libicu72 \
         liblz4-1 \
         libreadline8 \
         libboost-iostreams1.74.0 \
