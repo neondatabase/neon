@@ -2667,7 +2667,9 @@ class NeonPageserver(PgProtocol, LogUtils):
             tenant_id, generation=self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         )
 
-    def list_layers(self, tenant_id: TenantId, timeline_id: TimelineId) -> list[Path]:
+    def list_layers(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ) -> list[Path]:
         """
         Inspect local storage on a pageserver to discover which layer files are present.
 
