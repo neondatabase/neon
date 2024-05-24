@@ -40,7 +40,7 @@ on:
         default: false
       run_only_pgvector_tests:
         type: boolean
-        description: 'Run pgvector tests but no other tests. If not set, pgvector tests will not be run'
+        description: 'Run pgvector tests but no other tests. If not set, all tests including pgvector tests will be run'
         required: false
         default: false
 
