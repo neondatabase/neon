@@ -51,12 +51,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.project();
         let mut stream = this.stream;
-        this.send.put(buf);
 
-        ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
-        match stream.as_mut().start_send(Frame::binary(this.send.split())) {
-            Ok(()) => Poll::Ready(Ok(buf.len())),
-            Err(e) => Poll::Ready(Err(io_error(e))),
+        let rem = 16284 - this.send.len();
+        let max = usize::max(rem, buf.len());
+        this.send.put(&buf[..max]);
+
+        let ready = stream.as_mut().poll_ready(cx).map_err(io_error)?;
+
+        match ready {
+            Poll::Ready(_) => {
+                // flush
+                match stream.as_mut().start_send(Frame::binary(this.send.split())) {
+                    Ok(()) => Poll::Ready(Ok(buf.len())),
+                    Err(e) => Poll::Ready(Err(io_error(e))),
+                }
+            }
+            Poll::Pending if max == 0 => Poll::Pending,
+            // we 'wrote' some bytes
+            Poll::Pending => Poll::Ready(Ok(max)),
         }
     }
 
