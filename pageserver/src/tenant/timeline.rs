@@ -23,9 +23,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
-        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
-        TimelineState,
+        AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, CompactionAlgorithmSettings,
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -1423,7 +1423,7 @@ impl Timeline {
         let layer_map = guard.layer_map();
         let mut size = 0;
         for l in layer_map.iter_historic_layers() {
-            size += l.file_size();
+            size += l.file_size;
         }
         size
     }
@@ -1529,6 +1529,20 @@ impl Timeline {
             **latest_gc_cutoff_lsn,
         );
         Ok(())
+    }
+
+    /// Obtains a temporary lease blocking garbage collection for the given LSN
+    pub(crate) fn make_lsn_lease(
+        &self,
+        _lsn: Lsn,
+        _ctx: &RequestContext,
+    ) -> anyhow::Result<LsnLease> {
+        const LEASE_LENGTH: Duration = Duration::from_secs(5 * 60);
+        let lease = LsnLease {
+            valid_until: SystemTime::now() + LEASE_LENGTH,
+        };
+        // TODO: dummy implementation
+        Ok(lease)
     }
 
     /// Flush to disk all data that was written with the put_* functions
@@ -1685,7 +1699,7 @@ impl Timeline {
             return Ok(());
         }
 
-        match self.get_compaction_algorithm() {
+        match self.get_compaction_algorithm_settings().kind {
             CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
         }
@@ -2081,12 +2095,14 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
-    fn get_compaction_algorithm(&self) -> CompactionAlgorithm {
+    fn get_compaction_algorithm_settings(&self) -> CompactionAlgorithmSettings {
         let tenant_conf = &self.tenant_conf.load();
         tenant_conf
             .tenant_conf
             .compaction_algorithm
-            .unwrap_or(self.conf.default_tenant_conf.compaction_algorithm)
+            .as_ref()
+            .unwrap_or(&self.conf.default_tenant_conf.compaction_algorithm)
+            .clone()
     }
 
     fn get_eviction_policy(&self) -> EvictionPolicy {
@@ -3038,7 +3054,7 @@ impl Timeline {
 
             HeatMapLayer::new(
                 layer.layer_desc().layer_name(),
-                (&layer.metadata()).into(),
+                layer.metadata(),
                 last_activity_ts,
             )
         });
@@ -4314,7 +4330,7 @@ impl Timeline {
         let delta_file_accessed = reconstruct_state.get_delta_layers_visited();
 
         let trigger_generation = delta_file_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
-        info!(
+        debug!(
             "generate image layers for metadata keys: trigger_generation={trigger_generation}, \
                 delta_file_accessed={delta_file_accessed}, total_kb_retrieved={total_kb_retrieved}, \
                 total_key_retrieved={total_key_retrieved}"
@@ -4574,6 +4590,14 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Vec<TimelineId>, anyhow::Error> {
         detach_ancestor::complete(self, tenant, prepared, ctx).await
+    }
+
+    /// Switch aux file policy and schedule upload to the index part.
+    pub(crate) fn do_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
+        self.last_aux_file_policy.store(Some(policy));
+        self.remote_client
+            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
+        Ok(())
     }
 }
 

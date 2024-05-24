@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import threading
@@ -292,3 +293,62 @@ def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             assert slot_xmin is None
 
         wait_until(10, 1.0, xmin_is_null)
+
+
+# Test race condition between WAL replay and backends performing queries
+# https://github.com/neondatabase/neon/issues/7791
+def test_replica_query_race(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+
+    primary_ep = env.endpoints.create_start(
+        branch_name="main",
+        endpoint_id="primary",
+    )
+
+    with primary_ep.connect() as p_con:
+        with p_con.cursor() as p_cur:
+            p_cur.execute("CREATE EXTENSION neon_test_utils")
+            p_cur.execute("CREATE TABLE test AS SELECT 0 AS counter")
+
+    standby_ep = env.endpoints.new_replica_start(origin=primary_ep, endpoint_id="standby")
+    time.sleep(1)
+
+    # In primary, run a lot of UPDATEs on a single page
+    finished = False
+    writecounter = 1
+
+    async def primary_workload():
+        nonlocal writecounter, finished
+        conn = await primary_ep.connect_async()
+        while writecounter < 10000:
+            writecounter += 1
+            await conn.execute(f"UPDATE test SET counter = {writecounter}")
+        finished = True
+
+    # In standby, at the same time, run queries on it. And repeatedly drop caches
+    async def standby_workload():
+        nonlocal writecounter, finished
+        conn = await standby_ep.connect_async()
+        reads = 0
+        while not finished:
+            readcounter = await conn.fetchval("SELECT counter FROM test")
+
+            # Check that the replica is keeping up with the primary. In local
+            # testing, the lag between primary and standby is much smaller, in
+            # the ballpark of 2-3 counter values. But be generous in case there's
+            # some hiccup.
+            # assert(writecounter - readcounter < 1000)
+            assert readcounter <= writecounter
+            if reads % 100 == 0:
+                log.info(f"read {reads}: counter {readcounter}, last update {writecounter}")
+            reads += 1
+
+            await conn.execute("SELECT clear_buffer_cache()")
+
+    async def both():
+        await asyncio.gather(
+            primary_workload(),
+            standby_workload(),
+        )
+
+    asyncio.run(both())

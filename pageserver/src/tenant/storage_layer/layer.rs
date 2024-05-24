@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use tracing::Instrument;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
-use utils::sync::heavier_once_cell;
+use utils::sync::{gate, heavier_once_cell};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -161,7 +161,7 @@ impl Layer {
             timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
-            metadata.file_size(),
+            metadata.file_size,
         );
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
@@ -194,7 +194,7 @@ impl Layer {
             timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
-            metadata.file_size(),
+            metadata.file_size,
         );
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
@@ -227,7 +227,7 @@ impl Layer {
 
         timeline
             .metrics
-            .resident_physical_size_add(metadata.file_size());
+            .resident_physical_size_add(metadata.file_size);
 
         ResidentLayer { downloaded, owner }
     }
@@ -1264,6 +1264,7 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
+                l0: crate::tenant::layer_map::LayerMap::is_l0(self.layer_desc()),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
@@ -1332,7 +1333,7 @@ impl LayerInner {
 
         is_good_to_continue(&rx.borrow_and_update())?;
 
-        let Ok(_gate) = timeline.gate.enter() else {
+        let Ok(gate) = timeline.gate.enter() else {
             return Err(EvictionCancelled::TimelineGone);
         };
 
@@ -1420,7 +1421,7 @@ impl LayerInner {
         Self::spawn_blocking(move || {
             let _span = span.entered();
 
-            let res = self.evict_blocking(&timeline, &permit);
+            let res = self.evict_blocking(&timeline, &gate, &permit);
 
             let waiters = self.inner.initializer_count();
 
@@ -1446,6 +1447,7 @@ impl LayerInner {
     fn evict_blocking(
         &self,
         timeline: &Timeline,
+        _gate: &gate::GateGuard,
         _permit: &heavier_once_cell::InitPermit,
     ) -> Result<(), EvictionCancelled> {
         // now accesses to `self.inner.get_or_init*` wait on the semaphore or the `_permit`

@@ -84,7 +84,7 @@ pub async fn download_layer_file<'a>(
     )
     .await?;
 
-    let expected = layer_metadata.file_size();
+    let expected = layer_metadata.file_size;
     if expected != bytes_amount {
         return Err(DownloadError::Other(anyhow!(
             "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file {temp_file_path:?}",

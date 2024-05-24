@@ -9,7 +9,6 @@ use std::{
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
-    str::FromStr,
     sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
 };
@@ -162,6 +161,22 @@ impl std::fmt::Debug for TenantState {
     }
 }
 
+/// A temporary lease to a specific lsn inside a timeline.
+/// Access to the lsn is guaranteed by the pageserver until the expiration indicated by `valid_until`.
+#[serde_as]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LsnLease {
+    #[serde_as(as = "SystemTimeAsRfc3339Millis")]
+    pub valid_until: SystemTime,
+}
+
+serde_with::serde_conv!(
+    SystemTimeAsRfc3339Millis,
+    SystemTime,
+    |time: &SystemTime| humantime::format_rfc3339_millis(*time).to_string(),
+    |value: String| -> Result<_, humantime::TimestampError> { humantime::parse_rfc3339(&value) }
+);
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
@@ -290,7 +305,7 @@ pub struct TenantConfig {
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
-    pub compaction_algorithm: Option<CompactionAlgorithm>,
+    pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
     pub image_creation_threshold: Option<usize>,
@@ -318,14 +333,28 @@ pub struct TenantConfig {
 /// Unset -> V1
 ///       -> V2
 ///       -> CrossValidation -> V2
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
 pub enum AuxFilePolicy {
     /// V1 aux file policy: store everything in AUX_FILE_KEY
+    #[strum(ascii_case_insensitive)]
     V1,
     /// V2 aux file policy: store in the AUX_FILE keyspace
+    #[strum(ascii_case_insensitive)]
     V2,
     /// Cross validation runs both formats on the write path and does validation
     /// on the read path.
+    #[strum(ascii_case_insensitive)]
     CrossValidation,
 }
 
@@ -391,23 +420,6 @@ impl AuxFilePolicy {
     }
 }
 
-impl FromStr for AuxFilePolicy {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.to_lowercase();
-        if s == "v1" {
-            Ok(Self::V1)
-        } else if s == "v2" {
-            Ok(Self::V2)
-        } else if s == "crossvalidation" || s == "cross_validation" {
-            Ok(Self::CrossValidation)
-        } else {
-            anyhow::bail!("cannot parse {} to aux file policy", s)
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EvictionPolicy {
@@ -426,11 +438,26 @@ impl EvictionPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
 pub enum CompactionAlgorithm {
     Legacy,
     Tiered,
+}
+
+#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionAlgorithmSettings {
+    pub kind: CompactionAlgorithm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -789,6 +816,8 @@ pub enum HistoricLayerInfo {
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        l0: bool,
     },
     Image {
         layer_file_name: String,
@@ -1387,6 +1416,7 @@ impl PagestreamBeMessage {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::str::FromStr;
 
     use super::*;
 
@@ -1648,5 +1678,15 @@ mod tests {
             Some(AuxFilePolicy::CrossValidation),
             AuxFilePolicy::V2
         ));
+    }
+
+    #[test]
+    fn test_aux_parse() {
+        assert_eq!(AuxFilePolicy::from_str("V2").unwrap(), AuxFilePolicy::V2);
+        assert_eq!(AuxFilePolicy::from_str("v2").unwrap(), AuxFilePolicy::V2);
+        assert_eq!(
+            AuxFilePolicy::from_str("cross-validation").unwrap(),
+            AuxFilePolicy::CrossValidation
+        );
     }
 }

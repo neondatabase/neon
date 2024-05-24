@@ -159,7 +159,7 @@ pub(super) fn reconcile(
             layer_name,
             Decision::Resident {
                 local: local_metadata,
-                remote: remote_metadata.into(),
+                remote: remote_metadata.clone(),
             },
         );
     }
@@ -168,10 +168,10 @@ pub(super) fn reconcile(
     index_part
         .layer_metadata
         .iter()
-        .map(|(name, metadata)| (name, LayerFileMetadata::from(metadata)))
+        .map(|(name, metadata)| (name, metadata))
         .for_each(|(name, metadata)| {
             if let hash_map::Entry::Vacant(entry) = remote_layers.entry(name.clone()) {
-                entry.insert(Decision::Evicted(metadata));
+                entry.insert(Decision::Evicted(metadata.clone()));
             }
         });
 

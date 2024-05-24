@@ -1867,7 +1867,6 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_received: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
-    pub(crate) time_spent_on_ingest: Histogram,
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
@@ -1889,12 +1888,6 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     records_filtered: register_int_counter!(
         "pageserver_wal_ingest_records_filtered",
         "Number of WAL records filtered out due to sharding"
-    )
-    .expect("failed to define a metric"),
-    time_spent_on_ingest: register_histogram!(
-        "pageserver_wal_ingest_put_value_seconds",
-        "Actual time spent on ingesting a record",
-        redo_histogram_time_buckets!(),
     )
     .expect("failed to define a metric"),
 });
