@@ -275,7 +275,6 @@ def test_pgvector_indexing(query: LabelledQuery, remote_compare: RemoteCompare):
     The DB prepared manually in advance.
     See
     - test_runner/performance/pgvector/README.md
-    - test_runner/performance/pgvector/ddl.sql
     - test_runner/performance/pgvector/loaddata.py
     - test_runner/performance/pgvector/HNSW_build.sql
     """
