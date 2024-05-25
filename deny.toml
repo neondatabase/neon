@@ -99,6 +99,10 @@ name = "async-executor"
 [[bans.deny]]
 name = "smol"
 
+[[bans.deny]]
+# We want to use rustls instead of native-tls.
+name = "postgres-native-tls"
+
 # This section is considered when running `cargo deny check sources`.
 # More documentation about the 'sources' section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html
