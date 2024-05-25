@@ -9,7 +9,7 @@ ARG BUILD_TAG
 # Layer "build-deps"
 #
 #########################################################################################
-FROM debian:bullseye-slim AS build-deps
+FROM debian:bookworm-slim AS build-deps
 RUN apt update &&  \
     apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget pkg-config libssl-dev \
@@ -93,8 +93,8 @@ RUN apt update && \
     protobuf-c-compiler xsltproc
 
 # SFCGAL > 1.3 requires CGAL > 5.2, Bullseye's libcgal-dev is 5.2
-RUN wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.3.10/SFCGAL-v1.3.10.tar.gz -O SFCGAL.tar.gz && \
-    echo "4e39b3b2adada6254a7bdba6d297bb28e1a9835a9f879b74f37e2dab70203232 SFCGAL.tar.gz" | sha256sum --check && \
+RUN wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.4.1/SFCGAL-v1.4.1.tar.gz -O SFCGAL.tar.gz && \
+    echo "1800c8a26241588f11cddcf433049e9b9aea902e923414d2ecef33a3295626c3 SFCGAL.tar.gz" | sha256sum --check && \
     mkdir sfcgal-src && cd sfcgal-src && tar xvzf ../SFCGAL.tar.gz --strip-components=1 -C . && \
     cmake -DCMAKE_BUILD_TYPE=Release . && make -j $(getconf _NPROCESSORS_ONLN) && \
     DESTDIR=/sfcgal make install -j $(getconf _NPROCESSORS_ONLN) && \
@@ -1023,7 +1023,7 @@ RUN cd compute_tools && mold -run cargo build --locked --profile release-line-de
 #
 #########################################################################################
 
-FROM debian:bullseye-slim AS compute-tools-image
+FROM debian:bookworm-slim AS compute-tools-image
 
 COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
@@ -1140,7 +1140,7 @@ ENV PGDATABASE=postgres
 # Put it all together into the final image
 #
 #########################################################################################
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo "postgres:test_console_pass" | chpasswd && \
