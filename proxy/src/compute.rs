@@ -285,6 +285,7 @@ impl ConnCfg {
         drop(pause);
 
         let client_config = if allow_self_signed_compute {
+            // Allow all certificates for creating the connection
             let verifier = Arc::new(AcceptEverythingVerifier) as Arc<dyn ServerCertVerifier>;
             rustls::ClientConfig::builder()
                 .dangerous()
