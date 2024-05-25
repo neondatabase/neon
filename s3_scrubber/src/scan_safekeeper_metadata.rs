@@ -71,8 +71,13 @@ pub async fn scan_safekeeper_metadata(
         bucket_config.bucket, bucket_config.region, dump_db_table
     );
     // Use the native TLS implementation (Neon requires TLS)
-    let tls_connector =
-        postgres_native_tls::MakeTlsConnector::new(native_tls::TlsConnector::new().unwrap());
+    let root_store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let tls_connector = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
     let (client, connection) = tokio_postgres::connect(&dump_db_connstr, tls_connector).await?;
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.

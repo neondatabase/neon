@@ -4106,17 +4106,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "postgres-native-tls"
-version = "0.5.0"
-source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#20031d7a9ee1addeae6e0968e3899ae6bf01cee2"
-dependencies = [
- "native-tls",
- "tokio",
- "tokio-native-tls",
- "tokio-postgres",
-]
-
-[[package]]
 name = "postgres-protocol"
 version = "0.6.4"
 source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#20031d7a9ee1addeae6e0968e3899ae6bf01cee2"
@@ -4423,7 +4412,6 @@ dependencies = [
  "md5",
  "measured",
  "metrics",
- "native-tls",
  "once_cell",
  "opentelemetry",
  "parking_lot 0.12.1",
@@ -4431,7 +4419,6 @@ dependencies = [
  "parquet_derive",
  "pbkdf2",
  "pin-project-lite",
- "postgres-native-tls",
  "postgres-protocol",
  "postgres_backend",
  "pq_proto",
@@ -4479,7 +4466,7 @@ dependencies = [
  "utils",
  "uuid",
  "walkdir",
- "webpki-roots 0.25.2",
+ "webpki-roots 0.26.1",
  "workspace_hack",
  "x509-parser",
 ]
@@ -5232,20 +5219,20 @@ dependencies = [
  "hex",
  "histogram",
  "itertools",
- "native-tls",
  "pageserver",
  "pageserver_api",
- "postgres-native-tls",
  "postgres_ffi",
  "rand 0.8.5",
  "remote_storage",
  "reqwest 0.12.4",
+ "rustls 0.22.4",
  "serde",
  "serde_json",
  "serde_with",
  "thiserror",
  "tokio",
  "tokio-postgres",
+ "tokio-postgres-rustls",
  "tokio-rustls 0.25.0",
  "tokio-stream",
  "tokio-util",
@@ -5253,6 +5240,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "utils",
+ "webpki-roots 0.26.1",
  "workspace_hack",
 ]
 
@@ -7639,9 +7627,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.6.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a0956f1ba7c7909bfb66c2e9e4124ab6f6482560f6628b5aaeba39207c9aad9"
+checksum = "525b4ec142c6b68a2d10f01f7bbf6755599ca3f81ea53b8431b7dd348f5fdb2d"
 dependencies = [
  "zeroize_derive",
 ]
