@@ -3039,7 +3039,6 @@ class NeonProxy(PgProtocol):
                 # Link auth backend params
                 *["--auth-backend", "link"],
                 *["--uri", NeonProxy.link_auth_uri],
-                *["--allow-self-signed-compute", "true"],
             ]
 
     class Console(AuthBackend):

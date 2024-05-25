@@ -523,7 +523,6 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
             branch_id: (&BranchId::from("branch")).into(),
             cold_start_info: crate::console::messages::ColdStartInfo::Warm,
         },
-        allow_self_signed_compute: false,
     };
     let (_, node) = cache.insert("key".into(), node);
     node
@@ -558,7 +557,7 @@ async fn connect_to_compute_success() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&mut ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -576,7 +575,7 @@ async fn connect_to_compute_retry() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&mut ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -595,7 +594,7 @@ async fn connect_to_compute_non_retry_1() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&mut ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -614,7 +613,7 @@ async fn connect_to_compute_non_retry_2() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&mut ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -644,7 +643,6 @@ async fn connect_to_compute_non_retry_3() {
         &mut ctx,
         &mechanism,
         &user_info,
-        false,
         wake_compute_retry_config,
         connect_to_compute_retry_config,
     )
@@ -666,7 +664,7 @@ async fn wake_retry() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&mut ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap();
     mechanism.verify();
@@ -685,7 +683,7 @@ async fn wake_non_retry() {
         max_retries: 5,
         backoff_factor: 2.0,
     };
-    connect_to_compute(&mut ctx, &mechanism, &user_info, false, config, config)
+    connect_to_compute(&mut ctx, &mechanism, &user_info, config, config)
         .await
         .unwrap_err();
     mechanism.verify();
