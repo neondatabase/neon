@@ -9,6 +9,33 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
+/// Declare a failpoint that can use the `pause` failpoint action.
+/// We don't want to block the executor thread, hence, spawn_blocking + await.
+#[macro_export]
+macro_rules! pausable_failpoint {
+    ($name:literal) => {
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint {}", $name);
+                    fail::fail_point!($name);
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
+    };
+    ($name:literal, $cond:expr) => {
+        if cfg!(feature = "testing") {
+            if $cond {
+                pausable_failpoint!($name)
+            }
+        }
+    };
+}
+
 /// use with fail::cfg("$name", "return(2000)")
 ///
 /// The effect is similar to a "sleep(2000)" action, i.e. we sleep for the
