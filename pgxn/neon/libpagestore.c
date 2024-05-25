@@ -39,6 +39,12 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
+#ifdef __APPLE__
+#define ASYNC_CONNECT 0
+#else
+#define ASYNC_CONNECT 1
+#endif
+
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
@@ -429,7 +435,11 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		keywords[n_pgsql_params] = NULL;
 		values[n_pgsql_params] = NULL;
 
+#if ASYNC_CONNECT
 		shard->conn = PQconnectStartParams(keywords, values, 1);
+#else
+		shard->conn = PQconnectdbParams(keywords, values, 1);
+#endif
 		if (!shard->conn)
 		{
 			neon_shard_log(shard_no, elevel, "Failed to connect to pageserver: out of memory");
@@ -459,6 +469,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 		char	   *pagestream_query;
 		int			ps_send_query_ret;
+#if ASYNC_CONNECT
 		bool		connected = false;
 
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connecting_Startup");
@@ -527,6 +538,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 		while (!connected);
 
+#endif
 		/* No more polling needed; connection succeeded */
 		shard->last_connect_time = GetCurrentTimestamp();
 
@@ -555,7 +567,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			pfree(msg);
 			return false;
 		}
-
 		ps_send_query_ret = PQsendQuery(shard->conn, pagestream_query);
 		pfree(pagestream_query);
 		if (ps_send_query_ret != 1)
@@ -610,7 +621,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 				}
 			}
 		}
-
 		shard->state = PS_Connected;
 		/* fallthrough */
 	}
@@ -619,6 +629,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 * We successfully connected. Future connections to this PageServer
 		 * will do fast retries again, with exponential backoff.
 		 */
+		shard->state = PS_Connected;
 		shard->delay_us = MIN_RECONNECT_INTERVAL_USEC;
 
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connected");

@@ -584,9 +584,9 @@ prefetch_read(PrefetchRequest *slot)
 		slot->response != NULL ||
 		slot->my_ring_index != MyPState->ring_receive)
 		neon_shard_log(slot->shard_no, ERROR,
-					   "Incorrect prefetch read: status=%d response=%llx my=%llu receive=%llu",
-					   slot->status, (size_t) (void *) slot->response,
-					   slot->my_ring_index, MyPState->ring_receive);
+					   "Incorrect prefetch read: status=%d response=%p my=%llu receive=%llu",
+					   slot->status, slot->response,
+					   (long long)slot->my_ring_index, (long long)MyPState->ring_receive);
 
 	old = MemoryContextSwitchTo(MyPState->errctx);
 	response = (NeonResponse *) page_server->receive(slot->shard_no);
@@ -607,7 +607,7 @@ prefetch_read(PrefetchRequest *slot)
 	{
 		neon_shard_log(slot->shard_no, WARNING,
 					   "No response from reading prefetch entry %llu: %u/%u/%u.%u block %u. This can be caused by a concurrent disconnect",
-					   slot->my_ring_index,
+					   (long long)slot->my_ring_index,
 					   RelFileInfoFmt(BufTagGetNRelFileInfo(slot->buftag)),
 					   slot->buftag.forkNum, slot->buftag.blockNum);
 		return false;
