@@ -3393,9 +3393,6 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	if (old_redo_read_buffer_filter && old_redo_read_buffer_filter(record, block_id))
 		return true;
 
-	if (XLogRecBlockImageApply(record, block_id))
-		return false;
-
 #if PG_VERSION_NUM < 150000
 	if (!XLogRecGetBlockTag(record, block_id, &rinfo, &forknum, &blkno))
 		neon_log(PANIC, "failed to locate backup block with ID %d", block_id);
