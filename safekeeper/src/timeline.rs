@@ -3,14 +3,13 @@
 
 use anyhow::{anyhow, bail, Result};
 use camino::Utf8PathBuf;
-use postgres_ffi::XLogSegNo;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
 
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -169,7 +168,6 @@ pub struct SharedState {
     pub(crate) sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
     /// In memory list containing state of peers sent in latest messages from them.
     pub(crate) peers_info: PeersInfo,
-    pub(crate) last_removed_segno: XLogSegNo,
 }
 
 impl SharedState {
@@ -206,7 +204,6 @@ impl SharedState {
         Ok(Self {
             sk,
             peers_info: PeersInfo(vec![]),
-            last_removed_segno: 0,
         })
     }
 
@@ -223,7 +220,6 @@ impl SharedState {
         Ok(Self {
             sk: SafeKeeper::new(control_store, wal_store, conf.my_id)?,
             peers_info: PeersInfo(vec![]),
-            last_removed_segno: 0,
         })
     }
 
@@ -274,24 +270,6 @@ impl SharedState {
             .filter(|p| now.duration_since(p.ts) <= heartbeat_timeout)
             .cloned()
             .collect()
-    }
-
-    /// Get oldest segno we still need to keep. We hold WAL till it is consumed
-    /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
-    /// offloading.
-    /// While it is safe to use inmem values for determining horizon,
-    /// we use persistent to make possible normal states less surprising.
-    fn get_horizon_segno(&self, extra_horizon_lsn: Option<Lsn>) -> XLogSegNo {
-        let state = &self.sk.state;
-
-        use std::cmp::min;
-        let mut horizon_lsn = min(state.remote_consistent_lsn, state.peer_horizon_lsn);
-        // we don't want to remove WAL that is not yet offloaded to s3
-        horizon_lsn = min(horizon_lsn, state.backup_lsn);
-        if let Some(extra_horizon_lsn) = extra_horizon_lsn {
-            horizon_lsn = min(horizon_lsn, extra_horizon_lsn);
-        }
-        horizon_lsn.segment_number(state.server.wal_seg_size as usize)
     }
 }
 
@@ -356,15 +334,10 @@ pub struct Timeline {
     /// Directory where timeline state is stored.
     pub timeline_dir: Utf8PathBuf,
 
-    /// Should we keep WAL on disk for active replication connections.
-    /// Especially useful for sharding, when different shards process WAL
-    /// with different speed.
-    // TODO: add `Arc<SafeKeeperConf>` here instead of adding each field separately.
-    walsenders_keep_horizon: bool,
-
     // timeline_manager controlled state
     pub(crate) broker_active: AtomicBool,
     pub(crate) wal_backup_active: AtomicBool,
+    pub(crate) last_removed_segno: AtomicU64,
 }
 
 impl Timeline {
@@ -395,9 +368,9 @@ impl Timeline {
             walreceivers,
             cancel: CancellationToken::default(),
             timeline_dir: conf.timeline_dir(&ttid),
-            walsenders_keep_horizon: conf.walsenders_keep_horizon,
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
+            last_removed_segno: AtomicU64::new(0),
         })
     }
 
@@ -431,9 +404,9 @@ impl Timeline {
             walreceivers,
             cancel: CancellationToken::default(),
             timeline_dir: conf.timeline_dir(&ttid),
-            walsenders_keep_horizon: conf.walsenders_keep_horizon,
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
+            last_removed_segno: AtomicU64::new(0),
         })
     }
 
@@ -776,58 +749,6 @@ impl Timeline {
         self.read_shared_state().await.sk.wal_store.flush_lsn()
     }
 
-    /// Delete WAL segments from disk that are no longer needed. This is determined
-    /// based on pageserver's remote_consistent_lsn and local backup_lsn/peer_lsn.
-    pub async fn remove_old_wal(self: &Arc<Self>) -> Result<()> {
-        if self.is_cancelled() {
-            bail!(TimelineError::Cancelled(self.ttid));
-        }
-
-        // If enabled, we use LSN of the most lagging walsender as a WAL removal horizon.
-        // This allows to get better read speed for pageservers that are lagging behind,
-        // at the cost of keeping more WAL on disk.
-        let replication_horizon_lsn = if self.walsenders_keep_horizon {
-            self.walsenders.laggard_lsn()
-        } else {
-            None
-        };
-
-        let horizon_segno: XLogSegNo;
-        let remover = {
-            let shared_state = self.read_shared_state().await;
-            horizon_segno = shared_state.get_horizon_segno(replication_horizon_lsn);
-            if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
-                return Ok(()); // nothing to do
-            }
-
-            // release the lock before removing
-            shared_state.sk.wal_store.remove_up_to(horizon_segno - 1)
-        };
-
-        // delete old WAL files
-        remover.await?;
-
-        // update last_removed_segno
-        let mut shared_state = self.write_shared_state().await;
-        if shared_state.last_removed_segno != horizon_segno {
-            shared_state.last_removed_segno = horizon_segno;
-        } else {
-            shared_state.skip_update = true;
-        }
-        Ok(())
-    }
-
-    /// Persist control file if there is something to save and enough time
-    /// passed after the last save. This helps to keep remote_consistent_lsn up
-    /// to date so that storage nodes restart doesn't cause many pageserver ->
-    /// safekeeper reconnections.
-    pub async fn maybe_persist_control_file(self: &Arc<Self>, force: bool) -> Result<()> {
-        let mut guard = self.write_shared_state().await;
-        let changed = guard.sk.maybe_persist_inmem_control_file(force).await?;
-        guard.skip_update = !changed;
-        Ok(())
-    }
-
     /// Gather timeline data for metrics.
     pub async fn info_for_metrics(&self) -> Option<FullTimelineInfo> {
         if self.is_cancelled() {
@@ -843,7 +764,7 @@ impl Timeline {
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
-            last_removed_segno: state.last_removed_segno,
+            last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
             epoch_start_lsn: state.sk.term_start_lsn,
             mem_state: state.sk.state.inmem.clone(),
             persisted_state: state.sk.state.clone(),
@@ -866,7 +787,7 @@ impl Timeline {
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
-            last_removed_segno: state.last_removed_segno,
+            last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
             epoch_start_lsn: state.sk.term_start_lsn,
             mem_state: state.sk.state.inmem.clone(),
             write_lsn,
