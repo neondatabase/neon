@@ -30,7 +30,7 @@ use tracing::*;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
-use crate::timeline::{PeerInfo, Timeline};
+use crate::timeline::{get_timeline_dir, PeerInfo, Timeline};
 use crate::timeline_manager::StateSnapshot;
 use crate::{GlobalTimelines, SafeKeeperConf, WAL_BACKUP_RUNTIME};
 
@@ -80,15 +80,10 @@ pub async fn update_task(
             info!("elected for backup: {}", election_dbg_str);
 
             let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-            let timeline_dir = conf.timeline_dir(&ttid);
+            let timeline_dir = get_timeline_dir(conf, &ttid);
 
-            let async_task = backup_task_main(
-                ttid,
-                timeline_dir,
-                conf.workdir.clone(),
-                conf.backup_parallel_jobs,
-                shutdown_rx,
-            );
+            let async_task =
+                backup_task_main(ttid, timeline_dir, conf.backup_parallel_jobs, shutdown_rx);
 
             let handle = if conf.current_thread_runtime {
                 tokio::spawn(async_task)
@@ -200,7 +195,6 @@ pub fn init_remote_storage(conf: &SafeKeeperConf) {
 struct WalBackupTask {
     timeline: Arc<Timeline>,
     timeline_dir: Utf8PathBuf,
-    workspace_dir: Utf8PathBuf,
     wal_seg_size: usize,
     parallel_jobs: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
@@ -211,7 +205,6 @@ struct WalBackupTask {
 async fn backup_task_main(
     ttid: TenantTimelineId,
     timeline_dir: Utf8PathBuf,
-    workspace_dir: Utf8PathBuf,
     parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
@@ -230,7 +223,6 @@ async fn backup_task_main(
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
         timeline: tli,
         timeline_dir,
-        workspace_dir,
         parallel_jobs,
     };
 
@@ -297,7 +289,6 @@ impl WalBackupTask {
                 commit_lsn,
                 self.wal_seg_size,
                 &self.timeline_dir,
-                &self.workspace_dir,
                 self.parallel_jobs,
             )
             .await
@@ -324,13 +315,13 @@ async fn backup_lsn_range(
     end_lsn: Lsn,
     wal_seg_size: usize,
     timeline_dir: &Utf8Path,
-    workspace_dir: &Utf8Path,
     parallel_jobs: usize,
 ) -> Result<()> {
     if parallel_jobs < 1 {
         anyhow::bail!("parallel_jobs must be >= 1");
     }
 
+    let remote_timeline_path = remote_timeline_path(&timeline.ttid)?;
     let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
 
@@ -343,7 +334,11 @@ async fn backup_lsn_range(
     loop {
         let added_task = match iter.next() {
             Some(s) => {
-                uploads.push_back(backup_single_segment(s, timeline_dir, workspace_dir));
+                uploads.push_back(backup_single_segment(
+                    s,
+                    timeline_dir,
+                    &remote_timeline_path,
+                ));
                 true
             }
             None => false,
@@ -381,18 +376,10 @@ async fn backup_lsn_range(
 async fn backup_single_segment(
     seg: &Segment,
     timeline_dir: &Utf8Path,
-    workspace_dir: &Utf8Path,
+    remote_timeline_path: &RemotePath,
 ) -> Result<Segment> {
     let segment_file_path = seg.file_path(timeline_dir)?;
-    let remote_segment_path = segment_file_path
-        .strip_prefix(workspace_dir)
-        .context("Failed to strip workspace dir prefix")
-        .and_then(RemotePath::new)
-        .with_context(|| {
-            format!(
-                "Failed to resolve remote part of path {segment_file_path:?} for base {workspace_dir:?}",
-            )
-        })?;
+    let remote_segment_path = seg.remote_path(remote_timeline_path);
 
     let res = backup_object(&segment_file_path, &remote_segment_path, seg.size()).await;
     if res.is_ok() {
@@ -428,6 +415,10 @@ impl Segment {
 
     pub fn file_path(self, timeline_dir: &Utf8Path) -> Result<Utf8PathBuf> {
         Ok(timeline_dir.join(self.object_name()))
+    }
+
+    pub fn remote_path(self, remote_timeline_path: &RemotePath) -> RemotePath {
+        remote_timeline_path.join(self.object_name())
     }
 
     pub fn size(self) -> usize {
@@ -530,8 +521,7 @@ pub async fn read_object(
 /// when called.
 pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
     let storage = get_configured_remote_storage();
-    let ttid_path = Utf8Path::new(&ttid.tenant_id.to_string()).join(ttid.timeline_id.to_string());
-    let remote_path = RemotePath::new(&ttid_path)?;
+    let remote_path = remote_timeline_path(ttid)?;
 
     // see DEFAULT_MAX_KEYS_PER_LIST_RESPONSE
     // const Option unwrap is not stable, otherwise it would be const.
@@ -613,15 +603,17 @@ pub async fn copy_s3_segments(
         .as_ref()
         .unwrap();
 
-    let relative_dst_path =
-        Utf8Path::new(&dst_ttid.tenant_id.to_string()).join(dst_ttid.timeline_id.to_string());
-
-    let remote_path = RemotePath::new(&relative_dst_path)?;
+    let remote_dst_path = remote_timeline_path(dst_ttid)?;
 
     let cancel = CancellationToken::new();
 
     let files = storage
-        .list(Some(&remote_path), ListingMode::NoDelimiter, None, &cancel)
+        .list(
+            Some(&remote_dst_path),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
         .await?
         .keys;
 
@@ -635,9 +627,6 @@ pub async fn copy_s3_segments(
         uploaded_segments
     );
 
-    let relative_src_path =
-        Utf8Path::new(&src_ttid.tenant_id.to_string()).join(src_ttid.timeline_id.to_string());
-
     for segno in from_segment..to_segment {
         if segno % SEGMENTS_PROGRESS_REPORT_INTERVAL == 0 {
             info!("copied all segments from {} until {}", from_segment, segno);
@@ -649,8 +638,8 @@ pub async fn copy_s3_segments(
         }
         debug!("copying segment {}", segment_name);
 
-        let from = RemotePath::new(&relative_src_path.join(&segment_name))?;
-        let to = RemotePath::new(&relative_dst_path.join(&segment_name))?;
+        let from = remote_timeline_path(src_ttid)?.join(&segment_name);
+        let to = remote_dst_path.join(&segment_name);
 
         storage.copy_object(&from, &to, &cancel).await?;
     }
@@ -660,4 +649,9 @@ pub async fn copy_s3_segments(
         from_segment, to_segment
     );
     Ok(())
+}
+
+/// Get S3 (remote_storage) prefix path used for timeline files.
+pub fn remote_timeline_path(ttid: &TenantTimelineId) -> Result<RemotePath> {
+    RemotePath::new(&Utf8Path::new(&ttid.tenant_id.to_string()).join(ttid.timeline_id.to_string()))
 }

@@ -31,7 +31,8 @@ use crate::{
     metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
     safekeeper::Term,
     timeline::FullAccessTimeline,
-    wal_backup, SafeKeeperConf,
+    wal_backup::{self, remote_timeline_path},
+    SafeKeeperConf,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -84,7 +85,7 @@ struct PartialBackup {
     tli: FullAccessTimeline,
     conf: SafeKeeperConf,
     local_prefix: Utf8PathBuf,
-    remote_prefix: Utf8PathBuf,
+    remote_timeline_path: RemotePath,
 
     state: State,
 }
@@ -151,7 +152,7 @@ impl PartialBackup {
         let backup_bytes = flush_lsn.segment_offset(self.wal_seg_size);
 
         let local_path = self.local_prefix.join(self.local_segment_name(segno));
-        let remote_path = RemotePath::new(self.remote_prefix.join(&prepared.name).as_ref())?;
+        let remote_path = self.remote_timeline_path.join(&prepared.name);
 
         // Upload first `backup_bytes` bytes of the segment to the remote storage.
         wal_backup::backup_partial_segment(&local_path, &remote_path, backup_bytes).await?;
@@ -251,7 +252,7 @@ impl PartialBackup {
         info!("deleting objects: {:?}", segments_to_delete);
         let mut objects_to_delete = vec![];
         for seg in segments_to_delete.iter() {
-            let remote_path = RemotePath::new(self.remote_prefix.join(seg).as_ref())?;
+            let remote_path = self.remote_timeline_path.join(seg);
             objects_to_delete.push(remote_path);
         }
 
@@ -288,10 +289,10 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
     let wal_seg_size = tli.get_wal_seg_size().await;
 
     let local_prefix = tli.timeline_dir.clone();
-    let remote_prefix = match tli.timeline_dir.strip_prefix(&conf.workdir) {
-        Ok(path) => path.to_owned(),
+    let remote_timeline_path = match remote_timeline_path(&tli.ttid) {
+        Ok(path) => path,
         Err(e) => {
-            error!("failed to strip workspace dir prefix: {:?}", e);
+            error!("failed to create remote path: {:?}", e);
             return;
         }
     };
@@ -302,7 +303,7 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
         state: persistent_state.partial_backup,
         conf,
         local_prefix,
-        remote_prefix,
+        remote_timeline_path,
     };
 
     debug!("state: {:?}", backup.state);

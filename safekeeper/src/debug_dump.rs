@@ -323,7 +323,6 @@ pub async fn calculate_digest(
         bail!("from_lsn is greater than until_lsn");
     }
 
-    let conf = GlobalTimelines::get_global_config();
     let (_, persisted_state) = tli.get_state().await;
 
     if persisted_state.timeline_start_lsn > request.from_lsn {
@@ -331,7 +330,7 @@ pub async fn calculate_digest(
     }
 
     let mut wal_reader = WalReader::new(
-        conf.workdir.clone(),
+        &tli.ttid,
         tli.timeline_dir.clone(),
         &persisted_state,
         request.from_lsn,

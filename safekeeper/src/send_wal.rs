@@ -5,7 +5,7 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::RECEIVED_PS_FEEDBACKS;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{Term, TermLsn};
-use crate::timeline::FullAccessTimeline;
+use crate::timeline::{get_timeline_dir, FullAccessTimeline};
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
@@ -452,8 +452,8 @@ impl SafekeeperPostgresHandler {
 
         let (_, persisted_state) = tli.get_state().await;
         let wal_reader = WalReader::new(
-            self.conf.workdir.clone(),
-            self.conf.timeline_dir(&tli.ttid),
+            &tli.ttid,
+            get_timeline_dir(&self.conf, &tli.ttid),
             &persisted_state,
             start_pos,
             self.conf.is_wal_backup_enabled(),

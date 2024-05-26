@@ -6,6 +6,7 @@ use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
+use utils::id::TenantId;
 
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
@@ -194,10 +195,11 @@ impl SharedState {
 
         // We don't want to write anything to disk, because we may have existing timeline there.
         // These functions should not change anything on disk.
-        let timeline_dir = conf.timeline_dir(ttid);
-        let control_store = control_file::FileStorage::create_new(timeline_dir, conf, state)?;
+        let timeline_dir = get_timeline_dir(conf, ttid);
+        let control_store =
+            control_file::FileStorage::create_new(timeline_dir.clone(), conf, state)?;
         let wal_store =
-            wal_storage::PhysicalStorage::new(ttid, conf.timeline_dir(ttid), conf, &control_store)?;
+            wal_storage::PhysicalStorage::new(ttid, timeline_dir, conf, &control_store)?;
         let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
 
         Ok(Self {
@@ -208,13 +210,14 @@ impl SharedState {
 
     /// Restore SharedState from control file. If file doesn't exist, bails out.
     fn restore(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Result<Self> {
+        let timeline_dir = get_timeline_dir(conf, ttid);
         let control_store = control_file::FileStorage::restore_new(ttid, conf)?;
         if control_store.server.wal_seg_size == 0 {
             bail!(TimelineError::UninitializedWalSegSize(*ttid));
         }
 
         let wal_store =
-            wal_storage::PhysicalStorage::new(ttid, conf.timeline_dir(ttid), conf, &control_store)?;
+            wal_storage::PhysicalStorage::new(ttid, timeline_dir, conf, &control_store)?;
 
         Ok(Self {
             sk: SafeKeeper::new(control_store, wal_store, conf.my_id)?,
@@ -366,7 +369,7 @@ impl Timeline {
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
             cancel: CancellationToken::default(),
-            timeline_dir: conf.timeline_dir(&ttid),
+            timeline_dir: get_timeline_dir(conf, &ttid),
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
@@ -402,7 +405,7 @@ impl Timeline {
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
             cancel: CancellationToken::default(),
-            timeline_dir: conf.timeline_dir(&ttid),
+            timeline_dir: get_timeline_dir(conf, &ttid),
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
@@ -756,4 +759,12 @@ async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e.into()),
     }
+}
+
+pub(crate) fn get_tenant_dir(conf: &SafeKeeperConf, tenant_id: &TenantId) -> Utf8PathBuf {
+    conf.workdir.join(tenant_id.to_string())
+}
+
+pub(crate) fn get_timeline_dir(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Utf8PathBuf {
+    get_tenant_dir(conf, &ttid.tenant_id).join(ttid.timeline_id.to_string())
 }

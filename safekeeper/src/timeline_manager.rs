@@ -85,6 +85,7 @@ pub async fn main_task(
         if tli.is_cancelled() {
             info!("manager task finished");
         } else {
+            // TODO: add this to assert_no_errors() in python tests
             warn!("manager task finished prematurely");
         }
     };
@@ -186,7 +187,9 @@ pub async fn main_task(
 
         // WAL removal
         let removal_horizon_lsn = calc_horizon_lsn(&state_snapshot, replication_horizon_lsn);
-        let removal_horizon_segno = removal_horizon_lsn.segment_number(wal_seg_size).saturating_sub(1);
+        let removal_horizon_segno = removal_horizon_lsn
+            .segment_number(wal_seg_size)
+            .saturating_sub(1);
 
         if removal_horizon_segno > last_removed_segno {
             // we need to remove WAL

@@ -15,7 +15,7 @@ use crate::{
     control_file::{FileStorage, Storage},
     pull_timeline::{create_temp_timeline_dir, load_temp_timeline, validate_temp_timeline},
     state::TimelinePersistentState,
-    timeline::{Timeline, TimelineError},
+    timeline::{get_timeline_dir, Timeline, TimelineError},
     wal_backup::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
     GlobalTimelines, SafeKeeperConf,
@@ -168,8 +168,8 @@ async fn copy_disk_segments(
     tli_dir_path: &Utf8PathBuf,
 ) -> Result<()> {
     let mut wal_reader = WalReader::new(
-        conf.workdir.clone(),
-        conf.timeline_dir(source_ttid),
+        source_ttid,
+        get_timeline_dir(conf, source_ttid),
         persisted_state,
         start_lsn,
         true,
