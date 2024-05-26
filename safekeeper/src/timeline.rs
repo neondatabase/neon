@@ -25,7 +25,6 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 
 use crate::receive_wal::WalReceivers;
-use crate::recovery::{recovery_main, Donor, RecoveryNeededInfo};
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, ServerInfo, Term, TermLsn,
     INVALID_TERM,
@@ -38,7 +37,7 @@ use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::FullTimelineInfo;
 use crate::wal_storage::Storage as wal_storage_iface;
-use crate::{debug_dump, timeline_manager, wal_backup_partial, wal_storage};
+use crate::{debug_dump, timeline_manager, wal_storage};
 use crate::{GlobalTimelines, SafeKeeperConf};
 
 /// Things safekeeper should know about timeline state on peers.
@@ -677,9 +676,7 @@ impl Timeline {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
-        Ok(FullAccessTimeline {
-            tli: self.clone(),
-        })
+        Ok(FullAccessTimeline { tli: self.clone() })
     }
 }
 

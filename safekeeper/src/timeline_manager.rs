@@ -14,7 +14,14 @@ use tracing::{info, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
-    control_file::Storage, metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL}, recovery::recovery_main, remove_wal::calc_horizon_lsn, timeline::{PeerInfo, ReadGuardSharedState, Timeline}, timelines_set::TimelinesSet, wal_backup::{self, WalBackupTaskHandle}, wal_backup_partial, SafeKeeperConf
+    control_file::Storage,
+    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
+    recovery::recovery_main,
+    remove_wal::calc_horizon_lsn,
+    timeline::{PeerInfo, ReadGuardSharedState, Timeline},
+    timelines_set::TimelinesSet,
+    wal_backup::{self, WalBackupTaskHandle},
+    wal_backup_partial, SafeKeeperConf,
 };
 
 pub struct StateSnapshot {
@@ -116,7 +123,10 @@ pub async fn main_task(
     if conf.is_wal_backup_enabled() && conf.partial_backup_enabled {
         match tli.full_access_guard().await {
             Ok(tli) => {
-                partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(tli, conf.clone())));
+                partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
+                    tli,
+                    conf.clone(),
+                )));
             }
             Err(e) => {
                 warn!("failed to start partial backup task: {:?}", e);
@@ -189,7 +199,8 @@ pub async fn main_task(
                 warn!("failed to remove WAL: {}", e);
             } else {
                 last_removed_segno = removal_horizon_segno;
-                tli.last_removed_segno.store(last_removed_segno, std::sync::atomic::Ordering::Relaxed);
+                tli.last_removed_segno
+                    .store(last_removed_segno, std::sync::atomic::Ordering::Relaxed);
             }
         }
 

@@ -296,14 +296,8 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         parse_request_param(&request, "timeline_id")?,
     );
 
-    let tli = GlobalTimelines::get(ttid)?;
-    tli.maybe_persist_control_file(true)
-        .await
-        .map_err(ApiError::InternalServerError)?;
-    tli.remove_old_wal()
-        .await
-        .map_err(ApiError::InternalServerError)?;
-
+    let _tli = GlobalTimelines::get(ttid)?;
+    // TODO: fixme
     json_response(StatusCode::OK, ())
 }
 

@@ -29,12 +29,12 @@ use safekeeper::defaults::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
+use safekeeper::http;
 use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, WAL_SERVICE_RUNTIME};
 use safekeeper::{control_file, BROKER_RUNTIME};
-use safekeeper::{http};
 use safekeeper::{wal_backup, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};

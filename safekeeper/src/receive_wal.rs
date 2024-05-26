@@ -7,7 +7,6 @@ use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 use crate::safekeeper::ServerInfo;
 use crate::timeline::FullAccessTimeline;
-use crate::timeline::Timeline;
 use crate::wal_service::ConnectionId;
 use crate::GlobalTimelines;
 use anyhow::{anyhow, Context};
@@ -338,7 +337,9 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
                     system_id: greeting.system_id,
                     wal_seg_size: greeting.wal_seg_size,
                 };
-                let tli = GlobalTimelines::create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID).await?;
+                let tli =
+                    GlobalTimelines::create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID)
+                        .await?;
                 tli.full_access_guard().await?
             }
             _ => {

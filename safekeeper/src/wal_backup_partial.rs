@@ -18,8 +18,6 @@
 //! This way control file stores information about all potentially existing
 //! remote partial segments and can clean them up after uploading a newer version.
 
-use std::sync::Arc;
-
 use camino::Utf8PathBuf;
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
 use rand::Rng;
@@ -32,7 +30,7 @@ use utils::lsn::Lsn;
 use crate::{
     metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
     safekeeper::Term,
-    timeline::{FullAccessTimeline, Timeline},
+    timeline::FullAccessTimeline,
     wal_backup, SafeKeeperConf,
 };
 

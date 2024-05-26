@@ -5,7 +5,7 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::RECEIVED_PS_FEEDBACKS;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{Term, TermLsn};
-use crate::timeline::{FullAccessTimeline, Timeline};
+use crate::timeline::FullAccessTimeline;
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;

@@ -6,7 +6,6 @@
 //! modifications in tests.
 //!
 
-
 use anyhow::Context;
 use bytes::Bytes;
 use postgres_backend::QueryError;
@@ -119,7 +118,11 @@ async fn prepare_safekeeper(
     tli.full_access_guard().await
 }
 
-async fn send_proposer_elected(tli: &FullAccessTimeline, term: Term, lsn: Lsn) -> anyhow::Result<()> {
+async fn send_proposer_elected(
+    tli: &FullAccessTimeline,
+    term: Term,
+    lsn: Lsn,
+) -> anyhow::Result<()> {
     // add new term to existing history
     let history = tli.get_state().await.1.acceptor_state.term_history;
     let history = history.up_to(lsn.checked_sub(1u64).unwrap());

@@ -2,7 +2,7 @@
 //! provide it, i.e. safekeeper lags too much.
 
 use std::time::SystemTime;
-use std::{fmt, pin::pin, sync::Arc};
+use std::{fmt, pin::pin};
 
 use anyhow::{bail, Context};
 use futures::StreamExt;
@@ -65,7 +65,10 @@ pub async fn recovery_main(tli: FullAccessTimeline, conf: SafeKeeperConf) {
 /// recover from which one -- history which would be committed is different
 /// depending on assembled quorum (e.g. classic picture 8 from Raft paper).
 /// Thus we don't try to predict it here.
-async fn recovery_needed(tli: &FullAccessTimeline, heartbeat_timeout: Duration) -> RecoveryNeededInfo {
+async fn recovery_needed(
+    tli: &FullAccessTimeline,
+    heartbeat_timeout: Duration,
+) -> RecoveryNeededInfo {
     let ss = tli.read_shared_state().await;
     let term = ss.sk.state.acceptor_state.term;
     let last_log_term = ss.sk.get_epoch();
