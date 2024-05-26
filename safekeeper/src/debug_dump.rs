@@ -26,7 +26,7 @@ use crate::safekeeper::TermHistory;
 use crate::send_wal::WalSenderState;
 use crate::state::TimelineMemState;
 use crate::state::TimelinePersistentState;
-use crate::wal_storage::WalReader;
+use crate::timeline::FullAccessTimeline;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 
@@ -316,7 +316,7 @@ pub struct TimelineDigest {
 }
 
 pub async fn calculate_digest(
-    tli: &Arc<crate::timeline::Timeline>,
+    tli: &FullAccessTimeline,
     request: TimelineDigestRequest,
 ) -> Result<TimelineDigest> {
     if request.from_lsn > request.until_lsn {
@@ -324,18 +324,11 @@ pub async fn calculate_digest(
     }
 
     let (_, persisted_state) = tli.get_state().await;
-
     if persisted_state.timeline_start_lsn > request.from_lsn {
         bail!("requested LSN is before the start of the timeline");
     }
 
-    let mut wal_reader = WalReader::new(
-        &tli.ttid,
-        tli.timeline_dir.clone(),
-        &persisted_state,
-        request.from_lsn,
-        true,
-    )?;
+    let mut wal_reader = tli.get_walreader(request.from_lsn).await?;
 
     let mut hasher = Sha256::new();
     let mut buf = [0u8; MAX_SEND_SIZE];

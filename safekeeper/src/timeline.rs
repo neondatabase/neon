@@ -37,7 +37,7 @@ use crate::wal_backup::{self};
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::FullTimelineInfo;
-use crate::wal_storage::Storage as wal_storage_iface;
+use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
 use crate::{debug_dump, timeline_manager, wal_storage};
 use crate::{GlobalTimelines, SafeKeeperConf};
 
@@ -749,6 +749,19 @@ impl FullAccessTimeline {
             }
         }
         Ok(rmsg)
+    }
+
+    pub async fn get_walreader(&self, start_lsn: Lsn) -> Result<WalReader> {
+        let (_, persisted_state) = self.get_state().await;
+        let enable_remote_read = GlobalTimelines::get_global_config().is_wal_backup_enabled();
+
+        WalReader::new(
+            &self.ttid,
+            self.timeline_dir.clone(),
+            &persisted_state,
+            start_lsn,
+            enable_remote_read,
+        )
     }
 }
 

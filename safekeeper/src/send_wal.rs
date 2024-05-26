@@ -5,7 +5,7 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::RECEIVED_PS_FEEDBACKS;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{Term, TermLsn};
-use crate::timeline::{get_timeline_dir, FullAccessTimeline};
+use crate::timeline::FullAccessTimeline;
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
@@ -450,14 +450,7 @@ impl SafekeeperPostgresHandler {
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
-        let (_, persisted_state) = tli.get_state().await;
-        let wal_reader = WalReader::new(
-            &tli.ttid,
-            get_timeline_dir(&self.conf, &tli.ttid),
-            &persisted_state,
-            start_pos,
-            self.conf.is_wal_backup_enabled(),
-        )?;
+        let wal_reader = tli.get_walreader(start_pos).await?;
 
         // Split to concurrently receive and send data; replies are generally
         // not synchronized with sends, so this avoids deadlocks.

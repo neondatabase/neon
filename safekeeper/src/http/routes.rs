@@ -249,6 +249,10 @@ async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body
     };
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let tli = tli
+        .full_access_guard()
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     let response = debug_dump::calculate_digest(&tli, request)
         .await
