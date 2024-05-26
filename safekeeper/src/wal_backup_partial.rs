@@ -32,7 +32,7 @@ use utils::lsn::Lsn;
 use crate::{
     metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
     safekeeper::Term,
-    timeline::Timeline,
+    timeline::{FullAccessTimeline, Timeline},
     wal_backup, SafeKeeperConf,
 };
 
@@ -83,7 +83,7 @@ impl State {
 
 struct PartialBackup {
     wal_seg_size: usize,
-    tli: Arc<Timeline>,
+    tli: FullAccessTimeline,
     conf: SafeKeeperConf,
     local_prefix: Utf8PathBuf,
     remote_prefix: Utf8PathBuf,
@@ -273,7 +273,7 @@ impl PartialBackup {
 }
 
 #[instrument(name = "Partial backup", skip_all, fields(ttid = %tli.ttid))]
-pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
+pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
 

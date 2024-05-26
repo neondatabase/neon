@@ -467,15 +467,6 @@ impl Timeline {
             conf.clone(),
             broker_active_set,
         ));
-
-        // Start recovery task which always runs on the timeline.
-        if conf.peer_recovery_enabled {
-            tokio::spawn(recovery_main(self.clone(), conf.clone()));
-        }
-        // TODO: migrate to timeline_manager
-        if conf.is_wal_backup_enabled() && conf.partial_backup_enabled {
-            tokio::spawn(wal_backup_partial::main_task(self.clone(), conf.clone()));
-        }
     }
 
     /// Delete timeline from disk completely, by removing timeline directory.
@@ -528,36 +519,6 @@ impl Timeline {
         self.mutex.read().await
     }
 
-    /// Returns true if walsender should stop sending WAL to pageserver. We
-    /// terminate it if remote_consistent_lsn reached commit_lsn and there is no
-    /// computes. While there might be nothing to stream already, we learn about
-    /// remote_consistent_lsn update through replication feedback, and we want
-    /// to stop pushing to the broker if pageserver is fully caughtup.
-    pub async fn should_walsender_stop(&self, reported_remote_consistent_lsn: Lsn) -> bool {
-        if self.is_cancelled() {
-            return true;
-        }
-        let shared_state = self.read_shared_state().await;
-        if self.walreceivers.get_num() == 0 {
-            return shared_state.sk.state.inmem.commit_lsn == Lsn(0) || // no data at all yet
-            reported_remote_consistent_lsn >= shared_state.sk.state.inmem.commit_lsn;
-        }
-        false
-    }
-
-    /// Ensure that current term is t, erroring otherwise, and lock the state.
-    pub async fn acquire_term(&self, t: Term) -> Result<ReadGuardSharedState> {
-        let ss = self.read_shared_state().await;
-        if ss.sk.state.acceptor_state.term != t {
-            bail!(
-                "failed to acquire term {}, current term {}",
-                t,
-                ss.sk.state.acceptor_state.term
-            );
-        }
-        Ok(ss)
-    }
-
     /// Returns commit_lsn watch channel.
     pub fn get_commit_lsn_watch_rx(&self) -> watch::Receiver<Lsn> {
         self.commit_lsn_watch_rx.clone()
@@ -571,28 +532,6 @@ impl Timeline {
     /// Returns watch channel for SharedState update version.
     pub fn get_state_version_rx(&self) -> watch::Receiver<usize> {
         self.shared_state_version_rx.clone()
-    }
-
-    /// Pass arrived message to the safekeeper.
-    pub async fn process_msg(
-        self: &Arc<Self>,
-        msg: &ProposerAcceptorMessage,
-    ) -> Result<Option<AcceptorProposerMessage>> {
-        if self.is_cancelled() {
-            bail!(TimelineError::Cancelled(self.ttid));
-        }
-
-        let mut rmsg: Option<AcceptorProposerMessage>;
-        {
-            let mut shared_state = self.write_shared_state().await;
-            rmsg = shared_state.sk.process_msg(msg).await?;
-
-            // if this is AppendResponse, fill in proper hot standby feedback.
-            if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
-                resp.hs_feedback = self.walsenders.get_hotstandby().hs_feedback;
-            }
-        }
-        Ok(rmsg)
     }
 
     /// Returns wal_seg_size.
@@ -655,85 +594,6 @@ impl Timeline {
     pub async fn get_peers(&self, conf: &SafeKeeperConf) -> Vec<PeerInfo> {
         let shared_state = self.read_shared_state().await;
         shared_state.get_peers(conf.heartbeat_timeout)
-    }
-
-    /// Should we start fetching WAL from a peer safekeeper, and if yes, from
-    /// which? Answer is yes, i.e. .donors is not empty if 1) there is something
-    /// to fetch, and we can do that without running elections; 2) there is no
-    /// actively streaming compute, as we don't want to compete with it.
-    ///
-    /// If donor(s) are choosen, theirs last_log_term is guaranteed to be equal
-    /// to its last_log_term so we are sure such a leader ever had been elected.
-    ///
-    /// All possible donors are returned so that we could keep connection to the
-    /// current one if it is good even if it slightly lags behind.
-    ///
-    /// Note that term conditions above might be not met, but safekeepers are
-    /// still not aligned on last flush_lsn. Generally in this case until
-    /// elections are run it is not possible to say which safekeeper should
-    /// recover from which one -- history which would be committed is different
-    /// depending on assembled quorum (e.g. classic picture 8 from Raft paper).
-    /// Thus we don't try to predict it here.
-    pub async fn recovery_needed(&self, heartbeat_timeout: Duration) -> RecoveryNeededInfo {
-        let ss = self.read_shared_state().await;
-        let term = ss.sk.state.acceptor_state.term;
-        let last_log_term = ss.sk.get_last_log_term();
-        let flush_lsn = ss.sk.flush_lsn();
-        // note that peers contain myself, but that's ok -- we are interested only in peers which are strictly ahead of us.
-        let mut peers = ss.get_peers(heartbeat_timeout);
-        // Sort by <last log term, lsn> pairs.
-        peers.sort_by(|p1, p2| {
-            let tl1 = TermLsn {
-                term: p1.last_log_term,
-                lsn: p1.flush_lsn,
-            };
-            let tl2 = TermLsn {
-                term: p2.last_log_term,
-                lsn: p2.flush_lsn,
-            };
-            tl2.cmp(&tl1) // desc
-        });
-        let num_streaming_computes = self.walreceivers.get_num_streaming();
-        let donors = if num_streaming_computes > 0 {
-            vec![] // If there is a streaming compute, don't try to recover to not intervene.
-        } else {
-            peers
-                .iter()
-                .filter_map(|candidate| {
-                    // Are we interested in this candidate?
-                    let candidate_tl = TermLsn {
-                        term: candidate.last_log_term,
-                        lsn: candidate.flush_lsn,
-                    };
-                    let my_tl = TermLsn {
-                        term: last_log_term,
-                        lsn: flush_lsn,
-                    };
-                    if my_tl < candidate_tl {
-                        // Yes, we are interested. Can we pull from it without
-                        // (re)running elections? It is possible if 1) his term
-                        // is equal to his last_log_term so we could act on
-                        // behalf of leader of this term (we must be sure he was
-                        // ever elected) and 2) our term is not higher, or we'll refuse data.
-                        if candidate.term == candidate.last_log_term && candidate.term >= term {
-                            Some(Donor::from(candidate))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-        RecoveryNeededInfo {
-            term,
-            last_log_term,
-            flush_lsn,
-            peers,
-            num_streaming_computes,
-            donors,
-        }
     }
 
     pub fn get_walsenders(&self) -> &Arc<WalSenders> {
@@ -809,6 +669,86 @@ impl Timeline {
         // If persisting fails, we abort the change and return error.
         state.sk.state.finish_change(&persistent_state).await?;
         Ok(res)
+    }
+
+    /// Get the guard for full disk access to the timeline.
+    /// If WAL files are not present on disk, they will be downloaded.
+    pub async fn full_access_guard(self: &Arc<Self>) -> Result<FullAccessTimeline> {
+        if self.is_cancelled() {
+            bail!(TimelineError::Cancelled(self.ttid));
+        }
+        Ok(FullAccessTimeline {
+            tli: self.clone(),
+        })
+    }
+}
+
+/// This is a guard that allows to read/write disk timeline state.
+/// All tasks that are using the disk should use this guard.
+#[derive(Clone)]
+pub struct FullAccessTimeline {
+    pub tli: Arc<Timeline>,
+}
+
+impl Deref for FullAccessTimeline {
+    type Target = Arc<Timeline>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tli
+    }
+}
+
+impl FullAccessTimeline {
+    /// Returns true if walsender should stop sending WAL to pageserver. We
+    /// terminate it if remote_consistent_lsn reached commit_lsn and there is no
+    /// computes. While there might be nothing to stream already, we learn about
+    /// remote_consistent_lsn update through replication feedback, and we want
+    /// to stop pushing to the broker if pageserver is fully caughtup.
+    pub async fn should_walsender_stop(&self, reported_remote_consistent_lsn: Lsn) -> bool {
+        if self.is_cancelled() {
+            return true;
+        }
+        let shared_state = self.read_shared_state().await;
+        if self.walreceivers.get_num() == 0 {
+            return shared_state.sk.state.inmem.commit_lsn == Lsn(0) || // no data at all yet
+            reported_remote_consistent_lsn >= shared_state.sk.state.inmem.commit_lsn;
+        }
+        false
+    }
+
+    /// Ensure that current term is t, erroring otherwise, and lock the state.
+    pub async fn acquire_term(&self, t: Term) -> Result<ReadGuardSharedState> {
+        let ss = self.read_shared_state().await;
+        if ss.sk.state.acceptor_state.term != t {
+            bail!(
+                "failed to acquire term {}, current term {}",
+                t,
+                ss.sk.state.acceptor_state.term
+            );
+        }
+        Ok(ss)
+    }
+
+    /// Pass arrived message to the safekeeper.
+    pub async fn process_msg(
+        &self,
+        msg: &ProposerAcceptorMessage,
+    ) -> Result<Option<AcceptorProposerMessage>> {
+        if self.is_cancelled() {
+            bail!(TimelineError::Cancelled(self.ttid));
+        }
+
+        let mut rmsg: Option<AcceptorProposerMessage>;
+        {
+            let mut shared_state = self.write_shared_state().await;
+            rmsg = shared_state.sk.process_msg(msg).await?;
+
+            // if this is AppendResponse, fill in proper hot standby feedback.
+            if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
+                resp.hs_feedback = self.walsenders.get_hotstandby().hs_feedback;
+            }
+        }
+        Ok(rmsg)
     }
 }
 

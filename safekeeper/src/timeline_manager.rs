@@ -9,17 +9,12 @@ use std::{
 };
 
 use postgres_ffi::XLogSegNo;
+use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
-    control_file::Storage,
-    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
-    remove_wal::calc_horizon_lsn,
-    timeline::{PeerInfo, ReadGuardSharedState, Timeline},
-    timelines_set::TimelinesSet,
-    wal_backup::{self, WalBackupTaskHandle},
-    SafeKeeperConf,
+    control_file::Storage, metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL}, recovery::recovery_main, remove_wal::calc_horizon_lsn, timeline::{PeerInfo, ReadGuardSharedState, Timeline}, timelines_set::TimelinesSet, wal_backup::{self, WalBackupTaskHandle}, wal_backup_partial, SafeKeeperConf
 };
 
 pub struct StateSnapshot {
@@ -102,6 +97,32 @@ pub async fn main_task(
 
     // list of background tasks
     let mut backup_task: Option<WalBackupTaskHandle> = None;
+    let mut recovery_task: Option<JoinHandle<()>> = None;
+    let mut partial_backup_task: Option<JoinHandle<()>> = None;
+
+    // Start recovery task which always runs on the timeline.
+    if conf.peer_recovery_enabled {
+        match tli.full_access_guard().await {
+            Ok(tli) => {
+                recovery_task = Some(tokio::spawn(recovery_main(tli, conf.clone())));
+            }
+            Err(e) => {
+                warn!("failed to start recovery task: {:?}", e);
+            }
+        }
+    }
+
+    // Start partial backup task which always runs on the timeline.
+    if conf.is_wal_backup_enabled() && conf.partial_backup_enabled {
+        match tli.full_access_guard().await {
+            Ok(tli) => {
+                partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(tli, conf.clone())));
+            }
+            Err(e) => {
+                warn!("failed to start partial backup task: {:?}", e);
+            }
+        }
+    }
 
     let last_state = 'outer: loop {
         MANAGER_ITERATIONS_TOTAL.inc();
@@ -207,5 +228,17 @@ pub async fn main_task(
     // shutdown background tasks
     if conf.is_wal_backup_enabled() {
         wal_backup::update_task(&conf, ttid, false, &last_state, &mut backup_task).await;
+    }
+
+    if let Some(recovery_task) = recovery_task {
+        if let Err(e) = recovery_task.await {
+            warn!("recovery task failed: {:?}", e);
+        }
+    }
+
+    if let Some(partial_backup_task) = partial_backup_task {
+        if let Err(e) = partial_backup_task.await {
+            warn!("partial backup task failed: {:?}", e);
+        }
     }
 }
