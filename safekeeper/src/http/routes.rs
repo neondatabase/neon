@@ -272,8 +272,12 @@ async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>
     let filename: String = parse_request_param(&request, "filename")?;
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let tli = tli
+        .full_access_guard()
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
-    let filepath = tli.timeline_dir.join(filename);
+    let filepath = tli.get_timeline_dir().join(filename);
     let mut file = File::open(&filepath)
         .await
         .map_err(|e| ApiError::InternalServerError(e.into()))?;

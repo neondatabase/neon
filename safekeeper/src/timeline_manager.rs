@@ -91,7 +91,6 @@ pub async fn main_task(
     };
 
     // configuration & dependencies
-    let ttid = tli.ttid;
     let wal_seg_size = tli.get_wal_seg_size().await;
     let heartbeat_timeout = conf.heartbeat_timeout;
     let walsenders = tli.get_walsenders();
@@ -147,7 +146,7 @@ pub async fn main_task(
         if conf.is_wal_backup_enabled() {
             wal_backup::update_task(
                 &conf,
-                ttid,
+                &tli,
                 is_wal_backup_required,
                 &state_snapshot,
                 &mut backup_task,
@@ -241,7 +240,7 @@ pub async fn main_task(
 
     // shutdown background tasks
     if conf.is_wal_backup_enabled() {
-        wal_backup::update_task(&conf, ttid, false, &last_state, &mut backup_task).await;
+        wal_backup::update_task(&conf, &tli, false, &last_state, &mut backup_task).await;
     }
 
     if let Some(recovery_task) = recovery_task {

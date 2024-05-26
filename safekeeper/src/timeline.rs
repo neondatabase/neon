@@ -329,12 +329,10 @@ pub struct Timeline {
     mutex: RwLock<SharedState>,
     walsenders: Arc<WalSenders>,
     walreceivers: Arc<WalReceivers>,
+    timeline_dir: Utf8PathBuf,
 
     /// Delete/cancel will trigger this, background tasks should drop out as soon as it fires
     pub(crate) cancel: CancellationToken,
-
-    /// Directory where timeline state is stored.
-    pub timeline_dir: Utf8PathBuf,
 
     // timeline_manager controlled state
     pub(crate) broker_active: AtomicBool,
@@ -762,6 +760,10 @@ impl FullAccessTimeline {
             start_lsn,
             enable_remote_read,
         )
+    }
+
+    pub fn get_timeline_dir(&self) -> Utf8PathBuf {
+        self.timeline_dir.clone()
     }
 }
 

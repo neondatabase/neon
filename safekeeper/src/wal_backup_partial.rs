@@ -288,7 +288,7 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
     let mut flush_lsn_rx = tli.get_term_flush_lsn_watch_rx();
     let wal_seg_size = tli.get_wal_seg_size().await;
 
-    let local_prefix = tli.timeline_dir.clone();
+    let local_prefix = tli.get_timeline_dir();
     let remote_timeline_path = match remote_timeline_path(&tli.ttid) {
         Ok(path) => path,
         Err(e) => {

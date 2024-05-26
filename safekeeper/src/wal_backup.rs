@@ -30,9 +30,9 @@ use tracing::*;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
-use crate::timeline::{get_timeline_dir, PeerInfo, Timeline};
+use crate::timeline::{FullAccessTimeline, PeerInfo, Timeline};
 use crate::timeline_manager::StateSnapshot;
-use crate::{GlobalTimelines, SafeKeeperConf, WAL_BACKUP_RUNTIME};
+use crate::{SafeKeeperConf, WAL_BACKUP_RUNTIME};
 
 use once_cell::sync::OnceCell;
 
@@ -63,13 +63,13 @@ pub fn is_wal_backup_required(
 /// is running, kill it.
 pub async fn update_task(
     conf: &SafeKeeperConf,
-    ttid: TenantTimelineId,
+    tli: &Arc<Timeline>,
     need_backup: bool,
     state: &StateSnapshot,
     entry: &mut Option<WalBackupTaskHandle>,
 ) {
     let (offloader, election_dbg_str) =
-        determine_offloader(&state.peers, state.backup_lsn, ttid, conf);
+        determine_offloader(&state.peers, state.backup_lsn, tli.ttid, conf);
     let elected_me = Some(conf.my_id) == offloader;
 
     let should_task_run = need_backup && elected_me;
@@ -80,10 +80,8 @@ pub async fn update_task(
             info!("elected for backup: {}", election_dbg_str);
 
             let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-            let timeline_dir = get_timeline_dir(conf, &ttid);
 
-            let async_task =
-                backup_task_main(ttid, timeline_dir, conf.backup_parallel_jobs, shutdown_rx);
+            let async_task = backup_task_main(tli.clone(), conf.backup_parallel_jobs, shutdown_rx);
 
             let handle = if conf.current_thread_runtime {
                 tokio::spawn(async_task)
@@ -193,7 +191,7 @@ pub fn init_remote_storage(conf: &SafeKeeperConf) {
 }
 
 struct WalBackupTask {
-    timeline: Arc<Timeline>,
+    timeline: FullAccessTimeline,
     timeline_dir: Utf8PathBuf,
     wal_seg_size: usize,
     parallel_jobs: usize,
@@ -201,28 +199,24 @@ struct WalBackupTask {
 }
 
 /// Offload single timeline.
-#[instrument(name = "WAL backup", skip_all, fields(ttid = %ttid))]
-async fn backup_task_main(
-    ttid: TenantTimelineId,
-    timeline_dir: Utf8PathBuf,
-    parallel_jobs: usize,
-    mut shutdown_rx: Receiver<()>,
-) {
+#[instrument(name = "WAL backup", skip_all, fields(ttid = %tli.ttid))]
+async fn backup_task_main(tli: Arc<Timeline>, parallel_jobs: usize, mut shutdown_rx: Receiver<()>) {
     let _guard = WAL_BACKUP_TASKS.guard();
 
+    let tli = match tli.full_access_guard().await {
+        Ok(tli) => tli,
+        Err(e) => {
+            error!("backup error: {}", e);
+            return;
+        }
+    };
     info!("started");
-    let res = GlobalTimelines::get(ttid);
-    if let Err(e) = res {
-        error!("backup error: {}", e);
-        return;
-    }
-    let tli = res.unwrap();
 
     let mut wb = WalBackupTask {
         wal_seg_size: tli.get_wal_seg_size().await,
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
+        timeline_dir: tli.get_timeline_dir(),
         timeline: tli,
-        timeline_dir,
         parallel_jobs,
     };
 
@@ -310,7 +304,7 @@ impl WalBackupTask {
 }
 
 async fn backup_lsn_range(
-    timeline: &Arc<Timeline>,
+    timeline: &FullAccessTimeline,
     backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
