@@ -381,8 +381,13 @@ pub fn rel_size_to_key(rel: RelTag) -> Key {
         field3: rel.dbnode,
         field4: rel.relnode,
         field5: rel.forknum,
-        field6: 0xffffffff,
+        field6: 0xffff_ffff,
     }
+}
+
+#[inline(always)]
+pub fn is_rel_size_key(key: &Key) -> bool {
+    key.field1 == 0 && key.field6 == u32::MAX
 }
 
 #[inline(always)]
@@ -423,6 +428,25 @@ pub fn slru_dir_to_key(kind: SlruKind) -> Key {
 }
 
 #[inline(always)]
+pub fn slru_dir_kind(key: &Key) -> Option<Result<SlruKind, u32>> {
+    if key.field1 == 0x01
+        && key.field3 == 0
+        && key.field4 == 0
+        && key.field5 == 0
+        && key.field6 == 0
+    {
+        match key.field2 {
+            0 => Some(Ok(SlruKind::Clog)),
+            1 => Some(Ok(SlruKind::MultiXactMembers)),
+            2 => Some(Ok(SlruKind::MultiXactOffsets)),
+            x => Some(Err(x)),
+        }
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
 pub fn slru_block_to_key(kind: SlruKind, segno: u32, blknum: BlockNumber) -> Key {
     Key {
         field1: 0x01,
@@ -450,8 +474,16 @@ pub fn slru_segment_size_to_key(kind: SlruKind, segno: u32) -> Key {
         field3: 1,
         field4: segno,
         field5: 0,
-        field6: 0xffffffff,
+        field6: 0xffff_ffff,
     }
+}
+
+pub fn is_slru_segment_size_key(key: &Key) -> bool {
+    key.field1 == 0x01
+        && key.field2 < 0x03
+        && key.field3 == 0x01
+        && key.field5 == 0
+        && key.field6 == u32::MAX
 }
 
 #[inline(always)]

@@ -25,7 +25,7 @@ use pageserver::{
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
     virtual_file,
 };
-use pageserver_api::{key::Key, shard::TenantShardId};
+use pageserver_api::{key::Key, reltag::SlruKind, shard::TenantShardId};
 use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use tokio_util::sync::CancellationToken;
@@ -197,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
                 ($name:ident) => {{
                     let s: &'static str = stringify!($name);
                     let s = s.strip_prefix("is_").unwrap_or(s);
+                    let s = s.strip_suffix("_key").unwrap_or(s);
 
                     #[allow(clippy::needless_borrow)]
                     (s, pageserver_api::key::$name(key))
@@ -209,15 +210,20 @@ async fn main() -> anyhow::Result<()> {
                 kind_query!(is_rel_fsm_block_key),
                 kind_query!(is_slru_block_key),
                 kind_query!(is_inherited_key),
+                ("rel_size", pageserver_api::key::is_rel_size_key(&key)),
+                (
+                    "slru_segment_size",
+                    pageserver_api::key::is_slru_segment_size_key(&key),
+                ),
             ];
 
-            let matches_constant = "matches constant";
+            let recognized_kind = "recognized kind";
             let metadata_key = "metadata key";
 
             let longest = queries
                 .iter()
                 .map(|t| t.0)
-                .chain([matches_constant, metadata_key].into_iter())
+                .chain([recognized_kind, metadata_key].into_iter())
                 .map(|s| s.len())
                 .max()
                 .unwrap();
@@ -230,34 +236,45 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}{:width$}{}", name, ":", is, width = width);
             }
 
-            println!(
-                "{}{:width$}{}",
-                matches_constant,
-                ":",
-                match key {
-                    pageserver_api::key::DBDIR_KEY => "DBDIR",
-                    pageserver_api::key::CONTROLFILE_KEY => "CONTROLFILE",
-                    pageserver_api::key::CHECKPOINT_KEY => "CHECKPOINT",
-                    pageserver_api::key::AUX_FILES_KEY => "AUX_FILES (v1)",
-                    _ => "None",
-                },
-                width = longest - matches_constant.len() + colon + padding,
-            );
+            #[derive(Debug)]
+            #[allow(dead_code)] // debug print is used
+            enum RecognizedKeyKind {
+                DbDir,
+                ControlFile,
+                Checkpoint,
+                AuxFilesV1,
+                SlruDir(Result<SlruKind, u32>),
+                AuxFileV2(utils::Hex<[u8; 16]>),
+            }
 
-            let mut bytes = [0u8; 16];
-            let metadata_keyness = if key.is_metadata_key() {
-                key.extract_metadata_key_to_writer(&mut bytes[..]);
-                Some(utils::Hex(&bytes[..]))
-            } else {
-                None
-            };
+            impl RecognizedKeyKind {
+                fn new(key: Key) -> Option<Self> {
+                    use RecognizedKeyKind::*;
+
+                    let slru_dir_kind = pageserver_api::key::slru_dir_kind(&key);
+
+                    Some(match key {
+                        pageserver_api::key::DBDIR_KEY => DbDir,
+                        pageserver_api::key::CONTROLFILE_KEY => ControlFile,
+                        pageserver_api::key::CHECKPOINT_KEY => Checkpoint,
+                        pageserver_api::key::AUX_FILES_KEY => AuxFilesV1,
+                        _ if slru_dir_kind.is_some() => SlruDir(slru_dir_kind.unwrap()),
+                        _ if key.is_metadata_key() => {
+                            let mut bytes = [0u8; 16];
+                            key.extract_metadata_key_to_writer(&mut bytes[..]);
+                            AuxFileV2(utils::Hex(bytes))
+                        }
+                        _ => return None,
+                    })
+                }
+            }
 
             println!(
                 "{}{:width$}{:?}",
-                metadata_key,
+                recognized_kind,
                 ":",
-                metadata_keyness,
-                width = longest - metadata_key.len() + colon + padding
+                RecognizedKeyKind::new(key),
+                width = longest - recognized_kind.len() + colon + padding,
             );
 
             println!("{:?}", pageserver_api::shard::describe(&key, None, None));
