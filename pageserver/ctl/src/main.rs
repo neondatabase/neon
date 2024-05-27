@@ -193,6 +193,73 @@ async fn main() -> anyhow::Result<()> {
         Commands::Key(DescribeKeyCommand { key }) => {
             println!("{key:?}");
 
+            macro_rules! kind_query {
+                ($name:ident) => {{
+                    let s: &'static str = stringify!($name);
+                    let s = s.strip_prefix("is_").unwrap_or(s);
+
+                    #[allow(clippy::needless_borrow)]
+                    (s, pageserver_api::key::$name(key))
+                }};
+            }
+
+            let queries = [
+                ("rel_block", pageserver_api::key::is_rel_block_key(&key)),
+                kind_query!(is_rel_vm_block_key),
+                kind_query!(is_rel_fsm_block_key),
+                kind_query!(is_slru_block_key),
+                kind_query!(is_inherited_key),
+            ];
+
+            let matches_constant = "matches constant";
+            let metadata_key = "metadata key";
+
+            let longest = queries
+                .iter()
+                .map(|t| t.0)
+                .chain([matches_constant, metadata_key].into_iter())
+                .map(|s| s.len())
+                .max()
+                .unwrap();
+
+            let colon = 1;
+            let padding = 1;
+
+            for (name, is) in queries {
+                let width = longest - name.len() + colon + padding;
+                println!("{}{:width$}{}", name, ":", is, width = width);
+            }
+
+            println!(
+                "{}{:width$}{}",
+                matches_constant,
+                ":",
+                match key {
+                    pageserver_api::key::DBDIR_KEY => "DBDIR",
+                    pageserver_api::key::CONTROLFILE_KEY => "CONTROLFILE",
+                    pageserver_api::key::CHECKPOINT_KEY => "CHECKPOINT",
+                    pageserver_api::key::AUX_FILES_KEY => "AUX_FILES (v1)",
+                    _ => "None",
+                },
+                width = longest - matches_constant.len() + colon + padding,
+            );
+
+            let mut bytes = [0u8; 16];
+            let metadata_keyness = if key.is_metadata_key() {
+                key.extract_metadata_key_to_writer(&mut bytes[..]);
+                Some(utils::Hex(&bytes[..]))
+            } else {
+                None
+            };
+
+            println!(
+                "{}{:width$}{:?}",
+                metadata_key,
+                ":",
+                metadata_keyness,
+                width = longest - metadata_key.len() + colon + padding
+            );
+
             println!("{:?}", pageserver_api::shard::describe(&key, None, None));
         }
     };
