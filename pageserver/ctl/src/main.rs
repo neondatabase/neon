@@ -25,7 +25,7 @@ use pageserver::{
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
     virtual_file,
 };
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{key::Key, shard::TenantShardId};
 use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use tokio_util::sync::CancellationToken;
@@ -61,6 +61,8 @@ enum Commands {
     AnalyzeLayerMap(AnalyzeLayerMapCmd),
     #[command(subcommand)]
     Layer(LayerCmd),
+    /// Debug print a hex key found from logs
+    Key(DescribeKeyCommand),
 }
 
 /// Read and update pageserver metadata file
@@ -108,6 +110,11 @@ struct AnalyzeLayerMapCmd {
     path: Utf8PathBuf,
     /// Max holes
     max_holes: Option<usize>,
+}
+
+#[derive(Parser)]
+struct DescribeKeyCommand {
+    key: Key,
 }
 
 #[tokio::main]
@@ -182,6 +189,11 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap()
                 .time_travel_recover(Some(&prefix), timestamp, done_if_after, &cancel)
                 .await?;
+        }
+        Commands::Key(DescribeKeyCommand { key }) => {
+            println!("{key:?}");
+
+            println!("{:?}", pageserver_api::shard::describe(&key, None, None));
         }
     };
     Ok(())

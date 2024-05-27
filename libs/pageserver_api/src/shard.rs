@@ -713,6 +713,27 @@ fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Ke
     ShardNumber((hash % count.0 as u32) as u8)
 }
 
+/// For debugging, while not exposing the internals.
+#[derive(Debug)]
+#[allow(unused)] // used by debug formatting by pagectl
+struct KeyShardingInfo {
+    shard0: bool,
+    shard_number: ShardNumber,
+}
+
+pub fn describe(
+    key: &Key,
+    shard_count: Option<ShardCount>,
+    stripe_size: Option<ShardStripeSize>,
+) -> impl std::fmt::Debug {
+    let shard_count = shard_count.unwrap_or(ShardCount(8));
+    let stripe_size = stripe_size.unwrap_or(DEFAULT_STRIPE_SIZE);
+    KeyShardingInfo {
+        shard0: key_is_shard0(key),
+        shard_number: key_to_shard_number(shard_count, stripe_size, key),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use utils::Hex;
