@@ -797,8 +797,7 @@ jobs:
       matrix:
         version: [ v14 ]
         # version: [ v14, v15, v16 ]
-        arch: [ x64 ]
-        # arch: [ x64, arm64 ]
+        arch: [ x64, arm64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
