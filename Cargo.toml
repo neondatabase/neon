@@ -46,7 +46,7 @@ anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
 atomic-take = "1.1.0"
-azure_core = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
+azure_core = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
 azure_identity = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
 azure_storage = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
 azure_storage_blobs = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
