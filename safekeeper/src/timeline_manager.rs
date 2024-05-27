@@ -47,14 +47,6 @@ pub async fn main_task(
     conf: SafeKeeperConf,
     broker_active_set: Arc<TimelinesSet>,
 ) {
-    let mut cancellation_rx = match tli.get_cancellation_rx() {
-        Ok(rx) => rx,
-        Err(_) => {
-            info!("timeline canceled during task start");
-            return;
-        }
-    };
-
     scopeguard::defer! {
         if tli.is_cancelled() {
             info!("manager task finished");
@@ -114,7 +106,7 @@ pub async fn main_task(
 
             if !is_active {
                 // TODO: maybe use tokio::spawn?
-                if let Err(e) = tli.maybe_persist_control_file().await {
+                if let Err(e) = tli.maybe_persist_control_file(false).await {
                     warn!("control file save in update_status failed: {:?}", e);
                 }
             }
@@ -129,7 +121,7 @@ pub async fn main_task(
         // wait until something changes. tx channels are stored under Arc, so they will not be
         // dropped until the manager task is finished.
         tokio::select! {
-            _ = cancellation_rx.changed() => {
+            _ = tli.cancel.cancelled() => {
                 // timeline was deleted
                 break 'outer state_snapshot;
             }

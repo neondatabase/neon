@@ -179,6 +179,13 @@ where
             // Schedule some work, if concurrency limit permits it
             self.spawn_pending();
 
+            // This message is printed every scheduling iteration as proof of liveness when looking at logs
+            tracing::info!(
+                "Status: {} tasks running, {} pending",
+                self.running.len(),
+                self.pending.len()
+            );
+
             // Between scheduling iterations, we will:
             //  - Drain any complete tasks and spawn pending tasks
             //  - Handle incoming administrative commands
@@ -258,7 +265,11 @@ where
 
         self.tasks.spawn(fut);
 
-        self.running.insert(tenant_shard_id, in_progress);
+        let replaced = self.running.insert(tenant_shard_id, in_progress);
+        debug_assert!(replaced.is_none());
+        if replaced.is_some() {
+            tracing::warn!(%tenant_shard_id, "Unexpectedly spawned a task when one was already running")
+        }
     }
 
     /// For all pending tenants that are elegible for execution, spawn their task.
@@ -268,7 +279,9 @@ where
         while !self.pending.is_empty() && self.running.len() < self.concurrency {
             // unwrap: loop condition includes !is_empty()
             let pending = self.pending.pop_front().unwrap();
-            self.do_spawn(pending);
+            if !self.running.contains_key(pending.get_tenant_shard_id()) {
+                self.do_spawn(pending);
+            }
         }
     }
 
@@ -321,7 +334,8 @@ where
 
         let tenant_shard_id = job.get_tenant_shard_id();
         let barrier = if let Some(barrier) = self.get_running(tenant_shard_id) {
-            tracing::info!("Command already running, waiting for it");
+            tracing::info!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                           "Command already running, waiting for it");
             barrier
         } else {
             let running = self.spawn_now(job);

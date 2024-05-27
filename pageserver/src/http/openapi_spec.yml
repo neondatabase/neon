@@ -612,6 +612,80 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/detach_ancestor:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        ŕequired: true
+        schema:
+          type: string
+
+    put:
+      description: |
+        Detach a timeline from its ancestor and reparent all ancestors timelines with lower `ancestor_lsn`.
+        Current implementation might not be retryable across failure cases, but will be enhanced in future.
+        Detaching should be expected to be expensive operation. Timeouts should be retried.
+      responses:
+        "200":
+          description: |
+            The timeline has been detached from it's ancestor (now or earlier), and at least the returned timelines have been reparented.
+            If any timelines were deleted after reparenting, they might not be on this list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AncestorDetached"
+
+        "400":
+          description: |
+            Number of early checks meaning the timeline cannot be detached now:
+              - the ancestor of timeline has an ancestor: not supported, see RFC
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+        "404":
+          description: Tenant or timeline not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+
+        "409":
+          description: |
+            The timeline can never be detached:
+              - timeline has no ancestor, implying that the timeline has never had an ancestor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+
+        "500":
+          description: |
+            Transient error, for example, pageserver shutdown happened while
+            processing the request but we were unable to distinguish that. Must
+            be retried.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+        "503":
+          description: |
+            Temporarily unavailable, please retry. Possible reasons:
+              - another timeline detach for the same tenant is underway, please retry later
+              - detected shutdown error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
+
   /v1/tenant/:
     get:
       description: Get tenants list
@@ -1076,6 +1150,19 @@ components:
           type: integer
           format: int64
           description: How many bytes of layer content were in the latest layer heatmap
+
+    AncestorDetached:
+      type: object
+      required:
+        - reparented_timelines
+      properties:
+        reparented_timelines:
+          type: array
+          description: Set of reparented timeline ids
+          properties:
+            type: string
+            format: hex
+            description: TimelineId
 
 
     Error:

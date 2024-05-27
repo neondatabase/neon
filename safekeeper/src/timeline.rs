@@ -6,6 +6,7 @@ use camino::Utf8PathBuf;
 use postgres_ffi::XLogSegNo;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
@@ -103,11 +104,16 @@ pub type ReadGuardSharedState<'a> = RwLockReadGuard<'a, SharedState>;
 pub struct WriteGuardSharedState<'a> {
     tli: Arc<Timeline>,
     guard: RwLockWriteGuard<'a, SharedState>,
+    skip_update: bool,
 }
 
 impl<'a> WriteGuardSharedState<'a> {
     fn new(tli: Arc<Timeline>, guard: RwLockWriteGuard<'a, SharedState>) -> Self {
-        WriteGuardSharedState { tli, guard }
+        WriteGuardSharedState {
+            tli,
+            guard,
+            skip_update: false,
+        }
     }
 }
 
@@ -148,10 +154,12 @@ impl<'a> Drop for WriteGuardSharedState<'a> {
             }
         });
 
-        // send notification about shared state update
-        self.tli.shared_state_version_tx.send_modify(|old| {
-            *old += 1;
-        });
+        if !self.skip_update {
+            // send notification about shared state update
+            self.tli.shared_state_version_tx.send_modify(|old| {
+                *old += 1;
+            });
+        }
     }
 }
 
@@ -342,12 +350,8 @@ pub struct Timeline {
     walsenders: Arc<WalSenders>,
     walreceivers: Arc<WalReceivers>,
 
-    /// Cancellation channel. Delete/cancel will send `true` here as a cancellation signal.
-    cancellation_tx: watch::Sender<bool>,
-
-    /// Timeline should not be used after cancellation. Background tasks should
-    /// monitor this channel and stop eventually after receiving `true` from this channel.
-    cancellation_rx: watch::Receiver<bool>,
+    /// Delete/cancel will trigger this, background tasks should drop out as soon as it fires
+    pub(crate) cancel: CancellationToken,
 
     /// Directory where timeline state is stored.
     pub timeline_dir: Utf8PathBuf,
@@ -376,7 +380,6 @@ impl Timeline {
             shared_state.sk.flush_lsn(),
         )));
         let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
-        let (cancellation_tx, cancellation_rx) = watch::channel(false);
 
         let walreceivers = WalReceivers::new();
         Ok(Timeline {
@@ -390,8 +393,7 @@ impl Timeline {
             mutex: RwLock::new(shared_state),
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
-            cancellation_rx,
-            cancellation_tx,
+            cancel: CancellationToken::default(),
             timeline_dir: conf.timeline_dir(&ttid),
             walsenders_keep_horizon: conf.walsenders_keep_horizon,
             broker_active: AtomicBool::new(false),
@@ -411,7 +413,6 @@ impl Timeline {
         let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) =
             watch::channel(TermLsn::from((INVALID_TERM, Lsn::INVALID)));
         let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
-        let (cancellation_tx, cancellation_rx) = watch::channel(false);
 
         let state =
             TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
@@ -428,8 +429,7 @@ impl Timeline {
             mutex: RwLock::new(SharedState::create_new(conf, &ttid, state)?),
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
-            cancellation_rx,
-            cancellation_tx,
+            cancel: CancellationToken::default(),
             timeline_dir: conf.timeline_dir(&ttid),
             walsenders_keep_horizon: conf.walsenders_keep_horizon,
             broker_active: AtomicBool::new(false),
@@ -535,7 +535,7 @@ impl Timeline {
     /// eventually after receiving cancellation signal.
     fn cancel(&self, shared_state: &mut WriteGuardSharedState<'_>) {
         info!("timeline {} is cancelled", self.ttid);
-        let _ = self.cancellation_tx.send(true);
+        self.cancel.cancel();
         // Close associated FDs. Nobody will be able to touch timeline data once
         // it is cancelled, so WAL storage won't be opened again.
         shared_state.sk.wal_store.close();
@@ -543,17 +543,7 @@ impl Timeline {
 
     /// Returns if timeline is cancelled.
     pub fn is_cancelled(&self) -> bool {
-        *self.cancellation_rx.borrow()
-    }
-
-    /// Returns watch channel which gets value when timeline is cancelled. It is
-    /// guaranteed to have not cancelled value observed (errors otherwise).
-    pub fn get_cancellation_rx(&self) -> Result<watch::Receiver<bool>> {
-        let rx = self.cancellation_rx.clone();
-        if *rx.borrow() {
-            bail!(TimelineError::Cancelled(self.ttid));
-        }
-        Ok(rx)
+        self.cancel.is_cancelled()
     }
 
     /// Take a writing mutual exclusive lock on timeline shared_state.
@@ -819,7 +809,11 @@ impl Timeline {
 
         // update last_removed_segno
         let mut shared_state = self.write_shared_state().await;
-        shared_state.last_removed_segno = horizon_segno;
+        if shared_state.last_removed_segno != horizon_segno {
+            shared_state.last_removed_segno = horizon_segno;
+        } else {
+            shared_state.skip_update = true;
+        }
         Ok(())
     }
 
@@ -827,12 +821,11 @@ impl Timeline {
     /// passed after the last save. This helps to keep remote_consistent_lsn up
     /// to date so that storage nodes restart doesn't cause many pageserver ->
     /// safekeeper reconnections.
-    pub async fn maybe_persist_control_file(self: &Arc<Self>) -> Result<()> {
-        self.write_shared_state()
-            .await
-            .sk
-            .maybe_persist_inmem_control_file()
-            .await
+    pub async fn maybe_persist_control_file(self: &Arc<Self>, force: bool) -> Result<()> {
+        let mut guard = self.write_shared_state().await;
+        let changed = guard.sk.maybe_persist_inmem_control_file(force).await?;
+        guard.skip_update = !changed;
+        Ok(())
     }
 
     /// Gather timeline data for metrics.

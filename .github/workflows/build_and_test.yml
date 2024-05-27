@@ -548,7 +548,7 @@ jobs:
 
   report-benchmarks-failures:
     needs: [ benchmarks, create-test-report ]
-    if: github.ref_name == 'main' && needs.benchmarks.result == 'failure'
+    if: github.ref_name == 'main' && failure() && needs.benchmarks.result == 'failure'
     runs-on: ubuntu-latest
 
     steps:
@@ -723,9 +723,13 @@ jobs:
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
 
-  neon-image:
+  neon-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
-    runs-on: [ self-hosted, gen3, large ]
+    strategy:
+      matrix:
+        arch: [ x64, arm64 ]
+
+    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Checkout
@@ -747,12 +751,6 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
-        with:
-          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
-
       - uses: docker/build-push-action@v5
         with:
           context: .
@@ -764,25 +762,52 @@ jobs:
           push: true
           pull: true
           file: Dockerfile
-          cache-from: type=registry,ref=neondatabase/neon:cache
-          cache-to: type=registry,ref=neondatabase/neon:cache,mode=max
+          cache-from: type=registry,ref=neondatabase/neon:cache-${{ matrix.arch }}
+          cache-to: type=registry,ref=neondatabase/neon:cache-${{ matrix.arch }},mode=max
           tags: |
-            369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
-            neondatabase/neon:${{needs.tag.outputs.build-tag}}
+            neondatabase/neon:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
       - name: Remove custom docker config directory
         if: always()
         run: |
           rm -rf .docker-custom
 
-  compute-node-image:
-    needs: [ check-permissions, build-build-tools-image, tag ]
-    runs-on: [ self-hosted, gen3, large ]
+  neon-image:
+    needs: [ neon-image-arch, tag ]
+    runs-on: ubuntu-latest
 
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Create multi-arch image
+        run: |
+          docker buildx imagetools create -t neondatabase/neon:${{ needs.tag.outputs.build-tag }} \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-x64 \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-arm64
+
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - name: Push multi-arch image to ECR
+        run: |
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{ needs.tag.outputs.build-tag }} \
+                                                                                neondatabase/neon:${{ needs.tag.outputs.build-tag }}
+
+  compute-node-image-arch:
+    needs: [ check-permissions, build-build-tools-image, tag ]
     strategy:
       fail-fast: false
       matrix:
         version: [ v14, v15, v16 ]
+        arch: [ x64, arm64 ]
+
+    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Checkout
@@ -829,15 +854,14 @@ jobs:
           push: true
           pull: true
           file: Dockerfile.compute-node
-          cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache
-          cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache,mode=max
+          cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
+          cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
           tags: |
-            369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
-            neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+            neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
-        if: ${{ matrix.version == 'v16' }}
+        if: matrix.version == 'v16'
         uses: docker/build-push-action@v5
         with:
           target: compute-tools-image
@@ -851,13 +875,56 @@ jobs:
           pull: true
           file: Dockerfile.compute-node
           tags: |
-            369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }}
-            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
+            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
       - name: Remove custom docker config directory
         if: always()
         run: |
           rm -rf .docker-custom
+
+  compute-node-image:
+    needs: [ compute-node-image-arch, tag ]
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        version: [ v14, v15, v16 ]
+
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Create multi-arch compute-node image
+        run: |
+          docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
+                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
+                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
+
+      - name: Create multi-arch compute-tools image
+        if: matrix.version == 'v16'
+        run: |
+          docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
+                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-x64 \
+                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-arm64
+
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - name: Push multi-arch compute-node-${{ matrix.version }} image to ECR
+        run: |
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
+                                                                                neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+
+      - name: Push multi-arch compute-tools image to ECR
+        if: matrix.version == 'v16'
+        run: |
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }} \
+                                                                                neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
@@ -866,11 +933,8 @@ jobs:
       fail-fast: false
       matrix:
         version: [ v14, v15, v16 ]
-    defaults:
-      run:
-        shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.28.1
+      VM_BUILDER_VERSION: v0.29.3
 
     steps:
       - name: Checkout
@@ -883,26 +947,48 @@ jobs:
           curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
+        run: |
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
         run: |
-          docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          docker pull neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Build vm image
         run: |
           ./vm-builder \
             -spec=vm-image-spec.yaml \
-            -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
-            -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+            -src=neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
+            -dst=neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Pushing vm-compute-node image
         run: |
-          docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          docker push neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
 
   test-images:
     needs: [ check-permissions, tag, neon-image, compute-node-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ x64, arm64 ]
+
+    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
       - name: Checkout
@@ -920,7 +1006,7 @@ jobs:
       - name: Verify image versions
         shell: bash # ensure no set -e for better error messages
         run: |
-          pageserver_version=$(docker run --rm 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
+          pageserver_version=$(docker run --rm neondatabase/neon:${{ needs.tag.outputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
 
           echo "Pageserver version string: $pageserver_version"
 
@@ -946,78 +1032,48 @@ jobs:
 
   promote-images:
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
-    runs-on: [ self-hosted, gen3, small ]
-    container: golang:1.19-bullseye
-    # Don't add if-condition here.
-    # The job should always be run because we have dependant other jobs that shouldn't be skipped
+    runs-on: ubuntu-latest
+
+    env:
+      VERSIONS: v14 v15 v16
 
     steps:
-      - name: Install Crane & ECR helper
-        run: |
-          go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
-          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Configure ECR login
-        run: |
-          mkdir /github/home/.docker/
-          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-      - name: Copy vm-compute-node images to Docker Hub
+      - name: Copy vm-compute-node images to ECR
         run: |
-          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
-          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
-          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} vm-compute-node-v16
+          for version in ${VERSIONS}; do
+            docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
+                                               neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
+          done
 
       - name: Add latest tag to images
-        if: github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy'
+        if: github.ref_name == 'main'
         run: |
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:${{needs.tag.outputs.build-tag}} latest
-          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
+          for repo in neondatabase 369495373322.dkr.ecr.eu-central-1.amazonaws.com; do
+            docker buildx imagetools create -t $repo/neon:latest \
+                                               $repo/neon:${{ needs.tag.outputs.build-tag }}
 
-      - name: Push images to production ECR
-        if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
-        run: |
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:latest
-          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:latest
+            docker buildx imagetools create -t $repo/compute-tools:latest \
+                                               $repo/compute-tools:${{ needs.tag.outputs.build-tag }}
 
-      - name: Configure Docker Hub login
-        run: |
-          # ECR Credential Helper & Docker Hub don't work together in config, hence reset
-          echo "" > /github/home/.docker/config.json
-          crane auth login -u ${{ secrets.NEON_DOCKERHUB_USERNAME }} -p ${{ secrets.NEON_DOCKERHUB_PASSWORD }} index.docker.io
+            for version in ${VERSIONS}; do
+              docker buildx imagetools create -t $repo/compute-node-${version}:latest \
+                                                 $repo/compute-node-${version}:${{ needs.tag.outputs.build-tag }}
 
-      - name: Push vm-compute-node to Docker Hub
-        run: |
-          crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
-          crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
-          crane push vm-compute-node-v16 neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}}
-
-      - name: Push latest tags to Docker Hub
-        if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
-        run: |
-          crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v16:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
-
-      - name: Cleanup ECR folder
-        run: rm -rf ~/.ecr
+              docker buildx imagetools create -t $repo/vm-compute-node-${version}:latest \
+                                                 $repo/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
+            done
+          done
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]

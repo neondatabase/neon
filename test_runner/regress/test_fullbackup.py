@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from fixtures.common_types import Lsn, TimelineId
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -19,17 +19,16 @@ def test_fullbackup(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
     port_distributor: PortDistributor,
-    pg_distrib_dir: Path,
     test_output_dir: Path,
 ):
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_fullbackup")
-    endpoint_main = env.endpoints.create_start("test_fullbackup")
+    # endpoint needs to be alive until the fullbackup so that we have
+    # prev_record_lsn for the vanilla_pg to start in read-write mode
+    # for some reason this does not happen if endpoint is shutdown.
+    endpoint_main = env.endpoints.create_start("main")
 
     with endpoint_main.cursor() as cur:
-        timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
-
         # data loading may take a while, so increase statement timeout
         cur.execute("SET statement_timeout='300s'")
         cur.execute(
@@ -41,17 +40,13 @@ def test_fullbackup(
         lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_insert_lsn()"))
         log.info(f"start_backup_lsn = {lsn}")
 
-    # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
-    # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
-
     # Get and unpack fullbackup from pageserver
     restored_dir_path = env.repo_dir / "restored_datadir"
     os.mkdir(restored_dir_path, 0o750)
-    query = f"fullbackup {env.initial_tenant} {timeline} {lsn}"
     tar_output_file = test_output_dir / "fullbackup.tar"
-    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query, "-o", str(tar_output_file)]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, env.initial_timeline, lsn, tar_output_file
+    )
     subprocess_capture(
         env.repo_dir, ["tar", "-xf", str(tar_output_file), "-C", str(restored_dir_path)]
     )
@@ -61,7 +56,7 @@ def test_fullbackup(
     # use resetwal to overwrite it
     pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, "pg_resetwal")
     cmd = [pg_resetwal_path, "-D", str(restored_dir_path)]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.run_capture(cmd)
 
     # Restore from the backup and find the data we inserted
     port = port_distributor.get_port()
