@@ -151,9 +151,6 @@ jobs:
 #            target/
 #          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: exit
-        run: exit 0
-
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
@@ -201,8 +198,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ release ]
-        # build_type: [ debug, release ]
+        build_type: [ debug, release ]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
