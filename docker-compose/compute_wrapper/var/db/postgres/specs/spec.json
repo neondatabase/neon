@@ -95,7 +95,7 @@
             },
             {
                 "name": "shared_preload_libraries",
-                "value": "neon,pg_cron",
+                "value": "neon,pg_cron,timescaledb,pg_stat_statements",
                 "vartype": "string"
             },
             {

@@ -11,5 +11,6 @@ RUN apt-get update &&       \
                        python3-pip \
                        netcat
 RUN pip3 install Faker
+RUN mkdir -p /ext-src/pg_hint_plan-src/data && chown postgres /ext-src/pg_hint_plan-src/data
 
 USER postgres

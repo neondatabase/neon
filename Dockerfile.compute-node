@@ -978,6 +978,12 @@ RUN cd /ext-src/ && for f in *.tar.gz; \
     || exit 1; rm -f $f; done
 RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch 
 RUN apt-get update && apt-get install -y libgdal-dev cmake vim
+RUN cd /ext-src/pg_hint_plan-src/expected && cat ut-A.out \
+    | awk '{if (NR == 12 || NR == 17 || NR == 19) print "LOG:  Sending request to compute_ctl: http://localhost:3080/extension_server/pg_hint_plan"; print $0;}' \
+    > ut-A_1.out &&\
+    cat ut-fdw.out | \
+    awk '{if (NR == 10) print "LOG:  Sending request to compute_ctl: http://localhost:3080/extension_server/file_fdw"; print $0;}' \
+    > ut-fdw_1.out 
 #RUN cd /ext-src/postgis-src && ./configure --with-sfcgal=/usr/local/bin/sfcgal-config\
 #     --without-protobuf --with-interrupt-tests && make 
 COPY <<-"EOF" /run-tests.sh
