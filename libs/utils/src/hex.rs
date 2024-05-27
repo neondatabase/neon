@@ -19,7 +19,6 @@
 /// // right: [0x68; 1]
 /// # fn serialize_something() -> Vec<u8> { "hello world".as_bytes().to_vec() }
 /// ```
-#[derive(PartialEq)]
 pub struct Hex<S>(pub S);
 
 impl<S: AsRef<[u8]>> std::fmt::Debug for Hex<S> {
@@ -38,5 +37,14 @@ impl<S: AsRef<[u8]>> std::fmt::Debug for Hex<S> {
             }
         }
         write!(f, "; {}]", self.0.as_ref().len())
+    }
+}
+
+impl<R: AsRef<[u8]>, L: AsRef<[u8]>> PartialEq<Hex<R>> for Hex<L> {
+    fn eq(&self, other: &Hex<R>) -> bool {
+        let left = self.0.as_ref();
+        let right = other.0.as_ref();
+
+        left == right
     }
 }
