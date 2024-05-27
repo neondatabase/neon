@@ -39,12 +39,6 @@
 #define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
-#ifdef __APPLE__
-#define ASYNC_CONNECT 0
-#else
-#define ASYNC_CONNECT 1
-#endif
-
 /* GUCs */
 char	   *neon_timeline;
 char	   *neon_tenant;
@@ -131,13 +125,6 @@ typedef struct
 	 *	- WL_EXIT_ON_PM_DEATH.
 	 */
 	WaitEventSet   *wes_read;
-	/*---
-	 * WaitEventSet containing:
-	 *	- WL_SOCKET_WRITABLE on 'conn'
-	 *	- WL_LATCH_SET on MyLatch, and
-	 *	- WL_EXIT_ON_PM_DEATH.
-	 */
-	WaitEventSet   *wes_write;
 } PageServer;
 
 static PageServer page_servers[MAX_SHARDS];
@@ -342,11 +329,6 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
 		FreeWaitEventSet(shard->wes_read);
 		shard->wes_read = NULL;
 	}
-	if (shard->wes_write)
-	{
-		FreeWaitEventSet(shard->wes_write);
-		shard->wes_write = NULL;
-	}
 	if (shard->conn)
 	{
 		PQfinish(shard->conn);
@@ -435,32 +417,12 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		keywords[n_pgsql_params] = NULL;
 		values[n_pgsql_params] = NULL;
 
-#if ASYNC_CONNECT
 		shard->conn = PQconnectStartParams(keywords, values, 1);
-#else
-		shard->conn = PQconnectdbParams(keywords, values, 1);
-#endif
 		if (!shard->conn)
 		{
 			neon_shard_log(shard_no, elevel, "Failed to connect to pageserver: out of memory");
 			return false;
 		}
-
-		shard->wes_read = CreateWaitEventSet(TopMemoryContext, 3);
-		AddWaitEventToSet(shard->wes_read, WL_LATCH_SET, PGINVALID_SOCKET,
-						  MyLatch, NULL);
-		AddWaitEventToSet(shard->wes_read, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
-						  NULL, NULL);
-		AddWaitEventToSet(shard->wes_read, WL_SOCKET_READABLE, PQsocket(shard->conn), NULL, NULL);
-
-		shard->wes_write = CreateWaitEventSet(TopMemoryContext, 3);
-		AddWaitEventToSet(shard->wes_write, WL_LATCH_SET, PGINVALID_SOCKET,
-						  MyLatch, NULL);
-		AddWaitEventToSet(shard->wes_write, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
-						  NULL, NULL);
-		AddWaitEventToSet(shard->wes_write, WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE,
-						  PQsocket(shard->conn),
-						  NULL, NULL);
 
 		shard->state = PS_Connecting_Startup;
 		/* fallthrough */
@@ -469,15 +431,13 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	{
 		char	   *pagestream_query;
 		int			ps_send_query_ret;
-#if ASYNC_CONNECT
 		bool		connected = false;
-
+		int poll_result = PGRES_POLLING_WRITING;
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connecting_Startup");
 
 		do
 		{
 			WaitEvent	event;
-			int			poll_result = PQconnectPoll(shard->conn);
 
 			switch (poll_result)
 			{
@@ -508,25 +468,45 @@ pageserver_connect(shardno_t shard_no, int elevel)
 				}
 			case PGRES_POLLING_READING:
 				/* Sleep until there's something to do */
-				(void) WaitEventSetWait(shard->wes_read, -1L, &event, 1,
-										PG_WAIT_EXTENSION);
-				ResetLatch(MyLatch);
-
-				/* query cancellation, backend shutdown */
-				CHECK_FOR_INTERRUPTS();
-
+				while (true)
+				{
+					int rc = WaitLatchOrSocket(MyLatch,
+											   WL_EXIT_ON_PM_DEATH | WL_LATCH_SET | WL_SOCKET_READABLE,
+											   PQsocket(shard->conn),
+											   0,
+											   PG_WAIT_EXTENSION);
+					elog(DEBUG5, "PGRES_POLLING_READING=>%d", rc);
+					if (rc & WL_LATCH_SET)
+					{
+						ResetLatch(MyLatch);
+						/* query cancellation, backend shutdown */
+						CHECK_FOR_INTERRUPTS();
+					}
+					if (rc & WL_SOCKET_READABLE)
+						break;
+				}
 				/* PQconnectPoll() handles the socket polling state updates */
 
 				break;
 			case PGRES_POLLING_WRITING:
 				/* Sleep until there's something to do */
-				(void) WaitEventSetWait(shard->wes_write, -1L, &event, 1,
-										PG_WAIT_EXTENSION);
-				ResetLatch(MyLatch);
-
-				/* query cancellation, backend shutdown */
-				CHECK_FOR_INTERRUPTS();
-
+				while (true)
+				{
+					int rc = WaitLatchOrSocket(MyLatch,
+											   WL_EXIT_ON_PM_DEATH | WL_LATCH_SET | WL_SOCKET_WRITEABLE,
+											   PQsocket(shard->conn),
+											   0,
+											   PG_WAIT_EXTENSION);
+					elog(DEBUG5, "PGRES_POLLING_WRITING=>%d", rc);
+					if (rc & WL_LATCH_SET)
+					{
+						ResetLatch(MyLatch);
+						/* query cancellation, backend shutdown */
+						CHECK_FOR_INTERRUPTS();
+					}
+					if (rc & WL_SOCKET_WRITEABLE)
+						break;
+				}
 				/* PQconnectPoll() handles the socket polling state updates */
 
 				break;
@@ -535,12 +515,21 @@ pageserver_connect(shardno_t shard_no, int elevel)
 				connected = true;
 				break;
 			}
+			poll_result = PQconnectPoll(shard->conn);
+			elog(DEBUG5, "PQconnectPoll=>%d", poll_result);
 		}
 		while (!connected);
 
-#endif
 		/* No more polling needed; connection succeeded */
 		shard->last_connect_time = GetCurrentTimestamp();
+
+		shard->wes_read = CreateWaitEventSet(TopMemoryContext, 3);
+		AddWaitEventToSet(shard->wes_read, WL_LATCH_SET, PGINVALID_SOCKET,
+						  MyLatch, NULL);
+		AddWaitEventToSet(shard->wes_read, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+						  NULL, NULL);
+		AddWaitEventToSet(shard->wes_read, WL_SOCKET_READABLE, PQsocket(shard->conn), NULL, NULL);
+
 
 		switch (neon_protocol_version)
 		{
@@ -567,6 +556,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			pfree(msg);
 			return false;
 		}
+
 		ps_send_query_ret = PQsendQuery(shard->conn, pagestream_query);
 		pfree(pagestream_query);
 		if (ps_send_query_ret != 1)
@@ -621,6 +611,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 				}
 			}
 		}
+
 		shard->state = PS_Connected;
 		/* fallthrough */
 	}
@@ -629,7 +620,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		 * We successfully connected. Future connections to this PageServer
 		 * will do fast retries again, with exponential backoff.
 		 */
-		shard->state = PS_Connected;
 		shard->delay_us = MIN_RECONNECT_INTERVAL_USEC;
 
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connected");
