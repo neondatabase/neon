@@ -25,7 +25,11 @@ use pageserver::{
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
     virtual_file,
 };
-use pageserver_api::{key::Key, reltag::SlruKind, shard::TenantShardId};
+use pageserver_api::{
+    key::Key,
+    reltag::SlruKind,
+    shard::{ShardCount, ShardStripeSize, TenantShardId},
+};
 use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use tokio_util::sync::CancellationToken;
@@ -116,6 +120,20 @@ struct AnalyzeLayerMapCmd {
 #[derive(Parser)]
 struct DescribeKeyCommand {
     key: Key,
+
+    /// The number of shards.
+    ///
+    /// The default is 8, which is what we've been recently using. Don't worry about setting it to
+    /// unsharded, it only affects one row in the output you can ignore.
+    #[arg(long)]
+    shard_count: Option<u8>,
+
+    /// The sharding stripe size.
+    ///
+    /// The default is hardcoded. Don't worry about setting this for unsharded tenants, it affects
+    /// one row in output you can ignore.
+    #[arg(long)]
+    stripe_size: Option<u32>,
 }
 
 /// Print out a key corresponding to the given reltag and blocknum, with optional forknum option.
@@ -211,7 +229,11 @@ async fn main() -> anyhow::Result<()> {
                 .time_travel_recover(Some(&prefix), timestamp, done_if_after, &cancel)
                 .await?;
         }
-        Commands::Key(DescribeKeyCommand { key }) => {
+        Commands::Key(DescribeKeyCommand {
+            key,
+            shard_count,
+            stripe_size,
+        }) => {
             println!("{key:?}");
 
             macro_rules! kind_query {
@@ -298,8 +320,15 @@ async fn main() -> anyhow::Result<()> {
                 width = longest - recognized_kind.len() + colon + padding,
             );
 
-            println!("{:?}", pageserver_api::shard::describe(&key, None, None));
+            let shard_count = shard_count.map(ShardCount::new);
+            let stripe_size = stripe_size.map(ShardStripeSize);
 
+            println!(
+                "{:?}",
+                pageserver_api::shard::describe(&key, shard_count, stripe_size)
+            );
+
+            println!("next key: {}", key.next());
         }
 
         Commands::RelBlockToKey(RelBlockToKey {
