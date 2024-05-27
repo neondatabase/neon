@@ -4467,13 +4467,11 @@ impl Timeline {
 
         for l in new_deltas {
             if guard.contains(l.as_ref()) {
-                // we should abort
                 error!("duplicate L1 layer; \
                  likely we already overwrote the exiting file on disk with a possibly different bit pattern, \
                  causing incoherency with in-memory copies (PS page cache) {l}");
-                std::process::abort(); // scary to run `struct Layer` desctructor (?)
+                std::process::abort();
             } else if LayerMap::is_l0(l.layer_desc()) {
-                // we should abort so we don't  otherwise we might leave some
                 error!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
                 std::process::abort(); // if we returned an error, we'd not check the remaining `new_delta` layers for duplicates
             }
