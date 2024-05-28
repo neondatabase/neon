@@ -295,7 +295,7 @@ async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>
         .map_err(|e| ApiError::InternalServerError(e.into()))
 }
 
-/// Force persist control file and remove old WAL.
+/// Force persist control file.
 async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
@@ -304,8 +304,8 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         parse_request_param(&request, "timeline_id")?,
     );
 
-    let _tli = GlobalTimelines::get(ttid)?;
-    // TODO: fixme
+    let tli = GlobalTimelines::get(ttid)?;
+    tli.write_shared_state().await.sk.state.flush().await.map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, ())
 }
 

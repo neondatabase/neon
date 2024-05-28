@@ -760,7 +760,7 @@ impl FullAccessTimeline {
     }
 
     /// Update in memory remote consistent lsn.
-    pub async fn update_remote_consistent_lsn(self: &Arc<Self>, candidate: Lsn) {
+    pub async fn update_remote_consistent_lsn(&self, candidate: Lsn) {
         let mut shared_state = self.write_shared_state().await;
         shared_state.sk.state.inmem.remote_consistent_lsn =
             max(shared_state.sk.state.inmem.remote_consistent_lsn, candidate);
