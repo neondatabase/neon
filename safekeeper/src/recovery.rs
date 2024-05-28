@@ -337,7 +337,7 @@ async fn network_io(
             ReplicationMessage::XLogData(xlog_data) => {
                 let ar_hdr = AppendRequestHeader {
                     term: donor.term,
-                    epoch_start_lsn: Lsn::INVALID, // unused
+                    term_start_lsn: Lsn::INVALID, // unused
                     begin_lsn: Lsn(xlog_data.wal_start()),
                     end_lsn: Lsn(xlog_data.wal_start()) + xlog_data.data().len() as u64,
                     commit_lsn: Lsn::INVALID, // do not attempt to advance, peer communication anyway does it

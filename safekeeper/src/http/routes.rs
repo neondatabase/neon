@@ -85,11 +85,11 @@ impl From<TermSwitchApiEntry> for TermLsn {
     }
 }
 
-/// Augment AcceptorState with epoch for convenience
+/// Augment AcceptorState with last_log_term for convenience
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AcceptorStateStatus {
     pub term: Term,
-    pub epoch: Term,
+    pub epoch: Term, // aka last_log_term
     pub term_history: Vec<TermSwitchApiEntry>,
 }
 
@@ -130,7 +130,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     let (inmem, state) = tli.get_state().await;
     let flush_lsn = tli.get_flush_lsn().await;
 
-    let epoch = state.acceptor_state.get_epoch(flush_lsn);
+    let last_log_term = state.acceptor_state.get_last_log_term(flush_lsn);
     let term_history = state
         .acceptor_state
         .term_history
@@ -143,7 +143,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         .collect();
     let acc_state = AcceptorStateStatus {
         term: state.acceptor_state.term,
-        epoch,
+        epoch: last_log_term,
         term_history,
     };
 

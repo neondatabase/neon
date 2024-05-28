@@ -165,7 +165,7 @@ pub async fn append_logical_message(
     let append_request = ProposerAcceptorMessage::AppendRequest(AppendRequest {
         h: AppendRequestHeader {
             term: msg.term,
-            epoch_start_lsn: begin_lsn,
+            term_start_lsn: begin_lsn,
             begin_lsn,
             end_lsn,
             commit_lsn,
