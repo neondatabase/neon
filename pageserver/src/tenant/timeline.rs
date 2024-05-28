@@ -4320,6 +4320,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         mode: ImageLayerCreationMode,
+        start: Key,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         assert!(!matches!(mode, ImageLayerCreationMode::Initial));
 
@@ -4354,13 +4355,12 @@ impl Timeline {
                 next_start_key: img_range.end,
             });
         }
-        let has_keys = !data.is_empty();
+        let mut has_keys = false;
         for (k, v) in data {
-            // Even if the value is empty (deleted), we do not delete it for now until we can ensure vectored get
-            // considers this situation properly.
-            // if v.is_empty() {
-            //     continue;
-            // }
+            if v.is_empty() {
+                continue;
+            }
+            has_keys = true;
 
             // No need to handle sharding b/c metadata keys are always on the 0-th shard.
 
@@ -4368,16 +4368,26 @@ impl Timeline {
             // on the normal data path either.
             image_layer_writer.put_image(k, v, ctx).await?;
         }
-        Ok(ImageLayerCreationOutcome {
-            image: if has_keys {
-                let image_layer = image_layer_writer.finish(self, ctx).await?;
-                Some(image_layer)
-            } else {
-                tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
-                None
-            },
-            next_start_key: img_range.end,
-        })
+
+        if has_keys {
+            // Normal path: we have written some data into the new image layer for this
+            // partition, so flush it to disk.
+            let image_layer = image_layer_writer.finish(self, ctx).await?;
+            Ok(ImageLayerCreationOutcome {
+                image: Some(image_layer),
+                next_start_key: img_range.end,
+            })
+        } else {
+            // Special case: the image layer may be empty if this is a sharded tenant and the
+            // partition does not cover any keys owned by this shard.  In this case, to ensure
+            // we don't leave gaps between image layers, leave `start` where it is, so that the next
+            // layer we write will cover the key range that we just scanned.
+            tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
+            Ok(ImageLayerCreationOutcome {
+                image: None,
+                next_start_key: start,
+            })
+        }
     }
 
     #[tracing::instrument(skip_all, fields(%lsn, %mode))]
@@ -4487,6 +4497,7 @@ impl Timeline {
                         ctx,
                         img_range,
                         mode,
+                        start,
                     )
                     .await?;
                 start = next_start_key;
@@ -5438,11 +5449,12 @@ impl Timeline {
         let min_key = *deltas.first().map(|(k, _, _)| k).unwrap();
         let max_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
         let min_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
-        let max_lsn = Lsn(deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap().0 + 1);
+        let max_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
         assert!(
             max_lsn <= last_record_lsn,
             "advance last record lsn before inserting a layer, max_lsn={max_lsn}, last_record_lsn={last_record_lsn}"
         );
+        let max_lsn = Lsn(max_lsn.0 + 1);
         if let Some(check_start_lsn) = check_start_lsn {
             assert!(min_lsn >= check_start_lsn);
         }
@@ -5466,6 +5478,36 @@ impl Timeline {
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    /// Return all keys at the LSN in the image layers
+    pub(crate) async fn inspect_image_layers(
+        self: &Arc<Timeline>,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Bytes)>> {
+        let mut all_data = Vec::new();
+        let guard = self.layers.read().await;
+        for layer in guard.layer_map().iter_historic_layers() {
+            if !layer.is_delta() && layer.image_layer_lsn() == lsn {
+                let layer = guard.get_from_desc(&layer);
+                let mut reconstruct_data = ValuesReconstructState::default();
+                layer
+                    .get_values_reconstruct_data(
+                        KeySpace::single(Key::MIN..Key::MAX),
+                        lsn..Lsn(lsn.0 + 1),
+                        &mut reconstruct_data,
+                        ctx,
+                    )
+                    .await?;
+                for (k, v) in reconstruct_data.keys {
+                    all_data.push((k, v?.img.unwrap().1));
+                }
+            }
+        }
+        all_data.sort();
+        Ok(all_data)
     }
 }
 
