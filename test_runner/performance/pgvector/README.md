@@ -52,4 +52,4 @@ size_categories:
 - Created: February 2024. 
 - Text used for Embedding: title (string) + text (string)
 - Embedding Model: OpenAI text-embedding-3-large
-- This dataset was generated from the first 1M entries of https://huggingface.co/datasets/BeIR/dbpedia-entity, extracted by @KShivendu_ [here](https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M)
+- This dataset was generated from the first 1M entries of https://huggingface.co/datasets/BeIR/dbpedia-entity, extracted by @KShivendu_
