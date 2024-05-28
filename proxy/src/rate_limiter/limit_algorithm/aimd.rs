@@ -27,7 +27,6 @@ pub struct Aimd {
 
 impl LimitAlgorithm for Aimd {
     fn update(&self, old_limit: usize, sample: Sample) -> usize {
-        dbg!(sample);
         use Outcome::*;
         match sample.outcome {
             Success => {
@@ -35,7 +34,12 @@ impl LimitAlgorithm for Aimd {
 
                 if utilisation > self.utilisation {
                     let limit = old_limit + self.inc;
-                    limit.clamp(self.min, self.max)
+                    let increased_limit = limit.clamp(self.min, self.max);
+                    if increased_limit > old_limit {
+                        tracing::info!(increased_limit, "limit increased");
+                    }
+
+                    increased_limit
                 } else {
                     old_limit
                 }

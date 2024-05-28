@@ -192,15 +192,21 @@ impl DynamicLimiter {
             let mut notified = pin!(self.ready.notified());
             let mut ready = notified.as_mut().enable();
             loop {
+                let mut limit = None;
                 if ready {
                     let mut inner = self.inner.lock();
                     if inner.take(&self.ready).is_some() {
                         break Ok(Token::new(self.clone()));
                     }
+                    limit = Some(inner.limit);
                 }
                 match timeout_at(deadline, notified.as_mut()).await {
                     Ok(()) => ready = true,
-                    Err(e) => break Err(e),
+                    Err(e) => {
+                        let limit = limit.unwrap_or_else(|| self.inner.lock().limit);
+                        tracing::info!(limit, "could not acquire token in time");
+                        break Err(e);
+                    }
                 }
             }
         }
