@@ -7,7 +7,7 @@ use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
 use tracing::{error, info, instrument, Instrument};
-use utils::{crashsafe, fs_ext, id::TimelineId};
+use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
 
 use crate::{
     config::PageServerConf,

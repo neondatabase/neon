@@ -197,6 +197,7 @@ pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
+use utils::pausable_failpoint;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1192,7 +1193,7 @@ impl RemoteTimelineClient {
                     &self.storage_impl,
                     uploaded.local_path(),
                     &remote_path,
-                    uploaded.metadata().file_size(),
+                    uploaded.metadata().file_size,
                     cancel,
                 )
                 .await
@@ -1573,7 +1574,7 @@ impl RemoteTimelineClient {
                         &self.storage_impl,
                         local_path,
                         &remote_path,
-                        layer_metadata.file_size(),
+                        layer_metadata.file_size,
                         &self.cancel,
                     )
                     .measure_remote_op(
@@ -1768,7 +1769,7 @@ impl RemoteTimelineClient {
             UploadOp::UploadLayer(_, m) => (
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Upload,
-                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size()),
+                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size),
             ),
             UploadOp::UploadMetadata(_, _) => (
                 RemoteOpFileKind::Index,

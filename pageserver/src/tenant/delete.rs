@@ -8,7 +8,7 @@ use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, Instrument};
 
-use utils::{backoff, completion, crashsafe, fs_ext, id::TimelineId};
+use utils::{backoff, completion, crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
 
 use crate::{
     config::PageServerConf,

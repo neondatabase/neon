@@ -41,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
+    fs_ext, pausable_failpoint,
     sync::gate::{Gate, GateGuard},
     vec_map::VecMap,
 };
@@ -60,6 +61,7 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
@@ -88,9 +90,6 @@ use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
-use crate::{
-    pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::timeline::init::LocalLayerFileMetadata,
-};
 use crate::{
     pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
     virtual_file::{MaybeFatalIo, VirtualFile},
@@ -1424,7 +1423,7 @@ impl Timeline {
         let layer_map = guard.layer_map();
         let mut size = 0;
         for l in layer_map.iter_historic_layers() {
-            size += l.file_size();
+            size += l.file_size;
         }
         size
     }
@@ -2454,8 +2453,6 @@ impl Timeline {
         let span = tracing::Span::current();
 
         // Copy to move into the task we're about to spawn
-        let generation = self.generation;
-        let shard = self.get_shard_index();
         let this = self.myself.upgrade().expect("&self method holds the arc");
 
         let (loaded_layers, needs_cleanup, total_physical_size) = tokio::task::spawn_blocking({
@@ -2469,11 +2466,14 @@ impl Timeline {
 
                 for discovered in discovered {
                     let (name, kind) = match discovered {
-                        Discovered::Layer(layer_file_name, local_path, file_size) => {
-                            discovered_layers.push((layer_file_name, local_path, file_size));
+                        Discovered::Layer(layer_file_name, local_metadata) => {
+                            discovered_layers.push((layer_file_name, local_metadata));
                             continue;
                         }
-                        Discovered::IgnoredBackup => {
+                        Discovered::IgnoredBackup(path) => {
+                            std::fs::remove_file(path)
+                                .or_else(fs_ext::ignore_not_found)
+                                .fatal_err("Removing .old file");
                             continue;
                         }
                         Discovered::Unknown(file_name) => {
@@ -2499,13 +2499,8 @@ impl Timeline {
                     );
                 }
 
-                let decided = init::reconcile(
-                    discovered_layers,
-                    index_part.as_ref(),
-                    disk_consistent_lsn,
-                    generation,
-                    shard,
-                );
+                let decided =
+                    init::reconcile(discovered_layers, index_part.as_ref(), disk_consistent_lsn);
 
                 let mut loaded_layers = Vec::new();
                 let mut needs_cleanup = Vec::new();
@@ -2513,21 +2508,6 @@ impl Timeline {
 
                 for (name, decision) in decided {
                     let decision = match decision {
-                        Ok(UseRemote { local, remote }) => {
-                            // Remote is authoritative, but we may still choose to retain
-                            // the local file if the contents appear to match
-                            if local.metadata.file_size() == remote.file_size() {
-                                // Use the local file, but take the remote metadata so that we pick up
-                                // the correct generation.
-                                UseLocal(LocalLayerFileMetadata {
-                                    metadata: remote,
-                                    local_path: local.local_path,
-                                })
-                            } else {
-                                init::cleanup_local_file_for_remote(&local, &remote)?;
-                                UseRemote { local, remote }
-                            }
-                        }
                         Ok(decision) => decision,
                         Err(DismissedLayer::Future { local }) => {
                             if let Some(local) = local {
@@ -2545,6 +2525,11 @@ impl Timeline {
                             // this file never existed remotely, we will have to do rework
                             continue;
                         }
+                        Err(DismissedLayer::BadMetadata(local)) => {
+                            init::cleanup_local_file_for_remote(&local)?;
+                            // this file never existed remotely, we will have to do rework
+                            continue;
+                        }
                     };
 
                     match &name {
@@ -2555,14 +2540,12 @@ impl Timeline {
                     tracing::debug!(layer=%name, ?decision, "applied");
 
                     let layer = match decision {
-                        UseLocal(local) => {
-                            total_physical_size += local.metadata.file_size();
-                            Layer::for_resident(conf, &this, local.local_path, name, local.metadata)
+                        Resident { local, remote } => {
+                            total_physical_size += local.file_size;
+                            Layer::for_resident(conf, &this, local.local_path, name, remote)
                                 .drop_eviction_guard()
                         }
-                        Evicted(remote) | UseRemote { remote, .. } => {
-                            Layer::for_evicted(conf, &this, name, remote)
-                        }
+                        Evicted(remote) => Layer::for_evicted(conf, &this, name, remote),
                     };
 
                     loaded_layers.push(layer);
@@ -3071,7 +3054,7 @@ impl Timeline {
 
             HeatMapLayer::new(
                 layer.layer_desc().layer_name(),
-                (&layer.metadata()).into(),
+                layer.metadata(),
                 last_activity_ts,
             )
         });
@@ -4347,7 +4330,7 @@ impl Timeline {
         let delta_file_accessed = reconstruct_state.get_delta_layers_visited();
 
         let trigger_generation = delta_file_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
-        info!(
+        debug!(
             "generate image layers for metadata keys: trigger_generation={trigger_generation}, \
                 delta_file_accessed={delta_file_accessed}, total_kb_retrieved={total_kb_retrieved}, \
                 total_key_retrieved={total_key_retrieved}"
@@ -4725,10 +4708,15 @@ impl Timeline {
 
     async fn rewrite_layers(
         self: &Arc<Self>,
-        replace_layers: Vec<(Layer, ResidentLayer)>,
-        drop_layers: Vec<Layer>,
+        mut replace_layers: Vec<(Layer, ResidentLayer)>,
+        mut drop_layers: Vec<Layer>,
     ) -> anyhow::Result<()> {
         let mut guard = self.layers.write().await;
+
+        // Trim our lists in case our caller (compaction) raced with someone else (GC) removing layers: we want
+        // to avoid double-removing, and avoid rewriting something that was removed.
+        replace_layers.retain(|(l, _)| guard.contains(l));
+        drop_layers.retain(|l| guard.contains(l));
 
         guard.rewrite_layers(&replace_layers, &drop_layers, &self.metrics);
 
@@ -5602,26 +5590,6 @@ impl<'a> TimelineWriter<'a> {
 fn is_send() {
     fn _assert_send<T: Send>() {}
     _assert_send::<TimelineWriter<'_>>();
-}
-
-/// Add a suffix to a layer file's name: .{num}.old
-/// Uses the first available num (starts at 0)
-fn rename_to_backup(path: &Utf8Path) -> anyhow::Result<()> {
-    let filename = path
-        .file_name()
-        .ok_or_else(|| anyhow!("Path {path} don't have a file name"))?;
-    let mut new_path = path.to_owned();
-
-    for i in 0u32.. {
-        new_path.set_file_name(format!("{filename}.{i}.old"));
-        if !new_path.exists() {
-            std::fs::rename(path, &new_path)
-                .with_context(|| format!("rename {path:?} to {new_path:?}"))?;
-            return Ok(());
-        }
-    }
-
-    bail!("couldn't find an unused backup number for {:?}", path)
 }
 
 #[cfg(test)]

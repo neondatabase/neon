@@ -287,6 +287,26 @@ async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>
         .map_err(|e| ApiError::InternalServerError(e.into()))
 }
 
+/// Force persist control file and remove old WAL.
+async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+
+    let tli = GlobalTimelines::get(ttid)?;
+    tli.maybe_persist_control_file(true)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    tli.remove_old_wal()
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Deactivates the timeline and removes its data directory.
 async fn timeline_delete_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let ttid = TenantTimelineId::new(
@@ -552,6 +572,10 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .patch(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/control_file",
             |r| request_span(r, patch_control_file_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
+            |r| request_span(r, timeline_checkpoint_handler),
         )
         // for tests
         .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {

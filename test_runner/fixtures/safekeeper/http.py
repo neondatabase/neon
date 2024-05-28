@@ -177,6 +177,13 @@ class SafekeeperHttpClient(requests.Session):
         )
         res.raise_for_status()
 
+    def checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
+            json={},
+        )
+        res.raise_for_status()
+
     # only_local doesn't remove segments in the remote storage.
     def timeline_delete(
         self, tenant_id: TenantId, timeline_id: TimelineId, only_local: bool = False
