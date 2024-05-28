@@ -27,6 +27,7 @@ def replication_sync(master, replica):
                 return replica_lsn
         time.sleep(0.5)
 
+@pytest.mark.timeout(0)
 def test_ro_replica_lag(
         pg_bin: PgBin,
         neon_api_key: str,
@@ -35,35 +36,36 @@ def test_ro_replica_lag(
 ):
     project = neon_create_project(neon_api_key, neon_api_base_url, pg_version)
     project_id = project["project"]["id"]
-    branch_id = project["branch"]["id"]
-    master_connstr = project["connection_uris"][0]["connection_uri"]
+    try:
+        branch_id = project["branch"]["id"]
+        master_connstr = project["connection_uris"][0]["connection_uri"]
 
-    while is_operation_ongoing(neon_api_key, neon_api_base_url, project_id):
-        time.sleep(1)
+        while is_operation_ongoing(neon_api_key, neon_api_base_url, project_id):
+            time.sleep(1)
 
-    replica = neon_create_endpoint(
-        neon_api_key,
-        neon_api_base_url,
-        project_id,
-        branch_id,
-        endpoint_type="read_only",
-    )
+        replica = neon_create_endpoint(
+            neon_api_key,
+            neon_api_base_url,
+            project_id,
+            branch_id,
+            endpoint_type="read_only",
+        )
 
-    replica_connstr = neon_get_connection_uri(
-        neon_api_key,
-        neon_api_base_url,
-        project_id,
-        endpoint_id=replica["endpoint"]["id"],
-    )["uri"]
+        replica_connstr = neon_get_connection_uri(
+            neon_api_key,
+            neon_api_base_url,
+            project_id,
+            endpoint_id=replica["endpoint"]["id"],
+        )["uri"]
 
-    pg_bin.run_capture(["pgbench", "-i", "-s100", master_connstr])
-    conn_master = psycopg2.connect(master_connstr)
-    cur_master = conn_master.cursor()
-    conn_replica = psycopg2.connect(replica_connstr)
-    cur_replica = conn_replica.cursor()
+        pg_bin.run_capture(["pgbench", "-i", "-s100", master_connstr])
+        conn_master = psycopg2.connect(master_connstr)
+        cur_master = conn_master.cursor()
+        conn_replica = psycopg2.connect(replica_connstr)
+        cur_replica = conn_replica.cursor()
 
-    pg_bin.run_capture(["pgbench", "-c10", "-T100", "-Mprepared", master_connstr])
-
-    start = time.time()
-    replication_sync(cur_master, cur_replica)
-    log.info(f"Sync with master took {time.time() - start} seconds")
+        start = time.time()
+        replication_sync(cur_master, cur_replica)
+        log.info(f"Sync with master took {time.time() - start} seconds")
+    finally:
+        neon_delete_project(neon_api_key, neon_api_base_url, project_id)

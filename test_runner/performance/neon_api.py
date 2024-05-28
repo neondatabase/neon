@@ -49,6 +49,23 @@ def neon_create_project(
     return cast("dict[str, Any]", resp.json())
 
 
+def neon_delete_project(
+    neon_api_key: str,
+    neon_api_base_url: str,
+    project_id: str,
+) -> dict[str, Any]:
+    resp = requests.delete(
+        f"{neon_api_base_url}/projects/{project_id}",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {neon_api_key}",
+        },
+    )
+
+    return cast("dict[str, Any]", resp.json())
+    
+
 def neon_start_endpoint(
     neon_api_key: str,
     neon_api_base_url: str,
