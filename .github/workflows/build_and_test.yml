@@ -874,10 +874,10 @@ jobs:
           pull: true
           file: Dockerfile.compute-node
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache
-          cache-to: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache,mode=max
+          cache-from: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
+          cache-to: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
           tags: |
-            neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+            neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
