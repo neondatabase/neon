@@ -841,7 +841,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # fetch something sensible from status
     tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
-    epoch = tli_status.acceptor_epoch
+    term = tli_status.term
     timeline_start_lsn = tli_status.timeline_start_lsn
 
     if auth_enabled:
@@ -862,8 +862,8 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     endpoint.safe_psql("insert into t values(10)")
 
     tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
-    epoch_after_reboot = tli_status.acceptor_epoch
-    assert epoch_after_reboot > epoch
+    term_after_reboot = tli_status.term
+    assert term_after_reboot > term
 
     # and timeline_start_lsn stays the same
     assert tli_status.timeline_start_lsn == timeline_start_lsn
@@ -1104,11 +1104,11 @@ def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
     # First check that term / flush_lsn are the same: it is easier to
     # report/understand if WALs are different due to that.
     statuses = [sk_http_cli.timeline_status(tenant_id, timeline_id) for sk_http_cli in sk_http_clis]
-    term_flush_lsns = [(s.acceptor_epoch, s.flush_lsn) for s in statuses]
+    term_flush_lsns = [(s.last_log_term, s.flush_lsn) for s in statuses]
     for tfl, sk in zip(term_flush_lsns[1:], sks[1:]):
         assert (
             term_flush_lsns[0] == tfl
-        ), f"(term, flush_lsn) are not equal on sks {sks[0].id} and {sk.id}: {term_flush_lsns[0]} != {tfl}"
+        ), f"(last_log_term, flush_lsn) are not equal on sks {sks[0].id} and {sk.id}: {term_flush_lsns[0]} != {tfl}"
 
     # check that WALs are identic.
     segs = [sk.list_segments(tenant_id, timeline_id) for sk in sks]
