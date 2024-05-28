@@ -6209,70 +6209,31 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let cancel = CancellationToken::new();
-
         let base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
         let base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
         let base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
 
-        let mut lsn = Lsn(0x20);
-
-        {
-            let mut writer = tline.writer().await;
-            writer
-                .put(base_key, lsn, &Value::Image(test_img("data key 1")), &ctx)
-                .await?;
-            writer.finish_write(lsn);
-            drop(writer);
-
-            tline.freeze_and_flush().await?; // this will create a image layer
-        }
-
-        let child = tenant
-            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
+        tline.force_advance_lsn(Lsn(0x20));
+        tline
+            .force_create_image_layer(Lsn(0x20), vec![(base_key, test_img("data key 1"))], &ctx)
             .await
             .unwrap();
 
-        lsn.0 += 0x10;
+        let child = tenant
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x20)), &ctx)
+            .await
+            .unwrap();
 
-        {
-            let mut writer = child.writer().await;
-            writer
-                .put(
-                    base_key_child,
-                    lsn,
-                    &Value::Image(test_img("data key 2")),
-                    &ctx,
-                )
-                .await?;
-            writer.finish_write(lsn);
-            drop(writer);
-
-            child.freeze_and_flush().await?; // this will create a delta
-
-            {
-                // update the partitioning to include the test key space, otherwise they
-                // will be dropped by image layer creation
-                let mut guard = child.partitioning.lock().await;
-                let ((partitioning, _), partition_lsn) = &mut *guard;
-                partitioning
-                    .parts
-                    .push(KeySpace::single(base_key..base_key_nonexist)); // exclude the nonexist key
-                *partition_lsn = lsn;
-            }
-
-            child
-                .compact(
-                    &cancel,
-                    {
-                        let mut set = EnumSet::empty();
-                        set.insert(CompactFlags::ForceImageLayerCreation);
-                        set
-                    },
-                    &ctx,
-                )
-                .await?; // force create an image layer for the keys, TODO: check if the image layer is created
-        }
+        tline.force_advance_lsn(Lsn(0x30));
+        child.force_advance_lsn(Lsn(0x30));
+        child
+            .force_create_image_layer(
+                Lsn(0x30),
+                vec![(base_key_child, test_img("data key 2"))],
+                &ctx,
+            )
+            .await
+            .unwrap();
 
         async fn get_vectored_impl_wrapper(
             tline: &Arc<Timeline>,
@@ -6294,6 +6255,8 @@ mod tests {
                 v.unwrap()
             }))
         }
+
+        let lsn = Lsn(0x30);
 
         // test vectored get on parent timeline
         assert_eq!(
@@ -6338,8 +6301,6 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let cancel = CancellationToken::new();
-
         let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
         let mut base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
         let mut base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
@@ -6347,78 +6308,31 @@ mod tests {
         base_key_child.field1 = AUX_KEY_PREFIX;
         base_key_nonexist.field1 = AUX_KEY_PREFIX;
 
-        let mut lsn = Lsn(0x20);
-
-        {
-            let mut writer = tline.writer().await;
-            writer
-                .put(
-                    base_key,
-                    lsn,
-                    &Value::Image(test_img("metadata key 1")),
-                    &ctx,
-                )
-                .await?;
-            writer.finish_write(lsn);
-            drop(writer);
-
-            tline.freeze_and_flush().await?; // this will create an image layer
-
-            tline
-                .compact(
-                    &cancel,
-                    {
-                        let mut set = EnumSet::empty();
-                        set.insert(CompactFlags::ForceImageLayerCreation);
-                        set.insert(CompactFlags::ForceRepartition);
-                        set
-                    },
-                    &ctx,
-                )
-                .await?; // force create an image layer for metadata keys
-            tenant
-                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
-                .await?;
-        }
-
-        let child = tenant
-            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
+        tline.force_advance_lsn(Lsn(0x20));
+        tline
+            .force_create_image_layer(
+                Lsn(0x20),
+                vec![(base_key, test_img("metadata key 1"))],
+                &ctx,
+            )
             .await
             .unwrap();
 
-        lsn.0 += 0x10;
+        let child = tenant
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x20)), &ctx)
+            .await
+            .unwrap();
 
-        {
-            let mut writer = child.writer().await;
-            writer
-                .put(
-                    base_key_child,
-                    lsn,
-                    &Value::Image(test_img("metadata key 2")),
-                    &ctx,
-                )
-                .await?;
-            writer.finish_write(lsn);
-            drop(writer);
-
-            child.freeze_and_flush().await?;
-
-            child
-                .compact(
-                    &cancel,
-                    {
-                        let mut set = EnumSet::empty();
-                        set.insert(CompactFlags::ForceImageLayerCreation);
-                        set.insert(CompactFlags::ForceRepartition);
-                        set
-                    },
-                    &ctx,
-                )
-                .await?; // force create an image layer for metadata keys
-            tenant
-                .gc_iteration(Some(child.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
-                .await?;
-        }
+        tline.force_advance_lsn(Lsn(0x30));
+        child.force_advance_lsn(Lsn(0x30));
+        child
+            .force_create_image_layer(
+                Lsn(0x30),
+                vec![(base_key_child, test_img("metadata key 2"))],
+                &ctx,
+            )
+            .await
+            .unwrap();
 
         async fn get_vectored_impl_wrapper(
             tline: &Arc<Timeline>,
@@ -6440,6 +6354,8 @@ mod tests {
                 v.unwrap()
             }))
         }
+
+        let lsn = Lsn(0x30);
 
         // test vectored get on parent timeline
         assert_eq!(

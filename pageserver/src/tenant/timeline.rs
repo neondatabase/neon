@@ -9,6 +9,9 @@ pub mod span;
 pub mod uninit;
 mod walreceiver;
 
+#[cfg(test)]
+mod test_utils;
+
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
