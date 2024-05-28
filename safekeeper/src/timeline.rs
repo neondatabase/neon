@@ -244,7 +244,7 @@ impl SharedState {
                 timeline_id: ttid.timeline_id.as_ref().to_owned(),
             }),
             term: self.sk.state.acceptor_state.term,
-            last_log_term: self.sk.get_epoch(),
+            last_log_term: self.sk.get_last_log_term(),
             flush_lsn: self.sk.flush_lsn().0,
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: self.sk.state.inmem.commit_lsn.0,
@@ -704,7 +704,7 @@ impl Timeline {
     pub async fn recovery_needed(&self, heartbeat_timeout: Duration) -> RecoveryNeededInfo {
         let ss = self.read_shared_state().await;
         let term = ss.sk.state.acceptor_state.term;
-        let last_log_term = ss.sk.get_epoch();
+        let last_log_term = ss.sk.get_last_log_term();
         let flush_lsn = ss.sk.flush_lsn();
         // note that peers contain myself, but that's ok -- we are interested only in peers which are strictly ahead of us.
         let mut peers = ss.get_peers(heartbeat_timeout);
@@ -844,7 +844,7 @@ impl Timeline {
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: state.last_removed_segno,
-            epoch_start_lsn: state.sk.epoch_start_lsn,
+            epoch_start_lsn: state.sk.term_start_lsn,
             mem_state: state.sk.state.inmem.clone(),
             persisted_state: state.sk.state.clone(),
             flush_lsn: state.sk.wal_store.flush_lsn(),
@@ -867,7 +867,7 @@ impl Timeline {
             active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: state.last_removed_segno,
-            epoch_start_lsn: state.sk.epoch_start_lsn,
+            epoch_start_lsn: state.sk.term_start_lsn,
             mem_state: state.sk.state.inmem.clone(),
             write_lsn,
             write_record_lsn,
