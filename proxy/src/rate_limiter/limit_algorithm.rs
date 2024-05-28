@@ -156,24 +156,6 @@ impl DynamicLimiter {
         })
     }
 
-    // /// Try to immediately acquire a concurrency [Token].
-    // ///
-    // /// Returns `None` if there are none available.
-    // pub fn try_acquire(self: &Arc<Self>) -> Option<Token> {
-    //     if self.config.disable {
-    //         // If the rate limiter is disabled, we can always acquire a token.
-    //         Some(Token::new(None, self.clone()))
-    //     } else {
-    //         let mut inner = self.inner.lock();
-    //         if inner.available > 1 {
-    //             inner.available -= 1;
-    //             Some(Token::new(Some(()), self.clone()))
-    //         } else {
-    //             None
-    //         }
-    //     }
-    // }
-
     /// Try to acquire a concurrency [Token], waiting for `duration` if there are none available.
     ///
     /// Returns `None` if there are none available after `duration`.
