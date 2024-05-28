@@ -69,7 +69,6 @@ mod test {
         assert!(dst.is_absolute());
 
         let result = rename_noreplace(&src, &dst);
-        assert!(result.is_err());
         assert_eq!(result.unwrap_err(), nix::Error::EEXIST);
     }
 
@@ -88,7 +87,6 @@ mod test {
         fs::write(&dst, b"").unwrap();
 
         let result = rename_noreplace(&src, &dst);
-        assert!(result.is_err());
         assert_eq!(result.unwrap_err(), nix::Error::EEXIST);
     }
 
@@ -102,8 +100,7 @@ mod test {
 
         fs::write(&src, b"content").unwrap();
 
-        let result = rename_noreplace(src.as_std_path(), dst.as_std_path());
-        assert!(result.is_ok());
+        rename_noreplace(src.as_std_path(), dst.as_std_path()).unwrap();
         assert_eq!(
             "content",
             String::from_utf8(std::fs::read(&dst).unwrap()).unwrap()
