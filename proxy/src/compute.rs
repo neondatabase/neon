@@ -274,7 +274,6 @@ impl ConnCfg {
     pub async fn connect(
         &self,
         ctx: &mut RequestMonitoring,
-        allow_self_signed_compute: bool,
         aux: MetricsAuxInfo,
         timeout: Duration,
     ) -> Result<PostgresConnection, ConnectionError> {
@@ -282,10 +281,7 @@ impl ConnCfg {
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
         drop(pause);
 
-        let tls_connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(allow_self_signed_compute)
-            .build()
-            .unwrap();
+        let tls_connector = native_tls::TlsConnector::builder().build().unwrap();
         let mut mk_tls = postgres_native_tls::MakeTlsConnector::new(tls_connector);
         let tls = MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut mk_tls, host)?;
 

@@ -121,6 +121,5 @@ pub(super) async fn authenticate(
     Ok(NodeInfo {
         config,
         aux: db_info.aux,
-        allow_self_signed_compute: false, // caller may override
     })
 }

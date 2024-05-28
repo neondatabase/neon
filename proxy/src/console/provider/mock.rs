@@ -126,7 +126,6 @@ impl Api {
                 branch_id: (&BranchId::from("branch")).into(),
                 cold_start_info: crate::console::messages::ColdStartInfo::Warm,
             },
-            allow_self_signed_compute: false,
         };
 
         Ok(node)

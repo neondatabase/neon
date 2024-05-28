@@ -42,6 +42,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tracing::error;
 use tracing::info;
 use tracing::warn;
 use tracing::Instrument;
@@ -507,7 +508,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
 
     if args.allow_self_signed_compute {
-        warn!("allowing self-signed compute certificates");
+        error!("self-signed compute is not supported");
     }
     let backup_metric_collection_config = config::MetricBackupCollectionConfig {
         interval: args.metric_backup_collection_interval,
@@ -645,7 +646,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         tls_config,
         auth_backend,
         metric_collection,
-        allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
         require_client_ip: args.require_client_ip,
