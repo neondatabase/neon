@@ -55,6 +55,8 @@ for pg_version in 16; do
     echo Adding auto-loading of anon
     docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "ALTER SYSTEM SET session_preload_libraries='anon'"
     docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "SELECT pg_reload_conf()"
+    echo Adding dummy config
+    docker exec $COMPUTE_CONTAINER_NAME touch /var/db/postgres/compute/compute_ctl_temp_override.conf
     TMPDIR=$(mktemp -d)
     docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
     echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
