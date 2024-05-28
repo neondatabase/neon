@@ -1,3 +1,20 @@
+# Source of the dataset for pgvector tests
+
+This readme was copied from https://huggingface.co/datasets/Qdrant/dbpedia-entities-openai3-text-embedding-3-large-1536-1M
+
+## Download the parquet files
+
+```bash
+brew install git-lfs
+git-lfs clone https://huggingface.co/datasets/Qdrant/dbpedia-entities-openai3-text-embedding-3-large-1536-1M
+```
+
+## Load into postgres:
+
+see loaddata.py in this directory
+
+## Rest of dataset card as on huggingface
+
 ---
 dataset_info:
   features:
@@ -35,4 +52,4 @@ size_categories:
 - Created: February 2024. 
 - Text used for Embedding: title (string) + text (string)
 - Embedding Model: OpenAI text-embedding-3-large
-- This dataset was generated from the first 1M entries of https://huggingface.co/datasets/BeIR/dbpedia-entity, extracted by @KShivendu_ [here](https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M)
+- This dataset was generated from the first 1M entries of https://huggingface.co/datasets/BeIR/dbpedia-entity, extracted by @KShivendu_
