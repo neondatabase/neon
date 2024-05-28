@@ -829,8 +829,8 @@ jobs:
           push: true
           pull: true
           file: Dockerfile.compute-node
-          cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache
-          cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache,mode=max
+          cache-from: type=registry,ref=neondatabase/neon-test-${{ matrix.version }}:cache
+          cache-to: type=registry,ref=neondatabase/neon-test-${{ matrix.version }}:cache,mode=max
           tags: |
             369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
             neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
