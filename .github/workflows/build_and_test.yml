@@ -835,7 +835,7 @@ jobs:
             369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
             neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
       
-      - name: Build neon-test image
+      - name: Build neon extensions test image
         if: ${{ matrix.version == 'v16' }}
         uses: docker/build-push-action@v5
         with:
@@ -850,10 +850,10 @@ jobs:
           pull: true
           file: Dockerfile.compute-node
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache
-          cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache,mode=max
+          cache-from: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache
+          cache-to: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache,mode=max
           tags: |
-            neondatabase/neon-test-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+            neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once

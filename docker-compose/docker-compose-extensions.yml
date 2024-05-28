@@ -195,8 +195,8 @@ services:
     depends_on:
       - compute
 
-  neon-test:
-    image: ${REPOSITORY:-neondatabase}/neon-test-v${PG_VERSION:-16}:${TAG:-latest}
+  neon-test-extensions:
+    image: ${REPOSITORY:-neondatabase}/neon-test-extensions-v${PG_VERSION:-16}:${TAG:-latest}
     entrypoint:
       - "/bin/bash"
       - "-c"
