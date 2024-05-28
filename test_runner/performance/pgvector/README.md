@@ -1,3 +1,20 @@
+# Source of the dataset for pgvector tests
+
+This readme was copied from https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M
+
+## Download the parquet files
+
+```bash
+brew install git-lfs
+git-lfs clone https://huggingface.co/datasets/Qdrant/dbpedia-entities-openai3-text-embedding-3-large-1536-1M
+```
+
+## Load into postgres:
+
+see loaddata.py in this directory
+
+## Rest of dataset card as on huggingface
+
 ---
 dataset_info:
   features:
