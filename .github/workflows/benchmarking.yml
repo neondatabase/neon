@@ -353,7 +353,7 @@ jobs:
 
   pgbench-pgvector:
     env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "5m"
+      TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
       TEST_PG_BENCH_SCALES_MATRIX: "1"
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 16
