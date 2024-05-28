@@ -1625,7 +1625,7 @@ class NeonCli(AbstractNeonCli):
             args.extend(["-c", "switch_aux_file_policy:v1"])
 
         if aux_file_v2 is AuxFileStore.CrossValidation:
-            args.extend(["-c", "switch_aux_file_policy:cross_validation"])
+            args.extend(["-c", "switch_aux_file_policy:cross-validation"])
 
         if set_default:
             args.append("--set-default")
@@ -2667,7 +2667,9 @@ class NeonPageserver(PgProtocol, LogUtils):
             tenant_id, generation=self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         )
 
-    def list_layers(self, tenant_id: TenantId, timeline_id: TimelineId) -> list[Path]:
+    def list_layers(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ) -> list[Path]:
         """
         Inspect local storage on a pageserver to discover which layer files are present.
 
@@ -2721,7 +2723,12 @@ class PgBin:
         env.update(env_add)
         return env
 
-    def run(self, command: List[str], env: Optional[Env] = None, cwd: Optional[str] = None):
+    def run(
+        self,
+        command: List[str],
+        env: Optional[Env] = None,
+        cwd: Optional[Union[str, Path]] = None,
+    ):
         """
         Run one of the postgres binaries.
 
@@ -2782,6 +2789,28 @@ class PgBin:
         )[0]
         log.info(f"last checkpoint at {checkpoint_lsn}")
         return Lsn(checkpoint_lsn)
+
+    def take_fullbackup(
+        self,
+        pageserver: NeonPageserver,
+        tenant: TenantId,
+        timeline: TimelineId,
+        lsn: Lsn,
+        output: Path,
+    ):
+        """
+        Request fullbackup from pageserver, store it at 'output'.
+        """
+        cmd = [
+            "psql",
+            "--no-psqlrc",
+            pageserver.connstr(),
+            "-c",
+            f"fullbackup {tenant} {timeline} {lsn}",
+            "-o",
+            str(output),
+        ]
+        self.run_capture(cmd)
 
 
 @pytest.fixture(scope="function")
@@ -3742,13 +3771,20 @@ class SafekeeperPort:
 
 
 @dataclass
-class Safekeeper:
+class Safekeeper(LogUtils):
     """An object representing a running safekeeper daemon."""
 
     env: NeonEnv
     port: SafekeeperPort
     id: int
     running: bool = False
+
+    def __init__(self, env: NeonEnv, port: SafekeeperPort, id: int, running: bool = False):
+        self.env = env
+        self.port = port
+        self.id = id
+        self.running = running
+        self.logfile = Path(self.data_dir) / f"safekeeper-{id}.log"
 
     def start(self, extra_opts: Optional[List[str]] = None) -> "Safekeeper":
         assert self.running is False
@@ -3810,11 +3846,38 @@ class Safekeeper:
             port=self.port.http, auth_token=auth_token, is_testing_enabled=is_testing_enabled
         )
 
-    def data_dir(self) -> str:
-        return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
+    def get_timeline_start_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
+        timeline_status = self.http_client().timeline_status(tenant_id, timeline_id)
+        timeline_start_lsn = timeline_status.timeline_start_lsn
+        log.info(f"sk {self.id} timeline start LSN: {timeline_start_lsn}")
+        return timeline_start_lsn
 
-    def timeline_dir(self, tenant_id, timeline_id) -> str:
-        return os.path.join(self.data_dir(), str(tenant_id), str(timeline_id))
+    def get_flush_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
+        timeline_status = self.http_client().timeline_status(tenant_id, timeline_id)
+        flush_lsn = timeline_status.flush_lsn
+        log.info(f"sk {self.id} flush LSN: {flush_lsn}")
+        return flush_lsn
+
+    def pull_timeline(
+        self, srcs: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId
+    ) -> Dict[str, Any]:
+        """
+        pull_timeline from srcs to self.
+        """
+        src_https = [f"http://localhost:{sk.port.http}" for sk in srcs]
+        res = self.http_client().pull_timeline(
+            {"tenant_id": str(tenant_id), "timeline_id": str(timeline_id), "http_hosts": src_https}
+        )
+        src_ids = [sk.id for sk in srcs]
+        log.info(f"finished pulling timeline from {src_ids} to {self.id}")
+        return res
+
+    @property
+    def data_dir(self) -> Path:
+        return self.env.repo_dir / "safekeepers" / f"sk{self.id}"
+
+    def timeline_dir(self, tenant_id, timeline_id) -> Path:
+        return self.data_dir / str(tenant_id) / str(timeline_id)
 
     def list_segments(self, tenant_id, timeline_id) -> List[str]:
         """
@@ -3826,6 +3889,35 @@ class Safekeeper:
             segments.extend([f for f in filenames if not f.startswith("safekeeper.control")])
         segments.sort()
         return segments
+
+    def checkpoint_up_to(self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn):
+        """
+        Assuming pageserver(s) uploaded to s3 up to `lsn`,
+        1) wait for remote_consistent_lsn and wal_backup_lsn on safekeeper to reach it.
+        2) checkpoint timeline on safekeeper, which should remove WAL before this LSN.
+        """
+        cli = self.http_client()
+
+        def are_lsns_advanced():
+            stat = cli.timeline_status(tenant_id, timeline_id)
+            log.info(
+                f"waiting for remote_consistent_lsn and backup_lsn on sk {self.id} to reach {lsn}, currently remote_consistent_lsn={stat.remote_consistent_lsn}, backup_lsn={stat.backup_lsn}"
+            )
+            assert stat.remote_consistent_lsn >= lsn and stat.backup_lsn >= lsn.segment_lsn()
+
+        # xxx: max wait is long because we might be waiting for reconnection from
+        # pageserver to this safekeeper
+        wait_until(30, 1, are_lsns_advanced)
+        cli.checkpoint(tenant_id, timeline_id)
+
+    def wait_until_paused(self, failpoint: str):
+        msg = f"at failpoint {failpoint}"
+
+        def paused():
+            log.info(f"waiting for hitting failpoint {failpoint}")
+            self.assert_log_contains(msg)
+
+        wait_until(20, 0.5, paused)
 
 
 class S3Scrubber:
@@ -4145,7 +4237,12 @@ def list_files_to_compare(pgdata_dir: Path) -> List[str]:
 
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
-def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint: Endpoint):
+def check_restored_datadir_content(
+    test_output_dir: Path,
+    env: NeonEnv,
+    endpoint: Endpoint,
+    ignored_files: Optional[list[str]] = None,
+):
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
 
     # Get the timeline ID. We need it for the 'basebackup' command
@@ -4197,6 +4294,10 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
             for f in pgdata_files
             if not f.startswith("pg_xact") and not f.startswith("pg_multixact")
         ]
+
+    if ignored_files:
+        pgdata_files = [f for f in pgdata_files if f not in ignored_files]
+        restored_files = [f for f in restored_files if f not in ignored_files]
 
     # check that file sets are equal
     assert pgdata_files == restored_files
@@ -4286,6 +4387,17 @@ def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
         if caught_up:
             return
         time.sleep(1)
+
+
+def log_replica_lag(primary: Endpoint, secondary: Endpoint):
+    last_replay_lsn = Lsn(
+        secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
+    )
+    primary_lsn = Lsn(
+        primary.safe_psql_scalar("SELECT pg_current_wal_flush_lsn()", log_query=False)
+    )
+    lag = primary_lsn - last_replay_lsn
+    log.info(f"primary_lsn={primary_lsn}, replay_lsn={last_replay_lsn}, lag={lag}")
 
 
 def wait_for_last_flush_lsn(

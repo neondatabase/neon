@@ -8,8 +8,6 @@
 # Their defaults point at DockerHub `neondatabase/neon:latest` image.`,
 # to verify custom image builds (e.g pre-published ones).
 
-# XXX: Current does not work on M1 macs due to x86_64 Docker images compiled only, and no seccomp support in M1 Docker emulation layer.
-
 set -eux -o pipefail
 
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"

@@ -3,8 +3,10 @@ use super::{
 };
 use crate::{
     auth::{self, AuthFlow},
+    config::AuthenticationConfig,
     console::AuthSecret,
     context::RequestMonitoring,
+    intern::EndpointIdInt,
     sasl,
     stream::{self, Stream},
 };
@@ -20,6 +22,7 @@ pub async fn authenticate_cleartext(
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     secret: AuthSecret,
+    config: &'static AuthenticationConfig,
 ) -> auth::Result<ComputeCredentials> {
     warn!("cleartext auth flow override is enabled, proceeding");
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
@@ -27,8 +30,14 @@ pub async fn authenticate_cleartext(
     // pause the timer while we communicate with the client
     let paused = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
 
+    let ep = EndpointIdInt::from(&info.endpoint);
+
     let auth_flow = AuthFlow::new(client)
-        .begin(auth::CleartextPassword(secret))
+        .begin(auth::CleartextPassword {
+            secret,
+            endpoint: ep,
+            pool: config.thread_pool.clone(),
+        })
         .await?;
     drop(paused);
     // cleartext auth is only allowed to the ws/http protocol.

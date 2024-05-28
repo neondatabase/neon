@@ -820,10 +820,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         Ok(ProcessMsgResult::Continue)
     }
 
-    /// Log as info/error result of handling COPY stream and send back
-    /// ErrorResponse if that makes sense. Shutdown the stream if we got
-    /// Terminate. TODO: transition into waiting for Sync msg if we initiate the
-    /// close.
+    /// - Log as info/error result of handling COPY stream and send back
+    ///   ErrorResponse if that makes sense.
+    /// - Shutdown the stream if we got Terminate.
+    /// - Then close the connection because we don't handle exiting from COPY
+    ///   stream normally.
     pub async fn handle_copy_stream_end(&mut self, end: CopyStreamHandlerEnd) {
         use CopyStreamHandlerEnd::*;
 
@@ -847,10 +848,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             if let Err(e) = self.write_message(&BeMessage::CopyDone).await {
                 error!("failed to send CopyDone: {}", e);
             }
-        }
-
-        if let Terminate = &end {
-            self.state = ProtoState::Closed;
         }
 
         let err_to_send_and_errcode = match &end {
@@ -882,6 +879,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 error!("failed to send ErrorResponse: {}", ee);
             }
         }
+
+        // Proper COPY stream finishing to continue using the connection is not
+        // implemented at the server side (we don't need it so far). To prevent
+        // further usages of the connection, close it.
+        self.framed.shutdown().await.ok();
+        self.state = ProtoState::Closed;
     }
 }
 

@@ -23,7 +23,6 @@ from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
     Endpoint,
-    NeonEnv,
     NeonEnvBuilder,
     NeonPageserver,
     PgBin,
@@ -48,7 +47,7 @@ from fixtures.remote_storage import (
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
-from fixtures.utils import get_dir_size, query_scalar, start_in_background
+from fixtures.utils import PropagatingThread, get_dir_size, query_scalar, start_in_background
 
 
 def wait_lsn_force_checkpoint(
@@ -360,7 +359,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # We will wait for first segment removal. Make sure they exist for starter.
     first_segments = [
-        os.path.join(sk.data_dir(), str(tenant_id), str(timeline_id), "000000010000000000000001")
+        sk.timeline_dir(tenant_id, timeline_id) / "000000010000000000000001"
         for sk in env.safekeepers
     ]
     assert all(os.path.exists(p) for p in first_segments)
@@ -445,7 +444,7 @@ def is_flush_lsn_caught_up(sk: Safekeeper, tenant_id: TenantId, timeline_id: Tim
 def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, target_size_mb):
     http_cli = sk.http_client()
     tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-    sk_wal_size = get_dir_size(os.path.join(sk.data_dir(), str(tenant_id), str(timeline_id)))
+    sk_wal_size = get_dir_size(sk.timeline_dir(tenant_id, timeline_id))
     sk_wal_size_mb = sk_wal_size / 1024 / 1024
     log.info(f"Safekeeper id={sk.id} wal_size={sk_wal_size_mb:.2f}MB status={tli_status}")
     return sk_wal_size_mb <= target_size_mb
@@ -591,10 +590,10 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
 
     # save the last (partial) file to put it back after recreation; others will be fetched from s3
     sk = env.safekeepers[0]
-    tli_dir = Path(sk.data_dir()) / str(tenant_id) / str(timeline_id)
+    tli_dir = Path(sk.data_dir) / str(tenant_id) / str(timeline_id)
     f_partial = Path([f for f in os.listdir(tli_dir) if f.endswith(".partial")][0])
     f_partial_path = tli_dir / f_partial
-    f_partial_saved = Path(sk.data_dir()) / f_partial.name
+    f_partial_saved = Path(sk.data_dir) / f_partial.name
     f_partial_path.rename(f_partial_saved)
 
     pg_version = sk.http_client().timeline_status(tenant_id, timeline_id).pg_version
@@ -616,7 +615,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
         cli = sk.http_client()
         cli.timeline_create(tenant_id, timeline_id, pg_version, last_lsn)
         f_partial_path = (
-            Path(sk.data_dir()) / str(tenant_id) / str(timeline_id) / f_partial_saved.name
+            Path(sk.data_dir) / str(tenant_id) / str(timeline_id) / f_partial_saved.name
         )
         shutil.copy(f_partial_saved, f_partial_path)
 
@@ -1132,8 +1131,8 @@ def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
         )
 
         for f in mismatch:
-            f1 = os.path.join(sk0.timeline_dir(tenant_id, timeline_id), f)
-            f2 = os.path.join(sk.timeline_dir(tenant_id, timeline_id), f)
+            f1 = sk0.timeline_dir(tenant_id, timeline_id) / f
+            f2 = sk.timeline_dir(tenant_id, timeline_id) / f
             stdout_filename = f"{f2}.filediff"
 
             with open(stdout_filename, "w") as stdout_f:
@@ -1631,7 +1630,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE t(key int primary key)")
     sk = env.safekeepers[0]
-    sk_data_dir = Path(sk.data_dir())
+    sk_data_dir = sk.data_dir
     if not auth_enabled:
         sk_http = sk.http_client()
         sk_http_other = sk_http
@@ -1724,9 +1723,6 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
 
 def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
-    def safekeepers_guc(env: NeonEnv, sk_names: List[int]) -> str:
-        return ",".join([f"localhost:{sk.port.pg}" for sk in env.safekeepers if sk.id in sk_names])
-
     def execute_payload(endpoint: Endpoint):
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
@@ -1810,6 +1806,65 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
+
+
+# Test pull_timeline while concurrently gc'ing WAL on safekeeper:
+# 1) Start pull_timeline, listing files to fetch.
+# 2) Write segment, do gc.
+# 3) Finish pull_timeline.
+# 4) Do some write, verify integrity with timeline_digest.
+# Expected to fail while holding off WAL gc plus fetching commit_lsn WAL
+# segment is not implemented.
+@pytest.mark.xfail
+def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    (src_sk, dst_sk) = (env.safekeepers[0], env.safekeepers[2])
+
+    log.info("use only first 2 safekeepers, 3rd will be seeded")
+    endpoint = env.endpoints.create("main")
+    endpoint.active_safekeepers = [1, 2]
+    endpoint.start()
+    endpoint.safe_psql("create table t(key int, value text)")
+    endpoint.safe_psql("insert into t select generate_series(1, 1000), 'pear'")
+
+    src_flush_lsn = src_sk.get_flush_lsn(tenant_id, timeline_id)
+    log.info(f"flush_lsn on src before pull_timeline: {src_flush_lsn}")
+
+    dst_http = dst_sk.http_client()
+    # run pull_timeline which will halt before downloading files
+    dst_http.configure_failpoints(("sk-pull-timeline-after-list-pausable", "pause"))
+    pt_handle = PropagatingThread(
+        target=dst_sk.pull_timeline, args=([src_sk], tenant_id, timeline_id)
+    )
+    pt_handle.start()
+    dst_sk.wait_until_paused("sk-pull-timeline-after-list-pausable")
+
+    # ensure segment exists
+    endpoint.safe_psql("insert into t select generate_series(1, 180000), 'papaya'")
+    lsn = last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+    assert lsn > Lsn("0/2000000")
+    # Checkpoint timeline beyond lsn.
+    src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn)
+    first_segment_p = src_sk.timeline_dir(tenant_id, timeline_id) / "000000010000000000000001"
+    log.info(f"first segment exist={os.path.exists(first_segment_p)}")
+
+    dst_http.configure_failpoints(("sk-pull-timeline-after-list-pausable", "off"))
+    pt_handle.join()
+
+    timeline_start_lsn = src_sk.get_timeline_start_lsn(tenant_id, timeline_id)
+    dst_flush_lsn = dst_sk.get_flush_lsn(tenant_id, timeline_id)
+    log.info(f"flush_lsn on dst after pull_timeline: {dst_flush_lsn}")
+    assert dst_flush_lsn >= src_flush_lsn
+    digests = [
+        sk.http_client().timeline_digest(tenant_id, timeline_id, timeline_start_lsn, dst_flush_lsn)
+        for sk in [src_sk, dst_sk]
+    ]
+    assert digests[0] == digests[1], f"digest on src is {digests[0]} but on dst is {digests[1]}"
 
 
 # In this test we check for excessive START_REPLICATION and START_WAL_PUSH queries
