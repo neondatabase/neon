@@ -25,18 +25,6 @@ pub struct Aimd {
     pub utilisation: f32,
 }
 
-impl Default for Aimd {
-    fn default() -> Self {
-        Self {
-            min: 1,
-            max: 1500,
-            inc: 10,
-            dec: 0.9,
-            utilisation: 0.8,
-        }
-    }
-}
-
 impl LimitAlgorithm for Aimd {
     fn update(&self, old_limit: usize, sample: Sample) -> usize {
         dbg!(sample);
@@ -81,8 +69,11 @@ mod tests {
             initial_limit: 10,
             algorithm: RateLimitAlgorithm::Aimd {
                 conf: Aimd {
+                    min: 1,
+                    max: 1500,
+                    inc: 10,
                     dec: 0.5,
-                    ..Default::default()
+                    utilisation: 0.8,
                 },
             },
         };
@@ -104,10 +95,11 @@ mod tests {
             initial_limit: 4,
             algorithm: RateLimitAlgorithm::Aimd {
                 conf: Aimd {
+                    min: 1,
+                    max: 1500,
+                    inc: 1,
                     dec: 0.5,
                     utilisation: 0.5,
-                    inc: 1,
-                    ..Default::default()
                 },
             },
         };
@@ -137,9 +129,11 @@ mod tests {
             initial_limit: 4,
             algorithm: RateLimitAlgorithm::Aimd {
                 conf: Aimd {
+                    min: 1,
+                    max: 1500,
+                    inc: 10,
                     dec: 0.5,
                     utilisation: 0.5,
-                    ..Default::default()
                 },
             },
         };
@@ -165,9 +159,11 @@ mod tests {
             initial_limit: 10,
             algorithm: RateLimitAlgorithm::Aimd {
                 conf: Aimd {
+                    min: 1,
+                    max: 1500,
+                    inc: 10,
                     dec: 0.5,
                     utilisation: 0.5,
-                    ..Default::default()
                 },
             },
         };

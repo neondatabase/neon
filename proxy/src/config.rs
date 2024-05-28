@@ -707,6 +707,7 @@ mod tests {
         assert_eq!(timeout, Duration::from_secs(1));
         assert_eq!(shards, 32);
         assert_eq!(limiter.initial_limit, 4);
+        assert_eq!(limiter.algorithm, RateLimitAlgorithm::Fixed);
 
         let ConcurrencyLockOptions {
             epoch,
@@ -718,6 +719,7 @@ mod tests {
         assert_eq!(timeout, Duration::from_millis(100));
         assert_eq!(shards, 16);
         assert_eq!(limiter.initial_limit, 8);
+        assert_eq!(limiter.algorithm, RateLimitAlgorithm::Fixed);
 
         let ConcurrencyLockOptions {
             epoch,
@@ -729,6 +731,7 @@ mod tests {
         assert_eq!(timeout, Duration::ZERO);
         assert_eq!(shards, 2);
         assert_eq!(limiter.initial_limit, 0);
+        assert_eq!(limiter.algorithm, RateLimitAlgorithm::Fixed);
 
         Ok(())
     }

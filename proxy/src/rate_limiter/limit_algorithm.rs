@@ -28,7 +28,7 @@ pub trait LimitAlgorithm: Send + Sync + 'static {
     fn update(&self, old_limit: usize, sample: Sample) -> usize;
 }
 
-/// The result of a job (or jobs), including the [Outcome] (loss) and latency (delay).
+/// The result of a job (or jobs), including the [`Outcome`] (loss) and latency (delay).
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct Sample {
     pub(crate) latency: Duration,
@@ -72,17 +72,6 @@ impl RateLimiterConfig {
     }
 }
 
-impl Default for RateLimiterConfig {
-    fn default() -> Self {
-        Self {
-            algorithm: RateLimitAlgorithm::Aimd {
-                conf: Aimd::default(),
-            },
-            initial_limit: 100,
-        }
-    }
-}
-
 pub struct LimiterInner {
     alg: Box<dyn LimitAlgorithm>,
     available: usize,
@@ -120,7 +109,7 @@ impl LimiterInner {
 
 /// Limits the number of concurrent jobs.
 ///
-/// Concurrency is limited through the use of [Token]s. Acquire a token to run a job, and release the
+/// Concurrency is limited through the use of [`Token`]s. Acquire a token to run a job, and release the
 /// token once the job is finished.
 ///
 /// The limit will be automatically adjusted based on observed latency (delay) and/or failures
@@ -134,13 +123,13 @@ pub struct DynamicLimiter {
 
 /// A concurrency token, required to run a job.
 ///
-/// Release the token back to the [Limiter] after the job is complete.
+/// Release the token back to the [`DynamicLimiter`] after the job is complete.
 pub struct Token {
     start: Instant,
     limiter: Option<Arc<DynamicLimiter>>,
 }
 
-/// A snapshot of the state of the [Limiter].
+/// A snapshot of the state of the [`DynamicLimiter`].
 ///
 /// Not guaranteed to be consistent under high concurrency.
 #[derive(Debug, Clone, Copy)]
