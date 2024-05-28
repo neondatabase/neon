@@ -144,24 +144,24 @@ RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouti
 FROM build-deps AS plv8-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN apt update && \
-    apt install -y ninja-build python3-dev libncurses5 binutils clang libstdc++-12-dev libtinfo5 pkg-config
+ENV PLV8_BRANCH=r3.2
+ENV PLV8_VERSION=3.2.2
 
-RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.2.2.tar.gz -O plv8.tar.gz && \
-    echo "2d1491280505afcdff629191451d0891d3258dbdc483992aa7449a8517335d98 plv8.tar.gz" | sha256sum --check && \
-    mkdir plv8-src && cd plv8-src && tar xvzf ../plv8.tar.gz --strip-components=1 -C . && \
-    # generate and copy upgrade scripts
-    mkdir -p upgrade && ./generate_upgrade.sh 3.2.2 && \
-    cp upgrade/* /usr/local/pgsql/share/extension/ && \
-    export PATH="/usr/local/pgsql/bin:$PATH" && \
-    make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
-    rm -rf /plv8-* && \
-    find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
+RUN apt update && \
+    apt install -y ninja-build python3-dev git libncurses5 binutils clang libstdc++-12-dev libtinfo5 pkg-config cmake
+
+
+RUN set -ex \
+    && export PATH="/usr/local/pgsql/bin:$PATH" \
+    && git clone --branch ${PLV8_BRANCH} --single-branch --depth 1 https://github.com/plv8/plv8 \
+    && cd plv8 \
+    && make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install \
+    && find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip \
+    && cd .. && rm -rf ./plv8 \
     # don't break computes with installed old version of plv8
-    cd /usr/local/pgsql/lib/ && \
-    ln -s plv8-3.2.2.so plv8-3.1.5.so && \
-    ln -s plv8-3.2.2.so plv8-3.1.8.so && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
+    && ln -s /usr/local/pgsql/lib/plv8-${PLV8_VERSION}.so /usr/local/pgsql/lib/plv8-3.1.5.so \
+    && ln -s /usr/local/pgsql/lib/plv8-${PLV8_VERSION}.so /usr/local/pgsql/lib/plv8-3.1.8.so \
+    && echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
 
