@@ -131,8 +131,8 @@ jobs:
         if: steps.cache_pg_16.outputs.cache-hit != 'true'
         run: make postgres-v16 -j$(sysctl -n hw.ncpu)
 
-      # - name: Build neon extensions
-      #   run: make neon-pg-ext -j$(sysctl -n hw.ncpu)
+      - name: Build neon extensions
+        run: make neon-pg-ext -j$(sysctl -n hw.ncpu)
 
       - name: Build walproposer-lib
         run: make walproposer-lib -j$(sysctl -n hw.ncpu)
@@ -234,8 +234,8 @@ jobs:
         if: steps.cache_pg_16.outputs.cache-hit != 'true'
         run: mold -run make postgres-v16 -j$(nproc)
 
-      # - name: Build neon extensions
-      #   run: mold -run make neon-pg-ext -j$(nproc)
+      - name: Build neon extensions
+        run: mold -run make neon-pg-ext -j$(nproc)
 
       - name: Build walproposer-lib
         run: mold -run make walproposer-lib -j$(nproc)
