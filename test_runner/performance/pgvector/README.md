@@ -1,6 +1,6 @@
 # Source of the dataset for pgvector tests
 
-This readme was copied from https://huggingface.co/datasets/KShivendu/dbpedia-entities-openai-1M
+This readme was copied from https://huggingface.co/datasets/Qdrant/dbpedia-entities-openai3-text-embedding-3-large-1536-1M
 
 ## Download the parquet files
 
