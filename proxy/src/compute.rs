@@ -10,6 +10,7 @@ use crate::{
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
+use once_cell::sync::OnceCell;
 use pq_proto::StartupMessageParams;
 use rustls::{client::danger::ServerCertVerifier, pki_types::InvalidDnsNameError};
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
@@ -291,9 +292,7 @@ impl ConnCfg {
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
         } else {
-            let root_store = rustls::RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-            };
+            let root_store = TLS_ROOTS.get_or_try_init(load_certs)?.clone();
             rustls::ClientConfig::builder().with_root_certificates(root_store)
         };
         let client_config = client_config.with_no_client_auth();
@@ -354,6 +353,14 @@ fn filtered_options(params: &StartupMessageParams) -> Option<String> {
 
     Some(options)
 }
+
+fn load_certs() -> Result<Arc<rustls::RootCertStore>, io::Error> {
+    let der_certs = rustls_native_certs::load_native_certs()?;
+    let mut store = rustls::RootCertStore::empty();
+    store.add_parsable_certificates(der_certs);
+    Ok(Arc::new(store))
+}
+static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
 
 #[derive(Debug)]
 struct AcceptEverythingVerifier;

@@ -4346,6 +4346,7 @@ dependencies = [
  "rstest",
  "rustc-hash",
  "rustls 0.22.4",
+ "rustls-native-certs 0.7.0",
  "rustls-pemfile 2.1.1",
  "scopeguard",
  "serde",
@@ -4375,7 +4376,6 @@ dependencies = [
  "utils",
  "uuid",
  "walkdir",
- "webpki-roots 0.26.1",
  "workspace_hack",
  "x509-parser",
 ]
@@ -5130,6 +5130,7 @@ dependencies = [
  "hex",
  "histogram",
  "itertools",
+ "once_cell",
  "pageserver",
  "pageserver_api",
  "postgres_ffi",
@@ -5137,6 +5138,7 @@ dependencies = [
  "remote_storage",
  "reqwest 0.12.4",
  "rustls 0.22.4",
+ "rustls-native-certs 0.7.0",
  "serde",
  "serde_json",
  "serde_with",
@@ -5151,7 +5153,6 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "utils",
- "webpki-roots 0.26.1",
  "workspace_hack",
 ]
 
