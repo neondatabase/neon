@@ -584,13 +584,6 @@ impl Timeline {
         Ok(())
     }
 
-    /// Update in memory remote consistent lsn.
-    pub async fn update_remote_consistent_lsn(self: &Arc<Self>, candidate: Lsn) {
-        let mut shared_state = self.write_shared_state().await;
-        shared_state.sk.state.inmem.remote_consistent_lsn =
-            max(shared_state.sk.state.inmem.remote_consistent_lsn, candidate);
-    }
-
     pub async fn get_peers(&self, conf: &SafeKeeperConf) -> Vec<PeerInfo> {
         let shared_state = self.read_shared_state().await;
         shared_state.get_peers(conf.heartbeat_timeout)
@@ -765,6 +758,13 @@ impl FullAccessTimeline {
     pub fn get_timeline_dir(&self) -> Utf8PathBuf {
         self.timeline_dir.clone()
     }
+
+    /// Update in memory remote consistent lsn.
+    pub async fn update_remote_consistent_lsn(self: &Arc<Self>, candidate: Lsn) {
+        let mut shared_state = self.write_shared_state().await;
+        shared_state.sk.state.inmem.remote_consistent_lsn =
+            max(shared_state.sk.state.inmem.remote_consistent_lsn, candidate);
+    }
 }
 
 /// Deletes directory and it's contents. Returns false if directory does not exist.
@@ -776,10 +776,15 @@ async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
     }
 }
 
+/// Get a path to the tenant directory. If you just need to get a timeline directory,
+/// use FullAccessTimeline::get_timeline_dir instead.
 pub(crate) fn get_tenant_dir(conf: &SafeKeeperConf, tenant_id: &TenantId) -> Utf8PathBuf {
     conf.workdir.join(tenant_id.to_string())
 }
 
+/// Get a path to the timeline directory. If you need to read WAL files from disk,
+/// use FullAccessTimeline::get_timeline_dir instead. This function does not check
+/// timeline offload status and WAL files might not be present on disk.
 pub(crate) fn get_timeline_dir(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Utf8PathBuf {
     get_tenant_dir(conf, &ttid.tenant_id).join(ttid.timeline_id.to_string())
 }
