@@ -44,7 +44,7 @@ jobs:
             while read -r f
             do
               l=$(grep -nE $PAT .github/workflows/release.yml | awk -F: '{print $1}' | head -1)
-              echo "::error file=$f,line=$l::Please, do not use latest images to run on"
+              echo "::error file=$f,line=$l::Please, do not use ubuntu-latest images to run on, use LTS instead."
             done
             exit 1
           fi
