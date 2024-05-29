@@ -87,7 +87,6 @@ pub async fn main_task(
         if tli.is_cancelled() {
             info!("manager task finished");
         } else {
-            // TODO: add this to assert_no_errors() in python tests
             warn!("manager task finished prematurely");
         }
     };

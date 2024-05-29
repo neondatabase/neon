@@ -973,6 +973,9 @@ class NeonEnvBuilder:
             for pageserver in self.env.pageservers:
                 pageserver.assert_no_errors()
 
+            for safekeeper in self.env.safekeepers:
+                safekeeper.assert_no_errors()
+
             self.env.storage_controller.assert_no_errors()
 
         try:
@@ -3812,6 +3815,9 @@ class Safekeeper(LogUtils):
         self.env.neon_cli.safekeeper_stop(self.id, immediate)
         self.running = False
         return self
+
+    def assert_no_errors(self):
+        assert not self.log_contains("manager task finished prematurely")
 
     def append_logical_message(
         self, tenant_id: TenantId, timeline_id: TimelineId, request: Dict[str, Any]
