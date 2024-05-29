@@ -137,7 +137,7 @@ jobs:
     # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
     env:
       RUN_AWS_RDS_AND_AURORA: ${{ github.event.inputs.run_AWS_RDS_AND_AURORA || 'false' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
       olap-compare-matrix: ${{ steps.olap-compare-matrix.outputs.matrix }}
