@@ -36,3 +36,14 @@ jobs:
           fail_on_error: true
           filter_mode: nofilter
           level: error
+  
+  check-runs-on:
+    needs: [ actionlint ]
+    runs-on: ubuntu-22.04
+    steps:
+      - run: |
+          if grep -ER '^\s*runs-on:.*-latest' .github/workflows
+          then
+            echo "Use LTS versions to run on"
+            exit 1
+          fi
