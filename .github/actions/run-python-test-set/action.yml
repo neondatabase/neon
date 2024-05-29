@@ -56,14 +56,14 @@ runs:
       if: inputs.build_type != 'remote'
       uses: ./.github/actions/download
       with:
-        name: neon-${{ runner.os }}-${{ inputs.build_type }}-artifact
+        name: neon-${{ runner.os }}-bookworm-${{ inputs.build_type }}-artifact
         path: /tmp/neon
 
     - name: Download Neon binaries for the previous release
       if: inputs.build_type != 'remote'
       uses: ./.github/actions/download
       with:
-        name: neon-${{ runner.os }}-${{ inputs.build_type }}-artifact
+        name: neon-${{ runner.os }}-bookworm-${{ inputs.build_type }}-artifact
         path: /tmp/neon-previous
         prefix: latest
 
