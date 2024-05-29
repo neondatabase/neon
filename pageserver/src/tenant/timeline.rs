@@ -2753,11 +2753,6 @@ impl Timeline {
             self.current_logical_size.initialized.add_permits(1);
         }
 
-        enum BackgroundCalculationError {
-            Cancelled,
-            Other(anyhow::Error),
-        }
-
         let try_once = |attempt: usize| {
             let background_ctx = &background_ctx;
             let self_ref = &self;
@@ -2775,10 +2770,10 @@ impl Timeline {
                         (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit)
                     }
                     _ = self_ref.cancel.cancelled() => {
-                        return Err(BackgroundCalculationError::Cancelled);
+                        return Err(CalculateLogicalSizeError::Cancelled);
                     }
                     _ = cancel.cancelled() => {
-                        return Err(BackgroundCalculationError::Cancelled);
+                        return Err(CalculateLogicalSizeError::Cancelled);
                     },
                     () = skip_concurrency_limiter.cancelled() => {
                         // Some action that is part of a end user interaction requested logical size
@@ -2805,18 +2800,7 @@ impl Timeline {
                     .await
                 {
                     Ok(calculated_size) => Ok((calculated_size, metrics_guard)),
-                    Err(CalculateLogicalSizeError::Cancelled) => {
-                        Err(BackgroundCalculationError::Cancelled)
-                    }
-                    Err(CalculateLogicalSizeError::Other(err)) => {
-                        if let Some(PageReconstructError::AncestorStopping(_)) =
-                            err.root_cause().downcast_ref()
-                        {
-                            Err(BackgroundCalculationError::Cancelled)
-                        } else {
-                            Err(BackgroundCalculationError::Other(err))
-                        }
-                    }
+                    Err(e) => Err(e),
                 }
             }
         };
@@ -2828,8 +2812,11 @@ impl Timeline {
 
                 match try_once(attempt).await {
                     Ok(res) => return ControlFlow::Continue(res),
-                    Err(BackgroundCalculationError::Cancelled) => return ControlFlow::Break(()),
-                    Err(BackgroundCalculationError::Other(e)) => {
+                    Err(CalculateLogicalSizeError::Cancelled) => return ControlFlow::Break(()),
+                    Err(
+                        e @ (CalculateLogicalSizeError::Decode(_)
+                        | CalculateLogicalSizeError::PageRead(_)),
+                    ) => {
                         warn!(attempt, "initial size calculation failed: {e:?}");
                         // exponential back-off doesn't make sense at these long intervals;
                         // use fixed retry interval with generous jitter instead
