@@ -76,6 +76,7 @@ const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
 
 /// This task gets spawned alongside each timeline and is responsible for managing the timeline's
 /// background tasks.
+/// Be careful, this task is not respawned on panic, so it should not panic.
 #[instrument(name = "manager", skip_all, fields(ttid = %tli.ttid))]
 pub async fn main_task(
     tli: Arc<Timeline>,
@@ -305,6 +306,7 @@ async fn update_control_file_save(
     }
 }
 
+/// Spawns WAL removal task if needed.
 async fn update_wal_removal(
     conf: &SafeKeeperConf,
     walsenders: &Arc<WalSenders>,
@@ -346,6 +348,7 @@ async fn update_wal_removal(
     }
 }
 
+/// Update the state after WAL removal task finished.
 fn update_wal_removal_end(
     res: Result<anyhow::Result<u64>, JoinError>,
     tli: &Arc<Timeline>,
