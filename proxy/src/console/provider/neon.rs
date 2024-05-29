@@ -13,7 +13,7 @@ use crate::{
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::EndpointRateLimiter,
-    scram, EndpointCacheKey, Normalize,
+    scram, EndpointCacheKey,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
@@ -296,7 +296,7 @@ impl super::Api for Api {
         // check rate limit
         if !self
             .wake_compute_endpoint_rate_limiter
-            .check(user_info.endpoint.normalize().into(), 1)
+            .check(user_info.endpoint.normalize_intern(), 1)
         {
             info!(key = &*key, "found cached compute node info");
             return Err(WakeComputeError::TooManyConnections);
