@@ -412,7 +412,7 @@ jobs:
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
         with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
+          name: neon-${{ runner.os }}-bookworm-${{ matrix.build_type }}-artifact
           path: /tmp/neon
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
@@ -640,7 +640,7 @@ jobs:
       - name: Get Neon artifact
         uses: ./.github/actions/download
         with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
+          name: neon-${{ runner.os }}-bookworm-${{ matrix.build_type }}-artifact
           path: /tmp/neon
 
       - name: Get coverage artifact
@@ -1278,7 +1278,7 @@ jobs:
           # Update Neon artifact for the release (reuse already uploaded artifact)
           for build_type in debug release; do
             OLD_PREFIX=artifacts/${GITHUB_RUN_ID}
-            FILENAME=neon-${{ runner.os }}-${build_type}-artifact.tar.zst
+            FILENAME=neon-${{ runner.os }}-bookworm-${build_type}-artifact.tar.zst
 
             S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
             if [ -z "${S3_KEY}" ]; then
