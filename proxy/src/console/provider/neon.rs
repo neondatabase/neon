@@ -281,14 +281,6 @@ impl super::Api for Api {
             return Ok(cached);
         }
 
-        // check rate limit
-        if !self
-            .wake_compute_endpoint_rate_limiter
-            .check(user_info.endpoint.normalize().into(), 1)
-        {
-            return Err(WakeComputeError::TooManyConnections);
-        }
-
         let permit = self.locks.get_permit(&key).await?;
 
         // after getting back a permit - it's possible the cache was filled
@@ -299,6 +291,15 @@ impl super::Api for Api {
                 ctx.set_project(cached.aux.clone());
                 return Ok(cached);
             }
+        }
+
+        // check rate limit
+        if !self
+            .wake_compute_endpoint_rate_limiter
+            .check(user_info.endpoint.normalize().into(), 1)
+        {
+            info!(key = &*key, "found cached compute node info");
+            return Err(WakeComputeError::TooManyConnections);
         }
 
         let mut node = permit.release_result(self.do_wake_compute(ctx, user_info).await)?;
