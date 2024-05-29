@@ -31,7 +31,7 @@ jobs:
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
   tag:
-    runs-on: [ ubuntu-22.04 ]
+    runs-on: ubuntu-22.04
     outputs:
       build-tag: ${{ steps.build-tag.outputs.tag }}
 
