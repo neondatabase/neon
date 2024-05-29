@@ -1155,7 +1155,7 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 
 # Install:
 # libreadline8 for psql
-# libicu67, locales for collations (including ICU and plpgsql_check)
+# libicu72, locales for collations (including ICU and plpgsql_check)
 # liblz4-1 for lz4
 # libossp-uuid16 for extension ossp-uuid
 # libgeos, libgdal, libsfcgal1, libproj and libprotobuf-c1 for PostGIS
@@ -1166,7 +1166,7 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 RUN apt update &&  \
     apt install --no-install-recommends -y \
         gdb \
-        libicu67 \
+        libicu72 \
         liblz4-1 \
         libreadline8 \
         libboost-iostreams1.74.0 \
@@ -1175,8 +1175,8 @@ RUN apt update &&  \
         libboost-system1.74.0 \
         libossp-uuid16 \
         libgeos-c1v5 \
-        libgdal28 \
-        libproj19 \
+        libgdal32 \
+        libproj25 \
         libprotobuf-c1 \
         libsfcgal1 \
         libxml2 \
