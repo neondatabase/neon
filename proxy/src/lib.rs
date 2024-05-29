@@ -133,12 +133,10 @@ pub trait Normalize {
     fn normalize(&self) -> Self;
 }
 
-impl<S: Clone + AsRef<str> + From<String>> Normalize for S {
+impl<S: Clone + AsRef<str> + for<'a> From<&'a str>> Normalize for S {
     fn normalize(&self) -> Self {
-        if self.as_ref().ends_with(POOLER_SUFFIX) {
-            let mut s = self.as_ref().to_string();
-            s.truncate(s.len() - POOLER_SUFFIX.len());
-            s.into()
+        if let Some(stripped) = self.as_ref().strip_suffix(POOLER_SUFFIX) {
+            stripped.into()
         } else {
             self.clone()
         }
