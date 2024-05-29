@@ -922,6 +922,13 @@ jobs:
                                              neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
                                              neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
 
+      - name: Create multi-arch neon-test-extensions image
+        if: matrix.version == 'v16'
+        run: |
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
+
       - name: Create multi-arch compute-tools image
         if: matrix.version == 'v16'
         run: |
