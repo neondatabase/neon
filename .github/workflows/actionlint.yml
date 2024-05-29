@@ -39,6 +39,6 @@ jobs:
       - run: |
           if grep -ER '^\s*runs-on:.*-latest' .github/workflows
           then
-            echo "Use LTS versions to run on"
+            echo "Please, use LTS versions to run on"
             exit 1
           fi
