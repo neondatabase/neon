@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{layer_manager::LayerManager, Timeline};
+use super::{layer_manager::LayerManager, FlushLayerError, Timeline};
 use crate::{
     context::{DownloadBehavior, RequestContext},
     task_mgr::TaskKind,
@@ -23,7 +23,7 @@ pub(crate) enum Error {
     #[error("shutting down, please retry later")]
     ShuttingDown,
     #[error("flushing failed")]
-    FlushAncestor(#[source] anyhow::Error),
+    FlushAncestor(#[source] FlushLayerError),
     #[error("layer download failed")]
     RewrittenDeltaDownloadFailed(#[source] anyhow::Error),
     #[error("copying LSN prefix locally failed")]

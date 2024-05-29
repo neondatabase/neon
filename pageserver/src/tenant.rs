@@ -4154,7 +4154,7 @@ mod tests {
                 .await?;
             writer.finish_write(lsn);
         }
-        tline.freeze_and_flush().await
+        tline.freeze_and_flush().await.map_err(|e| e.into())
     }
 
     #[tokio::test]
