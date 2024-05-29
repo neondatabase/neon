@@ -191,7 +191,13 @@ pub async fn main_task(
             _ = num_computes_rx.changed() => {
                 // number of connected computes was updated
             }
-            _ = tokio::time::sleep_until(next_cfile_save.unwrap()), if next_cfile_save.is_some() => {
+            _ = async {
+                if let Some(timeout) = next_cfile_save {
+                    tokio::time::sleep_until(timeout).await
+                } else {
+                    futures::future::pending().await
+                }
+            } => {
                 // it's time to save the control file
             }
             res = async {
