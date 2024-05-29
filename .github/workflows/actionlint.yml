@@ -37,8 +37,13 @@ jobs:
           filter_mode: nofilter
           level: error
       - run: |
-          if grep -ER '^\s*runs-on:.*-latest' .github/workflows
+          PAT='^\s*runs-on:.*-latest'
+          if grep -ERq $PAT .github/workflows
           then
-            echo "Please, use LTS versions to run on"
+            for f in $(grep -ERl $PAT .github/workflows)
+            do
+              l=$(grep -nE $PAT .github/workflows/release.yml | awk -F: '{print $1}' | head -1)
+              echo "::error file=$f,line=$l::Please, do not use latest images to run on"
+            done
             exit 1
           fi
