@@ -41,7 +41,7 @@ jobs:
           if grep -ERq $PAT .github/workflows
           then
             grep -ERl $PAT .github/workflows |\
-            while read f
+            while read -r f
             do
               l=$(grep -nE $PAT .github/workflows/release.yml | awk -F: '{print $1}' | head -1)
               echo "::error file=$f,line=$l::Please, do not use latest images to run on"
