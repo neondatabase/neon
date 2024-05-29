@@ -8,14 +8,6 @@ from fixtures.log_helper import log
 from performance.neon_api import *
 from fixtures.neon_fixtures import PgBin
 
-def is_operation_ongoing(neon_api_key: str, neon_api_base_url: str, project_id: str):
-    operations = neon_get_operations(neon_api_key, neon_api_base_url, project_id)["operations"]
-    for op in operations:
-        if op["status"] in {"scheduling", "running", "cancelling"}:
-            return True
-
-    return False
-
 def replication_sync(master, replica):
     master.execute("SELECT pg_current_wal_flush_lsn()")
     master_lsn = master.fetchall()[0][0]
@@ -39,9 +31,7 @@ def test_ro_replica_lag(
     try:
         branch_id = project["branch"]["id"]
         master_connstr = project["connection_uris"][0]["connection_uri"]
-
-        while is_operation_ongoing(neon_api_key, neon_api_base_url, project_id):
-            time.sleep(1)
+        neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
 
         replica = neon_create_endpoint(
             neon_api_key,
@@ -50,6 +40,7 @@ def test_ro_replica_lag(
             branch_id,
             endpoint_type="read_only",
         )
+        neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
 
         replica_connstr = neon_get_connection_uri(
             neon_api_key,
@@ -64,8 +55,92 @@ def test_ro_replica_lag(
         conn_replica = psycopg2.connect(replica_connstr)
         cur_replica = conn_replica.cursor()
 
-        start = time.time()
-        replication_sync(cur_master, cur_replica)
-        log.info(f"Sync with master took {time.time() - start} seconds")
+        master_workload = pg_bin.run_nonblocking(["pgbench", "-c10", "-T1000", "-Mprepared", master_connstr])
+        try:
+            replica_workload = pg_bin.run_nonblocking(["pgbench", "-c10", "-T1000", "-S", replica_connstr])
+            try:
+
+                start = time.time()
+                while time.time() - start < 60 * 60:
+                    time.sleep(60 * 10)
+                    lag_start = time.time()
+                    replication_sync(cur_master, cur_replica)
+                    log.info(f"Replica lagged behind master by {time.time() - lag_start} seconds")
+            finally:
+                replica_workload.terminate()
+        finally:
+            replica_workload.terminate()
+    finally:
+        neon_delete_project(neon_api_key, neon_api_base_url, project_id)
+
+
+@pytest.mark.timeout(0)
+def test_replication_start_stop(
+        pg_bin: PgBin,
+        neon_api_key: str,
+        neon_api_base_url: str,
+        pg_version: PgVersion,
+):
+    num_replicas = 2
+
+    project = neon_create_project(neon_api_key, neon_api_base_url, pg_version)
+    project_id = project["project"]["id"]
+    neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
+    try:
+        branch_id = project["branch"]["id"]
+        master_connstr = project["connection_uris"][0]["connection_uri"]
+
+        replicas = []
+        for i in range(num_replicas):
+            replicas.append(neon_create_endpoint(
+                neon_api_key,
+                neon_api_base_url,
+                project_id,
+                branch_id,
+                endpoint_type="read_only",
+            ))
+            neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
+
+        replica_connstr = [neon_get_connection_uri(
+            neon_api_key,
+            neon_api_base_url,
+            project_id,
+            endpoint_id=replicas[i]["endpoint"]["id"],
+        )["uri"] for i in range(num_replicas)]
+
+        pg_bin.run_capture(["pgbench", "-i", "-s100", master_connstr])
+        conn_master = psycopg2.connect(master_connstr)
+        cur_master = conn_master.cursor()
+
+        conn_replica = [psycopg2.connect(replica_connstr[i]) for i in range(num_replicas)]
+        cur_replica = [conn_replica[i].cursor() for i in range(num_replicas)]
+
+        for i in range(num_replicas):
+            replication_sync(cur_master, cur_replica[i])
+
+        master_pgbench = pg_bin.run_nonblocking(["pgbench", "-c10", "-T1000", "-Mprepared", master_connstr])
+        replica_pgbench = [None for i in range(num_replicas)]
+
+        for iconfig in range((1 << num_replicas) - 1, -1, -1):
+            def replica_enabled(ireplica):
+                return bool((iconfig >> 1) & 1)
+            
+            for ireplica in range(num_replicas):
+                if replica_enabled(ireplica) and replica_pgbench[ireplica] is None:
+                    replica_pgbench[ireplica] = pg_bin.run_nonblocking(
+                        ["pgbench", "-c10", "-S", "-T1000", replica_connstr[ireplica]]
+                    )
+                elif not replica_enabled(ireplica) and replica_pgbench[ireplica] is not None:
+                    replica_pgbench[ireplica].terminate()
+                    replica_pgbench[ireplica].wait()
+                    replica_pgbench[ireplica].check_return_code()
+                    neon_suspend_compute(
+                        neon_api_key,
+                        neon_api_base_url,
+                        project_id,
+                        replicas[ireplica]["endpoint"]["id"],
+                    )
+            time.sleep(60 * 10)
+            # TODO: Collect statistics
     finally:
         neon_delete_project(neon_api_key, neon_api_base_url, project_id)

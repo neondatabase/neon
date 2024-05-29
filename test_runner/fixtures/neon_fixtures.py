@@ -2728,6 +2728,7 @@ class PgBin:
         self.pg_lib_dir = pg_distrib_dir / pg_version.v_prefixed / "lib"
         self.env = os.environ.copy()
         self.env["LD_LIBRARY_PATH"] = str(self.pg_lib_dir)
+        self.popen = None
 
     def _fixpath(self, command: List[str]):
         if "/" not in str(command[0]):
@@ -2740,14 +2741,14 @@ class PgBin:
         env.update(env_add)
         return env
 
-    def run(
+    def run_nonblocking(
         self,
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[Union[str, Path]] = None,
-    ):
+    ) -> subprocess.Popen:
         """
-        Run one of the postgres binaries.
+        Run one of the postgres binaries, not waiting for it to finish
 
         The command should be in list form, e.g. ['pgbench', '-p', '55432']
 
@@ -2758,11 +2759,20 @@ class PgBin:
 
         If you want stdout/stderr captured to files, use `run_capture` instead.
         """
-
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
-        subprocess.run(command, env=env, cwd=cwd, check=True)
+        return subprocess.Popen(command, env=env, cwd=cwd)
+
+    def run(
+        self,
+        command: List[str],
+        env: Optional[Env] = None,
+        cwd: Optional[Union[str, Path]] = None,
+    ):
+        proc = self.run_nonblocking(command, env, cwd)
+        proc.wait()
+        proc.check_returncode()
 
     def run_capture(
         self,

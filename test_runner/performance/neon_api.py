@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 
 from typing import TYPE_CHECKING, cast
 
@@ -227,3 +228,31 @@ def neon_get_operations(
     assert resp.status_code == 200
 
     return cast("dict[str, Any]", resp.json())
+
+def neon_suspend_compute(
+        neon_api_key: str,
+        neon_api_base_url: str,
+        project_id: str,
+        endpoint_id: str,
+) -> dict[str, Any]:
+    resp = requests.post(
+        f"{neon_api_base_url}/projects/{project_id}/endpoints/{endpoint_id}/suspend",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {neon_api_key}",
+        },
+    )
+
+    assert resp.status_code == 200
+
+    return cast("dict[str, Any]", resp.json())
+
+def neon_wait_for_operation_to_finish(neon_api_key: str, neon_api_base_url: str, project_id: str):
+    has_running = True
+    while has_running:
+        has_running = False
+        operations = neon_get_operations(neon_api_key, neon_api_base_url, project_id)["operations"]
+        for op in operations:
+            if op["status"] in {"scheduling", "running", "cancelling"}:
+                has_running = True
+        time.sleep(0.5)
