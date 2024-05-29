@@ -262,11 +262,12 @@ async fn main() -> anyhow::Result<()> {
 
             let recognized_kind = "recognized kind";
             let metadata_key = "metadata key";
+            let shard_placement = "shard placement";
 
             let longest = queries
                 .iter()
                 .map(|t| t.0)
-                .chain([recognized_kind, metadata_key].into_iter())
+                .chain([recognized_kind, metadata_key, shard_placement].into_iter())
                 .map(|s| s.len())
                 .max()
                 .unwrap();
@@ -323,8 +324,19 @@ async fn main() -> anyhow::Result<()> {
             let shard_count = shard_count.map(ShardCount::new);
             let stripe_size = stripe_size.map(ShardStripeSize);
 
+            if shard_count.is_none() && stripe_size.is_none() {
+                println!(
+                    "# key does not tell anything about sharding, but this is how it would be placed."
+                );
+                println!(
+                    "# override defaults by providing --shard-count and --stripe-size options."
+                );
+            }
+            let width = longest - shard_placement.len() + colon + padding;
             println!(
-                "{:?}",
+                "{}{:width$}{:?}",
+                shard_placement,
+                ":",
                 pageserver_api::shard::describe(&key, shard_count, stripe_size)
             );
         }
