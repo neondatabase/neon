@@ -276,7 +276,7 @@ async fn main() -> anyhow::Result<()> {
 
             for (name, is) in queries {
                 let width = longest - name.len() + colon + padding;
-                println!("{}{:width$}{}", name, ":", is, width = width);
+                println!("{}{:width$}{}", name, ":", is);
             }
 
             #[derive(Debug)]
@@ -312,12 +312,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            let width = longest - recognized_kind.len() + colon + padding;
             println!(
                 "{}{:width$}{:?}",
                 recognized_kind,
                 ":",
                 RecognizedKeyKind::new(key),
-                width = longest - recognized_kind.len() + colon + padding,
             );
 
             let shard_count = shard_count.map(ShardCount::new);
