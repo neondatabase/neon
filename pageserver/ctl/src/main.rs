@@ -327,8 +327,6 @@ async fn main() -> anyhow::Result<()> {
                 "{:?}",
                 pageserver_api::shard::describe(&key, shard_count, stripe_size)
             );
-
-            println!("next key: {}", key.next());
         }
 
         Commands::RelBlockToKey(RelBlockToKey {
