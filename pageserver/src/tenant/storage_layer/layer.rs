@@ -1161,6 +1161,11 @@ impl LayerInner {
                 let consecutive_failures =
                     1 + self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
 
+                if timeline.cancel.is_cancelled() {
+                    // If we're shutting down, drop out before logging the error
+                    return Err(e);
+                }
+
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
 
                 let backoff = utils::backoff::exponential_backoff_duration_seconds(
