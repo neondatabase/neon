@@ -305,7 +305,13 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     );
 
     let tli = GlobalTimelines::get(ttid)?;
-    tli.write_shared_state().await.sk.state.flush().await.map_err(ApiError::InternalServerError)?;
+    tli.write_shared_state()
+        .await
+        .sk
+        .state
+        .flush()
+        .await
+        .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, ())
 }
 

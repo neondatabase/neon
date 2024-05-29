@@ -664,8 +664,10 @@ impl Timeline {
         Ok(res)
     }
 
-    /// Get the guard for full disk access to the timeline.
-    /// If WAL files are not present on disk, they will be downloaded.
+    /// Get the timeline guard for reading/writing WAL files.
+    /// TODO: if WAL files are not present on disk (evicted), they will be
+    /// downloaded from S3. Also there will logic for preventing eviction
+    /// while someone is holding FullAccessTimeline guard.
     pub async fn full_access_guard(self: &Arc<Self>) -> Result<FullAccessTimeline> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
@@ -784,7 +786,7 @@ pub(crate) fn get_tenant_dir(conf: &SafeKeeperConf, tenant_id: &TenantId) -> Utf
 
 /// Get a path to the timeline directory. If you need to read WAL files from disk,
 /// use FullAccessTimeline::get_timeline_dir instead. This function does not check
-/// timeline offload status and WAL files might not be present on disk.
+/// timeline eviction status and WAL files might not be present on disk.
 pub(crate) fn get_timeline_dir(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Utf8PathBuf {
     get_tenant_dir(conf, &ttid.tenant_id).join(ttid.timeline_id.to_string())
 }

@@ -2,11 +2,12 @@ use utils::lsn::Lsn;
 
 use crate::timeline_manager::StateSnapshot;
 
-/// Get oldest segno we still need to keep. We hold WAL till it is consumed
+/// Get oldest LSN we still need to keep. We hold WAL till it is consumed
 /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
 /// offloading.
 /// While it is safe to use inmem values for determining horizon,
 /// we use persistent to make possible normal states less surprising.
+/// All segments covering LSNs before horizon_lsn can be removed.
 pub fn calc_horizon_lsn(state: &StateSnapshot, extra_horizon_lsn: Option<Lsn>) -> Lsn {
     use std::cmp::min;
 

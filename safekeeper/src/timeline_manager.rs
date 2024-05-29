@@ -9,7 +9,7 @@ use std::{
 };
 
 use postgres_ffi::XLogSegNo;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tracing::{info, instrument, warn};
 use utils::lsn::Lsn;
 
@@ -18,8 +18,9 @@ use crate::{
     metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
+    send_wal::WalSenders,
     timeline::{PeerInfo, ReadGuardSharedState, Timeline},
-    timelines_set::TimelinesSet,
+    timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
     wal_backup_partial, SafeKeeperConf,
 };
@@ -36,7 +37,7 @@ pub struct StateSnapshot {
     pub cfile_backup_lsn: Lsn,
 
     // misc
-    pub last_persist_at: Instant,
+    pub cfile_last_persist_at: Instant,
     pub inmem_flush_pending: bool,
     pub peers: Vec<PeerInfo>,
 }
@@ -51,7 +52,7 @@ impl StateSnapshot {
             cfile_peer_horizon_lsn: read_guard.sk.state.peer_horizon_lsn,
             cfile_remote_consistent_lsn: read_guard.sk.state.remote_consistent_lsn,
             cfile_backup_lsn: read_guard.sk.state.backup_lsn,
-            last_persist_at: read_guard.sk.state.pers.last_persist_at(),
+            cfile_last_persist_at: read_guard.sk.state.pers.last_persist_at(),
             inmem_flush_pending: Self::has_unflushed_inmem_state(&read_guard),
             peers: read_guard.get_peers(heartbeat_timeout),
         }
@@ -106,6 +107,7 @@ pub async fn main_task(
     let mut backup_task: Option<WalBackupTaskHandle> = None;
     let mut recovery_task: Option<JoinHandle<()>> = None;
     let mut partial_backup_task: Option<JoinHandle<()>> = None;
+    let mut wal_removal_task: Option<JoinHandle<anyhow::Result<u64>>> = None;
 
     // Start recovery task which always runs on the timeline.
     if conf.peer_recovery_enabled {
@@ -140,83 +142,36 @@ pub async fn main_task(
         let state_snapshot = StateSnapshot::new(tli.read_shared_state().await, heartbeat_timeout);
         let num_computes = *num_computes_rx.borrow();
 
-        let is_wal_backup_required =
-            wal_backup::is_wal_backup_required(wal_seg_size, num_computes, &state_snapshot);
+        let is_wal_backup_required = update_backup(
+            &conf,
+            &tli,
+            wal_seg_size,
+            num_computes,
+            &state_snapshot,
+            &mut backup_task,
+        )
+        .await;
 
-        if conf.is_wal_backup_enabled() {
-            wal_backup::update_task(
-                &conf,
-                &tli,
-                is_wal_backup_required,
-                &state_snapshot,
-                &mut backup_task,
-            )
-            .await;
-        }
+        let _is_active = update_is_active(
+            is_wal_backup_required,
+            num_computes,
+            &state_snapshot,
+            &mut tli_broker_active,
+            &tli,
+        );
 
-        let is_active = is_wal_backup_required
-            || num_computes > 0
-            || state_snapshot.remote_consistent_lsn < state_snapshot.commit_lsn;
+        let next_cfile_save = update_control_file_save(&state_snapshot, &tli).await;
 
-        // update the broker timeline set
-        if tli_broker_active.set(is_active) {
-            // write log if state has changed
-            info!(
-                "timeline active={} now, remote_consistent_lsn={}, commit_lsn={}",
-                is_active, state_snapshot.remote_consistent_lsn, state_snapshot.commit_lsn,
-            );
-
-            MANAGER_ACTIVE_CHANGES.inc();
-        }
-
-        // If enabled, we use LSN of the most lagging walsender as a WAL removal horizon.
-        // This allows to get better read speed for pageservers that are lagging behind,
-        // at the cost of keeping more WAL on disk.
-        let replication_horizon_lsn = if conf.walsenders_keep_horizon {
-            walsenders.laggard_lsn()
-        } else {
-            None
-        };
-
-        // update the state in Arc<Timeline>
-        tli.wal_backup_active
-            .store(backup_task.is_some(), std::sync::atomic::Ordering::Relaxed);
-        tli.broker_active
-            .store(is_active, std::sync::atomic::Ordering::Relaxed);
-
-        // WAL removal
-        let removal_horizon_lsn = calc_horizon_lsn(&state_snapshot, replication_horizon_lsn);
-        let removal_horizon_segno = removal_horizon_lsn
-            .segment_number(wal_seg_size)
-            .saturating_sub(1);
-
-        if removal_horizon_segno > last_removed_segno {
-            // we need to remove WAL
-            // TODO: do it in a tokio::spawn'ed task
-            let remover = crate::wal_storage::Storage::remove_up_to(
-                &tli.read_shared_state().await.sk.wal_store,
-                removal_horizon_segno,
-            );
-            if let Err(e) = remover.await {
-                warn!("failed to remove WAL: {}", e);
-            } else {
-                last_removed_segno = removal_horizon_segno;
-                tli.last_removed_segno
-                    .store(last_removed_segno, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-
-        // save control file if needed
-        if state_snapshot.inmem_flush_pending
-            && state_snapshot.last_persist_at.elapsed() > CF_SAVE_INTERVAL
-        {
-            let mut write_guard = tli.write_shared_state().await;
-            if let Err(e) = write_guard.sk.state.flush().await {
-                warn!("failed to save control file: {:?}", e);
-            }
-
-            // TODO: sleep until next CF_SAVE_INTERVAL
-        }
+        update_wal_removal(
+            &conf,
+            walsenders,
+            &tli,
+            wal_seg_size,
+            &state_snapshot,
+            last_removed_segno,
+            &mut wal_removal_task,
+        )
+        .await;
 
         // wait until something changes. tx channels are stored under Arc, so they will not be
         // dropped until the manager task is finished.
@@ -234,6 +189,20 @@ pub async fn main_task(
             }
             _ = num_computes_rx.changed() => {
                 // number of connected computes was updated
+            }
+            _ = tokio::time::sleep_until(next_cfile_save.unwrap()), if next_cfile_save.is_some() => {
+                // it's time to save the control file
+            }
+            res = async {
+                if let Some(task) = &mut wal_removal_task {
+                    task.await
+                } else {
+                    futures::future::pending().await
+                }
+            } => {
+                // WAL removal task finished
+                wal_removal_task = None;
+                update_wal_removal_end(res, &tli, &mut last_removed_segno);
             }
         }
     };
@@ -254,4 +223,148 @@ pub async fn main_task(
             warn!("partial backup task failed: {:?}", e);
         }
     }
+
+    if let Some(wal_removal_task) = wal_removal_task {
+        let res = wal_removal_task.await;
+        update_wal_removal_end(res, &tli, &mut last_removed_segno);
+    }
+}
+
+/// Spawns/kills backup task and returns true if backup is required.
+async fn update_backup(
+    conf: &SafeKeeperConf,
+    tli: &Arc<Timeline>,
+    wal_seg_size: usize,
+    num_computes: usize,
+    state: &StateSnapshot,
+    backup_task: &mut Option<WalBackupTaskHandle>,
+) -> bool {
+    let is_wal_backup_required =
+        wal_backup::is_wal_backup_required(wal_seg_size, num_computes, state);
+
+    if conf.is_wal_backup_enabled() {
+        wal_backup::update_task(conf, tli, is_wal_backup_required, state, backup_task).await;
+    }
+
+    // update the state in Arc<Timeline>
+    tli.wal_backup_active
+        .store(backup_task.is_some(), std::sync::atomic::Ordering::Relaxed);
+    is_wal_backup_required
+}
+
+/// Update is_active flag and returns its value.
+fn update_is_active(
+    is_wal_backup_required: bool,
+    num_computes: usize,
+    state: &StateSnapshot,
+    tli_broker_active: &mut TimelineSetGuard,
+    tli: &Arc<Timeline>,
+) -> bool {
+    let is_active = is_wal_backup_required
+        || num_computes > 0
+        || state.remote_consistent_lsn < state.commit_lsn;
+
+    // update the broker timeline set
+    if tli_broker_active.set(is_active) {
+        // write log if state has changed
+        info!(
+            "timeline active={} now, remote_consistent_lsn={}, commit_lsn={}",
+            is_active, state.remote_consistent_lsn, state.commit_lsn,
+        );
+
+        MANAGER_ACTIVE_CHANGES.inc();
+    }
+
+    // update the state in Arc<Timeline>
+    tli.broker_active
+        .store(is_active, std::sync::atomic::Ordering::Relaxed);
+    is_active
+}
+
+/// Save control file if needed. Returns Instant if we should persist the control file in the future.
+async fn update_control_file_save(
+    state: &StateSnapshot,
+    tli: &Arc<Timeline>,
+) -> Option<tokio::time::Instant> {
+    if !state.inmem_flush_pending {
+        return None;
+    }
+
+    if state.cfile_last_persist_at.elapsed() > CF_SAVE_INTERVAL {
+        let mut write_guard = tli.write_shared_state().await;
+        // this can be done in the background because it blocks manager task, but flush() should
+        // be fast enough not to be a problem now
+        if let Err(e) = write_guard.sk.state.flush().await {
+            warn!("failed to save control file: {:?}", e);
+        }
+
+        None
+    } else {
+        // we should wait until next CF_SAVE_INTERVAL
+        Some((state.cfile_last_persist_at + CF_SAVE_INTERVAL).into())
+    }
+}
+
+async fn update_wal_removal(
+    conf: &SafeKeeperConf,
+    walsenders: &Arc<WalSenders>,
+    tli: &Arc<Timeline>,
+    wal_seg_size: usize,
+    state: &StateSnapshot,
+    last_removed_segno: u64,
+    wal_removal_task: &mut Option<JoinHandle<anyhow::Result<u64>>>,
+) {
+    if wal_removal_task.is_some() {
+        // WAL removal is already in progress
+        return;
+    }
+
+    // If enabled, we use LSN of the most lagging walsender as a WAL removal horizon.
+    // This allows to get better read speed for pageservers that are lagging behind,
+    // at the cost of keeping more WAL on disk.
+    let replication_horizon_lsn = if conf.walsenders_keep_horizon {
+        walsenders.laggard_lsn()
+    } else {
+        None
+    };
+
+    let removal_horizon_lsn = calc_horizon_lsn(state, replication_horizon_lsn);
+    let removal_horizon_segno = removal_horizon_lsn
+        .segment_number(wal_seg_size)
+        .saturating_sub(1);
+
+    if removal_horizon_segno > last_removed_segno {
+        // we need to remove WAL
+        let remover = crate::wal_storage::Storage::remove_up_to(
+            &tli.read_shared_state().await.sk.wal_store,
+            removal_horizon_segno,
+        );
+        *wal_removal_task = Some(tokio::spawn(async move {
+            remover.await?;
+            Ok(removal_horizon_segno)
+        }));
+    }
+}
+
+fn update_wal_removal_end(
+    res: Result<anyhow::Result<u64>, JoinError>,
+    tli: &Arc<Timeline>,
+    last_removed_segno: &mut u64,
+) {
+    let new_last_removed_segno = match res {
+        Ok(Ok(segno)) => segno,
+        Err(e) => {
+            warn!("WAL removal task failed: {:?}", e);
+            return;
+        }
+        Ok(Err(e)) => {
+            warn!("WAL removal task failed: {:?}", e);
+            return;
+        }
+    };
+
+    *last_removed_segno = new_last_removed_segno;
+    // update the state in Arc<Timeline>
+    tli.last_removed_segno
+        .store(new_last_removed_segno, std::sync::atomic::Ordering::Relaxed);
 }
