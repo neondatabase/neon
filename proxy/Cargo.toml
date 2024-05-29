@@ -38,6 +38,7 @@ hmac.workspace = true
 hostname.workspace = true
 http.workspace = true
 humantime.workspace = true
+humantime-serde.workspace = true
 hyper.workspace = true
 hyper1 = { package = "hyper", version = "1.2", features = ["server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }

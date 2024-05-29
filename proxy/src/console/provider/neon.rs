@@ -301,7 +301,7 @@ impl super::Api for Api {
             }
         }
 
-        let mut node = self.do_wake_compute(ctx, user_info).await?;
+        let mut node = permit.release_result(self.do_wake_compute(ctx, user_info).await)?;
         ctx.set_project(node.aux.clone());
         let cold_start_info = node.aux.cold_start_info;
         info!("woken up a compute node");

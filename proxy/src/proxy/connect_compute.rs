@@ -84,8 +84,8 @@ impl ConnectMechanism for TcpMechanism<'_> {
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
         let host = node_info.config.get_host()?;
-        let _permit = self.locks.get_permit(&host).await?;
-        node_info.connect(ctx, timeout).await
+        let permit = self.locks.get_permit(&host).await?;
+        permit.release_result(node_info.connect(ctx, timeout).await)
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {
