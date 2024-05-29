@@ -366,7 +366,10 @@ impl Layer {
             .0
             .get_or_maybe_download(true, Some(ctx))
             .await
-            .map_err(|err| GetVectoredError::Other(anyhow::anyhow!(err)))?;
+            .map_err(|err| match err {
+                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                other => GetVectoredError::Other(anyhow::anyhow!(other)),
+            })?;
 
         self.0
             .access_stats
