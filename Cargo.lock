@@ -4113,6 +4113,7 @@ version = "0.1.0"
 dependencies = [
  "byteorder",
  "bytes",
+ "itertools",
  "pin-project-lite",
  "postgres-protocol",
  "rand 0.8.5",

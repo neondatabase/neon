@@ -17,7 +17,7 @@ use hyper1::http::HeaderValue;
 use hyper1::Response;
 use hyper1::StatusCode;
 use hyper1::{HeaderMap, Request};
-use pq_proto::StartupMessageParams;
+use pq_proto::StartupMessageParamsBuilder;
 use serde_json::json;
 use serde_json::Value;
 use tokio::time;
@@ -193,7 +193,7 @@ fn get_conn_info(
 
     let mut options = Option::None;
 
-    let mut params = StartupMessageParams::default();
+    let mut params = StartupMessageParamsBuilder::default();
     params.insert("user", &username);
     params.insert("database", &dbname);
     for (key, value) in pairs {
