@@ -860,7 +860,7 @@ jobs:
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
       
       - name: Build neon extensions test image
-        if: ${{ matrix.version == 'v16' }}
+        if: matrix.version == 'v16'
         uses: docker/build-push-action@v5
         with:
           context: .
