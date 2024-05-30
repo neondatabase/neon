@@ -4329,26 +4329,29 @@ impl Timeline {
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
             .await?;
-        let (data, total_kb_retrieved, total_key_retrieved) = {
+        let (data, total_kb_retrieved, total_keys_retrieved) = {
             let mut new_data = BTreeMap::new();
             let mut total_kb_retrieved = 0;
-            let mut total_key_retrieved = 0;
+            let mut total_keys_retrieved = 0;
             for (k, v) in data {
                 let v = v.map_err(CreateImageLayersError::PageReconstructError)?;
                 total_kb_retrieved += KEY_SIZE + v.len();
-                total_key_retrieved += 1;
+                total_keys_retrieved += 1;
                 new_data.insert(k, v);
             }
-            (new_data, total_kb_retrieved / 1024, total_key_retrieved)
+            (new_data, total_kb_retrieved / 1024, total_keys_retrieved)
         };
-        let delta_file_accessed = reconstruct_state.get_delta_layers_visited();
+        let delta_files_accessed = reconstruct_state.get_delta_layers_visited();
 
-        let trigger_generation = delta_file_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
+        let trigger_generation = delta_files_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
         debug!(
-            "generate image layers for metadata keys: trigger_generation={trigger_generation}, \
-                delta_file_accessed={delta_file_accessed}, total_kb_retrieved={total_kb_retrieved}, \
-                total_key_retrieved={total_key_retrieved}"
+            trigger_generation,
+            delta_files_accessed,
+            total_kb_retrieved,
+            total_keys_retrieved,
+            "generate metadata images"
         );
+
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
             return Ok(ImageLayerCreationOutcome {
                 image: None,
@@ -4358,6 +4361,8 @@ impl Timeline {
         let mut has_keys = false;
         for (k, v) in data {
             if v.is_empty() {
+                // the key has been deleted, it does not need an image
+                // in metadata keyspace, an empty image == tombstone
                 continue;
             }
             has_keys = true;
@@ -4379,7 +4384,7 @@ impl Timeline {
             })
         } else {
             // Special case: the image layer may be empty if this is a sharded tenant and the
-            // partition does not cover any keys owned by this shard.  In this case, to ensure
+            // partition does not cover any keys owned by this shard. In this case, to ensure
             // we don't leave gaps between image layers, leave `start` where it is, so that the next
             // layer we write will cover the key range that we just scanned.
             tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
@@ -5454,7 +5459,7 @@ impl Timeline {
             max_lsn <= last_record_lsn,
             "advance last record lsn before inserting a layer, max_lsn={max_lsn}, last_record_lsn={last_record_lsn}"
         );
-        let max_lsn = Lsn(max_lsn.0 + 1);
+        let end_lsn = Lsn(max_lsn.0 + 1);
         if let Some(check_start_lsn) = check_start_lsn {
             assert!(min_lsn >= check_start_lsn);
         }
@@ -5463,7 +5468,7 @@ impl Timeline {
             self.timeline_id,
             self.tenant_shard_id,
             min_key,
-            min_lsn..max_lsn,
+            min_lsn..end_lsn,
             ctx,
         )
         .await?;

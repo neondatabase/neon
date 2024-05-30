@@ -6477,58 +6477,44 @@ mod tests {
     async fn test_metadata_tombstone_reads() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_metadata_tombstone_reads")?;
         let (tenant, ctx) = harness.load().await;
-        let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
-            .await?;
-
-        let mut key0 = Key::from_hex("000000000033333333444444445500000000").unwrap();
-        let mut key1 = Key::from_hex("000000000033333333444444445500000001").unwrap();
-        let mut key2 = Key::from_hex("000000000033333333444444445500000002").unwrap();
-        let mut key3 = Key::from_hex("000000000033333333444444445500000003").unwrap();
-        key0.field1 = AUX_KEY_PREFIX;
-        key1.field1 = AUX_KEY_PREFIX;
-        key2.field1 = AUX_KEY_PREFIX;
-        key3.field1 = AUX_KEY_PREFIX;
-
-        tline.force_advance_lsn(Lsn(0x30));
-        tline
-            .force_create_image_layer(Lsn(0x10), vec![(key1, test_img("metadata key 1"))], &ctx)
-            .await
-            .unwrap();
-        tline
-            .force_create_delta_layer(
-                vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        tline
-            .force_create_delta_layer(vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))], &ctx)
-            .await
-            .unwrap();
-        tline
-            .force_create_delta_layer(vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))], &ctx)
-            .await
-            .unwrap();
+        let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
+        let key2 = Key::from_hex("620000000033333333444444445500000002").unwrap();
+        let key3 = Key::from_hex("620000000033333333444444445500000003").unwrap();
 
         // We emulate the situation that the compaction algorithm creates an image layer that removes the tombstones
         // Lsn 0x30 key0, key3, no key1+key2
         // Lsn 0x20 key1+key2 tomestones
         // Lsn 0x10 key1 in image, key2 in delta
-        tline
-            .force_create_image_layer(
-                Lsn(0x30),
-                vec![
-                    (key0, test_img("metadata key 0")),
-                    (key3, test_img("metadata key 3")),
-                ],
+        let tline = tenant
+            .create_test_timeline_with_states(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
                 &ctx,
+                // delta layers
+                vec![
+                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                ],
+                // image layers
+                vec![
+                    (Lsn(0x10), vec![(key1, test_img("metadata key 1"))]),
+                    (
+                        Lsn(0x30),
+                        vec![
+                            (key0, test_img("metadata key 0")),
+                            (key3, test_img("metadata key 3")),
+                        ],
+                    ),
+                ],
+                Lsn(0x30),
             )
-            .await
-            .unwrap();
+            .await?;
 
         let lsn = Lsn(0x30);
+        let old_lsn = Lsn(0x20);
 
         assert_eq!(
             get_vectored_impl_wrapper(&tline, key0, lsn, &ctx).await?,
@@ -6542,7 +6528,14 @@ mod tests {
             get_vectored_impl_wrapper(&tline, key2, lsn, &ctx).await?,
             None,
         );
-
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key1, old_lsn, &ctx).await?,
+            Some(Bytes::new()),
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key2, old_lsn, &ctx).await?,
+            Some(Bytes::new()),
+        );
         assert_eq!(
             get_vectored_impl_wrapper(&tline, key3, lsn, &ctx).await?,
             Some(test_img("metadata key 3"))
