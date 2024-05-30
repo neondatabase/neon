@@ -1507,7 +1507,7 @@ impl Tenant {
                         .wait_lsn(*lsn, timeline::WaitLsnWaiter::Tenant, ctx)
                         .await
                         .map_err(|e| match e {
-                            e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState) => {
+                            e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState { .. }) => {
                                 CreateTimelineError::AncestorLsn(anyhow::anyhow!(e))
                             }
                             WaitLsnError::Shutdown => CreateTimelineError::ShuttingDown,
@@ -4308,9 +4308,10 @@ mod tests {
 
         // This needs to traverse to the parent, and fails.
         let err = newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("will not become active. Current state: Broken"));
+        assert!(err.to_string().starts_with(&format!(
+            "Bad state on timeline {}: Broken",
+            tline.timeline_id
+        )));
 
         Ok(())
     }

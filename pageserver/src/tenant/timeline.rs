@@ -633,11 +633,14 @@ pub(crate) enum GetReadyAncestorError {
     #[error("Ancestor LSN wait error: {0}")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
+    #[error("Bad state on timeline {timeline_id}: {state:?}")]
+    BadState {
+        timeline_id: TimelineId,
+        state: TimelineState,
+    },
+
     #[error("Cancelled")]
     Cancelled,
-
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 #[derive(Clone, Copy)]
@@ -672,8 +675,8 @@ pub(crate) enum WaitLsnError {
     Shutdown,
 
     // Called on an timeline not in active state or shutting down
-    #[error("Bad state (not active)")]
-    BadState,
+    #[error("Bad timeline state: {0:?}")]
+    BadState(TimelineState),
 
     // Timeout expired while waiting for LSN to catch up with goal.
     #[error("{0}")]
@@ -738,8 +741,8 @@ impl From<GetReadyAncestorError> for PageReconstructError {
         match e {
             AncestorStopping(tid) => PageReconstructError::AncestorStopping(tid),
             AncestorLsnTimeout(wait_err) => PageReconstructError::AncestorLsnTimeout(wait_err),
+            bad_state @ BadState { .. } => PageReconstructError::Other(anyhow::anyhow!(bad_state)),
             Cancelled => PageReconstructError::Cancelled,
-            Other(other) => PageReconstructError::Other(other),
         }
     }
 }
@@ -1448,10 +1451,11 @@ impl Timeline {
         who_is_waiting: WaitLsnWaiter<'_>,
         ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
-        if self.cancel.is_cancelled() || self.is_stopping() {
+        let state = self.current_state();
+        if self.cancel.is_cancelled() || matches!(state, TimelineState::Stopping) {
             return Err(WaitLsnError::Shutdown);
-        } else if !self.is_active() {
-            return Err(WaitLsnError::BadState);
+        } else if !matches!(state, TimelineState::Active) {
+            return Err(WaitLsnError::BadState(state));
         }
 
         if cfg!(debug_assertions) {
@@ -3188,17 +3192,21 @@ impl Timeline {
             }
 
             // Recurse into ancestor if needed
-            if is_inherited_key(key) && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
-                trace!(
-                    "going into ancestor {}, cont_lsn is {}",
-                    timeline.ancestor_lsn,
-                    cont_lsn
-                );
+            if let Some(ancestor_timeline) = timeline.ancestor_timeline.as_ref() {
+                if is_inherited_key(key) && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
+                    trace!(
+                        "going into ancestor {}, cont_lsn is {}",
+                        timeline.ancestor_lsn,
+                        cont_lsn
+                    );
 
-                timeline_owned = timeline.get_ready_ancestor_timeline(ctx).await?;
-                timeline = &*timeline_owned;
-                prev_lsn = None;
-                continue 'outer;
+                    timeline_owned = timeline
+                        .get_ready_ancestor_timeline(ancestor_timeline, ctx)
+                        .await?;
+                    timeline = &*timeline_owned;
+                    prev_lsn = None;
+                    continue 'outer;
+                }
             }
 
             let guard = timeline.layers.read().await;
@@ -3347,10 +3355,10 @@ impl Timeline {
                 break None;
             }
 
-            // Not fully retrieved but no ancestor timeline.
-            if timeline.ancestor_timeline.is_none() {
+            let Some(ancestor_timeline) = timeline.ancestor_timeline.as_ref() else {
+                // Not fully retrieved but no ancestor timeline.
                 break Some(keyspace);
-            }
+            };
 
             // Now we see if there are keys covered by the image layer but does not exist in the
             // image layer, which means that the key does not exist.
@@ -3370,7 +3378,7 @@ impl Timeline {
             // Take the min to avoid reconstructing a page with data newer than request Lsn.
             cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
             timeline_owned = timeline
-                .get_ready_ancestor_timeline(ctx)
+                .get_ready_ancestor_timeline(ancestor_timeline, ctx)
                 .await
                 .map_err(GetVectoredError::GetReadyAncestorError)?;
             timeline = &*timeline_owned;
@@ -3542,13 +3550,9 @@ impl Timeline {
 
     async fn get_ready_ancestor_timeline(
         &self,
+        ancestor: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, GetReadyAncestorError> {
-        let ancestor = match self.get_ancestor_timeline() {
-            Ok(timeline) => timeline,
-            Err(e) => return Err(GetReadyAncestorError::from(e)),
-        };
-
         // It's possible that the ancestor timeline isn't active yet, or
         // is active but hasn't yet caught up to the branch point. Wait
         // for it.
@@ -3581,11 +3585,10 @@ impl Timeline {
                 ));
             }
             Err(state) => {
-                return Err(GetReadyAncestorError::Other(anyhow::anyhow!(
-                    "Timeline {} will not become active. Current state: {:?}",
-                    ancestor.timeline_id,
-                    &state,
-                )));
+                return Err(GetReadyAncestorError::BadState {
+                    timeline_id: ancestor.timeline_id,
+                    state,
+                });
             }
         }
         ancestor
@@ -3594,21 +3597,17 @@ impl Timeline {
             .map_err(|e| match e {
                 e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),
                 WaitLsnError::Shutdown => GetReadyAncestorError::Cancelled,
-                e @ WaitLsnError::BadState => GetReadyAncestorError::Other(anyhow::anyhow!(e)),
+                WaitLsnError::BadState(state) => GetReadyAncestorError::BadState {
+                    timeline_id: ancestor.timeline_id,
+                    state,
+                },
             })?;
 
-        Ok(ancestor)
+        Ok(ancestor.clone())
     }
 
-    pub(crate) fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
-        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
-            format!(
-                "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
-                self.timeline_id,
-                self.get_ancestor_timeline_id(),
-            )
-        })?;
-        Ok(Arc::clone(ancestor))
+    pub(crate) fn get_ancestor_timeline(&self) -> Option<Arc<Timeline>> {
+        self.ancestor_timeline.clone()
     }
 
     pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
