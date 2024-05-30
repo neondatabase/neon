@@ -50,12 +50,17 @@ pub enum FeStartupPacket {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct StartupMessageParams {
     params: HashMap<String, String>,
 }
 
 impl StartupMessageParams {
+    /// Set parameter's value by its name.
+    pub fn insert(&mut self, name: &str, value: &str) {
+        self.params.insert(name.to_owned(), value.to_owned());
+    }
+
     /// Get parameter's value by its name.
     pub fn get(&self, name: &str) -> Option<&str> {
         self.params.get(name).map(|s| s.as_str())
