@@ -19,7 +19,7 @@ env:
 jobs:
   cancel-previous-e2e-tests:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Cancel previous e2e-tests runs for this PR
@@ -31,7 +31,7 @@ jobs:
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
   tag:
-    runs-on: [ ubuntu-latest ]
+    runs-on: ubuntu-22.04
     outputs:
       build-tag: ${{ steps.build-tag.outputs.tag }}
 
@@ -62,7 +62,7 @@ jobs:
 
   trigger-e2e-tests:
     needs: [ tag ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
       TAG: ${{ needs.tag.outputs.build-tag }}
     steps:

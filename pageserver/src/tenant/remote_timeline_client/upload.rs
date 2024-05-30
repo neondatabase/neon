@@ -9,7 +9,7 @@ use std::time::SystemTime;
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
-use utils::backoff;
+use utils::{backoff, pausable_failpoint};
 
 use super::Generation;
 use crate::tenant::remote_timeline_client::{

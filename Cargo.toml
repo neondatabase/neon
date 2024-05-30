@@ -46,10 +46,10 @@ anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
 atomic-take = "1.1.0"
-azure_core = "0.19"
-azure_identity = "0.19"
-azure_storage = "0.19"
-azure_storage_blobs = "0.19"
+azure_core = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
+azure_identity = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
+azure_storage = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
+azure_storage_blobs = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
@@ -114,7 +114,6 @@ md5 = "0.7.0"
 measured = { version = "0.0.21", features=["lasso"] }
 measured-process = { version = "0.0.21" }
 memoffset = "0.8"
-native-tls = "0.2"
 nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
 notify = "6.0.0"
 num_cpus = "1.15"
@@ -191,7 +190,7 @@ url = "2.2"
 urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
-webpki-roots = "0.25"
+rustls-native-certs = "0.7"
 x509-parser = "0.15"
 
 ## TODO replace this with tracing
@@ -200,7 +199,6 @@ log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
@@ -241,8 +239,7 @@ tonic-build = "0.9"
 
 [patch.crates-io]
 
-# This is only needed for proxy's tests.
-# TODO: we should probably fork `tokio-postgres-rustls` instead.
+# Needed to get `tokio-postgres-rustls` to depend on our fork.
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 
 # bug fixes for UUID

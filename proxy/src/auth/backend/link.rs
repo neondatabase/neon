@@ -100,6 +100,7 @@ pub(super) async fn authenticate(
         .dbname(&db_info.dbname)
         .user(&db_info.user);
 
+    ctx.set_dbname(db_info.dbname.into());
     ctx.set_user(db_info.user.into());
     ctx.set_project(db_info.aux.clone());
     info!("woken up a compute node");

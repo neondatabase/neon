@@ -15,11 +15,11 @@ use crate::{
     error::ReportableError,
     intern::ProjectIdInt,
     metrics::ApiLockMetrics,
+    rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token},
     scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
 use std::{hash::Hash, sync::Arc, time::Duration};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tracing::info;
 
@@ -443,8 +443,8 @@ impl ApiCaches {
 /// Various caches for [`console`](super).
 pub struct ApiLocks<K> {
     name: &'static str,
-    node_locks: DashMap<K, Arc<Semaphore>>,
-    permits: usize,
+    node_locks: DashMap<K, Arc<DynamicLimiter>>,
+    config: RateLimiterConfig,
     timeout: Duration,
     epoch: std::time::Duration,
     metrics: &'static ApiLockMetrics,
@@ -452,8 +452,6 @@ pub struct ApiLocks<K> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiLockError {
-    #[error("lock was closed")]
-    AcquireError(#[from] tokio::sync::AcquireError),
     #[error("permit could not be acquired")]
     TimeoutError(#[from] tokio::time::error::Elapsed),
 }
@@ -461,7 +459,6 @@ pub enum ApiLockError {
 impl ReportableError for ApiLockError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            ApiLockError::AcquireError(_) => crate::error::ErrorKind::Service,
             ApiLockError::TimeoutError(_) => crate::error::ErrorKind::RateLimit,
         }
     }
@@ -470,7 +467,7 @@ impl ReportableError for ApiLockError {
 impl<K: Hash + Eq + Clone> ApiLocks<K> {
     pub fn new(
         name: &'static str,
-        permits: usize,
+        config: RateLimiterConfig,
         shards: usize,
         timeout: Duration,
         epoch: std::time::Duration,
@@ -479,7 +476,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         Ok(Self {
             name,
             node_locks: DashMap::with_shard_amount(shards),
-            permits,
+            config,
             timeout,
             epoch,
             metrics,
@@ -487,8 +484,10 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
     }
 
     pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
-        if self.permits == 0 {
-            return Ok(WakeComputePermit { permit: None });
+        if self.config.initial_limit == 0 {
+            return Ok(WakeComputePermit {
+                permit: Token::disabled(),
+            });
         }
         let now = Instant::now();
         let semaphore = {
@@ -500,24 +499,22 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
                     .entry(key.clone())
                     .or_insert_with(|| {
                         self.metrics.semaphores_registered.inc();
-                        Arc::new(Semaphore::new(self.permits))
+                        DynamicLimiter::new(self.config)
                     })
                     .clone()
             }
         };
-        let permit = tokio::time::timeout_at(now + self.timeout, semaphore.acquire_owned()).await;
+        let permit = semaphore.acquire_deadline(now + self.timeout).await;
 
         self.metrics
             .semaphore_acquire_seconds
             .observe(now.elapsed().as_secs_f64());
 
-        Ok(WakeComputePermit {
-            permit: Some(permit??),
-        })
+        Ok(WakeComputePermit { permit: permit? })
     }
 
     pub async fn garbage_collect_worker(&self) {
-        if self.permits == 0 {
+        if self.config.initial_limit == 0 {
             return;
         }
         let mut interval =
@@ -547,12 +544,21 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
 }
 
 pub struct WakeComputePermit {
-    // None if the lock is disabled
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Token,
 }
 
 impl WakeComputePermit {
     pub fn should_check_cache(&self) -> bool {
-        self.permit.is_some()
+        !self.permit.is_disabled()
+    }
+    pub fn release(self, outcome: Outcome) {
+        self.permit.release(outcome)
+    }
+    pub fn release_result<T, E>(self, res: Result<T, E>) -> Result<T, E> {
+        match res {
+            Ok(_) => self.release(Outcome::Success),
+            Err(_) => self.release(Outcome::Overload),
+        }
+        res
     }
 }

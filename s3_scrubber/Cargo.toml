@@ -22,8 +22,7 @@ serde_with.workspace = true
 workspace_hack.workspace = true
 utils.workspace = true
 async-stream.workspace = true
-native-tls.workspace = true
-postgres-native-tls.workspace = true
+tokio-postgres-rustls.workspace = true
 postgres_ffi.workspace = true
 tokio-stream.workspace = true
 tokio-postgres.workspace = true
@@ -31,6 +30,9 @@ tokio-util = { workspace = true }
 futures-util.workspace = true
 itertools.workspace = true
 camino.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+once_cell.workspace = true
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }

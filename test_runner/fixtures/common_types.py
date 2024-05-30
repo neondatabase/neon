@@ -5,6 +5,8 @@ from typing import Any, Type, TypeVar, Union
 
 T = TypeVar("T", bound="Id")
 
+DEFAULT_WAL_SEG_SIZE = 16 * 1024 * 1024
+
 
 @total_ordering
 class Lsn:
@@ -66,6 +68,9 @@ class Lsn:
 
     def as_int(self) -> int:
         return self.lsn_int
+
+    def segment_lsn(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> "Lsn":
+        return Lsn(self.lsn_int - (self.lsn_int % seg_sz))
 
 
 @dataclass(frozen=True)
