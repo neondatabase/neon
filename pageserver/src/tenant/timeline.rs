@@ -1448,7 +1448,7 @@ impl Timeline {
         who_is_waiting: WaitLsnWaiter<'_>,
         ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
-        if self.cancel.is_cancelled() {
+        if self.cancel.is_cancelled() || self.is_stopping() {
             return Err(WaitLsnError::Shutdown);
         } else if !self.is_active() {
             return Err(WaitLsnError::BadState);
