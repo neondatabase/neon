@@ -2762,7 +2762,7 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
-        return subprocess.Popen(command, env=env, cwd=cwd)
+        return subprocess.Popen(command, env=env, cwd=cwd, stdout=subprocess.PIPE, text=True)
 
     def run(
         self,
@@ -2772,7 +2772,8 @@ class PgBin:
     ):
         proc = self.run_nonblocking(command, env, cwd)
         proc.wait()
-        proc.check_returncode()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
     def run_capture(
         self,
