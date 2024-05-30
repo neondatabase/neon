@@ -33,6 +33,12 @@ defaults:
     shell: bash -euo pipefail {0}
 
 jobs:
+  test-var:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - run: echo TV ${{ toJson(github.event.pull_request.labels.*.name) }} 
+
   remove-label:
     # Remove `approved-for-ci-run` label if the workflow is triggered by changes in a PR.
     # The PR should be reviewed and labelled manually again.
