@@ -91,7 +91,7 @@ jobs:
           ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
           if [ -z "${ALREADY_CREATED}" ]; then
             ADDITIONAL_LABELS=
-            echo ${{ toJson(github.event.pull_request.labels.*.name) }} | while read -r label
+            for label in ${{ toJson(github.event.pull_request.labels.*.name) }} 
             do
               [ "$label" = "approved-for-ci-run" ] || \
               ADDITIONAL_LABELS="--label $label $ADDITIONAL_LABELS"
