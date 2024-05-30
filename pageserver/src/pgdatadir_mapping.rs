@@ -115,9 +115,7 @@ impl From<PageReconstructError> for CollectKeySpaceError {
 impl From<PageReconstructError> for CalculateLogicalSizeError {
     fn from(pre: PageReconstructError) -> Self {
         match pre {
-            PageReconstructError::AncestorStopping(_) | PageReconstructError::Cancelled => {
-                Self::Cancelled
-            }
+            PageReconstructError::Cancelled => Self::Cancelled,
             _ => Self::PageRead(pre),
         }
     }
@@ -1614,8 +1612,7 @@ impl<'a> DatadirModification<'a> {
                         aux_files.dir = Some(dir);
                     }
                     Err(
-                        e @ (PageReconstructError::AncestorStopping(_)
-                        | PageReconstructError::Cancelled
+                        e @ (PageReconstructError::Cancelled
                         | PageReconstructError::AncestorLsnTimeout(_)),
                     ) => {
                         // Important that we do not interpret a shutdown error as "not found" and thereby

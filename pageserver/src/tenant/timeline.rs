@@ -501,10 +501,6 @@ pub(crate) enum PageReconstructError {
     #[error("timeline shutting down")]
     Cancelled,
 
-    /// The ancestor of this is being stopped
-    #[error("ancestor timeline {0} is being stopped")]
-    AncestorStopping(TimelineId),
-
     /// An error happened replaying WAL records
     #[error(transparent)]
     WalRedo(anyhow::Error),
@@ -569,7 +565,7 @@ impl PageReconstructError {
         match self {
             Other(_) => false,
             AncestorLsnTimeout(_) => false,
-            Cancelled | AncestorStopping(_) => true,
+            Cancelled => true,
             WalRedo(_) => false,
             MissingKey { .. } => false,
         }
@@ -645,9 +641,6 @@ pub(crate) enum GetVectoredError {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum GetReadyAncestorError {
-    #[error("ancestor timeline {0} is being stopped")]
-    AncestorStopping(TimelineId),
-
     #[error("Ancestor LSN wait error: {0}")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
@@ -757,7 +750,6 @@ impl From<GetReadyAncestorError> for PageReconstructError {
     fn from(e: GetReadyAncestorError) -> Self {
         use GetReadyAncestorError::*;
         match e {
-            AncestorStopping(tid) => PageReconstructError::AncestorStopping(tid),
             AncestorLsnTimeout(wait_err) => PageReconstructError::AncestorLsnTimeout(wait_err),
             bad_state @ BadState { .. } => PageReconstructError::Other(anyhow::anyhow!(bad_state)),
             Cancelled => PageReconstructError::Cancelled,
@@ -1192,9 +1184,7 @@ impl Timeline {
 
                 use PageReconstructError::*;
                 match block {
-                    Err(Cancelled | AncestorStopping(_)) => {
-                        return Err(GetVectoredError::Cancelled)
-                    }
+                    Err(Cancelled) => return Err(GetVectoredError::Cancelled),
                     Err(MissingKey(_))
                         if NON_INHERITED_RANGE.contains(&key)
                             || NON_INHERITED_SPARSE_RANGE.contains(&key) =>
@@ -3585,9 +3575,8 @@ impl Timeline {
         match ancestor.wait_to_become_active(ctx).await {
             Ok(()) => {}
             Err(TimelineState::Stopping) => {
-                return Err(GetReadyAncestorError::AncestorStopping(
-                    ancestor.timeline_id,
-                ));
+                // If an ancestor is stopping, it means the tenant is stopping: handle this the same as if this timeline was stopping.
+                return Err(GetReadyAncestorError::Cancelled);
             }
             Err(state) => {
                 return Err(GetReadyAncestorError::BadState {
