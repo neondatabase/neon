@@ -68,7 +68,6 @@ enum Commands {
     Layer(LayerCmd),
     /// Debug print a hex key found from logs
     Key(DescribeKeyCommand),
-    RelBlockToKey(RelBlockToKey),
 }
 
 /// Read and update pageserver metadata file
@@ -217,26 +216,6 @@ impl std::str::FromStr for SpanAttributesFromLogs {
 
         Ok(Self(reltag, blocknum))
     }
-}
-
-/// Print out a key corresponding to the given reltag and blocknum, with optional forknum option.
-///
-/// The arguments correspond to page_service span:
-///
-/// ```text
-/// handle_get_page_at_lsn_request{rel=1663/16389/24615 blkno=1052204 ...
-/// ```
-///
-/// Where spcnode = 1663, dbnode = 16389, relnode = 24615 and block_num = 1_052_204.
-#[derive(Parser)]
-struct RelBlockToKey {
-    spcnode: u32,
-    dbnode: u32,
-    relnode: u32,
-    block_num: u32,
-    /// Fork number to use, defaults to zero
-    #[arg(long)]
-    forknum: Option<u8>,
 }
 
 #[tokio::main]
@@ -435,25 +414,6 @@ async fn main() -> anyhow::Result<()> {
                 ":",
                 pageserver_api::shard::describe(&key, shard_count, stripe_size)
             );
-        }
-
-        Commands::RelBlockToKey(RelBlockToKey {
-            spcnode,
-            dbnode,
-            relnode,
-            block_num,
-            forknum,
-        }) => {
-            let key = pageserver_api::key::rel_block_to_key(
-                pageserver_api::reltag::RelTag {
-                    forknum: forknum.unwrap_or(0),
-                    spcnode,
-                    dbnode,
-                    relnode,
-                },
-                block_num,
-            );
-            println!("{key}");
         }
     };
     Ok(())
