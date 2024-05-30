@@ -496,7 +496,7 @@ pub(crate) enum PageReconstructError {
     Other(#[from] anyhow::Error),
 
     #[error("Ancestor LSN wait error: {0}")]
-    AncestorLsnTimeout(#[from] WaitLsnError),
+    AncestorLsnTimeout(WaitLsnError),
 
     #[error("timeline shutting down")]
     Cancelled,
