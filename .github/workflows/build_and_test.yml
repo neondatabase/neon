@@ -318,7 +318,6 @@ jobs:
 
       - name: Build neon extensions
         run: mold -run make neon-pg-ext -j$(nproc)
-        shell: bash
 
       - name: Build walproposer-lib
         run: mold -run make walproposer-lib -j$(nproc)
