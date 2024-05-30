@@ -23,6 +23,7 @@ def measure_replication_lag(master, replica):
                 return time.time() - start
         time.sleep(0.5)
 
+@pytest.mark.remote_cluster
 @pytest.mark.timeout(0)
 def test_ro_replica_lag(
         pg_bin: PgBin,
@@ -83,7 +84,7 @@ def test_ro_replica_lag(
         if should_delete:
             neon_delete_project(neon_api_key, neon_api_base_url, project_id)
 
-
+@pytest.mark.remote_cluster
 @pytest.mark.timeout(0)
 def test_replication_start_stop(
         pg_bin: PgBin,
