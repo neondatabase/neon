@@ -14,6 +14,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
 use index_part::IndexPartCmd;
@@ -119,7 +120,11 @@ struct AnalyzeLayerMapCmd {
 
 #[derive(Parser)]
 struct DescribeKeyCommand {
-    key: Key,
+    /// Key material in one of the forms:
+    /// - hex
+    /// - span attributes captured from log
+    /// - reltag blocknum
+    input: Vec<String>,
 
     /// The number of shards.
     ///
@@ -134,6 +139,84 @@ struct DescribeKeyCommand {
     /// one row in output you can ignore.
     #[arg(long)]
     stripe_size: Option<u32>,
+}
+
+enum KeyMaterial {
+    Hex(Key),
+    String(SpanAttributesFromLogs),
+    Split(
+        pageserver_api::reltag::RelTag,
+        pageserver_api::reltag::BlockNumber,
+    ),
+}
+
+impl<S: AsRef<str>> TryFrom<&[S]> for KeyMaterial {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &[S]) -> Result<Self, Self::Error> {
+        match value {
+            [one] => {
+                let one = one.as_ref();
+
+                let key = Key::from_hex(one).map(KeyMaterial::Hex);
+
+                let attrs = SpanAttributesFromLogs::from_str(one).map(KeyMaterial::String);
+
+                match (key, attrs) {
+                    (Ok(key), _) => Ok(key),
+                    (_, Ok(s)) => Ok(s),
+                    (Err(e1), Err(e2)) => anyhow::bail!(
+                        "failed to parse {one:?} as hex or span attributes:\n- {e1:#}\n- {e2:#}"
+                    ),
+                }
+            }
+            [reltag, blocknum] => {
+                let (reltag, blocknum) = (reltag.as_ref(), blocknum.as_ref());
+                let reltag = reltag.strip_prefix("rel=").unwrap_or(reltag);
+                let blocknum = blocknum.strip_prefix("blkno=").unwrap_or(blocknum);
+                let reltag = reltag
+                    .parse()
+                    .with_context(|| format!("parse reltag out of {reltag:?}"))?;
+                let blocknum = blocknum
+                    .parse()
+                    .with_context(|| format!("parse blocknum out of {blocknum:?}"))?;
+                Ok(KeyMaterial::Split(reltag, blocknum))
+            }
+            _ => anyhow::bail!("need 1..2 positionals argument, not {}", value.len()),
+        }
+    }
+}
+
+struct SpanAttributesFromLogs(
+    pageserver_api::reltag::RelTag,
+    pageserver_api::reltag::BlockNumber,
+);
+
+impl std::str::FromStr for SpanAttributesFromLogs {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // accept the span separator but do not require or fail if either is missing
+        // "whatever{rel=1663/16389/24615 blkno=1052204 req_lsn=FFFFFFFF/FFFFFFFF}"
+        let (_, reltag) = s
+            .split_once("rel=")
+            .ok_or_else(|| anyhow::anyhow!("cannot find 'rel='"))?;
+        let reltag = reltag.split_whitespace().next().unwrap();
+
+        let (_, blocknum) = s
+            .split_once("blkno=")
+            .ok_or_else(|| anyhow::anyhow!("cannot find 'blkno='"))?;
+        let blocknum = blocknum.split_whitespace().next().unwrap();
+
+        let reltag = reltag
+            .parse()
+            .with_context(|| format!("parse reltag from {reltag:?}"))?;
+        let blocknum = blocknum
+            .parse()
+            .with_context(|| format!("parse blocknum from {blocknum:?}"))?;
+
+        Ok(Self(reltag, blocknum))
+    }
 }
 
 /// Print out a key corresponding to the given reltag and blocknum, with optional forknum option.
@@ -230,10 +313,23 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         Commands::Key(DescribeKeyCommand {
-            key,
+            input,
             shard_count,
             stripe_size,
         }) => {
+            let key_material = KeyMaterial::try_from(input.as_slice()).unwrap();
+
+            let (key, kind) = match key_material {
+                KeyMaterial::Hex(key) => (key, "hex"),
+                KeyMaterial::String(SpanAttributesFromLogs(reltag, blocknum))
+                | KeyMaterial::Split(reltag, blocknum) => (
+                    pageserver_api::key::rel_block_to_key(reltag, blocknum),
+                    "first reltag and blocknum",
+                ),
+            };
+
+            println!("parsed from {kind}: {key}:");
+            println!();
             println!("{key:?}");
 
             macro_rules! kind_query {
