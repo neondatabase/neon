@@ -816,9 +816,9 @@ async fn eviction_cancellation_on_drop() {
 /// below if it is really necessary to add more fields to the structures.
 #[test]
 fn layer_size() {
-    assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2048);
+    assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2040);
     assert_eq!(std::mem::size_of::<PersistentLayerDesc>(), 104);
-    assert_eq!(std::mem::size_of::<LayerInner>(), 2376);
+    assert_eq!(std::mem::size_of::<LayerInner>(), 2344);
     // it also has the utf8 path
 }
 
