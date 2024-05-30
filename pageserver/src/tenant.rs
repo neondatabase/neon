@@ -1393,6 +1393,32 @@ impl Tenant {
         Ok(tl)
     }
 
+    /// Helper for unit tests to create a timeline with some pre-loaded states.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_test_timeline_with_states(
+        &self,
+        new_timeline_id: TimelineId,
+        initdb_lsn: Lsn,
+        pg_version: u32,
+        ctx: &RequestContext,
+        delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
+        image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
+        end_lsn: Lsn,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        let tline = self
+            .create_test_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
+            .await?;
+        tline.force_advance_lsn(end_lsn);
+        for deltas in delta_layer_desc {
+            tline.force_create_delta_layer(deltas, ctx).await?;
+        }
+        for (lsn, images) in image_layer_desc {
+            tline.force_create_image_layer(lsn, images, ctx).await?;
+        }
+        Ok(tline)
+    }
+
     /// Create a new timeline.
     ///
     /// Returns the new timeline ID and reference to its Timeline object.
@@ -3001,6 +3027,32 @@ impl Tenant {
             .await?;
         tl.set_state(TimelineState::Active);
         Ok(tl)
+    }
+
+    /// Helper for unit tests to branch a timeline with some pre-loaded states.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn branch_timeline_test_with_states(
+        &self,
+        src_timeline: &Arc<Timeline>,
+        dst_id: TimelineId,
+        start_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+        delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
+        image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
+        end_lsn: Lsn,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        let tline = self
+            .branch_timeline_test(src_timeline, dst_id, start_lsn, ctx)
+            .await?;
+        tline.force_advance_lsn(end_lsn);
+        for deltas in delta_layer_desc {
+            tline.force_create_delta_layer(deltas, ctx).await?;
+        }
+        for (lsn, images) in image_layer_desc {
+            tline.force_create_image_layer(lsn, images, ctx).await?;
+        }
+        Ok(tline)
     }
 
     /// Branch an existing timeline.
@@ -6205,32 +6257,32 @@ mod tests {
     async fn test_vectored_missing_data_key_reads() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_vectored_missing_data_key_reads")?;
         let (tenant, ctx) = harness.load().await;
-        let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
-            .await?;
 
         let base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
         let base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
         let base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
 
-        tline.force_advance_lsn(Lsn(0x20));
-        tline
-            .force_create_image_layer(Lsn(0x20), vec![(base_key, test_img("data key 1"))], &ctx)
-            .await
-            .unwrap();
+        let tline = tenant
+            .create_test_timeline_with_states(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                Vec::new(), // delta layers
+                vec![(Lsn(0x20), vec![(base_key, test_img("data key 1"))])], // image layers
+                Lsn(0x20), // it's fine to not advance LSN to 0x30 while using 0x30 to get below because `get_vectored_impl` does not wait for LSN
+            )
+            .await?;
 
         let child = tenant
-            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x20)), &ctx)
-            .await
-            .unwrap();
-
-        tline.force_advance_lsn(Lsn(0x30));
-        child.force_advance_lsn(Lsn(0x30));
-        child
-            .force_create_image_layer(
-                Lsn(0x30),
-                vec![(base_key_child, test_img("data key 2"))],
+            .branch_timeline_test_with_states(
+                &tline,
+                NEW_TIMELINE_ID,
+                Some(Lsn(0x20)),
                 &ctx,
+                Vec::new(), // delta layers
+                vec![(Lsn(0x30), vec![(base_key_child, test_img("data key 2"))])], // image layers
+                Lsn(0x30),
             )
             .await
             .unwrap();
@@ -6295,41 +6347,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_vectored_missing_metadata_key_reads() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads")?;
+        let harness = TenantHarness::create("test_vectored_missing_data_key_reads")?;
         let (tenant, ctx) = harness.load().await;
+
+        let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        let base_key_child = Key::from_hex("620000000033333333444444445500000001").unwrap();
+        let base_key_nonexist = Key::from_hex("620000000033333333444444445500000002").unwrap();
+        assert_eq!(base_key.field1, AUX_KEY_PREFIX); // in case someone accidentally changed the prefix...
+
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline_with_states(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                Vec::new(), // delta layers
+                vec![(Lsn(0x20), vec![(base_key, test_img("metadata key 1"))])], // image layers
+                Lsn(0x20), // it's fine to not advance LSN to 0x30 while using 0x30 to get below because `get_vectored_impl` does not wait for LSN
+            )
             .await?;
 
-        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
-        let mut base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
-        let mut base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
-        base_key.field1 = AUX_KEY_PREFIX;
-        base_key_child.field1 = AUX_KEY_PREFIX;
-        base_key_nonexist.field1 = AUX_KEY_PREFIX;
-
-        tline.force_advance_lsn(Lsn(0x20));
-        tline
-            .force_create_image_layer(
-                Lsn(0x20),
-                vec![(base_key, test_img("metadata key 1"))],
-                &ctx,
-            )
-            .await
-            .unwrap();
-
         let child = tenant
-            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x20)), &ctx)
-            .await
-            .unwrap();
-
-        tline.force_advance_lsn(Lsn(0x30));
-        child.force_advance_lsn(Lsn(0x30));
-        child
-            .force_create_image_layer(
-                Lsn(0x30),
-                vec![(base_key_child, test_img("metadata key 2"))],
+            .branch_timeline_test_with_states(
+                &tline,
+                NEW_TIMELINE_ID,
+                Some(Lsn(0x20)),
                 &ctx,
+                Vec::new(), // delta layers
+                vec![(
+                    Lsn(0x30),
+                    vec![(base_key_child, test_img("metadata key 2"))],
+                )], // image layers
+                Lsn(0x30),
             )
             .await
             .unwrap();
