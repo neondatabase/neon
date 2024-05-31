@@ -109,7 +109,7 @@ jobs:
               ADD_CMD=
               REMOVE_CMD=
               [ -z "$LABELS_TO_ADD" ] || ADD_CMD="--add-label ${LABELS_TO_ADD// /,}"
-              [ -z "$LABELS_TO_REMOVE" ] || REMOVE_CMD="--add-label ${LABELS_TO_REMOVE// /,}"
+              [ -z "$LABELS_TO_REMOVE" ] || REMOVE_CMD="--remove-label ${LABELS_TO_REMOVE// /,}"
               gh pr --repo ${GITHUB_REPOSITORY} edit $OLD_PR $ADD_CMD $REMOVE_CMD
             done
           fi
