@@ -267,7 +267,7 @@ pub fn init_logging(file_name: &str) -> Option<WorkerGuard> {
     }
 }
 
-pub async fn init_s3_client(bucket_region: Region) -> Client {
+async fn init_s3_client(bucket_region: Region) -> Client {
     let config = aws_config::defaults(aws_config::BehaviorVersion::v2024_03_28())
         .region(bucket_region)
         .load()
