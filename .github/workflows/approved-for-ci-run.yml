@@ -105,7 +105,12 @@ jobs:
               LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name'))
               LABELS_TO_REMOVE=${LABELS_TO_REMOVE//run-e2e-tests-in-draft/}
               LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name'))
-              gh pr --repo ${GITHUB_REPOSITORY} edit $OLD_PR --remove-label ${LABELS_TO_REMOVE// /,} --add-label ${LABELS_TO_ADD// /,}
+              [ -z "$LABELS_TO_ADD" ] && [ -z "$LABELS_TO_REMOVE" ] && continue
+              ADD_CMD=
+              REMOVE_CMD=
+              [ -z "$LABELS_TO_ADD" ] || ADD_CMD="--add-label ${LABELS_TO_ADD// /,}"
+              [ -z "$LABELS_TO_REMOVE" ] || REMOVE_CMD="--add-label ${LABELS_TO_REMOVE// /,}"
+              gh pr --repo ${GITHUB_REPOSITORY} edit $OLD_PR $ADD_CMD $REMOVE_CMD
             done
           fi
 
