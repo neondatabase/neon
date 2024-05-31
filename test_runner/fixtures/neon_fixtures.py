@@ -3998,15 +3998,27 @@ class S3Scrubber:
         )
         log.info(f"tenant-snapshot output: {stdout}")
 
-    def pageserver_physical_gc(self, min_age_secs : int):
+    def pageserver_physical_gc(
+        self, min_age_secs: int, tenant_ids: Optional[list[TenantId]] = None
+    ):
+        args = ["pageserver-physical-gc", "--min-age", f"{min_age_secs}s"]
+
+        if tenant_ids is None:
+            tenant_ids = []
+
+        for tenant_id in tenant_ids:
+            args.extend(["--tenant-id", str(tenant_id)])
+
         stdout = self.scrubber_cli(
-            ["pageserver-physical-gc", "--min-age", f"{min_age_secs}s"],
+            args,
             timeout=30,
         )
         try:
             return json.loads(stdout)
         except:
-            log.error("Failed to decode JSON output from `pageserver-physical_gc`.  Dumping stdout:")
+            log.error(
+                "Failed to decode JSON output from `pageserver-physical_gc`.  Dumping stdout:"
+            )
             log.error(stdout)
             raise
 
