@@ -66,16 +66,9 @@ impl DescribeKeyCommand {
             stripe_size,
         } = self;
 
-        let key_material = KeyMaterial::try_from(input.as_slice()).unwrap();
-
-        let (key, kind) = match key_material {
-            KeyMaterial::Hex(key) => (key, "hex"),
-            KeyMaterial::String(SpanAttributesFromLogs(reltag, blocknum))
-            | KeyMaterial::Split(reltag, blocknum) => (
-                pageserver_api::key::rel_block_to_key(reltag, blocknum),
-                "first reltag and blocknum",
-            ),
-        };
+        let material = KeyMaterial::try_from(input.as_slice()).unwrap();
+        let kind = material.kind();
+        let key = Key::from(material);
 
         println!("parsed from {kind}: {key}:");
         println!();
