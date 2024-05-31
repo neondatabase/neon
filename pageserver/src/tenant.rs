@@ -507,11 +507,11 @@ pub(crate) enum GcError {
 
     // A remote storage error while scheduling updates after compaction
     #[error(transparent)]
-    RemoteUpload(anyhow::Error),
+    Remote(anyhow::Error),
 
     // If GC was invoked for a particular timeline, this error means it didn't exist
     #[error("timeline not found")]
-    NotFound,
+    TimelineNotFound,
 }
 
 impl Tenant {
@@ -2920,7 +2920,7 @@ impl Tenant {
             let timelines = {
                 if let Some(target_timeline_id) = target_timeline_id.as_ref() {
                     if timelines.get(target_timeline_id).is_none() {
-                        return Err(GcError::NotFound);
+                        return Err(GcError::TimelineNotFound);
                     }
                 };
 

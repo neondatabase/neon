@@ -5066,7 +5066,7 @@ impl Timeline {
                     if self.cancel.is_cancelled() {
                         GcError::TimelineCancelled
                     } else {
-                        GcError::RemoteUpload(e)
+                        GcError::Remote(e)
                     }
                 })?;
 
@@ -5083,7 +5083,7 @@ impl Timeline {
                     if self.cancel.is_cancelled() {
                         GcError::TimelineCancelled
                     } else {
-                        GcError::RemoteUpload(e)
+                        GcError::Remote(e)
                     }
                 })?;
 

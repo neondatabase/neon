@@ -2835,7 +2835,9 @@ pub(crate) async fn immediate_gc(
 
     result.map_err(|e| match e {
         GcError::TenantCancelled | GcError::TimelineCancelled => ApiError::ShuttingDown,
-        GcError::NotFound => ApiError::NotFound(anyhow::anyhow!("Timeline not found").into()),
+        GcError::TimelineNotFound => {
+            ApiError::NotFound(anyhow::anyhow!("Timeline not found").into())
+        }
         other => ApiError::InternalServerError(anyhow::anyhow!(other)),
     })
 }
