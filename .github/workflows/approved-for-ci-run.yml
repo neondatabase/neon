@@ -33,12 +33,6 @@ defaults:
     shell: bash -euo pipefail {0}
 
 jobs:
-  test-var:
-    runs-on: ubuntu-22.04
-
-    steps:
-      - run: echo TV ${{ toJson(github.event.pull_request.labels.*.name) }} 
-
   remove-label:
     # Remove `approved-for-ci-run` label if the workflow is triggered by changes in a PR.
     # The PR should be reviewed and labelled manually again.
@@ -96,12 +90,7 @@ jobs:
 
           ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
           if [ -z "${ALREADY_CREATED}" ]; then
-            ADDITIONAL_LABELS=
-            gh pr view ${PR_NUMBER}  --json labels | jq '.labels.[].name' | while read -r label  
-            do
-              [ "$label" = "approved-for-ci-run" ] || \
-              ADDITIONAL_LABELS="--label $label $ADDITIONAL_LABELS"
-            done
+            ADDITIONAL_LABELS=$(gh pr view ${PR_NUMBER}  --json labels | awk -F, 'BEGIN {labels=""} {for(i=1;i<=NF;i++){if ($i ~ /^\"name\":\"run/) labels=labels " --label " substr($i,9,length($i)-10)};} END {print labels}')
             gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
                                                        --body-file "body.md" \
                                                        --head "${BRANCH}" \
