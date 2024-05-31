@@ -373,7 +373,7 @@ impl From<WaitLsnError> for PageStreamError {
         match value {
             e @ WaitLsnError::Timeout(_) => Self::LsnTimeout(e),
             WaitLsnError::Shutdown => Self::Shutdown,
-            WaitLsnError::BadState => Self::Reconnect("Timeline is not active".into()),
+            e @ WaitLsnError::BadState { .. } => Self::Reconnect(format!("{e}").into()),
         }
     }
 }
@@ -383,7 +383,7 @@ impl From<WaitLsnError> for QueryError {
         match value {
             e @ WaitLsnError::Timeout(_) => Self::Other(anyhow::Error::new(e)),
             WaitLsnError::Shutdown => Self::Shutdown,
-            WaitLsnError::BadState => Self::Reconnect,
+            WaitLsnError::BadState { .. } => Self::Reconnect,
         }
     }
 }
