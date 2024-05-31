@@ -261,7 +261,7 @@ pub fn init_logging(file_name: &str) -> WorkerGuard {
     guard
 }
 
-pub fn init_s3_client(bucket_region: Region) -> Client {
+fn init_s3_client(bucket_region: Region) -> Client {
     let credentials_provider = {
         // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
         let chain = CredentialsProviderChain::first_try(
