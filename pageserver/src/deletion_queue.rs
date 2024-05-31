@@ -311,7 +311,7 @@ impl DeletionList {
                 result.extend(
                     timeline_layers
                         .into_iter()
-                        .map(|l| timeline_remote_path.join(&Utf8PathBuf::from(l))),
+                        .map(|l| timeline_remote_path.join(Utf8PathBuf::from(l))),
                 );
             }
         }

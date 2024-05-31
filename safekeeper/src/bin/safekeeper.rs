@@ -29,13 +29,12 @@ use safekeeper::defaults::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
-use safekeeper::remove_wal;
+use safekeeper::http;
 use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, WAL_SERVICE_RUNTIME};
 use safekeeper::{control_file, BROKER_RUNTIME};
-use safekeeper::{http, WAL_REMOVER_RUNTIME};
 use safekeeper::{wal_backup, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
@@ -440,14 +439,6 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .spawn(broker::task_main(conf_).instrument(info_span!("broker")))
         .map(|res| ("broker main".to_owned(), res));
     tasks_handles.push(Box::pin(broker_task_handle));
-
-    let conf_ = conf.clone();
-    let wal_remover_handle = current_thread_rt
-        .as_ref()
-        .unwrap_or_else(|| WAL_REMOVER_RUNTIME.handle())
-        .spawn(remove_wal::task_main(conf_))
-        .map(|res| ("WAL remover".to_owned(), res));
-    tasks_handles.push(Box::pin(wal_remover_handle));
 
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
 

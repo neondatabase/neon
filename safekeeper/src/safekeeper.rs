@@ -10,7 +10,6 @@ use std::cmp::max;
 use std::cmp::min;
 use std::fmt;
 use std::io::Read;
-use std::time::Duration;
 use storage_broker::proto::SafekeeperTimelineInfo;
 
 use tracing::*;
@@ -826,24 +825,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Persist control file if there is something to save and enough time
-    /// passed after the last save.
-    pub async fn maybe_persist_inmem_control_file(&mut self, force: bool) -> Result<bool> {
-        const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
-        if !force && self.state.pers.last_persist_at().elapsed() < CF_SAVE_INTERVAL {
-            return Ok(false);
-        }
-        let need_persist = self.state.inmem.commit_lsn > self.state.commit_lsn
-            || self.state.inmem.backup_lsn > self.state.backup_lsn
-            || self.state.inmem.peer_horizon_lsn > self.state.peer_horizon_lsn
-            || self.state.inmem.remote_consistent_lsn > self.state.remote_consistent_lsn;
-        if need_persist {
-            self.state.flush().await?;
-            trace!("saved control file: {CF_SAVE_INTERVAL:?} passed");
-        }
-        Ok(need_persist)
     }
 
     /// Handle request to append WAL.

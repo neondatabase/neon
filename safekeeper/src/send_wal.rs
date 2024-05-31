@@ -5,7 +5,7 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::metrics::RECEIVED_PS_FEEDBACKS;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{Term, TermLsn};
-use crate::timeline::Timeline;
+use crate::timeline::FullAccessTimeline;
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
@@ -387,8 +387,10 @@ impl SafekeeperPostgresHandler {
         term: Option<Term>,
     ) -> Result<(), QueryError> {
         let tli = GlobalTimelines::get(self.ttid).map_err(|e| QueryError::Other(e.into()))?;
+        let full_access = tli.full_access_guard().await?;
+
         if let Err(end) = self
-            .handle_start_replication_guts(pgb, start_pos, term, tli.clone())
+            .handle_start_replication_guts(pgb, start_pos, term, full_access)
             .await
         {
             let info = tli.get_safekeeper_info(&self.conf).await;
@@ -405,7 +407,7 @@ impl SafekeeperPostgresHandler {
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
         term: Option<Term>,
-        tli: Arc<Timeline>,
+        tli: FullAccessTimeline,
     ) -> Result<(), CopyStreamHandlerEnd> {
         let appname = self.appname.clone();
 
@@ -448,14 +450,7 @@ impl SafekeeperPostgresHandler {
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
-        let (_, persisted_state) = tli.get_state().await;
-        let wal_reader = WalReader::new(
-            self.conf.workdir.clone(),
-            self.conf.timeline_dir(&tli.ttid),
-            &persisted_state,
-            start_pos,
-            self.conf.is_wal_backup_enabled(),
-        )?;
+        let wal_reader = tli.get_walreader(start_pos).await?;
 
         // Split to concurrently receive and send data; replies are generally
         // not synchronized with sends, so this avoids deadlocks.
@@ -532,7 +527,7 @@ impl EndWatch {
 /// A half driving sending WAL.
 struct WalSender<'a, IO> {
     pgb: &'a mut PostgresBackend<IO>,
-    tli: Arc<Timeline>,
+    tli: FullAccessTimeline,
     appname: Option<String>,
     // Position since which we are sending next chunk.
     start_pos: Lsn,
@@ -741,7 +736,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
 struct ReplyReader<IO> {
     reader: PostgresBackendReader<IO>,
     ws_guard: Arc<WalSenderGuard>,
-    tli: Arc<Timeline>,
+    tli: FullAccessTimeline,
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
