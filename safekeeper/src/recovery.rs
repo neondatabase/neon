@@ -71,7 +71,7 @@ async fn recovery_needed(
 ) -> RecoveryNeededInfo {
     let ss = tli.read_shared_state().await;
     let term = ss.sk.state.acceptor_state.term;
-    let last_log_term = ss.sk.get_epoch();
+    let last_log_term = ss.sk.get_last_log_term();
     let flush_lsn = ss.sk.flush_lsn();
     // note that peers contain myself, but that's ok -- we are interested only in peers which are strictly ahead of us.
     let mut peers = ss.get_peers(heartbeat_timeout);
