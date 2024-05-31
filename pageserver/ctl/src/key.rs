@@ -284,12 +284,22 @@ enum RecognizedKeyKind {
     SlruDir(Result<SlruKind, u32>),
     RelMap(RelTagish<2>),
     RelDir(RelTagish<2>),
-    AuxFileV2(utils::Hex<[u8; 16]>),
+    AuxFileV2(Result<AuxFileV2, utils::Hex<[u8; 16]>>),
+}
+
+#[derive(Debug, PartialEq)]
+#[allow(unused)]
+enum AuxFileV2 {
+    Recognized(&'static str, utils::Hex<[u8; 13]>),
+    OtherWithPrefix(&'static str, utils::Hex<[u8; 13]>),
+    Other(utils::Hex<[u8; 13]>),
 }
 
 impl RecognizedKeyKind {
     fn new(key: Key) -> Option<Self> {
-        use RecognizedKeyKind::*;
+        use RecognizedKeyKind::{
+            AuxFilesV1, Checkpoint, ControlFile, DbDir, RelDir, RelMap, SlruDir,
+        };
 
         let slru_dir_kind = pageserver_api::key::slru_dir_kind(&key);
 
@@ -305,11 +315,44 @@ impl RecognizedKeyKind {
             _ if key.field1 == 0 && key.field4 == 0 && key.field5 == 0 && key.field6 == 1 => {
                 RelDir([key.field2, key.field3].into())
             }
-            _ if key.is_metadata_key() => {
-                let mut bytes = [0u8; 16];
-                key.extract_metadata_key_to_writer(&mut bytes[..]);
-                AuxFileV2(utils::Hex(bytes))
+            _ if key.is_metadata_key() => RecognizedKeyKind::AuxFileV2(
+                AuxFileV2::new(key)
+                    .ok_or_else(|| utils::Hex(key.to_i128().to_be_bytes().try_into().unwrap())),
+            ),
+            _ => return None,
+        })
+    }
+}
+
+impl AuxFileV2 {
+    fn new(key: Key) -> Option<AuxFileV2> {
+        const EMPTY_HASH: [u8; 13] = {
+            let mut out = [0u8; 13];
+            let hash = pageserver::aux_file::fnv_hash(b"").to_be_bytes();
+            let mut i = 3;
+            while i < 16 {
+                out[i - 3] = hash[i];
+                i += 1;
             }
+            out
+        };
+
+        let bytes = key.to_i128().to_be_bytes();
+        let hash = utils::Hex(<[u8; 13]>::try_from(&bytes[3..]).unwrap());
+
+        assert_eq!(EMPTY_HASH.len(), hash.0.len());
+
+        // TODO: we could probably find the preimages for the hashes
+
+        Some(match (bytes[1], bytes[2]) {
+            (1, 1) => AuxFileV2::Recognized("pg_logical/mappings/", hash),
+            (1, 2) => AuxFileV2::Recognized("pg_logical/snapshots/", hash),
+            (1, 3) if hash.0 == EMPTY_HASH => {
+                AuxFileV2::Recognized("pg_logical/replorigin_checkpoint", hash)
+            }
+            (2, 1) => AuxFileV2::Recognized("pg_replslot/", hash),
+            (1, 0xff) => AuxFileV2::OtherWithPrefix("pg_logical/", hash),
+            (0xff, 0xff) => AuxFileV2::Other(hash),
             _ => return None,
         })
     }
@@ -342,6 +385,8 @@ impl<const N: usize> std::fmt::Debug for RelTagish<N> {
 
 #[cfg(test)]
 mod tests {
+    use pageserver::aux_file::encode_aux_file_key;
+
     use super::*;
 
     #[test]
@@ -397,5 +442,40 @@ mod tests {
                 first = Some(key);
             }
         }
+    }
+    #[test]
+    fn recognized_auxfiles() {
+        use AuxFileV2::*;
+
+        let empty = [
+            0x2e, 0x07, 0xbb, 0x01, 0x42, 0x62, 0xb8, 0x21, 0x75, 0x62, 0x95, 0xc5, 0x8d,
+        ];
+        let foobar = [
+            0x62, 0x79, 0x3c, 0x64, 0xbf, 0x6f, 0x0d, 0x35, 0x97, 0xba, 0x44, 0x6f, 0x18,
+        ];
+
+        #[rustfmt::skip]
+        let examples = [
+            (line!(), "pg_logical/mappings/foobar", Recognized("pg_logical/mappings/", utils::Hex(foobar))),
+            (line!(), "pg_logical/snapshots/foobar", Recognized("pg_logical/snapshots/", utils::Hex(foobar))),
+            (line!(), "pg_logical/replorigin_checkpoint", Recognized("pg_logical/replorigin_checkpoint", utils::Hex(empty))),
+            (line!(), "pg_logical/foobar", OtherWithPrefix("pg_logical/", utils::Hex(foobar))),
+            (line!(), "pg_replslot/foobar", Recognized("pg_replslot/", utils::Hex(foobar))),
+            (line!(), "foobar", Other(utils::Hex(foobar))),
+        ];
+
+        for (line, path, expected) in examples {
+            let key = encode_aux_file_key(path);
+            let recognized =
+                AuxFileV2::new(key).unwrap_or_else(|| panic!("line {line} example failed"));
+
+            assert_eq!(recognized, expected);
+        }
+
+        assert_eq!(
+            AuxFileV2::new(Key::from_hex("600000102000000000000000000000000000").unwrap()),
+            None,
+            "example key has one too few 0 after 6 before 1"
+        );
     }
 }
