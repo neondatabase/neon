@@ -5371,6 +5371,102 @@ impl Timeline {
             shard_count: self.tenant_shard_id.shard_count,
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn force_advance_lsn(self: &Arc<Timeline>, new_lsn: Lsn) {
+        self.last_record_lsn.advance(new_lsn);
+    }
+
+    /// Force create an image layer and place it into the layer map.
+    ///
+    /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
+    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are placed into the layer map in one run.
+    #[cfg(test)]
+    pub(super) async fn force_create_image_layer(
+        self: &Arc<Timeline>,
+        lsn: Lsn,
+        mut images: Vec<(Key, Bytes)>,
+        check_start_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let last_record_lsn = self.get_last_record_lsn();
+        assert!(
+            lsn <= last_record_lsn,
+            "advance last record lsn before inserting a layer, lsn={lsn}, last_record_lsn={last_record_lsn}"
+        );
+        if let Some(check_start_lsn) = check_start_lsn {
+            assert!(lsn >= check_start_lsn);
+        }
+        images.sort_unstable_by(|(ka, _), (kb, _)| ka.cmp(kb));
+        let min_key = *images.first().map(|(k, _)| k).unwrap();
+        let max_key = images.last().map(|(k, _)| k).unwrap().next();
+        let mut image_layer_writer = ImageLayerWriter::new(
+            self.conf,
+            self.timeline_id,
+            self.tenant_shard_id,
+            &(min_key..max_key),
+            lsn,
+            ctx,
+        )
+        .await?;
+        for (key, img) in images {
+            image_layer_writer.put_image(key, img, ctx).await?;
+        }
+        let image_layer = image_layer_writer.finish(self, ctx).await?;
+
+        {
+            let mut guard = self.layers.write().await;
+            guard.force_insert_layer(image_layer);
+        }
+
+        Ok(())
+    }
+
+    /// Force create a delta layer and place it into the layer map.
+    ///
+    /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
+    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are placed into the layer map in one run.
+    #[cfg(test)]
+    pub(super) async fn force_create_delta_layer(
+        self: &Arc<Timeline>,
+        mut deltas: Vec<(Key, Lsn, Value)>,
+        check_start_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let last_record_lsn = self.get_last_record_lsn();
+        deltas.sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
+        let min_key = *deltas.first().map(|(k, _, _)| k).unwrap();
+        let max_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
+        let min_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
+        let max_lsn = Lsn(deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap().0 + 1);
+        assert!(
+            max_lsn <= last_record_lsn,
+            "advance last record lsn before inserting a layer, max_lsn={max_lsn}, last_record_lsn={last_record_lsn}"
+        );
+        if let Some(check_start_lsn) = check_start_lsn {
+            assert!(min_lsn >= check_start_lsn);
+        }
+        let mut delta_layer_writer = DeltaLayerWriter::new(
+            self.conf,
+            self.timeline_id,
+            self.tenant_shard_id,
+            min_key,
+            min_lsn..max_lsn,
+            ctx,
+        )
+        .await?;
+        for (key, lsn, val) in deltas {
+            delta_layer_writer.put_value(key, lsn, val, ctx).await?;
+        }
+        let delta_layer = delta_layer_writer.finish(max_key, self, ctx).await?;
+
+        {
+            let mut guard = self.layers.write().await;
+            guard.force_insert_layer(delta_layer);
+        }
+
+        Ok(())
+    }
 }
 
 type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
