@@ -1,0 +1,346 @@
+use anyhow::Context;
+use clap::Parser;
+use pageserver_api::{
+    key::Key,
+    reltag::{BlockNumber, RelTag, SlruKind},
+    shard::{ShardCount, ShardStripeSize},
+};
+use std::str::FromStr;
+
+#[derive(Parser)]
+pub(super) struct DescribeKeyCommand {
+    /// Key material in one of the forms:
+    /// - hex
+    /// - span attributes captured from log
+    /// - reltag blocknum
+    input: Vec<String>,
+
+    /// The number of shards to calculate what Keys placement would be.
+    #[arg(long)]
+    shard_count: Option<CustomShardCount>,
+
+    /// The sharding stripe size.
+    ///
+    /// The default is hardcoded. It makes no sense to provide this without providing
+    /// `--shard-count`.
+    #[arg(long, requires = "shard-count")]
+    stripe_size: Option<u32>,
+}
+
+/// Sharded shard count without unsharded count, which the actual ShardCount supports.
+#[derive(Clone, Copy)]
+pub(super) struct CustomShardCount(std::num::NonZeroU8);
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum InvalidShardCount {
+    #[error(transparent)]
+    ParsingFailed(#[from] std::num::ParseIntError),
+    #[error("too few shards")]
+    TooFewShards,
+}
+
+impl FromStr for CustomShardCount {
+    type Err = InvalidShardCount;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let inner: std::num::NonZeroU8 = s.parse()?;
+        if inner.get() < 2 {
+            Err(InvalidShardCount::TooFewShards)
+        } else {
+            Ok(CustomShardCount(inner))
+        }
+    }
+}
+
+impl From<CustomShardCount> for ShardCount {
+    fn from(value: CustomShardCount) -> Self {
+        ShardCount::new(value.0.get())
+    }
+}
+
+impl DescribeKeyCommand {
+    pub(super) fn execute(self) {
+        let DescribeKeyCommand {
+            input,
+            shard_count,
+            stripe_size,
+        } = self;
+
+        let key_material = KeyMaterial::try_from(input.as_slice()).unwrap();
+
+        let (key, kind) = match key_material {
+            KeyMaterial::Hex(key) => (key, "hex"),
+            KeyMaterial::String(SpanAttributesFromLogs(reltag, blocknum))
+            | KeyMaterial::Split(reltag, blocknum) => (
+                pageserver_api::key::rel_block_to_key(reltag, blocknum),
+                "first reltag and blocknum",
+            ),
+        };
+
+        println!("parsed from {kind}: {key}:");
+        println!();
+        println!("{key:?}");
+
+        macro_rules! kind_query {
+            ($name:ident) => {{
+                let s: &'static str = stringify!($name);
+                let s = s.strip_prefix("is_").unwrap_or(s);
+                let s = s.strip_suffix("_key").unwrap_or(s);
+
+                #[allow(clippy::needless_borrow)]
+                (s, pageserver_api::key::$name(key))
+            }};
+        }
+
+        // the current characterization is a mess of these boolean queries and separate
+        // "recognization". I think it accurately represents how strictly we model the Key
+        // right now, but could of course be made less confusing.
+
+        let queries = [
+            ("rel_block", pageserver_api::key::is_rel_block_key(&key)),
+            kind_query!(is_rel_vm_block_key),
+            kind_query!(is_rel_fsm_block_key),
+            kind_query!(is_slru_block_key),
+            kind_query!(is_inherited_key),
+            ("rel_size", pageserver_api::key::is_rel_size_key(&key)),
+            (
+                "slru_segment_size",
+                pageserver_api::key::is_slru_segment_size_key(&key),
+            ),
+        ];
+
+        let recognized_kind = "recognized kind";
+        let metadata_key = "metadata key";
+        let shard_placement = "shard placement";
+
+        let longest = queries
+            .iter()
+            .map(|t| t.0)
+            .chain([recognized_kind, metadata_key, shard_placement].into_iter())
+            .map(|s| s.len())
+            .max()
+            .unwrap();
+
+        let colon = 1;
+        let padding = 1;
+
+        for (name, is) in queries {
+            let width = longest - name.len() + colon + padding;
+            println!("{}{:width$}{}", name, ":", is);
+        }
+
+        let width = longest - recognized_kind.len() + colon + padding;
+        println!(
+            "{}{:width$}{:?}",
+            recognized_kind,
+            ":",
+            RecognizedKeyKind::new(key),
+        );
+
+        if let Some(shard_count) = shard_count {
+            // seeing the sharding placement might be confusing, so leave it out unless shard
+            // count was given.
+
+            let stripe_size = stripe_size.map(ShardStripeSize).unwrap_or_default();
+            println!(
+                "# placement with shard_count: {} and stripe_size: {}:",
+                shard_count.0, stripe_size.0
+            );
+            let width = longest - shard_placement.len() + colon + padding;
+            println!(
+                "{}{:width$}{:?}",
+                shard_placement,
+                ":",
+                pageserver_api::shard::describe(&key, shard_count.into(), stripe_size)
+            );
+        }
+    }
+}
+
+/// Hand-wavy "inputs we accept" for a key.
+#[derive(Debug)]
+pub(super) enum KeyMaterial {
+    Hex(Key),
+    String(SpanAttributesFromLogs),
+    Split(RelTag, BlockNumber),
+}
+
+impl KeyMaterial {
+    fn kind(&self) -> &'static str {
+        match self {
+            KeyMaterial::Hex(_) => "hex",
+            KeyMaterial::String(_) | KeyMaterial::Split(_, _) => "split",
+        }
+    }
+}
+
+impl From<KeyMaterial> for Key {
+    fn from(value: KeyMaterial) -> Self {
+        match value {
+            KeyMaterial::Hex(key) => key,
+            KeyMaterial::String(SpanAttributesFromLogs(rt, blocknum))
+            | KeyMaterial::Split(rt, blocknum) => {
+                pageserver_api::key::rel_block_to_key(rt, blocknum)
+            }
+        }
+    }
+}
+
+impl<S: AsRef<str>> TryFrom<&[S]> for KeyMaterial {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &[S]) -> Result<Self, Self::Error> {
+        match value {
+            [] => anyhow::bail!(
+                "need 1..N positional arguments describing the key, try hex or a log line"
+            ),
+            [one] => {
+                let one = one.as_ref();
+
+                let key = Key::from_hex(one).map(KeyMaterial::Hex);
+
+                let attrs = SpanAttributesFromLogs::from_str(one).map(KeyMaterial::String);
+
+                match (key, attrs) {
+                    (Ok(key), _) => Ok(key),
+                    (_, Ok(s)) => Ok(s),
+                    (Err(e1), Err(e2)) => anyhow::bail!(
+                        "failed to parse {one:?} as hex or span attributes:\n- {e1:#}\n- {e2:#}"
+                    ),
+                }
+            }
+            more => {
+                // assume going left to right one of these is a reltag and then we find a blocknum
+                // this works, because we don't have plain numbers at least right after reltag in
+                // logs. for some definition of "works".
+
+                let Some((reltag_at, reltag)) = more
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .enumerate()
+                    .find_map(|(i, s)| {
+                        s.strip_prefix("rel=")
+                            .unwrap_or(s)
+                            .parse::<RelTag>()
+                            .ok()
+                            .map(|rt| (i, rt))
+                    })
+                else {
+                    anyhow::bail!("found no RelTag in arguments");
+                };
+
+                let Some(blocknum) = more
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .skip(reltag_at)
+                    .find_map(|s| {
+                        s.strip_prefix("blkno=")
+                            .unwrap_or(s)
+                            .parse::<BlockNumber>()
+                            .ok()
+                    })
+                else {
+                    anyhow::bail!("found no blocknum in arguments");
+                };
+
+                Ok(KeyMaterial::Split(reltag, blocknum))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct SpanAttributesFromLogs(RelTag, BlockNumber);
+
+impl std::str::FromStr for SpanAttributesFromLogs {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // accept the span separator but do not require or fail if either is missing
+        // "whatever{rel=1663/16389/24615 blkno=1052204 req_lsn=FFFFFFFF/FFFFFFFF}"
+        let (_, reltag) = s
+            .split_once("rel=")
+            .ok_or_else(|| anyhow::anyhow!("cannot find 'rel='"))?;
+        let reltag = reltag.split_whitespace().next().unwrap();
+
+        let (_, blocknum) = s
+            .split_once("blkno=")
+            .ok_or_else(|| anyhow::anyhow!("cannot find 'blkno='"))?;
+        let blocknum = blocknum.split_whitespace().next().unwrap();
+
+        let reltag = reltag
+            .parse()
+            .with_context(|| format!("parse reltag from {reltag:?}"))?;
+        let blocknum = blocknum
+            .parse()
+            .with_context(|| format!("parse blocknum from {blocknum:?}"))?;
+
+        Ok(Self(reltag, blocknum))
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // debug print is used
+enum RecognizedKeyKind {
+    DbDir,
+    ControlFile,
+    Checkpoint,
+    AuxFilesV1,
+    SlruDir(Result<SlruKind, u32>),
+    RelMap(RelTagish<2>),
+    RelDir(RelTagish<2>),
+    AuxFileV2(utils::Hex<[u8; 16]>),
+}
+
+impl RecognizedKeyKind {
+    fn new(key: Key) -> Option<Self> {
+        use RecognizedKeyKind::*;
+
+        let slru_dir_kind = pageserver_api::key::slru_dir_kind(&key);
+
+        Some(match key {
+            pageserver_api::key::DBDIR_KEY => DbDir,
+            pageserver_api::key::CONTROLFILE_KEY => ControlFile,
+            pageserver_api::key::CHECKPOINT_KEY => Checkpoint,
+            pageserver_api::key::AUX_FILES_KEY => AuxFilesV1,
+            _ if slru_dir_kind.is_some() => SlruDir(slru_dir_kind.unwrap()),
+            _ if key.field1 == 0 && key.field4 == 0 && key.field5 == 0 && key.field6 == 0 => {
+                RelMap([key.field2, key.field3].into())
+            }
+            _ if key.field1 == 0 && key.field4 == 0 && key.field5 == 0 && key.field6 == 1 => {
+                RelDir([key.field2, key.field3].into())
+            }
+            _ if key.is_metadata_key() => {
+                let mut bytes = [0u8; 16];
+                key.extract_metadata_key_to_writer(&mut bytes[..]);
+                AuxFileV2(utils::Hex(bytes))
+            }
+            _ => return None,
+        })
+    }
+}
+
+/// Prefix of RelTag, currently only known use cases are the two item versions.
+///
+/// Renders like a reltag with `/`, nothing else.
+struct RelTagish<const N: usize>([u32; N]);
+
+impl<const N: usize> From<[u32; N]> for RelTagish<N> {
+    fn from(val: [u32; N]) -> Self {
+        RelTagish(val)
+    }
+}
+
+impl<const N: usize> std::fmt::Debug for RelTagish<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::fmt::Write as _;
+        let mut first = true;
+        self.0.iter().try_for_each(|x| {
+            if !first {
+                f.write_char('/')?;
+            }
+            first = false;
+            write!(f, "{}", x)
+        })
+    }
+}
