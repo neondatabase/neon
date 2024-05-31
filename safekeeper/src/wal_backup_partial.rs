@@ -117,10 +117,6 @@ impl PartialBackup {
             self.conf.my_id.0,
         )
     }
-
-    fn local_segment_name(&self, segno: u64) -> String {
-        format!("{}.partial", self.segment_name(segno))
-    }
 }
 
 impl PartialBackup {
@@ -152,7 +148,7 @@ impl PartialBackup {
         // We're going to backup bytes from the start of the segment up to flush_lsn.
         let backup_bytes = flush_lsn.segment_offset(self.wal_seg_size);
 
-        let local_path = self.local_prefix.join(self.local_segment_name(segno));
+        let local_path = self.local_prefix.join(self.segment_name(segno));
         let remote_path = RemotePath::new(self.remote_prefix.join(&prepared.name).as_ref())?;
 
         // Upload first `backup_bytes` bytes of the segment to the remote storage.

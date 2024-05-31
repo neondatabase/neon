@@ -16,6 +16,5 @@ declare -i WAL_SIZE=$REDO_POS+114
 "$PG_BIN"/pg_ctl -D "$DATA_DIR" -l "$DATA_DIR/logfile.log" stop -m immediate
 cp "$DATA_DIR"/pg_wal/000000010000000000000001 .
 cp "$WAL_PATH"/* "$DATA_DIR"/pg_wal/
-for partial in "$DATA_DIR"/pg_wal/*.partial ; do mv "$partial" "${partial%.partial}" ; done
 dd if=000000010000000000000001 of="$DATA_DIR"/pg_wal/000000010000000000000001 bs=$WAL_SIZE count=1 conv=notrunc
 rm -f 000000010000000000000001

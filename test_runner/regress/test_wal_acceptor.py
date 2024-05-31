@@ -591,10 +591,10 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
 
     # save the last (partial) file to put it back after recreation; others will be fetched from s3
     sk = env.safekeepers[0]
-    tli_dir = Path(sk.data_dir) / str(tenant_id) / str(timeline_id)
-    f_partial = Path([f for f in os.listdir(tli_dir) if f.endswith(".partial")][0])
+    tli_dir = sk.data_dir / str(tenant_id) / str(timeline_id)
+    f_partial = sk.list_segments(tenant_id, timeline_id)[-1]
     f_partial_path = tli_dir / f_partial
-    f_partial_saved = Path(sk.data_dir) / f_partial.name
+    f_partial_saved = sk.data_dir / f_partial
     f_partial_path.rename(f_partial_saved)
 
     pg_version = sk.http_client().timeline_status(tenant_id, timeline_id).pg_version
