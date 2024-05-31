@@ -23,7 +23,7 @@ pub(super) struct DescribeKeyCommand {
     ///
     /// The default is hardcoded. It makes no sense to provide this without providing
     /// `--shard-count`.
-    #[arg(long, requires = "shard-count")]
+    #[arg(long, requires = "shard_count")]
     stripe_size: Option<u32>,
 }
 
