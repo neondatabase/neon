@@ -1,4 +1,4 @@
-version: '3'
+#version: '3'
 
 services:
   minio:
@@ -192,5 +192,15 @@ services:
       - "until pg_isready -h compute -p 55433 -U cloud_admin ; do
             echo 'Waiting to start compute...' && sleep 1;
          done"
+    depends_on:
+      - compute
+
+  neon-test-extensions:
+    image: ${REPOSITORY:-neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-16}:${TAG:-latest}
+    entrypoint:
+      - "/bin/bash"
+      - "-c"
+    command:
+      - "while true; do sleep 60; done"
     depends_on:
       - compute

@@ -1047,13 +1047,9 @@ jobs:
             exit 1
           fi
 
-      - name: Verify docker-compose example
+      - name: Verify docker-compose example and test extensions
         timeout-minutes: 20
         run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
-
-      - name: Test extensions
-        timeout-minutes: 25
-        run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_extensions_test.sh
 
       - name: Print logs and clean up
         if: always()
