@@ -385,9 +385,11 @@ pub fn rel_size_to_key(rel: RelTag) -> Key {
     }
 }
 
-#[inline(always)]
-pub fn is_rel_size_key(key: &Key) -> bool {
-    key.field1 == 0 && key.field6 == u32::MAX
+impl Key {
+    #[inline(always)]
+    pub fn is_rel_size_key(&self) -> bool {
+        self.field1 == 0 && self.field6 == u32::MAX
+    }
 }
 
 #[inline(always)]
@@ -478,12 +480,14 @@ pub fn slru_segment_size_to_key(kind: SlruKind, segno: u32) -> Key {
     }
 }
 
-pub fn is_slru_segment_size_key(key: &Key) -> bool {
-    key.field1 == 0x01
-        && key.field2 < 0x03
-        && key.field3 == 0x01
-        && key.field5 == 0
-        && key.field6 == u32::MAX
+impl Key {
+    pub fn is_slru_segment_size_key(&self) -> bool {
+        self.field1 == 0x01
+            && self.field2 < 0x03
+            && self.field3 == 0x01
+            && self.field5 == 0
+            && self.field6 == u32::MAX
+    }
 }
 
 #[inline(always)]
@@ -591,25 +595,30 @@ pub const NON_INHERITED_RANGE: Range<Key> = AUX_FILES_KEY..AUX_FILES_KEY.next();
 /// Sparse keyspace range for vectored get. Missing key error will be ignored for this range.
 pub const NON_INHERITED_SPARSE_RANGE: Range<Key> = Key::metadata_key_range();
 
-// AUX_FILES currently stores only data for logical replication (slots etc), and
-// we don't preserve these on a branch because safekeepers can't follow timeline
-// switch (and generally it likely should be optional), so ignore these.
-#[inline(always)]
-pub fn is_inherited_key(key: Key) -> bool {
-    !NON_INHERITED_RANGE.contains(&key) && !NON_INHERITED_SPARSE_RANGE.contains(&key)
-}
+impl Key {
+    // AUX_FILES currently stores only data for logical replication (slots etc), and
+    // we don't preserve these on a branch because safekeepers can't follow timeline
+    // switch (and generally it likely should be optional), so ignore these.
+    #[inline(always)]
+    pub fn is_inherited_key(self) -> bool {
+        !NON_INHERITED_RANGE.contains(&self) && !NON_INHERITED_SPARSE_RANGE.contains(&self)
+    }
 
-#[inline(always)]
-pub fn is_rel_fsm_block_key(key: Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0 && key.field5 == FSM_FORKNUM && key.field6 != 0xffffffff
-}
+    #[inline(always)]
+    pub fn is_rel_fsm_block_key(self) -> bool {
+        self.field1 == 0x00
+            && self.field4 != 0
+            && self.field5 == FSM_FORKNUM
+            && self.field6 != 0xffffffff
+    }
 
-#[inline(always)]
-pub fn is_rel_vm_block_key(key: Key) -> bool {
-    key.field1 == 0x00
-        && key.field4 != 0
-        && key.field5 == VISIBILITYMAP_FORKNUM
-        && key.field6 != 0xffffffff
+    #[inline(always)]
+    pub fn is_rel_vm_block_key(self) -> bool {
+        self.field1 == 0x00
+            && self.field4 != 0
+            && self.field5 == VISIBILITYMAP_FORKNUM
+            && self.field6 != 0xffffffff
+    }
 }
 
 #[inline(always)]
@@ -631,16 +640,18 @@ pub fn key_to_slru_block(key: Key) -> anyhow::Result<(SlruKind, u32, BlockNumber
     })
 }
 
-#[inline(always)]
-pub fn is_slru_block_key(key: Key) -> bool {
-    key.field1 == 0x01                // SLRU-related
-        && key.field3 == 0x00000001   // but not SlruDir
-        && key.field6 != 0xffffffff // and not SlruSegSize
-}
+impl Key {
+    #[inline(always)]
+    pub fn is_slru_block_key(self) -> bool {
+        self.field1 == 0x01                // SLRU-related
+        && self.field3 == 0x00000001   // but not SlruDir
+        && self.field6 != 0xffffffff // and not SlruSegSize
+    }
 
-#[inline(always)]
-pub fn is_rel_block_key(key: &Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0 && key.field6 != 0xffffffff
+    #[inline(always)]
+    pub fn is_rel_block_key(&self) -> bool {
+        self.field1 == 0x00 && self.field4 != 0 && self.field6 != 0xffffffff
+    }
 }
 
 /// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.

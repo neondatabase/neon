@@ -17,7 +17,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use itertools::Itertools;
 use pageserver_api::key::{
-    dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
+    dbdir_key_range, rel_block_to_key, rel_dir_to_key,
     rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
@@ -1684,7 +1684,7 @@ impl<'a> DatadirModification<'a> {
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
             for (lsn, value) in values {
-                if is_rel_block_key(&key) || is_slru_block_key(key) {
+                if key.is_rel_block_key() || key.is_slru_block_key() {
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
                     writer.put(key, lsn, &value, ctx).await?;

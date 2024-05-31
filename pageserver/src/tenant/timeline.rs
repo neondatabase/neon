@@ -102,7 +102,6 @@ use crate::metrics::{
 };
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
-use pageserver_api::key::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
@@ -3188,7 +3187,7 @@ impl Timeline {
 
             // Recurse into ancestor if needed
             if let Some(ancestor_timeline) = timeline.ancestor_timeline.as_ref() {
-                if is_inherited_key(key) && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
+                if key.is_inherited_key() && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
                     trace!(
                         "going into ancestor {}, cont_lsn is {}",
                         timeline.ancestor_lsn,
@@ -4259,7 +4258,7 @@ impl Timeline {
                                 // Unfortunately we cannot do this for the main fork, or for
                                 // any metadata keys, keys, as that would lead to actual data
                                 // loss.
-                                if is_rel_fsm_block_key(img_key) || is_rel_vm_block_key(img_key) {
+                                if img_key.is_rel_fsm_block_key() || img_key.is_rel_vm_block_key() {
                                     warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
                                     ZERO_PAGE.clone()
                                 } else {
