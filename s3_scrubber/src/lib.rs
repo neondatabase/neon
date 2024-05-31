@@ -4,6 +4,7 @@ pub mod checks;
 pub mod cloud_admin_api;
 pub mod garbage;
 pub mod metadata_stream;
+pub mod pageserver_physical_gc;
 pub mod scan_pageserver_metadata;
 pub mod scan_safekeeper_metadata;
 pub mod tenant_snapshot;

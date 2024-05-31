@@ -2,11 +2,13 @@ use anyhow::bail;
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
 use s3_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
+use s3_scrubber::pageserver_physical_gc::GcMode;
 use s3_scrubber::scan_pageserver_metadata::scan_metadata;
 use s3_scrubber::tenant_snapshot::SnapshotDownloader;
 use s3_scrubber::{
-    init_logging, scan_safekeeper_metadata::scan_safekeeper_metadata, BucketConfig, ConsoleConfig,
-    NodeKind, TraversingDepth,
+    init_logging, pageserver_physical_gc::pageserver_physical_gc,
+    scan_safekeeper_metadata::scan_safekeeper_metadata, BucketConfig, ConsoleConfig, NodeKind,
+    TraversingDepth,
 };
 
 use clap::{Parser, Subcommand};
@@ -62,6 +64,14 @@ enum Command {
         #[arg(short, long)]
         output_path: Utf8PathBuf,
     },
+    PageserverPhysicalGc {
+        #[arg(long = "tenant-id", num_args = 0..)]
+        tenant_ids: Vec<TenantShardId>,
+        #[arg(long = "min-age")]
+        min_age: humantime::Duration,
+        #[arg(short, long, default_value_t = GcMode::IndicesOnly)]
+        mode: GcMode,
+    },
 }
 
 #[tokio::main]
@@ -75,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         Command::FindGarbage { .. } => "find-garbage",
         Command::PurgeGarbage { .. } => "purge-garbage",
         Command::TenantSnapshot { .. } => "tenant-snapshot",
+        Command::PageserverPhysicalGc { .. } => "pageserver-physical-gc",
     };
     let _guard = init_logging(&format!(
         "{}_{}_{}_{}.log",
@@ -177,6 +188,16 @@ async fn main() -> anyhow::Result<()> {
             let downloader =
                 SnapshotDownloader::new(bucket_config, tenant_id, output_path, concurrency)?;
             downloader.download().await
+        }
+        Command::PageserverPhysicalGc {
+            tenant_ids,
+            min_age,
+            mode,
+        } => {
+            let summary =
+                pageserver_physical_gc(bucket_config, tenant_ids, min_age.into(), mode).await?;
+            println!("{}", serde_json::to_string(&summary).unwrap());
+            Ok(())
         }
     }
 }
