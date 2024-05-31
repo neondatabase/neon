@@ -487,6 +487,33 @@ enum CreateTimelineCause {
     Delete,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum GcError {
+    // The tenant is shutting down
+    #[error("tenant shutting down")]
+    TenantCancelled,
+
+    // The tenant is shutting down
+    #[error("timeline shutting down")]
+    TimelineCancelled,
+
+    // The tenant is in a state inelegible to run GC
+    #[error("not active")]
+    NotActive,
+
+    // A requested GC cutoff LSN was invalid, for example it tried to move backwards
+    #[error("not active")]
+    BadLsn { why: String },
+
+    // A remote storage error while scheduling updates after compaction
+    #[error(transparent)]
+    Remote(anyhow::Error),
+
+    // If GC was invoked for a particular timeline, this error means it didn't exist
+    #[error("timeline not found")]
+    TimelineNotFound,
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     ///
@@ -1605,24 +1632,23 @@ impl Tenant {
     /// GC cutoff point is determined conservatively by either `horizon` and `pitr`, whichever
     /// requires more history to be retained.
     //
-    pub async fn gc_iteration(
+    pub(crate) async fn gc_iteration(
         &self,
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<GcResult> {
+    ) -> Result<GcResult, GcError> {
         // Don't start doing work during shutdown
         if let TenantState::Stopping { .. } = self.current_state() {
             return Ok(GcResult::default());
         }
 
         // there is a global allowed_error for this
-        anyhow::ensure!(
-            self.is_active(),
-            "Cannot run GC iteration on inactive tenant"
-        );
+        if !self.is_active() {
+            return Err(GcError::NotActive);
+        }
 
         {
             let conf = self.tenant_conf.load();
@@ -2790,28 +2816,13 @@ impl Tenant {
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<GcResult> {
+    ) -> Result<GcResult, GcError> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
-        let gc_timelines = match self
+        let gc_timelines = self
             .refresh_gc_info_internal(target_timeline_id, horizon, pitr, cancel, ctx)
-            .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                if let Some(PageReconstructError::Cancelled) =
-                    e.downcast_ref::<PageReconstructError>()
-                {
-                    // Handle cancellation
-                    totals.elapsed = now.elapsed();
-                    return Ok(totals);
-                } else {
-                    // Propagate other errors
-                    return Err(e);
-                }
-            }
-        };
+            .await?;
 
         failpoint_support::sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
 
@@ -2836,7 +2847,19 @@ impl Tenant {
                 // made.
                 break;
             }
-            let result = timeline.gc().await?;
+            let result = match timeline.gc().await {
+                Err(GcError::TimelineCancelled) => {
+                    if target_timeline_id.is_some() {
+                        // If we were targetting this specific timeline, surface cancellation to caller
+                        return Err(GcError::TimelineCancelled);
+                    } else {
+                        // A timeline may be shutting down independently of the tenant's lifecycle: we should
+                        // skip past this and proceed to try GC on other timelines.
+                        continue;
+                    }
+                }
+                r => r?,
+            };
             totals += result;
         }
 
@@ -2849,11 +2872,11 @@ impl Tenant {
     /// [`Tenant::get_gc_horizon`].
     ///
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
-    pub async fn refresh_gc_info(
+    pub(crate) async fn refresh_gc_info(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<Arc<Timeline>>> {
+    ) -> Result<Vec<Arc<Timeline>>, GcError> {
         // since this method can now be called at different rates than the configured gc loop, it
         // might be that these configuration values get applied faster than what it was previously,
         // since these were only read from the gc task.
@@ -2874,7 +2897,7 @@ impl Tenant {
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<Arc<Timeline>>> {
+    ) -> Result<Vec<Arc<Timeline>>, GcError> {
         // before taking the gc_cs lock, do the heavier weight finding of gc_cutoff points for
         // currently visible timelines.
         let timelines = self
@@ -2911,8 +2934,8 @@ impl Tenant {
             }
         }
 
-        if !self.is_active() {
-            anyhow::bail!("shutting down");
+        if !self.is_active() || self.cancel.is_cancelled() {
+            return Err(GcError::TenantCancelled);
         }
 
         // grab mutex to prevent new timelines from being created here; avoid doing long operations
@@ -2921,19 +2944,19 @@ impl Tenant {
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let (all_branchpoints, timeline_ids): (BTreeSet<(TimelineId, Lsn)>, _) = {
+        let (all_branchpoints, timelines): (BTreeSet<(TimelineId, Lsn)>, _) = {
             let timelines = self.timelines.lock().unwrap();
             let mut all_branchpoints = BTreeSet::new();
-            let timeline_ids = {
+            let timelines = {
                 if let Some(target_timeline_id) = target_timeline_id.as_ref() {
                     if timelines.get(target_timeline_id).is_none() {
-                        bail!("gc target timeline does not exist")
+                        return Err(GcError::TimelineNotFound);
                     }
                 };
 
                 timelines
                     .iter()
-                    .map(|(timeline_id, timeline_entry)| {
+                    .map(|(_timeline_id, timeline_entry)| {
                         if let Some(ancestor_timeline_id) =
                             &timeline_entry.get_ancestor_timeline_id()
                         {
@@ -2955,33 +2978,28 @@ impl Tenant {
                             }
                         }
 
-                        *timeline_id
+                        timeline_entry.clone()
                     })
                     .collect::<Vec<_>>()
             };
-            (all_branchpoints, timeline_ids)
+            (all_branchpoints, timelines)
         };
 
         // Ok, we now know all the branch points.
         // Update the GC information for each timeline.
-        let mut gc_timelines = Vec::with_capacity(timeline_ids.len());
-        for timeline_id in timeline_ids {
-            // Timeline is known to be local and loaded.
-            let timeline = self
-                .get_timeline(timeline_id, false)
-                .with_context(|| format!("Timeline {timeline_id} was not found"))?;
-
+        let mut gc_timelines = Vec::with_capacity(timelines.len());
+        for timeline in timelines {
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timeline_id) = target_timeline_id {
-                if timeline_id != target_timeline_id {
+                if timeline.timeline_id != target_timeline_id {
                     continue;
                 }
             }
 
             let branchpoints: Vec<Lsn> = all_branchpoints
                 .range((
-                    Included((timeline_id, Lsn(0))),
-                    Included((timeline_id, Lsn(u64::MAX))),
+                    Included((timeline.timeline_id, Lsn(0))),
+                    Included((timeline.timeline_id, Lsn(u64::MAX))),
                 ))
                 .map(|&x| x.1)
                 .collect();
@@ -2989,7 +3007,7 @@ impl Tenant {
             {
                 let mut target = timeline.gc_info.write().unwrap();
 
-                match gc_cutoffs.remove(&timeline_id) {
+                match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
                         *target = GcInfo {
                             retain_lsns: branchpoints,

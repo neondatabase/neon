@@ -131,11 +131,14 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
 use super::{config::TenantConf, storage_layer::VectoredValueReconstructState};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
+use super::{
+    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
+    GcError,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum FlushLoopState {
@@ -4837,7 +4840,7 @@ impl Timeline {
     /// Currently, we don't make any attempt at removing unneeded page versions
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
-    pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
+    pub(super) async fn gc(&self) -> Result<GcResult, GcError> {
         // this is most likely the background tasks, but it might be the spawned task from
         // immediate_gc
         let _g = tokio::select! {
@@ -4850,7 +4853,7 @@ impl Timeline {
 
         // Is the timeline being deleted?
         if self.is_stopping() {
-            anyhow::bail!("timeline is Stopping");
+            return Err(GcError::TimelineCancelled);
         }
 
         let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
@@ -4908,7 +4911,7 @@ impl Timeline {
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
-    ) -> anyhow::Result<GcResult> {
+    ) -> Result<GcResult, GcError> {
         // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
 
         let now = SystemTime::now();
@@ -4930,12 +4933,15 @@ impl Timeline {
         // The GC cutoff should only ever move forwards.
         let waitlist = {
             let write_guard = self.latest_gc_cutoff_lsn.lock_for_write();
-            ensure!(
-                *write_guard <= new_gc_cutoff,
-                "Cannot move GC cutoff LSN backwards (was {}, new {})",
-                *write_guard,
-                new_gc_cutoff
-            );
+            if *write_guard > new_gc_cutoff {
+                return Err(GcError::BadLsn {
+                    why: format!(
+                        "Cannot move GC cutoff LSN backwards (was {}, new {})",
+                        *write_guard, new_gc_cutoff
+                    ),
+                });
+            }
+
             write_guard.store_and_unlock(new_gc_cutoff)
         };
         waitlist.wait().await;
@@ -5044,7 +5050,14 @@ impl Timeline {
             // This unconditionally schedules also an index_part.json update, even though, we will
             // be doing one a bit later with the unlinked gc'd layers.
             let disk_consistent_lsn = self.disk_consistent_lsn.load();
-            self.schedule_uploads(disk_consistent_lsn, None)?;
+            self.schedule_uploads(disk_consistent_lsn, None)
+                .map_err(|e| {
+                    if self.cancel.is_cancelled() {
+                        GcError::TimelineCancelled
+                    } else {
+                        GcError::Remote(e)
+                    }
+                })?;
 
             let gc_layers = layers_to_remove
                 .iter()
@@ -5053,7 +5066,15 @@ impl Timeline {
 
             result.layers_removed = gc_layers.len() as u64;
 
-            self.remote_client.schedule_gc_update(&gc_layers)?;
+            self.remote_client
+                .schedule_gc_update(&gc_layers)
+                .map_err(|e| {
+                    if self.cancel.is_cancelled() {
+                        GcError::TimelineCancelled
+                    } else {
+                        GcError::Remote(e)
+                    }
+                })?;
 
             guard.finish_gc_timeline(&gc_layers);
 
@@ -5068,7 +5089,7 @@ impl Timeline {
             result.layers_removed, new_gc_cutoff
         );
 
-        result.elapsed = now.elapsed()?;
+        result.elapsed = now.elapsed().unwrap_or(Duration::ZERO);
         Ok(result)
     }
 
