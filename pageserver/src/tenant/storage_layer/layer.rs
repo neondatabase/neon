@@ -366,7 +366,10 @@ impl Layer {
             .0
             .get_or_maybe_download(true, Some(ctx))
             .await
-            .map_err(|err| GetVectoredError::Other(anyhow::anyhow!(err)))?;
+            .map_err(|err| match err {
+                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                other => GetVectoredError::Other(anyhow::anyhow!(other)),
+            })?;
 
         self.0
             .access_stats
@@ -1157,6 +1160,11 @@ impl LayerInner {
             Err(e) => {
                 let consecutive_failures =
                     1 + self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+
+                if timeline.cancel.is_cancelled() {
+                    // If we're shutting down, drop out before logging the error
+                    return Err(e);
+                }
 
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
 

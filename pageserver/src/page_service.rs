@@ -66,6 +66,7 @@ use crate::tenant::mgr::GetTenantError;
 use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
+use crate::tenant::timeline::FlushLayerError;
 use crate::tenant::timeline::WaitLsnError;
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
@@ -830,7 +831,10 @@ impl PageServerHandler {
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        timeline.freeze_and_flush().await?;
+        timeline.freeze_and_flush().await.map_err(|e| match e {
+            FlushLayerError::Cancelled => QueryError::Shutdown,
+            other => QueryError::Other(other.into()),
+        })?;
 
         info!("done");
         Ok(())

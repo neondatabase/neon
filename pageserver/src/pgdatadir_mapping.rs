@@ -78,11 +78,19 @@ pub enum LsnForTimestamp {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CalculateLogicalSizeError {
+pub(crate) enum CalculateLogicalSizeError {
     #[error("cancelled")]
     Cancelled,
+
+    /// Something went wrong while reading the metadata we use to calculate logical size
+    /// Note that cancellation variants of `PageReconstructError` are transformed to [`Self::Cancelled`]
+    /// in the `From` implementation for this variant.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    PageRead(PageReconstructError),
+
+    /// Something went wrong deserializing metadata that we read to calculate logical size
+    #[error("decode error: {0}")]
+    Decode(#[from] DeserializeError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,7 +118,7 @@ impl From<PageReconstructError> for CalculateLogicalSizeError {
             PageReconstructError::AncestorStopping(_) | PageReconstructError::Cancelled => {
                 Self::Cancelled
             }
-            _ => Self::Other(pre.into()),
+            _ => Self::PageRead(pre),
         }
     }
 }
@@ -763,7 +771,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn get_current_logical_size_non_incremental(
+    pub(crate) async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -772,7 +780,7 @@ impl Timeline {
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
+        let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {

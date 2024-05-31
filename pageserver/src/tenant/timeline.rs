@@ -138,7 +138,7 @@ use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub(super) enum FlushLoopState {
+pub(crate) enum FlushLoopState {
     NotStarted,
     Running {
         #[cfg(test)]
@@ -577,7 +577,7 @@ impl PageReconstructError {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum CreateImageLayersError {
+pub(crate) enum CreateImageLayersError {
     #[error("timeline shutting down")]
     Cancelled,
 
@@ -591,17 +591,35 @@ enum CreateImageLayersError {
     Other(#[from] anyhow::Error),
 }
 
-#[derive(thiserror::Error, Debug)]
-enum FlushLayerError {
+#[derive(thiserror::Error, Debug, Clone)]
+pub(crate) enum FlushLayerError {
     /// Timeline cancellation token was cancelled
     #[error("timeline shutting down")]
     Cancelled,
 
+    /// We tried to flush a layer while the Timeline is in an unexpected state
+    #[error("cannot flush frozen layers when flush_loop is not running, state is {0:?}")]
+    NotRunning(FlushLoopState),
+
+    // Arc<> the following non-clonable error types: we must be Clone-able because the flush error is propagated from the flush
+    // loop via a watch channel, where we can only borrow it.
     #[error(transparent)]
-    CreateImageLayersError(CreateImageLayersError),
+    CreateImageLayersError(Arc<CreateImageLayersError>),
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(#[from] Arc<anyhow::Error>),
+}
+
+impl FlushLayerError {
+    // When crossing from generic anyhow errors to this error type, we explicitly check
+    // for timeline cancellation to avoid logging inoffensive shutdown errors as warn/err.
+    fn from_anyhow(timeline: &Timeline, err: anyhow::Error) -> Self {
+        if timeline.cancel.is_cancelled() {
+            Self::Cancelled
+        } else {
+            Self::Other(Arc::new(err))
+        }
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -696,7 +714,7 @@ impl From<CreateImageLayersError> for FlushLayerError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
             CreateImageLayersError::Cancelled => FlushLayerError::Cancelled,
-            any => FlushLayerError::CreateImageLayersError(any),
+            any => FlushLayerError::CreateImageLayersError(Arc::new(any)),
         }
     }
 }
@@ -1547,13 +1565,13 @@ impl Timeline {
 
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
-    pub(crate) async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+    pub(crate) async fn freeze_and_flush(&self) -> Result<(), FlushLayerError> {
         self.freeze_and_flush0().await
     }
 
     // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
     // polluting the span hierarchy.
-    pub(crate) async fn freeze_and_flush0(&self) -> anyhow::Result<()> {
+    pub(crate) async fn freeze_and_flush0(&self) -> Result<(), FlushLayerError> {
         let to_lsn = self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
@@ -2735,11 +2753,6 @@ impl Timeline {
             self.current_logical_size.initialized.add_permits(1);
         }
 
-        enum BackgroundCalculationError {
-            Cancelled,
-            Other(anyhow::Error),
-        }
-
         let try_once = |attempt: usize| {
             let background_ctx = &background_ctx;
             let self_ref = &self;
@@ -2757,10 +2770,10 @@ impl Timeline {
                         (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit)
                     }
                     _ = self_ref.cancel.cancelled() => {
-                        return Err(BackgroundCalculationError::Cancelled);
+                        return Err(CalculateLogicalSizeError::Cancelled);
                     }
                     _ = cancel.cancelled() => {
-                        return Err(BackgroundCalculationError::Cancelled);
+                        return Err(CalculateLogicalSizeError::Cancelled);
                     },
                     () = skip_concurrency_limiter.cancelled() => {
                         // Some action that is part of a end user interaction requested logical size
@@ -2787,18 +2800,7 @@ impl Timeline {
                     .await
                 {
                     Ok(calculated_size) => Ok((calculated_size, metrics_guard)),
-                    Err(CalculateLogicalSizeError::Cancelled) => {
-                        Err(BackgroundCalculationError::Cancelled)
-                    }
-                    Err(CalculateLogicalSizeError::Other(err)) => {
-                        if let Some(PageReconstructError::AncestorStopping(_)) =
-                            err.root_cause().downcast_ref()
-                        {
-                            Err(BackgroundCalculationError::Cancelled)
-                        } else {
-                            Err(BackgroundCalculationError::Other(err))
-                        }
-                    }
+                    Err(e) => Err(e),
                 }
             }
         };
@@ -2810,8 +2812,11 @@ impl Timeline {
 
                 match try_once(attempt).await {
                     Ok(res) => return ControlFlow::Continue(res),
-                    Err(BackgroundCalculationError::Cancelled) => return ControlFlow::Break(()),
-                    Err(BackgroundCalculationError::Other(e)) => {
+                    Err(CalculateLogicalSizeError::Cancelled) => return ControlFlow::Break(()),
+                    Err(
+                        e @ (CalculateLogicalSizeError::Decode(_)
+                        | CalculateLogicalSizeError::PageRead(_)),
+                    ) => {
                         warn!(attempt, "initial size calculation failed: {e:?}");
                         // exponential back-off doesn't make sense at these long intervals;
                         // use fixed retry interval with generous jitter instead
@@ -3717,7 +3722,9 @@ impl Timeline {
                         return;
                     }
                     err @ Err(
-                        FlushLayerError::Other(_) | FlushLayerError::CreateImageLayersError(_),
+                        FlushLayerError::NotRunning(_)
+                        | FlushLayerError::Other(_)
+                        | FlushLayerError::CreateImageLayersError(_),
                     ) => {
                         error!("could not flush frozen layer: {err:?}");
                         break err.map(|_| ());
@@ -3763,7 +3770,10 @@ impl Timeline {
     /// `last_record_lsn` may be higher than the highest LSN of a frozen layer: if this is the case,
     /// it means no data will be written between the top of the highest frozen layer and to_lsn,
     /// e.g. because this tenant shard has ingested up to to_lsn and not written any data locally for that part of the WAL.
-    async fn flush_frozen_layers_and_wait(&self, last_record_lsn: Lsn) -> anyhow::Result<()> {
+    async fn flush_frozen_layers_and_wait(
+        &self,
+        last_record_lsn: Lsn,
+    ) -> Result<(), FlushLayerError> {
         let mut rx = self.layer_flush_done_tx.subscribe();
 
         // Increment the flush cycle counter and wake up the flush task.
@@ -3774,7 +3784,7 @@ impl Timeline {
 
         let flush_loop_state = { *self.flush_loop_state.lock().unwrap() };
         if !matches!(flush_loop_state, FlushLoopState::Running { .. }) {
-            anyhow::bail!("cannot flush frozen layers when flush_loop is not running, state is {flush_loop_state:?}")
+            return Err(FlushLayerError::NotRunning(flush_loop_state));
         }
 
         self.layer_flush_start_tx.send_modify(|(counter, lsn)| {
@@ -3787,14 +3797,11 @@ impl Timeline {
             {
                 let (last_result_counter, last_result) = &*rx.borrow();
                 if *last_result_counter >= my_flush_request {
-                    if let Err(_err) = last_result {
+                    if let Err(err) = last_result {
                         // We already logged the original error in
                         // flush_loop. We cannot propagate it to the caller
                         // here, because it might not be Cloneable
-                        anyhow::bail!(
-                            "Could not flush frozen layer. Request id: {}",
-                            my_flush_request
-                        );
+                        return Err(err.clone());
                     } else {
                         return Ok(());
                     }
@@ -3803,7 +3810,7 @@ impl Timeline {
             trace!("waiting for flush to complete");
             tokio::select! {
                 rx_e = rx.changed() => {
-                    rx_e?;
+                    rx_e.map_err(|_| FlushLayerError::NotRunning(*self.flush_loop_state.lock().unwrap()))?;
                 },
                 // Cancellation safety: we are not leaving an I/O in-flight for the flush, we're just ignoring
                 // the notification from [`flush_loop`] that it completed.
@@ -3875,7 +3882,8 @@ impl Timeline {
                     EnumSet::empty(),
                     ctx,
                 )
-                .await?;
+                .await
+                .map_err(|e| FlushLayerError::from_anyhow(self, e))?;
 
             if self.cancel.is_cancelled() {
                 return Err(FlushLayerError::Cancelled);
@@ -3899,7 +3907,8 @@ impl Timeline {
                     Some(metadata_keyspace.0.ranges[0].clone()),
                     ctx,
                 )
-                .await?
+                .await
+                .map_err(|e| FlushLayerError::from_anyhow(self, e))?
             } else {
                 None
             };
@@ -3926,7 +3935,11 @@ impl Timeline {
             // Normal case, write out a L0 delta layer file.
             // `create_delta_layer` will not modify the layer map.
             // We will remove frozen layer and add delta layer in one atomic operation later.
-            let Some(layer) = self.create_delta_layer(&frozen_layer, None, ctx).await? else {
+            let Some(layer) = self
+                .create_delta_layer(&frozen_layer, None, ctx)
+                .await
+                .map_err(|e| FlushLayerError::from_anyhow(self, e))?
+            else {
                 panic!("delta layer cannot be empty if no filter is applied");
             };
             (
@@ -3959,7 +3972,8 @@ impl Timeline {
 
             if self.set_disk_consistent_lsn(disk_consistent_lsn) {
                 // Schedule remote uploads that will reflect our new disk_consistent_lsn
-                self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?;
+                self.schedule_uploads(disk_consistent_lsn, layers_to_upload)
+                    .map_err(|e| FlushLayerError::from_anyhow(self, e))?;
             }
             // release lock on 'layers'
         };

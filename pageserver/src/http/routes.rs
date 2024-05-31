@@ -74,6 +74,7 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::CompactFlags;
+use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::SpawnMode;
@@ -1813,11 +1814,22 @@ async fn timeline_checkpoint_handler(
         timeline
             .freeze_and_flush()
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| {
+                match e {
+                    tenant::timeline::FlushLayerError::Cancelled => ApiError::ShuttingDown,
+                    other => ApiError::InternalServerError(other.into()),
+
+                }
+            })?;
         timeline
             .compact(&cancel, flags, &ctx)
             .await
-            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            .map_err(|e|
+                match e {
+                    CompactionError::ShuttingDown => ApiError::ShuttingDown,
+                    CompactionError::Other(e) => ApiError::InternalServerError(e)
+                }
+            )?;
 
         if wait_until_uploaded {
             timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
