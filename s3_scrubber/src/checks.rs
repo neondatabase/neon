@@ -70,7 +70,7 @@ pub(crate) fn branch_cleanup_and_check_errors(
 
     match s3_data {
         Some(s3_data) => {
-            result.garbage_keys.extend(s3_data.keys_to_remove);
+            result.garbage_keys.extend(s3_data.unknown_keys);
 
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
@@ -240,7 +240,7 @@ impl TenantObjectListing {
 #[derive(Debug)]
 pub(crate) struct S3TimelineBlobData {
     pub(crate) blob_data: BlobDataParseResult,
-    pub(crate) keys_to_remove: Vec<String>,
+    pub(crate) unknown_keys: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -276,7 +276,7 @@ pub(crate) async fn list_timeline_blobs(
     let mut s3_layers = HashSet::new();
 
     let mut errors = Vec::new();
-    let mut keys_to_remove = Vec::new();
+    let mut unknown_keys = Vec::new();
 
     let mut timeline_dir_target = s3_root.timeline_root(&id);
     timeline_dir_target.delimiter = String::new();
@@ -309,13 +309,13 @@ pub(crate) async fn list_timeline_blobs(
                     errors.push(
                         format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
                     );
-                    keys_to_remove.push(key.to_string());
+                    unknown_keys.push(key.to_string());
                 }
             },
             None => {
                 tracing::info!("Peculiar key {}", key);
                 errors.push(format!("S3 list response got an object with odd key {key}"));
-                keys_to_remove.push(key.to_string());
+                unknown_keys.push(key.to_string());
             }
         }
     }
@@ -326,7 +326,7 @@ pub(crate) async fn list_timeline_blobs(
         );
         return Ok(S3TimelineBlobData {
             blob_data: BlobDataParseResult::Relic,
-            keys_to_remove: Vec::new(),
+            unknown_keys: Vec::new(),
         });
     }
 
@@ -372,7 +372,7 @@ pub(crate) async fn list_timeline_blobs(
                         index_part_generation,
                         s3_layers,
                     },
-                    keys_to_remove,
+                    unknown_keys,
                 })
             }
             Err(index_parse_error) => errors.push(format!(
@@ -393,6 +393,6 @@ pub(crate) async fn list_timeline_blobs(
 
     Ok(S3TimelineBlobData {
         blob_data: BlobDataParseResult::Incorrect(errors),
-        keys_to_remove,
+        unknown_keys,
     })
 }
