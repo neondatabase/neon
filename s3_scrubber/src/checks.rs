@@ -292,16 +292,16 @@ pub(crate) async fn list_timeline_blobs(
         let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
         match blob_name {
             Some(name) if name.starts_with("index_part.json") => {
-                tracing::info!("Index key {key}");
+                tracing::debug!("Index key {key}");
                 index_parts.push(obj)
             }
             Some("initdb.tar.zst") => {
-                tracing::info!("initdb archive {key}");
+                tracing::debug!("initdb archive {key}");
                 initdb_archive = true;
             }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
                 Ok((new_layer, gen)) => {
-                    tracing::info!("Parsed layer key: {} {:?}", new_layer, gen);
+                    tracing::debug!("Parsed layer key: {} {:?}", new_layer, gen);
                     s3_layers.insert((new_layer, gen));
                 }
                 Err(e) => {
@@ -313,7 +313,7 @@ pub(crate) async fn list_timeline_blobs(
                 }
             },
             None => {
-                tracing::info!("Peculiar key {}", key);
+                tracing::warn!("Unknown key {}", key);
                 errors.push(format!("S3 list response got an object with odd key {key}"));
                 unknown_keys.push(key.to_string());
             }
@@ -321,7 +321,7 @@ pub(crate) async fn list_timeline_blobs(
     }
 
     if index_parts.is_empty() && s3_layers.is_empty() && initdb_archive {
-        tracing::info!(
+        tracing::debug!(
             "Timeline is empty apart from initdb archive: expected post-deletion state."
         );
         return Ok(S3TimelineBlobData {

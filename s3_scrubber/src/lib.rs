@@ -396,7 +396,7 @@ async fn download_object_with_retries(
             .await
         {
             Ok(bytes_read) => {
-                tracing::info!("Downloaded {bytes_read} bytes for object object with key {key}");
+                tracing::debug!("Downloaded {bytes_read} bytes for object {key}");
                 return Ok(body_buf);
             }
             Err(e) => {
