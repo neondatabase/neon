@@ -29,7 +29,7 @@ use pageserver::{
 use pageserver_api::{
     key::Key,
     reltag::SlruKind,
-    shard::{ShardCount, ShardStripeSize, TenantShardId},
+    shard::{ShardStripeSize, TenantShardId},
 };
 use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
@@ -125,19 +125,47 @@ struct DescribeKeyCommand {
     /// - reltag blocknum
     input: Vec<String>,
 
-    /// The number of shards.
-    ///
-    /// The default is 8, which is what we've been recently using. Don't worry about setting it to
-    /// unsharded, it only affects one row in the output you can ignore.
+    /// The number of shards to calculate what Keys placement would be.
     #[arg(long)]
-    shard_count: Option<u8>,
+    shard_count: Option<CustomShardCount>,
 
     /// The sharding stripe size.
     ///
-    /// The default is hardcoded. Don't worry about setting this for unsharded tenants, it affects
-    /// one row in output you can ignore.
-    #[arg(long)]
+    /// The default is hardcoded. It makes no sense to provide this without providing
+    /// `--shard-count`.
+    #[arg(long, requires = "shard-count")]
     stripe_size: Option<u32>,
+}
+
+/// Sharded shard count without unsharded count, which the actual ShardCount supports.
+#[derive(Clone, Copy)]
+struct CustomShardCount(std::num::NonZeroU8);
+
+#[derive(Debug, thiserror::Error)]
+enum InvalidShardCount {
+    #[error(transparent)]
+    ParsingFailed(#[from] std::num::ParseIntError),
+    #[error("too few shards")]
+    TooFewShards,
+}
+
+impl FromStr for CustomShardCount {
+    type Err = InvalidShardCount;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let inner: std::num::NonZeroU8 = s.parse()?;
+        if inner.get() < 2 {
+            Err(InvalidShardCount::TooFewShards)
+        } else {
+            Ok(CustomShardCount(inner))
+        }
+    }
+}
+
+impl From<CustomShardCount> for pageserver_api::shard::ShardCount {
+    fn from(value: CustomShardCount) -> Self {
+        pageserver_api::shard::ShardCount::new(value.0.get())
+    }
 }
 
 enum KeyMaterial {
@@ -396,24 +424,23 @@ async fn main() -> anyhow::Result<()> {
                 RecognizedKeyKind::new(key),
             );
 
-            let shard_count = shard_count.map(ShardCount::new);
-            let stripe_size = stripe_size.map(ShardStripeSize);
+            if let Some(shard_count) = shard_count {
+                // seeing the sharding placement might be confusing, so leave it out unless shard
+                // count was given.
 
-            if shard_count.is_none() && stripe_size.is_none() {
+                let stripe_size = stripe_size.map(ShardStripeSize).unwrap_or_default();
                 println!(
-                    "# key does not tell anything about sharding, but this is how it would be placed."
+                    "# placement with shard_count: {} and stripe_size: {}:",
+                    shard_count.0, stripe_size.0
                 );
+                let width = longest - shard_placement.len() + colon + padding;
                 println!(
-                    "# override defaults by providing --shard-count and --stripe-size options."
+                    "{}{:width$}{:?}",
+                    shard_placement,
+                    ":",
+                    pageserver_api::shard::describe(&key, shard_count.into(), stripe_size)
                 );
             }
-            let width = longest - shard_placement.len() + colon + padding;
-            println!(
-                "{}{:width$}{:?}",
-                shard_placement,
-                ":",
-                pageserver_api::shard::describe(&key, shard_count, stripe_size)
-            );
         }
     };
     Ok(())
