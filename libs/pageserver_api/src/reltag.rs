@@ -85,10 +85,10 @@ impl std::str::FromStr for RelTag {
         use ParseRelTagError::*;
 
         // FIXME: in postgres logs this separator is dot
-        // could not read block 2 in rel 1663/208101/2620.1 from page server at lsn 0/2431E6F0
-        //
+        // Example:
+        //     could not read block 2 in rel 1663/208101/2620.1 from page server at lsn 0/2431E6F0
         // with a regex we could get this more painlessly
-        let (triplet, forknum) = match s.split_once('_') {
+        let (triplet, forknum) = match s.split_once('_').or_else(|| s.split_once('.')) {
             Some((t, f)) => {
                 let forknum = forkname_to_number(Some(f));
                 let forknum = if let Ok(f) = forknum {
