@@ -374,6 +374,10 @@ async fn main() -> anyhow::Result<()> {
                 }};
             }
 
+            // the current characterization is a mess of these boolean queries and separate
+            // "recognization". I think it accurately represents how strictly we model the Key
+            // right now, but could of course be made less confusing.
+
             let queries = [
                 ("rel_block", pageserver_api::key::is_rel_block_key(&key)),
                 kind_query!(is_rel_vm_block_key),
@@ -415,6 +419,8 @@ async fn main() -> anyhow::Result<()> {
                 Checkpoint,
                 AuxFilesV1,
                 SlruDir(Result<SlruKind, u32>),
+                RelMap(RelTagish<2>),
+                RelDir(RelTagish<2>),
                 AuxFileV2(utils::Hex<[u8; 16]>),
             }
 
@@ -430,12 +436,51 @@ async fn main() -> anyhow::Result<()> {
                         pageserver_api::key::CHECKPOINT_KEY => Checkpoint,
                         pageserver_api::key::AUX_FILES_KEY => AuxFilesV1,
                         _ if slru_dir_kind.is_some() => SlruDir(slru_dir_kind.unwrap()),
+                        _ if key.field1 == 0
+                            && key.field4 == 0
+                            && key.field5 == 0
+                            && key.field6 == 0 =>
+                        {
+                            RelMap([key.field2, key.field3].into())
+                        }
+                        _ if key.field1 == 0
+                            && key.field4 == 0
+                            && key.field5 == 0
+                            && key.field6 == 1 =>
+                        {
+                            RelDir([key.field2, key.field3].into())
+                        }
                         _ if key.is_metadata_key() => {
                             let mut bytes = [0u8; 16];
                             key.extract_metadata_key_to_writer(&mut bytes[..]);
                             AuxFileV2(utils::Hex(bytes))
                         }
                         _ => return None,
+                    })
+                }
+            }
+
+            /// Prefix of RelTag, currently only known use cases are the two item versions.
+            ///
+            /// Renders like a reltag with `/`, nothing else.
+            struct RelTagish<const N: usize>([u32; N]);
+
+            impl<const N: usize> From<[u32; N]> for RelTagish<N> {
+                fn from(val: [u32; N]) -> Self {
+                    RelTagish(val)
+                }
+            }
+
+            impl<const N: usize> std::fmt::Debug for RelTagish<N> {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    use std::fmt::Write as _;
+                    let mut first = true;
+                    self.0.iter().try_for_each(|x| {
+                        if !first {
+                            f.write_char('/')?;
+                        }
+                        first = false;
+                        write!(f, "{}", x)
                     })
                 }
             }
