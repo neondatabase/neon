@@ -6,6 +6,7 @@
 
 mod draw_timeline_dir;
 mod index_part;
+mod key;
 mod layer_map_analyzer;
 mod layers;
 
@@ -61,6 +62,8 @@ enum Commands {
     AnalyzeLayerMap(AnalyzeLayerMapCmd),
     #[command(subcommand)]
     Layer(LayerCmd),
+    /// Debug print a hex key found from logs
+    Key(key::DescribeKeyCommand),
 }
 
 /// Read and update pageserver metadata file
@@ -183,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
                 .time_travel_recover(Some(&prefix), timestamp, done_if_after, &cancel)
                 .await?;
         }
+        Commands::Key(dkc) => dkc.execute(),
     };
     Ok(())
 }
