@@ -92,6 +92,7 @@ jobs:
           if [ -z "${ALREADY_CREATED}" ]; then
             LABELS=$(gh pr view ${PR_NUMBER}  --json labels --jq '.labels.[].name' | \
             awk 'BEGIN {labels="run-e2e-tests-in-draft"} {if ($1 ~ /^run/) labels=labels "," $1;} END {print labels}')
+            echo $LABELS
             gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
                                                        --body-file "body.md" \
                                                        --head "${BRANCH}" \
