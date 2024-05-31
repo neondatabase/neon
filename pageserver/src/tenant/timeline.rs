@@ -1577,7 +1577,7 @@ impl Timeline {
     // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
     // ephemeral layer bytes has been breached.
     pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
-        let Ok(_write_guard) = self.write_lock.try_lock() else {
+        let Ok(mut write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
             return;
@@ -1671,6 +1671,7 @@ impl Timeline {
                         .await;
                 }
             }
+            write_guard.take();
             self.flush_frozen_layers();
         }
     }
@@ -3652,7 +3653,10 @@ impl Timeline {
         let _write_guard = if write_lock_held {
             None
         } else {
-            Some(self.write_lock.lock().await)
+            let mut g = self.write_lock.lock().await;
+            // remove the reference to an open layer
+            g.take();
+            Some(g)
         };
 
         let to_lsn = self.get_last_record_lsn();
@@ -5580,12 +5584,6 @@ impl Deref for TimelineWriter<'_> {
     }
 }
 
-impl Drop for TimelineWriter<'_> {
-    fn drop(&mut self) {
-        self.write_guard.take();
-    }
-}
-
 #[derive(PartialEq)]
 enum OpenLayerAction {
     Roll,
@@ -5690,6 +5688,14 @@ impl<'a> TimelineWriter<'a> {
         let Some(state) = &state else {
             return OpenLayerAction::Open;
         };
+
+        if state.cached_last_freeze_at < self.tl.last_freeze_at.load() {
+            assert!(
+                state.open_layer.end_lsn.get().is_some(),
+                "our open_layer must be outdated"
+            );
+            return OpenLayerAction::Open;
+        }
 
         if state.prev_lsn == Some(lsn) {
             // Rolling mid LSN is not supported by downstream code.
