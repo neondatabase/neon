@@ -619,25 +619,25 @@ impl Key {
             && self.field5 == VISIBILITYMAP_FORKNUM
             && self.field6 != 0xffffffff
     }
-}
 
-#[inline(always)]
-pub fn key_to_slru_block(key: Key) -> anyhow::Result<(SlruKind, u32, BlockNumber)> {
-    Ok(match key.field1 {
-        0x01 => {
-            let kind = match key.field2 {
-                0x00 => SlruKind::Clog,
-                0x01 => SlruKind::MultiXactMembers,
-                0x02 => SlruKind::MultiXactOffsets,
-                _ => anyhow::bail!("unrecognized slru kind 0x{:02x}", key.field2),
-            };
-            let segno = key.field4;
-            let blknum = key.field6;
+    #[inline(always)]
+    pub fn to_slru_block(self) -> anyhow::Result<(SlruKind, u32, BlockNumber)> {
+        Ok(match self.field1 {
+            0x01 => {
+                let kind = match self.field2 {
+                    0x00 => SlruKind::Clog,
+                    0x01 => SlruKind::MultiXactMembers,
+                    0x02 => SlruKind::MultiXactOffsets,
+                    _ => anyhow::bail!("unrecognized slru kind 0x{:02x}", self.field2),
+                };
+                let segno = self.field4;
+                let blknum = self.field6;
 
-            (kind, segno, blknum)
-        }
-        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
+                (kind, segno, blknum)
+            }
+            _ => anyhow::bail!("unexpected value kind 0x{:02x}", self.field1),
+        })
+    }
 }
 
 impl Key {
@@ -652,23 +652,23 @@ impl Key {
     pub fn is_rel_block_key(&self) -> bool {
         self.field1 == 0x00 && self.field4 != 0 && self.field6 != 0xffffffff
     }
-}
 
-/// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
-#[inline(always)]
-pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
-    Ok(match key.field1 {
-        0x00 => (
-            RelTag {
-                spcnode: key.field2,
-                dbnode: key.field3,
-                relnode: key.field4,
-                forknum: key.field5,
-            },
-            key.field6,
-        ),
-        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
+    /// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
+    #[inline(always)]
+    pub fn to_rel_block(self) -> anyhow::Result<(RelTag, BlockNumber)> {
+        Ok(match self.field1 {
+            0x00 => (
+                RelTag {
+                    spcnode: self.field2,
+                    dbnode: self.field3,
+                    relnode: self.field4,
+                    forknum: self.field5,
+                },
+                self.field6,
+            ),
+            _ => anyhow::bail!("unexpected value kind 0x{:02x}", self.field1),
+        })
+    }
 }
 
 impl std::str::FromStr for Key {
