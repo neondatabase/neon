@@ -106,9 +106,9 @@ impl std::str::FromStr for RelTag {
             .splitn(3, '/')
             .enumerate()
             .map(|(i, s)| s.parse::<u32>().map_err(|e| InvalidTripletMember(i, e)));
-        let spcnode = split.next().ok_or_else(|| MissingTripletMember(0))??;
-        let dbnode = split.next().ok_or_else(|| MissingTripletMember(1))??;
-        let relnode = split.next().ok_or_else(|| MissingTripletMember(2))??;
+        let spcnode = split.next().ok_or(MissingTripletMember(0))??;
+        let dbnode = split.next().ok_or(MissingTripletMember(1))??;
+        let relnode = split.next().ok_or(MissingTripletMember(2))??;
 
         Ok(RelTag {
             spcnode,
