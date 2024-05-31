@@ -90,7 +90,7 @@ jobs:
 
           ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
           if [ -z "${ALREADY_CREATED}" ]; then
-            ADDITIONAL_LABELS=$(gh pr view ${PR_NUMBER}  --json labels | awk -F, 'BEGIN {labels=""} {for(i=1;i<=NF;i++){if ($i ~ /^\"name\":\"run/) labels=labels " --label " substr($i,9,length($i)-10)};} END {print labels}')
+            ADDITIONAL_LABELS=$(gh pr view ${PR_NUMBER}  --json labels --jq '.labels.[].name' | awk 'BEGIN {labels=""} {if ($1 ~ /^run/) labels=labels " --label " $1;} END {print labels}')
             gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
                                                        --body-file "body.md" \
                                                        --head "${BRANCH}" \
