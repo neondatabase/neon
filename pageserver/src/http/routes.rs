@@ -2,8 +2,10 @@
 //! Management HTTP API
 //!
 use std::cmp::Reverse;
+use std::collections::BTreeSet;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +18,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::key::Key;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
@@ -2424,6 +2427,102 @@ async fn list_aux_files(
     json_response(StatusCode::OK, files)
 }
 
+async fn perf_info(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    // First, collect all split points of the layers.
+    let mut split_points = BTreeSet::new();
+    let mut delta_ranges = Vec::new();
+    let mut image_ranges = Vec::new();
+
+    let all_layer_files = {
+        let guard = timeline.layers.read().await;
+        guard.all_persistent_layers()
+    };
+    let lsn = timeline.get_last_record_lsn();
+
+    for key in all_layer_files {
+        if key.is_delta {
+            split_points.insert(key.key_range.start);
+            split_points.insert(key.key_range.end);
+            delta_ranges.push((key.key_range.clone(), key.lsn_range.clone()));
+        } else {
+            split_points.insert(key.key_range.start);
+            split_points.insert(key.key_range.end);
+            image_ranges.push((key.key_range.clone(), key.lsn_range.start));
+        }
+    }
+
+    // For each split range, compute the estimated read amplification.
+    let split_points = split_points.into_iter().collect::<Vec<_>>();
+
+    #[derive(serde::Serialize)]
+    struct RangeAnalysis {
+        start: String,
+        end: String,
+        has_image: bool,
+        num_of_deltas_above_image: usize,
+        total_num_of_deltas: usize,
+    }
+
+    let mut result = Vec::new();
+
+    for i in 0..(split_points.len() - 1) {
+        let start = split_points[i];
+        let end = split_points[i + 1];
+        // Find the latest image layer that contains the information
+        let mut maybe_image_layers = image_ranges
+            .iter()
+            .filter(|(key_range, img_lsn)| key_range.contains(&start) && img_lsn <= &lsn)
+            .cloned()
+            .collect::<Vec<_>>();
+        maybe_image_layers.sort_by(|a, b| a.1.cmp(&b.1));
+        let image_layer = maybe_image_layers.last().cloned();
+        let lsn_filter_start = image_layer
+            .as_ref()
+            .map(|(_, lsn)| *lsn)
+            .unwrap_or(Lsn::INVALID);
+
+        fn overlaps_with(lsn_range_a: &Range<Lsn>, lsn_range_b: &Range<Lsn>) -> bool {
+            !(lsn_range_a.end <= lsn_range_b.start || lsn_range_a.start >= lsn_range_b.end)
+        }
+
+        let maybe_delta_layers = delta_ranges
+            .iter()
+            .filter(|(key_range, lsn_range)| {
+                key_range.contains(&start) && overlaps_with(&(lsn_filter_start..lsn), lsn_range)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let pitr_delta_layers = delta_ranges
+            .iter()
+            .filter(|(key_range, _)| key_range.contains(&start))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        result.push(RangeAnalysis {
+            start: start.to_string(),
+            end: end.to_string(),
+            has_image: image_layer.is_some(),
+            num_of_deltas_above_image: maybe_delta_layers.len(),
+            total_num_of_deltas: pitr_delta_layers.len(),
+        });
+    }
+    json_response(StatusCode::OK, result)
+}
+
 async fn ingest_aux_files(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -2851,5 +2950,9 @@ pub fn make_router(
             |r| testing_api_handler("list_aux_files", r, list_aux_files),
         )
         .post("/v1/top_tenants", |r| api_handler(r, post_top_tenants))
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/perf_info",
+            |r| testing_api_handler("perf_info", r, perf_info),
+        )
         .any(handler_404))
 }

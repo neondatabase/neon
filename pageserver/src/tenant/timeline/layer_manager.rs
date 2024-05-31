@@ -1,4 +1,5 @@
 use anyhow::{bail, ensure, Context, Result};
+use itertools::Itertools;
 use pageserver_api::shard::TenantShardId;
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
@@ -307,6 +308,10 @@ impl LayerManager {
 
     pub(crate) fn contains(&self, layer: &Layer) -> bool {
         self.layer_fmgr.contains(layer)
+    }
+
+    pub(crate) fn all_persistent_layers(&self) -> Vec<PersistentLayerKey> {
+        self.layer_fmgr.0.keys().cloned().collect_vec()
     }
 }
 
