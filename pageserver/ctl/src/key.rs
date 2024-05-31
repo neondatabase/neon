@@ -9,10 +9,7 @@ use std::str::FromStr;
 
 #[derive(Parser)]
 pub(super) struct DescribeKeyCommand {
-    /// Key material in one of the forms:
-    /// - hex
-    /// - span attributes captured from log
-    /// - reltag blocknum
+    /// Key material in one of the forms: hex, span attributes captured from log, reltag blocknum
     input: Vec<String>,
 
     /// The number of shards to calculate what Keys placement would be.
