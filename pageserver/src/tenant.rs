@@ -1396,7 +1396,7 @@ impl Tenant {
     /// Helper for unit tests to create a timeline with some pre-loaded states.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_test_timeline_with_states(
+    pub async fn create_test_timeline_with_layers(
         &self,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
@@ -1411,10 +1411,14 @@ impl Tenant {
             .await?;
         tline.force_advance_lsn(end_lsn);
         for deltas in delta_layer_desc {
-            tline.force_create_delta_layer(deltas, ctx).await?;
+            tline
+                .force_create_delta_layer(deltas, Some(initdb_lsn), ctx)
+                .await?;
         }
         for (lsn, images) in image_layer_desc {
-            tline.force_create_image_layer(lsn, images, ctx).await?;
+            tline
+                .force_create_image_layer(lsn, images, Some(initdb_lsn), ctx)
+                .await?;
         }
         Ok(tline)
     }
@@ -3018,12 +3022,12 @@ impl Tenant {
         &self,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
-        start_lsn: Option<Lsn>,
+        ancestor_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let create_guard = self.create_timeline_create_guard(dst_id).unwrap();
         let tl = self
-            .branch_timeline_impl(src_timeline, dst_id, start_lsn, create_guard, ctx)
+            .branch_timeline_impl(src_timeline, dst_id, ancestor_lsn, create_guard, ctx)
             .await?;
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -3032,25 +3036,35 @@ impl Tenant {
     /// Helper for unit tests to branch a timeline with some pre-loaded states.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub async fn branch_timeline_test_with_states(
+    pub async fn branch_timeline_test_with_layers(
         &self,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
-        start_lsn: Option<Lsn>,
+        ancestor_lsn: Option<Lsn>,
         ctx: &RequestContext,
         delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
         let tline = self
-            .branch_timeline_test(src_timeline, dst_id, start_lsn, ctx)
+            .branch_timeline_test(src_timeline, dst_id, ancestor_lsn, ctx)
             .await?;
+        let ancestor_lsn = if let Some(ancestor_lsn) = ancestor_lsn {
+            ancestor_lsn
+        } else {
+            tline.get_last_record_lsn()
+        };
+        assert!(end_lsn >= ancestor_lsn);
         tline.force_advance_lsn(end_lsn);
         for deltas in delta_layer_desc {
-            tline.force_create_delta_layer(deltas, ctx).await?;
+            tline
+                .force_create_delta_layer(deltas, Some(ancestor_lsn), ctx)
+                .await?;
         }
         for (lsn, images) in image_layer_desc {
-            tline.force_create_image_layer(lsn, images, ctx).await?;
+            tline
+                .force_create_image_layer(lsn, images, Some(ancestor_lsn), ctx)
+                .await?;
         }
         Ok(tline)
     }
@@ -6263,7 +6277,7 @@ mod tests {
         let base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
 
         let tline = tenant
-            .create_test_timeline_with_states(
+            .create_test_timeline_with_layers(
                 TIMELINE_ID,
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
@@ -6275,7 +6289,7 @@ mod tests {
             .await?;
 
         let child = tenant
-            .branch_timeline_test_with_states(
+            .branch_timeline_test_with_layers(
                 &tline,
                 NEW_TIMELINE_ID,
                 Some(Lsn(0x20)),
@@ -6356,7 +6370,7 @@ mod tests {
         assert_eq!(base_key.field1, AUX_KEY_PREFIX); // in case someone accidentally changed the prefix...
 
         let tline = tenant
-            .create_test_timeline_with_states(
+            .create_test_timeline_with_layers(
                 TIMELINE_ID,
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
@@ -6368,7 +6382,7 @@ mod tests {
             .await?;
 
         let child = tenant
-            .branch_timeline_test_with_states(
+            .branch_timeline_test_with_layers(
                 &tline,
                 NEW_TIMELINE_ID,
                 Some(Lsn(0x20)),
