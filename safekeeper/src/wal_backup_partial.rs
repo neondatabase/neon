@@ -24,7 +24,7 @@ use rand::Rng;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
@@ -308,7 +308,23 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
 
     debug!("state: {:?}", backup.state);
 
+    // The general idea is that each safekeeper keeps only one partial segment
+    // both in remote storage and in local state. If this is not true, something
+    // went wrong.
+    const MAX_SIMULTANEOUS_SEGMENTS: usize = 10;
+
     'outer: loop {
+        if backup.state.segments.len() > MAX_SIMULTANEOUS_SEGMENTS {
+            warn!(
+                "too many segments in control_file state, running gc: {}",
+                backup.state.segments.len()
+            );
+
+            backup.gc().await.unwrap_or_else(|e| {
+                error!("failed to run gc: {:#}", e);
+            });
+        }
+
         // wait until we have something to upload
         let uploaded_segment = backup.state.uploaded_segment();
         if let Some(seg) = &uploaded_segment {
