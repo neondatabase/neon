@@ -3879,6 +3879,11 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
+            // FIXME(auxfilesv2): support multiple metadata key partitions might need initdb support as well?
+            // This code path will not be hit during regression tests. After #7099 we have a single partition
+            // with two key ranges. If someone wants to fix initdb optimization in the future, this might need
+            // to be fixed.
+
             // For metadata, always create delta layers.
             let delta_layer = if !metadata_partition.parts.is_empty() {
                 assert_eq!(
