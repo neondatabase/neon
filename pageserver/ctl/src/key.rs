@@ -219,7 +219,8 @@ impl<S: AsRef<str>> TryFrom<&[S]> for KeyMaterial {
                     .map(AsRef::as_ref)
                     .enumerate()
                     .find_map(|(i, s)| {
-                        s.strip_prefix("rel=")
+                        s.split_once("rel=")
+                            .map(|(_garbage, actual)| actual)
                             .unwrap_or(s)
                             .parse::<RelTag>()
                             .ok()
@@ -234,7 +235,8 @@ impl<S: AsRef<str>> TryFrom<&[S]> for KeyMaterial {
                     .map(AsRef::as_ref)
                     .skip(reltag_at)
                     .find_map(|s| {
-                        s.strip_prefix("blkno=")
+                        s.split_once("blkno=")
+                            .map(|(_garbage, actual)| actual)
                             .unwrap_or(s)
                             .parse::<BlockNumber>()
                             .ok()
@@ -342,5 +344,65 @@ impl<const N: usize> std::fmt::Debug for RelTagish<N> {
             first = false;
             write!(f, "{}", x)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_is_key_material() {
+        let m = KeyMaterial::try_from(&["000000067F0000400200DF927900FFFFFFFF"][..]).unwrap();
+        assert!(matches!(m, KeyMaterial::Hex(_)), "{m:?}");
+    }
+
+    #[test]
+    fn single_positional_spanalike_is_key_material() {
+        // why is this needed? if you are checking many, then copypaste starts to appeal
+        let strings = [
+            (line!(), "2024-05-15T15:33:49.873906Z ERROR page_service_conn_main{peer_addr=A:B}:process_query{tenant_id=C timeline_id=D}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1663/208101/2620_fsm blkno=2 req_lsn=0/238D98C8}: error reading relation or page version: Read error: could not find data for key 000000067F00032CE5000000000000000001 (shard ShardNumber(0)) at LSN 0/1D0A16C1, request LSN 0/238D98C8, ancestor 0/0"),
+            (line!(), "rel=1663/208101/2620_fsm blkno=2"),
+            (line!(), "rel=1663/208101/2620.1 blkno=2"),
+        ];
+
+        let mut first: Option<Key> = None;
+
+        for (line, example) in strings {
+            let m = KeyMaterial::try_from(&[example][..])
+                .unwrap_or_else(|e| panic!("failed to parse example from line {line}: {e:?}"));
+            let key = Key::from(m);
+            if let Some(first) = first {
+                assert_eq!(first, key);
+            } else {
+                first = Some(key);
+            }
+        }
+
+        // not supporting this is rather accidential, but I think the input parsing is lenient
+        // enough already
+        KeyMaterial::try_from(&["1663/208101/2620_fsm 2"][..]).unwrap_err();
+    }
+
+    #[test]
+    fn multiple_spanlike_args() {
+        let strings = [
+            (line!(), &["process_query{tenant_id=C", "timeline_id=D}:handle_pagerequests:handle_get_page_at_lsn_request{rel=1663/208101/2620_fsm", "blkno=2", "req_lsn=0/238D98C8}"][..]),
+            (line!(), &["rel=1663/208101/2620_fsm", "blkno=2"][..]),
+            (line!(), &["1663/208101/2620_fsm", "2"][..]),
+        ];
+
+        let mut first: Option<Key> = None;
+
+        for (line, example) in strings {
+            let m = KeyMaterial::try_from(example)
+                .unwrap_or_else(|e| panic!("failed to parse example from line {line}: {e:?}"));
+            let key = Key::from(m);
+            if let Some(first) = first {
+                assert_eq!(first, key);
+            } else {
+                first = Some(key);
+            }
+        }
     }
 }
