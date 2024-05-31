@@ -3570,6 +3570,7 @@ dependencies = [
  "serde",
  "serde_json",
  "svg_fmt",
+ "thiserror",
  "tokio",
  "tokio-util",
  "toml_edit",
