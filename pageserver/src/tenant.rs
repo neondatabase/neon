@@ -6487,7 +6487,7 @@ mod tests {
         // Lsn 0x20 key1+key2 tomestones
         // Lsn 0x10 key1 in image, key2 in delta
         let tline = tenant
-            .create_test_timeline_with_states(
+            .create_test_timeline_with_layers(
                 TIMELINE_ID,
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
@@ -6555,7 +6555,7 @@ mod tests {
         let key3 = Key::from_hex("620000000033333333444444445500000003").unwrap();
 
         let tline = tenant
-            .create_test_timeline_with_states(
+            .create_test_timeline_with_layers(
                 TIMELINE_ID,
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
@@ -6612,7 +6612,7 @@ mod tests {
         let key2 = Key::from_hex("620000000033333333444444445500000002").unwrap();
 
         let tline = tenant
-            .create_test_timeline_with_states(
+            .create_test_timeline_with_layers(
                 TIMELINE_ID,
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,

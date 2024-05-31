@@ -4358,14 +4358,14 @@ impl Timeline {
                 next_start_key: img_range.end,
             });
         }
-        let mut has_keys = false;
+        let mut wrote_any_image = false;
         for (k, v) in data {
             if v.is_empty() {
                 // the key has been deleted, it does not need an image
                 // in metadata keyspace, an empty image == tombstone
                 continue;
             }
-            has_keys = true;
+            wrote_any_image = true;
 
             // No need to handle sharding b/c metadata keys are always on the 0-th shard.
 
@@ -4374,7 +4374,7 @@ impl Timeline {
             image_layer_writer.put_image(k, v, ctx).await?;
         }
 
-        if has_keys {
+        if wrote_any_image {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
             let image_layer = image_layer_writer.finish(self, ctx).await?;
@@ -5485,8 +5485,8 @@ impl Timeline {
         Ok(())
     }
 
-    #[cfg(test)]
     /// Return all keys at the LSN in the image layers
+    #[cfg(test)]
     pub(crate) async fn inspect_image_layers(
         self: &Arc<Timeline>,
         lsn: Lsn,
