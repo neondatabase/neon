@@ -182,6 +182,7 @@ impl<S: AsRef<str>> TryFrom<&[S]> for KeyMaterial {
 
     fn try_from(value: &[S]) -> Result<Self, Self::Error> {
         match value {
+            [] => anyhow::bail!("need 1..N positional arguments"),
             [one] => {
                 let one = one.as_ref();
 
@@ -197,19 +198,42 @@ impl<S: AsRef<str>> TryFrom<&[S]> for KeyMaterial {
                     ),
                 }
             }
-            [reltag, blocknum] => {
-                let (reltag, blocknum) = (reltag.as_ref(), blocknum.as_ref());
-                let reltag = reltag.strip_prefix("rel=").unwrap_or(reltag);
-                let blocknum = blocknum.strip_prefix("blkno=").unwrap_or(blocknum);
-                let reltag = reltag
-                    .parse()
-                    .with_context(|| format!("parse reltag out of {reltag:?}"))?;
-                let blocknum = blocknum
-                    .parse()
-                    .with_context(|| format!("parse blocknum out of {blocknum:?}"))?;
+            more => {
+                // assume going left to right one of these is a reltag and then we find a blocknum
+                // this works, because we don't have plain numbers at least right after reltag in
+                // logs. for some definition of "works".
+
+                let Some((reltag_at, reltag)) = more
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .enumerate()
+                    .find_map(|(i, s)| {
+                        s.strip_prefix("rel=")
+                            .unwrap_or(s)
+                            .parse::<pageserver_api::reltag::RelTag>()
+                            .ok()
+                            .map(|rt| (i, rt))
+                    })
+                else {
+                    anyhow::bail!("found no RelTag in arguments");
+                };
+
+                let Some(blocknum) = more
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .skip(reltag_at)
+                    .find_map(|s| {
+                        s.strip_prefix("blkno=")
+                            .unwrap_or(s)
+                            .parse::<pageserver_api::reltag::BlockNumber>()
+                            .ok()
+                    })
+                else {
+                    anyhow::bail!("found no blocknum in arguments");
+                };
+
                 Ok(KeyMaterial::Split(reltag, blocknum))
             }
-            _ => anyhow::bail!("need 1..2 positionals argument, not {}", value.len()),
         }
     }
 }
