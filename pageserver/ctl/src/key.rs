@@ -109,7 +109,7 @@ impl DescribeKeyCommand {
         let longest = queries
             .iter()
             .map(|t| t.0)
-            .chain([recognized_kind, metadata_key, shard_placement].into_iter())
+            .chain([recognized_kind, metadata_key, shard_placement])
             .map(|s| s.len())
             .max()
             .unwrap();
@@ -316,8 +316,7 @@ impl RecognizedKeyKind {
                 RelDir([key.field2, key.field3].into())
             }
             _ if key.is_metadata_key() => RecognizedKeyKind::AuxFileV2(
-                AuxFileV2::new(key)
-                    .ok_or_else(|| utils::Hex(key.to_i128().to_be_bytes().try_into().unwrap())),
+                AuxFileV2::new(key).ok_or_else(|| utils::Hex(key.to_i128().to_be_bytes())),
             ),
             _ => return None,
         })
