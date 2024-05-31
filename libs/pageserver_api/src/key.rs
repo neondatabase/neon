@@ -638,9 +638,7 @@ impl Key {
             _ => anyhow::bail!("unexpected value kind 0x{:02x}", self.field1),
         })
     }
-}
 
-impl Key {
     #[inline(always)]
     pub fn is_slru_block_key(self) -> bool {
         self.field1 == 0x01                // SLRU-related
