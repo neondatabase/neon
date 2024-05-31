@@ -386,7 +386,7 @@ pub fn rel_size_to_key(rel: RelTag) -> Key {
 }
 
 #[inline(always)]
-pub fn is_rel_size_key(key: &Key) -> bool {
+pub fn is_rel_size_key(key: Key) -> bool {
     key.field1 == 0 && key.field6 == u32::MAX
 }
 
@@ -428,7 +428,7 @@ pub fn slru_dir_to_key(kind: SlruKind) -> Key {
 }
 
 #[inline(always)]
-pub fn slru_dir_kind(key: &Key) -> Option<Result<SlruKind, u32>> {
+pub fn slru_dir_kind(key: Key) -> Option<Result<SlruKind, u32>> {
     if key.field1 == 0x01
         && key.field3 == 0
         && key.field4 == 0
@@ -478,7 +478,7 @@ pub fn slru_segment_size_to_key(kind: SlruKind, segno: u32) -> Key {
     }
 }
 
-pub fn is_slru_segment_size_key(key: &Key) -> bool {
+pub fn is_slru_segment_size_key(key: Key) -> bool {
     key.field1 == 0x01
         && key.field2 < 0x03
         && key.field3 == 0x01
@@ -639,7 +639,7 @@ pub fn is_slru_block_key(key: Key) -> bool {
 }
 
 #[inline(always)]
-pub fn is_rel_block_key(key: &Key) -> bool {
+pub fn is_rel_block_key(key: Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0 && key.field6 != 0xffffffff
 }
 

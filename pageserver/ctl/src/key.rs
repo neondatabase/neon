@@ -87,16 +87,13 @@ impl DescribeKeyCommand {
         // right now, but could of course be made less confusing.
 
         let queries = [
-            ("rel_block", pageserver_api::key::is_rel_block_key(&key)),
+            kind_query!(is_rel_block_key),
             kind_query!(is_rel_vm_block_key),
             kind_query!(is_rel_fsm_block_key),
             kind_query!(is_slru_block_key),
             kind_query!(is_inherited_key),
-            ("rel_size", pageserver_api::key::is_rel_size_key(&key)),
-            (
-                "slru_segment_size",
-                pageserver_api::key::is_slru_segment_size_key(&key),
-            ),
+            kind_query!(is_rel_size_key),
+            kind_query!(is_slru_segment_size_key,),
         ];
 
         let recognized_kind = "recognized kind";
