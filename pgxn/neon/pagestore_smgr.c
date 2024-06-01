@@ -3064,6 +3064,16 @@ neon_end_unlogged_build(SMgrRelation reln)
 		/* Make the relation look permanent again */
 		reln->smgr_relpersistence = RELPERSISTENCE_PERMANENT;
 
+		{
+			static ForkNumber forks[] = { MAIN_FORKNUM, FSM_FORKNUM, VISIBILITYMAP_FORKNUM };
+			static BlockNumber blocks[] = { 0, 0, 0 };
+#if PG_MAJORVERSION_NUM < 16
+			DropRelFileNodeBuffers(reln, forks, 3, blocks);
+#else
+			DropRelationBuffers(reln, forks, 3, blocks);
+#endif
+		}
+
 		/* Remove local copy */
 		rinfob = InfoBFromSMgrRel(reln);
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
