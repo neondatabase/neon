@@ -32,9 +32,8 @@ use tracing::debug;
 
 use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
 use crate::{
-    error::Cancelled, AzureConfig, ConcurrencyLimiter, Download,
-    DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
-    TimeTravelError, TimeoutOrCancel,
+    error::Cancelled, AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing,
+    ListingMode, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {
@@ -493,7 +492,9 @@ impl RemoteStorage for AzureBlobStorage {
         to: &RemotePath,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let _permit = self.permit(RequestKind::Copy, cancel).await?;
+        let kind = RequestKind::Copy;
+        let _permit = self.permit(kind, cancel).await?;
+        let started_at = start_measuring_requests(kind);
 
         let timeout = tokio::time::sleep(self.timeout);
 
@@ -537,15 +538,21 @@ impl RemoteStorage for AzureBlobStorage {
             }
         };
 
-        tokio::select! {
+        let res = tokio::select! {
             res = op => res,
-            _ = cancel.cancelled() => Err(anyhow::Error::new(TimeoutOrCancel::Cancel)),
+            _ = cancel.cancelled() => return Err(anyhow::Error::new(TimeoutOrCancel::Cancel)),
             _ = timeout => {
                 let e = anyhow::Error::new(TimeoutOrCancel::Timeout);
                 let e = e.context(format!("Timeout, last status: {copy_status:?}"));
                 Err(e)
             },
-        }
+        };
+
+        let started_at = ScopeGuard::into_inner(started_at);
+        crate::metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, &res, started_at);
+        res
     }
 
     async fn time_travel_recover(
