@@ -30,10 +30,9 @@ use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::metrics::start_measuring_requests;
-use crate::metrics::AttemptOutcome;
+use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
 use crate::{
-    error::Cancelled, s3_bucket::RequestKind, AzureConfig, ConcurrencyLimiter, Download,
+    error::Cancelled, AzureConfig, ConcurrencyLimiter, Download,
     DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
     TimeTravelError, TimeoutOrCancel,
 };
@@ -445,12 +444,13 @@ impl RemoteStorage for AzureBlobStorage {
         paths: &'a [RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let _permit = self.permit(RequestKind::Delete, cancel).await?;
+        let kind = RequestKind::Delete;
+        let _permit = self.permit(kind, cancel).await?;
+        let started_at = start_measuring_requests(kind);
 
         let op = async {
-            // TODO batch requests are also not supported by the SDK
+            // TODO batch requests are not supported by the SDK
             // https://github.com/Azure/azure-sdk-for-rust/issues/1068
-            // https://github.com/Azure/azure-sdk-for-rust/issues/1249
             for path in paths {
                 let blob_client = self.client.blob_client(self.relative_path_to_name(path));
 
@@ -475,10 +475,16 @@ impl RemoteStorage for AzureBlobStorage {
             Ok(())
         };
 
-        tokio::select! {
+        let res = tokio::select! {
             res = op => res,
-            _ = cancel.cancelled() => Err(TimeoutOrCancel::Cancel.into()),
-        }
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
+        };
+
+        let started_at = ScopeGuard::into_inner(started_at);
+        crate::metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, &res, started_at);
+        res
     }
 
     async fn copy(
