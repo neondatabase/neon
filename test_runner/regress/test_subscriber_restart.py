@@ -1,4 +1,5 @@
 import threading
+import time
 
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import wait_until
@@ -38,6 +39,7 @@ def test_subscriber_restart(neon_simple_env: NeonEnv):
             pub_conn = f"host=localhost port={pub.pg_port} dbname=postgres user=cloud_admin"
             query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_conn}' PUBLICATION pub"
             scur.execute(query)
+            time.sleep(2)  # let initial table sync complete
 
         thread = threading.Thread(target=insert_data, args=(pub,), daemon=True)
         thread.start()
