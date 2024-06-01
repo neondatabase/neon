@@ -405,6 +405,10 @@ impl S3Bucket {
         }
         Ok(())
     }
+
+    pub fn bucket_name(&self) -> &str {
+        &self.bucket_name
+    }
 }
 
 pin_project_lite::pin_project! {

@@ -8,21 +8,19 @@ use std::{
 };
 
 use anyhow::Context;
-use aws_sdk_s3::{
-    types::{Delete, ObjectIdentifier},
-    Client,
-};
 use futures_util::TryStreamExt;
 use pageserver_api::shard::TenantShardId;
+use remote_storage::{GenericRemoteStorage, ListingMode, RemotePath};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
 
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
-    init_remote,
-    metadata_stream::{stream_listing, stream_tenant_timelines, stream_tenants},
-    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TenantShardTimelineId, TraversingDepth,
+    init_remote, init_remote_generic,
+    metadata_stream::{stream_tenant_timelines, stream_tenants},
+    BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -324,41 +322,45 @@ impl std::fmt::Display for PurgeMode {
 }
 
 pub async fn get_tenant_objects(
-    s3_client: &Arc<Client>,
-    target: RootTarget,
+    s3_client: &GenericRemoteStorage,
     tenant_shard_id: TenantShardId,
-) -> anyhow::Result<Vec<ObjectIdentifier>> {
+) -> anyhow::Result<Vec<RemotePath>> {
     tracing::debug!("Listing objects in tenant {tenant_shard_id}");
+    let tenant_root = super::remote_tenant_path(&tenant_shard_id);
+
     // TODO: apply extra validation based on object modification time.  Don't purge
     // tenants where any timeline's index_part.json has been touched recently.
 
-    let mut tenant_root = target.tenant_root(&tenant_shard_id);
-
-    // Remove delimiter, so that object listing lists all keys in the prefix and not just
-    // common prefixes.
-    tenant_root.delimiter = String::new();
-
-    let key_stream = stream_listing(s3_client, &tenant_root);
-    key_stream.try_collect().await
+    let list = s3_client
+        .list(
+            Some(&tenant_root),
+            ListingMode::NoDelimiter,
+            None,
+            &CancellationToken::new(),
+        )
+        .await?;
+    Ok(list.keys)
 }
 
 pub async fn get_timeline_objects(
-    s3_client: &Arc<Client>,
-    target: RootTarget,
+    s3_client: &GenericRemoteStorage,
     ttid: TenantShardTimelineId,
-) -> anyhow::Result<Vec<ObjectIdentifier>> {
+) -> anyhow::Result<Vec<RemotePath>> {
     tracing::debug!("Listing objects in timeline {ttid}");
-    let mut timeline_root = target.timeline_root(&ttid);
+    let timeline_root = super::remote_timeline_path_id(&ttid);
 
     // TODO: apply extra validation based on object modification time.  Don't purge
     // timelines whose index_part.json has been touched recently.
 
-    // Remove delimiter, so that object listing lists all keys in the prefix and not just
-    // common prefixes.
-    timeline_root.delimiter = String::new();
-    let key_stream = stream_listing(s3_client, &timeline_root);
-
-    key_stream.try_collect().await
+    let list = s3_client
+        .list(
+            Some(&timeline_root),
+            ListingMode::NoDelimiter,
+            None,
+            &CancellationToken::new(),
+        )
+        .await?;
+    Ok(list.keys)
 }
 
 const MAX_KEYS_PER_DELETE: usize = 1000;
@@ -369,16 +371,17 @@ const MAX_KEYS_PER_DELETE: usize = 1000;
 /// MAX_KEYS_PER_DELETE keys are left.
 /// `num_deleted` returns number of deleted keys.
 async fn do_delete(
-    s3_client: &Arc<Client>,
-    bucket_name: &str,
-    keys: &mut Vec<ObjectIdentifier>,
+    remote_client: &GenericRemoteStorage,
+    keys: &mut Vec<RemotePath>,
     dry_run: bool,
     drain: bool,
     progress_tracker: &mut DeletionProgressTracker,
 ) -> anyhow::Result<()> {
+    let cancel = CancellationToken::new();
     while (!keys.is_empty() && drain) || (keys.len() >= MAX_KEYS_PER_DELETE) {
         let request_keys =
             keys.split_off(keys.len() - (std::cmp::min(MAX_KEYS_PER_DELETE, keys.len())));
+
         let num_deleted = request_keys.len();
         if dry_run {
             tracing::info!("Dry-run deletion of objects: ");
@@ -386,14 +389,10 @@ async fn do_delete(
                 tracing::info!("  {k:?}");
             }
         } else {
-            let delete_request = s3_client
-                .delete_objects()
-                .bucket(bucket_name)
-                .delete(Delete::builder().set_objects(Some(request_keys)).build()?);
-            delete_request
-                .send()
+            remote_client
+                .delete_objects(&request_keys, &cancel)
                 .await
-                .context("DeleteObjects request")?;
+                .context("deletetion request")?;
             progress_tracker.register(num_deleted);
         }
     }
@@ -431,8 +430,13 @@ pub async fn purge_garbage(
         input_path
     );
 
-    let (s3_client, target) =
-        init_remote(garbage_list.bucket_config.clone(), garbage_list.node_kind).await?;
+    let remote_client =
+        init_remote_generic(garbage_list.bucket_config.clone(), garbage_list.node_kind)?;
+
+    assert_eq!(
+        &garbage_list.bucket_config.bucket,
+        remote_client.bucket_name().unwrap()
+    );
 
     // Sanity checks on the incoming list
     if garbage_list.active_tenant_count == 0 {
@@ -464,16 +468,13 @@ pub async fn purge_garbage(
 
     let items = tokio_stream::iter(filtered_items.map(Ok));
     let get_objects_results = items.map_ok(|i| {
-        let s3_client = s3_client.clone();
-        let target = target.clone();
+        let remote_client = remote_client.clone();
         async move {
             match i.entity {
                 GarbageEntity::Tenant(tenant_id) => {
-                    get_tenant_objects(&s3_client, target, tenant_id).await
+                    get_tenant_objects(&remote_client, tenant_id).await
                 }
-                GarbageEntity::Timeline(ttid) => {
-                    get_timeline_objects(&s3_client, target, ttid).await
-                }
+                GarbageEntity::Timeline(ttid) => get_timeline_objects(&remote_client, ttid).await,
             }
         }
     });
@@ -487,8 +488,7 @@ pub async fn purge_garbage(
         objects_to_delete.append(&mut object_list);
         if objects_to_delete.len() >= MAX_KEYS_PER_DELETE {
             do_delete(
-                &s3_client,
-                &garbage_list.bucket_config.bucket,
+                &remote_client,
                 &mut objects_to_delete,
                 dry_run,
                 false,
@@ -499,8 +499,7 @@ pub async fn purge_garbage(
     }
 
     do_delete(
-        &s3_client,
-        &garbage_list.bucket_config.bucket,
+        &remote_client,
         &mut objects_to_delete,
         dry_run,
         true,

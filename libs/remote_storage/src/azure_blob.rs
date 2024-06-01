@@ -40,6 +40,7 @@ use crate::{
 
 pub struct AzureBlobStorage {
     client: ContainerClient,
+    container_name: String,
     prefix_in_container: Option<String>,
     max_keys_per_list_response: Option<NonZeroU32>,
     concurrency_limiter: ConcurrencyLimiter,
@@ -85,6 +86,7 @@ impl AzureBlobStorage {
 
         Ok(AzureBlobStorage {
             client,
+            container_name: azure_config.container_name.to_owned(),
             prefix_in_container: azure_config.prefix_in_container.to_owned(),
             max_keys_per_list_response,
             concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
@@ -237,6 +239,10 @@ impl AzureBlobStorage {
             permit = acquire => Ok(permit.expect("never closed")),
             _ = cancel.cancelled() => Err(Cancelled),
         }
+    }
+
+    pub fn container_name(&self) -> &str {
+        &self.container_name
     }
 }
 

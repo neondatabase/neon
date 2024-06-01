@@ -504,6 +504,16 @@ impl GenericRemoteStorage {
             None => self.download(from, cancel).await,
         }
     }
+
+    /// The name of the bucket/container/etc.
+    pub fn bucket_name(&self) -> Option<&str> {
+        match self {
+            Self::LocalFs(_s) => None,
+            Self::AwsS3(s) => Some(s.bucket_name()),
+            Self::AzureBlob(s) => Some(s.container_name()),
+            Self::Unreliable(_s) => None,
+        }
+    }
 }
 
 /// Extra set of key-value pairs that contain arbitrary metadata about the storage entry.
