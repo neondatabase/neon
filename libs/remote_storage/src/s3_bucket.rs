@@ -46,9 +46,12 @@ use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
-    error::Cancelled, support::PermitCarrying, ConcurrencyLimiter, Download, DownloadError,
-    Listing, ListingMode, RemotePath, RemoteStorage, S3Config, TimeTravelError, TimeoutOrCancel,
-    MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    error::Cancelled,
+    metrics::{start_counting_cancelled_wait, start_measuring_requests},
+    support::PermitCarrying,
+    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
+    S3Config, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 use crate::metrics::AttemptOutcome;
@@ -973,31 +976,6 @@ impl RemoteStorage for S3Bucket {
         }
         Ok(())
     }
-}
-
-/// On drop (cancellation) count towards [`metrics::BucketMetrics::cancelled_waits`].
-fn start_counting_cancelled_wait(
-    kind: RequestKind,
-) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
-    scopeguard::guard_on_success(std::time::Instant::now(), move |_| {
-        crate::metrics::BUCKET_METRICS
-            .cancelled_waits
-            .get(kind)
-            .inc()
-    })
-}
-
-/// On drop (cancellation) add time to [`metrics::BucketMetrics::req_seconds`].
-fn start_measuring_requests(
-    kind: RequestKind,
-) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
-    scopeguard::guard_on_success(std::time::Instant::now(), move |started_at| {
-        crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-            kind,
-            AttemptOutcome::Cancelled,
-            started_at,
-        )
-    })
 }
 
 // Save RAM and only store the needed data instead of the entire ObjectVersion/DeleteMarkerEntry

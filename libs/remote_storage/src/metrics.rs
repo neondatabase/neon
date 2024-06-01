@@ -15,6 +15,7 @@ pub(crate) enum RequestKind {
     TimeTravel = 5,
 }
 
+use scopeguard::ScopeGuard;
 use RequestKind::*;
 
 impl RequestKind {
@@ -128,6 +129,31 @@ impl PassFailCancelledRequestTyped<Histogram> {
         self.get(kind, outcome.into())
             .observe(started_at.elapsed().as_secs_f64())
     }
+}
+
+/// On drop (cancellation) count towards [`metrics::BucketMetrics::cancelled_waits`].
+pub(crate) fn start_counting_cancelled_wait(
+    kind: RequestKind,
+) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
+    scopeguard::guard_on_success(std::time::Instant::now(), move |_| {
+        crate::metrics::BUCKET_METRICS
+            .cancelled_waits
+            .get(kind)
+            .inc()
+    })
+}
+
+/// On drop (cancellation) add time to [`metrics::BucketMetrics::req_seconds`].
+pub(crate) fn start_measuring_requests(
+    kind: RequestKind,
+) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
+    scopeguard::guard_on_success(std::time::Instant::now(), move |started_at| {
+        crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+            kind,
+            AttemptOutcome::Cancelled,
+            started_at,
+        )
+    })
 }
 
 pub(crate) struct BucketMetrics {

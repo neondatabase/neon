@@ -26,9 +26,12 @@ use futures::stream::Stream;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use http_types::{StatusCode, Url};
+use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+use crate::metrics::start_measuring_requests;
+use crate::metrics::AttemptOutcome;
 use crate::{
     error::Cancelled, s3_bucket::RequestKind, AzureConfig, ConcurrencyLimiter, Download,
     DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
@@ -137,6 +140,8 @@ impl AzureBlobStorage {
         let mut last_modified = None;
         let mut metadata = HashMap::new();
 
+        let started_at = start_measuring_requests(kind);
+
         let download = async {
             let response = builder
                 // convert to concrete Pageable
@@ -200,13 +205,22 @@ impl AzureBlobStorage {
             })
         };
 
-        tokio::select! {
+        let download = tokio::select! {
             bufs = download => bufs,
             cancel_or_timeout = cancel_or_timeout => match cancel_or_timeout {
-                TimeoutOrCancel::Timeout => Err(DownloadError::Timeout),
-                TimeoutOrCancel::Cancel => Err(DownloadError::Cancelled),
+                TimeoutOrCancel::Timeout => return Err(DownloadError::Timeout),
+                TimeoutOrCancel::Cancel => return Err(DownloadError::Cancelled),
             },
-        }
+        };
+        let started_at = ScopeGuard::into_inner(started_at);
+        let outcome = match &download {
+            Ok(_) => AttemptOutcome::Ok,
+            Err(_) => AttemptOutcome::Err,
+        };
+        crate::metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, outcome, started_at);
+        download
     }
 
     async fn permit(
