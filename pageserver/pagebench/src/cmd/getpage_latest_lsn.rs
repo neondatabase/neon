@@ -309,8 +309,9 @@ async fn main_impl(
                     let key: i128 = rng.gen_range(r.start..r.end);
                     let key = Key::from_i128(key);
                     assert!(key.is_rel_block_key());
-                    let (rel_tag, block_no) =
-                        key.to_rel_block().expect("we filter non-rel-block keys out above");
+                    let (rel_tag, block_no) = key
+                        .to_rel_block()
+                        .expect("we filter non-rel-block keys out above");
                     PagestreamGetPageRequest {
                         request_lsn: if rng.gen_bool(args.req_latest_probability) {
                             Lsn::MAX

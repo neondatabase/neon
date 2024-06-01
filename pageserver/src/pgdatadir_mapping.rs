@@ -17,10 +17,10 @@ use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use itertools::Itertools;
 use pageserver_api::key::{
-    dbdir_key_range, rel_block_to_key, rel_dir_to_key,
-    rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
-    slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
-    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
+    dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
+    relmap_file_key, slru_block_to_key, slru_dir_to_key, slru_segment_key_range,
+    slru_segment_size_to_key, twophase_file_key, twophase_key_range, AUX_FILES_KEY, CHECKPOINT_KEY,
+    CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
 use pageserver_api::models::AuxFilePolicy;
