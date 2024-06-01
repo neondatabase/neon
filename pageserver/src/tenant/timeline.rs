@@ -3894,16 +3894,11 @@ impl Timeline {
                 let metadata_keyspace = &metadata_partition.parts[0];
                 self.create_delta_layer(
                     &frozen_layer,
-<<<<<<< HEAD
-                    Some(metadata_keyspace.0.ranges[0].clone()),
-                    ctx,
-=======
-                    ctx,
                     Some(
                         metadata_keyspace.0.ranges.first().unwrap().start
                             ..metadata_keyspace.0.ranges.last().unwrap().end,
                     ),
->>>>>>> 10b1208f9 (Fix unit tests)
+                    ctx,
                 )
                 .await
                 .map_err(|e| FlushLayerError::from_anyhow(self, e))?
