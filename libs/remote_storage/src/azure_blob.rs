@@ -354,7 +354,10 @@ impl RemoteStorage for AzureBlobStorage {
         metadata: Option<StorageMetadata>,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let _permit = self.permit(RequestKind::Put, cancel).await?;
+        let kind = RequestKind::Put;
+        let _permit = self.permit(kind, cancel).await?;
+
+        let started_at = start_measuring_requests(kind);
 
         let op = async {
             let blob_client = self.client.blob_client(self.relative_path_to_name(to));
@@ -378,14 +381,25 @@ impl RemoteStorage for AzureBlobStorage {
             match fut.await {
                 Ok(Ok(_response)) => Ok(()),
                 Ok(Err(azure)) => Err(azure.into()),
-                Err(_timeout) => Err(TimeoutOrCancel::Cancel.into()),
+                Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
             }
         };
 
-        tokio::select! {
+        let res = tokio::select! {
             res = op => res,
-            _ = cancel.cancelled() => Err(TimeoutOrCancel::Cancel.into()),
-        }
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
+        };
+
+        let outcome = match res {
+            Ok(_) => AttemptOutcome::Ok,
+            Err(_) => AttemptOutcome::Err,
+        };
+        let started_at = ScopeGuard::into_inner(started_at);
+        crate::metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, outcome, started_at);
+
+        res
     }
 
     async fn download(
