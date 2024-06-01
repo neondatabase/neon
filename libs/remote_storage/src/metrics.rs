@@ -33,10 +33,10 @@ impl RequestKind {
     }
 }
 
-pub(super) struct RequestTyped<C>([C; 6]);
+pub(crate) struct RequestTyped<C>([C; 6]);
 
 impl<C> RequestTyped<C> {
-    pub(super) fn get(&self, kind: RequestKind) -> &C {
+    pub(crate) fn get(&self, kind: RequestKind) -> &C {
         &self.0[kind.as_index()]
     }
 
@@ -58,19 +58,19 @@ impl<C> RequestTyped<C> {
 }
 
 impl RequestTyped<Histogram> {
-    pub(super) fn observe_elapsed(&self, kind: RequestKind, started_at: std::time::Instant) {
+    pub(crate) fn observe_elapsed(&self, kind: RequestKind, started_at: std::time::Instant) {
         self.get(kind).observe(started_at.elapsed().as_secs_f64())
     }
 }
 
-pub(super) struct PassFailCancelledRequestTyped<C> {
+pub(crate) struct PassFailCancelledRequestTyped<C> {
     success: RequestTyped<C>,
     fail: RequestTyped<C>,
     cancelled: RequestTyped<C>,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum AttemptOutcome {
+pub(crate) enum AttemptOutcome {
     Ok,
     Err,
     Cancelled,
@@ -86,7 +86,7 @@ impl<T, E> From<&Result<T, E>> for AttemptOutcome {
 }
 
 impl AttemptOutcome {
-    pub(super) fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             AttemptOutcome::Ok => "ok",
             AttemptOutcome::Err => "err",
@@ -96,7 +96,7 @@ impl AttemptOutcome {
 }
 
 impl<C> PassFailCancelledRequestTyped<C> {
-    pub(super) fn get(&self, kind: RequestKind, outcome: AttemptOutcome) -> &C {
+    pub(crate) fn get(&self, kind: RequestKind, outcome: AttemptOutcome) -> &C {
         let target = match outcome {
             AttemptOutcome::Ok => &self.success,
             AttemptOutcome::Err => &self.fail,
@@ -119,7 +119,7 @@ impl<C> PassFailCancelledRequestTyped<C> {
 }
 
 impl PassFailCancelledRequestTyped<Histogram> {
-    pub(super) fn observe_elapsed(
+    pub(crate) fn observe_elapsed(
         &self,
         kind: RequestKind,
         outcome: impl Into<AttemptOutcome>,
@@ -130,19 +130,19 @@ impl PassFailCancelledRequestTyped<Histogram> {
     }
 }
 
-pub(super) struct BucketMetrics {
+pub(crate) struct BucketMetrics {
     /// Full request duration until successful completion, error or cancellation.
-    pub(super) req_seconds: PassFailCancelledRequestTyped<Histogram>,
+    pub(crate) req_seconds: PassFailCancelledRequestTyped<Histogram>,
     /// Total amount of seconds waited on queue.
-    pub(super) wait_seconds: RequestTyped<Histogram>,
+    pub(crate) wait_seconds: RequestTyped<Histogram>,
 
     /// Track how many semaphore awaits were cancelled per request type.
     ///
     /// This is in case cancellations are happening more than expected.
-    pub(super) cancelled_waits: RequestTyped<IntCounter>,
+    pub(crate) cancelled_waits: RequestTyped<IntCounter>,
 
     /// Total amount of deleted objects in batches or single requests.
-    pub(super) deleted_objects_total: IntCounter,
+    pub(crate) deleted_objects_total: IntCounter,
 }
 
 impl Default for BucketMetrics {
