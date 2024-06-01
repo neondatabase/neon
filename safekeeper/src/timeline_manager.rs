@@ -10,7 +10,7 @@ use std::{
 
 use postgres_ffi::XLogSegNo;
 use tokio::task::{JoinError, JoinHandle};
-use tracing::{info, instrument, warn};
+use tracing::{info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
 
 use crate::{
@@ -346,10 +346,13 @@ async fn update_wal_removal(
             &tli.read_shared_state().await.sk.wal_store,
             removal_horizon_segno,
         );
-        *wal_removal_task = Some(tokio::spawn(async move {
-            remover.await?;
-            Ok(removal_horizon_segno)
-        }));
+        *wal_removal_task = Some(tokio::spawn(
+            async move {
+                remover.await?;
+                Ok(removal_horizon_segno)
+            }
+            .instrument(info_span!("WAL removal", ttid=%tli.ttid)),
+        ));
     }
 }
 
