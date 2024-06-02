@@ -20,6 +20,7 @@
 
 /// Process lifecycle and abstracction for the IPC protocol.
 mod process;
+use postgres_ffi::{page_get_lsn, page_is_new};
 pub use process::Kind as ProcessKind;
 
 /// Code to apply [`NeonWalRecord`]s.
@@ -97,6 +98,7 @@ impl PostgresRedoManager {
         let base_img_lsn = base_img.as_ref().map(|p| p.0).unwrap_or(Lsn::INVALID);
         let mut img = base_img.map(|p| p.1);
         let mut batch_neon = apply_neon::can_apply_in_neon(&records[0].1);
+        let page_lsn = records.last().unwrap().0;
         let mut batch_start = 0;
         for (i, record) in records.iter().enumerate().skip(1) {
             let rec_neon = apply_neon::can_apply_in_neon(&record.1);
@@ -123,7 +125,7 @@ impl PostgresRedoManager {
             }
         }
         // last batch
-        if batch_neon {
+        let result = if batch_neon {
             self.apply_batch_neon(key, lsn, img, &records[batch_start..])
         } else {
             self.apply_batch_postgres(
@@ -136,7 +138,8 @@ impl PostgresRedoManager {
                 pg_version,
             )
             .await
-        }
+        };
+        result
     }
 
     pub fn status(&self) -> WalRedoManagerStatus {
@@ -361,10 +364,10 @@ impl PostgresRedoManager {
         &self,
         key: Key,
         page: &mut BytesMut,
-        _record_lsn: Lsn,
+        record_lsn: Lsn,
         record: &NeonWalRecord,
     ) -> anyhow::Result<()> {
-        apply_neon::apply_in_neon(record, key, page)?;
+        apply_neon::apply_in_neon(record, record_lsn, key, page)?;
 
         Ok(())
     }
