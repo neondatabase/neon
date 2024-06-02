@@ -3992,8 +3992,8 @@ pub(crate) mod harness {
                 let base_img = base_img.expect("Neon WAL redo requires base image").1;
                 let mut page = BytesMut::new();
                 page.extend_from_slice(&base_img);
-                for (_record_lsn, record) in records {
-                    apply_neon::apply_in_neon(&record, key, &mut page)?;
+                for (record_lsn, record) in records {
+                    apply_neon::apply_in_neon(&record, record_lsn, key, &mut page)?;
                 }
                 Ok(page.freeze())
             } else {

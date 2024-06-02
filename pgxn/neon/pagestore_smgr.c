@@ -2663,6 +2663,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			/* This is a bit tricky. Check if the relation exists locally */
 			if (mdexists(reln, forknum))
 			{
+				pg_usleep(100000);
 				/* It exists locally. Guess it's unlogged then. */
 				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 

@@ -289,7 +289,7 @@ mod test {
         let mut page = BytesMut::from_iter(base_image);
 
         for record in deltas {
-            apply_in_neon(&record, file_path, &mut page)?;
+            apply_in_neon(&record, Lsn(8), file_path, &mut page)?;
         }
 
         let reconstructed = AuxFilesDirectory::des(&page)?;
