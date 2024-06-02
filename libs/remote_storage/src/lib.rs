@@ -12,6 +12,7 @@
 mod azure_blob;
 mod error;
 mod local_fs;
+mod metrics;
 mod s3_bucket;
 mod simulate_failures;
 mod support;
