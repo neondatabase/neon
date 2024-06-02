@@ -131,7 +131,7 @@ impl PassFailCancelledRequestTyped<Histogram> {
     }
 }
 
-/// On drop (cancellation) count towards [`metrics::BucketMetrics::cancelled_waits`].
+/// On drop (cancellation) count towards [`BucketMetrics::cancelled_waits`].
 pub(crate) fn start_counting_cancelled_wait(
     kind: RequestKind,
 ) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
@@ -143,7 +143,7 @@ pub(crate) fn start_counting_cancelled_wait(
     })
 }
 
-/// On drop (cancellation) add time to [`metrics::BucketMetrics::req_seconds`].
+/// On drop (cancellation) add time to [`BucketMetrics::req_seconds`].
 pub(crate) fn start_measuring_requests(
     kind: RequestKind,
 ) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
