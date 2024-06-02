@@ -651,7 +651,7 @@ impl Key {
         self.field1 == 0x00 && self.field4 != 0 && self.field6 != 0xffffffff
     }
 
-    /// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
+    /// Guaranteed to return `Ok()` if [`Self::is_rel_block_key`] returns `true` for `key`.
     #[inline(always)]
     pub fn to_rel_block(self) -> anyhow::Result<(RelTag, BlockNumber)> {
         Ok(match self.field1 {
