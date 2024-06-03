@@ -13,7 +13,7 @@
 use anyhow::{anyhow, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
-use pageserver_api::key::{replorigin_key, Key};
+use pageserver_api::key::Key;
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
