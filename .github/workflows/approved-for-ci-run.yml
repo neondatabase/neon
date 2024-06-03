@@ -114,6 +114,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          cat $GITHUB_ENV
           for OLD_PR in $ALREADY_CREATED
           do
             declare LTA=${OLD_PR}_LABELS_TO_ADD
