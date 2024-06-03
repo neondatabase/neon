@@ -13,7 +13,7 @@
 use anyhow::{anyhow, Context};
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
-use pageserver_api::key::{key_to_slru_block, Key};
+use pageserver_api::key::Key;
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
@@ -170,7 +170,7 @@ where
     }
 
     async fn add_block(&mut self, key: &Key, block: Bytes) -> Result<(), BasebackupError> {
-        let (kind, segno, _) = key_to_slru_block(*key)?;
+        let (kind, segno, _) = key.to_slru_block()?;
 
         match kind {
             SlruKind::Clog => {
