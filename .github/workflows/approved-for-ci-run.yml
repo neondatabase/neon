@@ -114,7 +114,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for OLD_PR in $ALREADY_CREATED
+          for OLD_PR in ${ALREADY_CREATED//'/}
           do
             declare LTA=${OLD_PR}_LABELS_TO_ADD
             declare LTR=${OLD_PR}_LABELS_TO_REMOVE
