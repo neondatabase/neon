@@ -114,8 +114,7 @@
 //!
 //! # Completion
 //!
-//! Once an operation has completed, we update
-//! [`UploadQueueInitialized::projected_remote_consistent_lsn`] immediately,
+//! Once an operation has completed, we update [`UploadQueueInitialized::clean`] immediately,
 //! and submit a request through the DeletionQueue to update
 //! [`UploadQueueInitialized::visible_remote_consistent_lsn`] after it has
 //! validated that our generation is not stale.  It is this visible value
