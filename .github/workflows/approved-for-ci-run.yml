@@ -109,15 +109,14 @@ jobs:
               LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|  grep -E '^run' |sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  grep -E '^run' | sort ))
               LABELS_TO_ADD=$(echo $LABELS_TO_ADD | awk 'BEGIN {list=""} {for (i=1;i<=NF;i++) if (length($i)>0) if (length(list)>0) list=list "," $i; else list=$i;} END {print list}')
               echo "LABELS_TO_ADD_${OLD_PR}=$LABELS_TO_ADD" >> $GITHUB_ENV
-              echo "LABELS_TO_ADD_${OLD_PR}=$LABELS_TO_ADD"
               echo "LABELS_TO_REMOVE_${OLD_PR}=$LABELS_TO_REMOVE" >> $GITHUB_ENV
-              echo "LABELS_TO_REMOVE_${OLD_PR}=$LABELS_TO_REMOVE"
             done
           fi
       - name: Modify the existant pull request (if required)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          [ -z "${ALREADY_CREATED+x}" ] && exit 0 || true
           for OLD_PR in ${ALREADY_CREATED}
           do
             declare LTA=LABELS_TO_ADD_${OLD_PR}
