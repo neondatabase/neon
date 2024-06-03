@@ -78,9 +78,9 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     max_num_of_deltas_above_image = 0
     max_total_num_of_deltas = 0
     for key_range in client.perf_info(tenant_id, timeline_id):
-        max_total_num_of_deltas = max(max_total_num_of_deltas, key_range["max_total_num_of_deltas"])
+        max_total_num_of_deltas = max(max_total_num_of_deltas, key_range["total_num_of_deltas"])
         max_num_of_deltas_above_image = max(
-            max_num_of_deltas_above_image, key_range["max_num_of_deltas_above_image"]
+            max_num_of_deltas_above_image, key_range["num_of_deltas_above_image"]
         )
 
     MB = 1024 * 1024
