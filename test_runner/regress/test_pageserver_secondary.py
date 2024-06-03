@@ -15,7 +15,7 @@ from fixtures.pageserver.utils import (
     tenant_delete_wait_completed,
     wait_for_upload_queue_empty,
 )
-from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage, s3_storage
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
@@ -73,7 +73,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     """
     neon_env_builder.num_pageservers = 3
     neon_env_builder.enable_pageserver_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        remote_storage_kind=s3_storage(),
     )
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
@@ -215,6 +215,13 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
                 )
                 workload.validate(pageserver.id)
 
+    # Having done a bunch of attach/detach cycles, we will have generated some index garbage: check
+    # that the scrubber sees it and cleans it up.  We do this before the final attach+validate pass,
+    # to also validate that the scrubber isn't breaking anything.
+    gc_summary = S3Scrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=1)
+    assert gc_summary["remote_storage_errors"] == 0
+    assert gc_summary["indices_deleted"] > 0
+
     # Attach all pageservers
     for ps in env.pageservers:
         location_conf = {"mode": "AttachedMulti", "secondary_conf": None, "tenant_conf": {}}
@@ -227,10 +234,11 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     # Detach all pageservers
     for ps in env.pageservers:
         location_conf = {"mode": "Detached", "secondary_conf": None, "tenant_conf": {}}
+        assert ps.list_layers(tenant_id, timeline_id) != []
         ps.tenant_location_configure(tenant_id, location_conf)
 
-    # Confirm that all local disk state was removed on detach
-    # TODO
+        # Confirm that all local disk state was removed on detach
+        assert ps.list_layers(tenant_id, timeline_id) == []
 
 
 def test_live_migration(neon_env_builder: NeonEnvBuilder):

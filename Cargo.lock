@@ -5129,6 +5129,7 @@ dependencies = [
  "futures-util",
  "hex",
  "histogram",
+ "humantime",
  "itertools",
  "once_cell",
  "pageserver",
