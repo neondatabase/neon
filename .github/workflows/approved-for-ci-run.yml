@@ -106,8 +106,8 @@ jobs:
               LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name'))
               LABELS_TO_REMOVE=${LABELS_TO_REMOVE//run-e2e-tests-in-draft/}
               LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name'))
-              [ -z "$LABELS_TO_ADD" ] || echo "LABELS_TO_ADD_${OLD_PR}=$LABELS_TO_ADD" >> $GITHUB_ENV
-              [ -z "$LABELS_TO_REMOVE" ] || echo "LABELS_TO_REMOVE_${OLD_PR}=$LABELS_TO_REMOVE" >> $GITHUB_ENV
+              echo "LABELS_TO_ADD_${OLD_PR}=$LABELS_TO_ADD" >> $GITHUB_ENV
+              echo "LABELS_TO_REMOVE_${OLD_PR}=$LABELS_TO_REMOVE" >> $GITHUB_ENV
             done
           fi
       - name: Modify the existant pull request (if required)
