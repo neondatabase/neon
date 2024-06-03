@@ -85,7 +85,13 @@ page_cache_size=10
 
     vectored_sum = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_sum")
     vectored_count = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_count")
-    vectored_average = vectored_sum.value / vectored_count.value
+    if vectored_count.value > 0:
+        assert vectored_sum.value > 0
+        vectored_average = vectored_sum.value / vectored_count.value
+    else:
+        # special case: running local tests with default legacy configuration
+        assert vectored_sum.value == 0
+        vectored_average = 0
 
     log.info(f"{non_vectored_average=} {vectored_average=}")
 
