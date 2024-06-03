@@ -2650,8 +2650,8 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	}
 	else
 	{
-		request_lsn = neon_get_request_lsn(&latest, InfoFromSMgrRel(reln), forkNum, blkno);
-		neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsn, latest, buffer);
+		request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno);
+		neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
 	}
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
