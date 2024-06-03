@@ -125,7 +125,7 @@ impl PostgresRedoManager {
             }
         }
         // last batch
-        let result = if batch_neon {
+        if batch_neon {
             self.apply_batch_neon(key, lsn, img, &records[batch_start..])
         } else {
             self.apply_batch_postgres(
@@ -138,8 +138,7 @@ impl PostgresRedoManager {
                 pg_version,
             )
             .await
-        };
-        result
+        }
     }
 
     pub fn status(&self) -> WalRedoManagerStatus {
