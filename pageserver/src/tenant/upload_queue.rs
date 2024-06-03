@@ -59,15 +59,9 @@ pub(crate) struct UploadQueueInitialized {
     /// last (scheduling of) metadata index upload?
     pub(crate) latest_files_changes_since_metadata_upload_scheduled: u64,
 
-    /// `disk_consistent_lsn` from the last metadata file that was successfully
-    /// uploaded. `Lsn(0)` if nothing was uploaded yet.
-    /// Unlike `latest_files` or `latest_metadata`, this value is never ahead.
-    /// Safekeeper can rely on it to make decisions for WAL storage.
-    ///
-    /// visible_remote_consistent_lsn is only updated after our generation has been validated with
+    /// The Lsn is only updated after our generation has been validated with
     /// the control plane (unlesss a timeline's generation is None, in which case
     /// we skip validation)
-    pub(crate) projected_remote_consistent_lsn: Option<Lsn>,
     pub(crate) visible_remote_consistent_lsn: Arc<AtomicLsn>,
 
     // Breakdown of different kinds of tasks currently in-progress
@@ -113,7 +107,8 @@ impl UploadQueueInitialized {
     }
 
     pub(super) fn get_last_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
-        self.projected_remote_consistent_lsn
+        let lsn = self.clean.0.metadata.disk_consistent_lsn();
+        self.clean.1.map(|_| lsn)
     }
 }
 
@@ -175,7 +170,6 @@ impl UploadQueue {
             dirty: index_part.clone(),
             clean: (index_part, None),
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            projected_remote_consistent_lsn: None,
             visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
             // what follows are boring default initializations
             task_counter: 0,
@@ -214,7 +208,6 @@ impl UploadQueue {
             dirty: index_part.clone(),
             clean: (index_part.clone(), None),
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            projected_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
             visible_remote_consistent_lsn: Arc::new(
                 index_part.metadata.disk_consistent_lsn().into(),
             ),

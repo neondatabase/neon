@@ -415,6 +415,7 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Returns `None` if nothing is yet uplodaded, `Some(disk_consistent_lsn)` otherwise.
     pub fn remote_consistent_lsn_projected(&self) -> Option<Lsn> {
         match &mut *self.upload_queue.lock().unwrap() {
             UploadQueue::Uninitialized => None,
@@ -1744,8 +1745,6 @@ impl RemoteTimelineClient {
 
                         let lsn = upload_queue.clean.0.metadata.disk_consistent_lsn();
 
-                        // FIXME: read this through clean
-                        upload_queue.projected_remote_consistent_lsn = Some(lsn);
                         if self.generation.is_none() {
                             // Legacy mode: skip validating generation
                             upload_queue.visible_remote_consistent_lsn.store(lsn);
@@ -1894,7 +1893,6 @@ impl RemoteTimelineClient {
                         dirty: initialized.dirty.clone(),
                         clean: initialized.clean.clone(),
                         latest_files_changes_since_metadata_upload_scheduled: 0,
-                        projected_remote_consistent_lsn: None,
                         visible_remote_consistent_lsn: initialized
                             .visible_remote_consistent_lsn
                             .clone(),
