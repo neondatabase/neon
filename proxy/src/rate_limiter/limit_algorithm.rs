@@ -1,10 +1,9 @@
 //! Algorithms for controlling concurrency limits.
 use parking_lot::Mutex;
 use std::{pin::pin, sync::Arc, time::Duration};
-use tokio::{
-    sync::Notify,
-    time::{error::Elapsed, Instant},
-};
+use tokio::{sync::Notify, time::Instant};
+
+use crate::console::provider::ApiLockError;
 
 use self::aimd::Aimd;
 
@@ -165,14 +164,17 @@ impl DynamicLimiter {
     /// Try to acquire a concurrency [Token], waiting for `duration` if there are none available.
     ///
     /// Returns `None` if there are none available after `duration`.
-    pub async fn acquire_timeout(self: &Arc<Self>, duration: Duration) -> Result<Token, Elapsed> {
+    pub async fn acquire_timeout(
+        self: &Arc<Self>,
+        duration: Duration,
+    ) -> Result<Token, ApiLockError> {
         tokio::time::timeout(duration, self.acquire()).await?
     }
 
     /// Try to acquire a concurrency [Token], waiting until `deadline` if there are none available.
     ///
     /// Returns `None` if there are none available after `deadline`.
-    pub async fn acquire(self: &Arc<Self>) -> Result<Token, Elapsed> {
+    pub async fn acquire(self: &Arc<Self>) -> Result<Token, ApiLockError> {
         if self.config.initial_limit == 0 {
             // If the rate limiter is disabled, we can always acquire a token.
             Ok(Token::disabled())
@@ -184,6 +186,8 @@ impl DynamicLimiter {
                     let mut inner = self.inner.lock();
                     if inner.take(&self.ready).is_some() {
                         break Ok(Token::new(self.clone()));
+                    } else {
+                        break Err(ApiLockError::PermitError);
                     }
                 }
                 notified.as_mut().await;
