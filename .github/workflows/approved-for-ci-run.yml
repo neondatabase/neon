@@ -100,14 +100,14 @@ jobs:
                                                        --label $LABELS \
                                                        --draft
           else
-            echo "ALREADY_CREATED=$ALREADY_CREATED" >> $GITHUB_ENV
+            echo "ALREADY_CREATED='$ALREADY_CREATED'" >> $GITHUB_ENV
             for OLD_PR in $ALREADY_CREATED
             do
               LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name'))
               LABELS_TO_REMOVE=${LABELS_TO_REMOVE//run-e2e-tests-in-draft/}
               LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name'))
-              echo "${OLD_PR}_LABELS_TO_ADD='$LABELS_TO_ADD'" >> $GITHUB_ENV
-              echo "${OLD_PR}_LABELS_TO_REMOVE='$LABELS_TO_REMOVE'" >> $GITHUB_ENV
+              echo "LABELS_TO_ADD_${OLD_PR}='$LABELS_TO_ADD'" >> $GITHUB_ENV
+              echo "LABELS_TO_REMOVE_${OLD_PR}='$LABELS_TO_REMOVE'" >> $GITHUB_ENV
             done
           fi
       - name: Modify the existant pull request (if required)
@@ -116,8 +116,8 @@ jobs:
         run: |
           for OLD_PR in ${ALREADY_CREATED}
           do
-            declare LTA=${OLD_PR}_LABELS_TO_ADD
-            declare LTR=${OLD_PR}_LABELS_TO_REMOVE
+            declare LTA=LABELS_TO_ADD_${OLD_PR}
+            declare LTR=LABELS_TO_REMOVE_${OLD_PR}
             [ -z "${!LTA}" ] && [ -z "${!LTR}" ] && continue
             ADD_CMD=
             REMOVE_CMD=
