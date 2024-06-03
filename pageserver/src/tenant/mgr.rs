@@ -45,7 +45,7 @@ use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::timeline::ShutdownMode;
-use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
+use crate::tenant::{AttachedTenantConf, GcError, SpawnMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -2833,7 +2833,13 @@ pub(crate) async fn immediate_gc(
         }
     }
 
-    result.map_err(ApiError::InternalServerError)
+    result.map_err(|e| match e {
+        GcError::TenantCancelled | GcError::TimelineCancelled => ApiError::ShuttingDown,
+        GcError::TimelineNotFound => {
+            ApiError::NotFound(anyhow::anyhow!("Timeline not found").into())
+        }
+        other => ApiError::InternalServerError(anyhow::anyhow!(other)),
+    })
 }
 
 #[cfg(test)]

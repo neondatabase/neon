@@ -19,7 +19,8 @@ class Walreceiver:
 
 @dataclass
 class SafekeeperTimelineStatus:
-    acceptor_epoch: int
+    term: int
+    last_log_term: int
     pg_version: int  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
     flush_lsn: Lsn
     commit_lsn: Lsn
@@ -156,7 +157,8 @@ class SafekeeperHttpClient(requests.Session):
         resj = res.json()
         walreceivers = [Walreceiver(wr["conn_id"], wr["status"]) for wr in resj["walreceivers"]]
         return SafekeeperTimelineStatus(
-            acceptor_epoch=resj["acceptor_state"]["epoch"],
+            term=resj["acceptor_state"]["term"],
+            last_log_term=resj["acceptor_state"]["epoch"],
             pg_version=resj["pg_info"]["pg_version"],
             flush_lsn=Lsn(resj["flush_lsn"]),
             commit_lsn=Lsn(resj["commit_lsn"]),
