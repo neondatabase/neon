@@ -28,6 +28,7 @@ use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode, RemotePath};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
+use utils::pausable_failpoint;
 
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{
