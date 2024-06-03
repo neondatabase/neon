@@ -1756,7 +1756,17 @@ impl RemoteTimelineClient {
                     } else {
                         // do we want to log? this is perfectly valid, since the ordering in
                         // which completing tasks get to lock the upload_queue is not the task
-                        // spawning order.
+                        // spawning order. log because it is very rare situation requiring two
+                        // consecutive index uploads (like we do with gc).
+
+                        // keeping this warn to see if it's immediatedly triggered in regress tests
+                        tracing::warn!(
+                            prev=?last_updater,
+                            now=?task.task_id,
+                            prev_lsn=%upload_queue.clean.0.metadata.disk_consistent_lsn(),
+                            now_lsn=%uploaded.metadata.disk_consistent_lsn(),
+                            "monotonicity check failed"
+                        );
                         None
                     }
                 }
