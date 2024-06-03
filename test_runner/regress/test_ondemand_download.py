@@ -658,7 +658,10 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
     assert dict(kinds_after) == {"Delta": 4, "Image": 1}
 
 
-def test_ondemand_download_cancelled_by_config_location(neon_env_builder: NeonEnvBuilder):
+def test_layer_download_cancelled_by_config_location(neon_env_builder: NeonEnvBuilder):
+    """
+    Demonstrates that tenant shutdown will cancel on-demand download and secondary doing warmup.
+    """
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
     # turn off background tasks so that they don't interfere with the downloads
@@ -685,6 +688,7 @@ def test_ondemand_download_cancelled_by_config_location(neon_env_builder: NeonEn
 
     client.tenant_heatmap_upload(env.initial_tenant)
 
+    # evict the initdb layer so we can download it
     client.evict_layer(env.initial_tenant, env.initial_timeline, layer.layer_file_name)
 
     try:
@@ -712,8 +716,6 @@ def test_ondemand_download_cancelled_by_config_location(neon_env_builder: NeonEn
                     "closing is taking longer than expected", offset
                 ),
             )
-            while time.time() - started < 1.0:
-                time.sleep(0.1)
 
             client.configure_failpoints((failpoint, "off"))
 
@@ -755,10 +757,6 @@ def test_ondemand_download_cancelled_by_config_location(neon_env_builder: NeonEn
                 0.5,
                 lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}", offset),
             )
-            started = time.time()
-
-            while time.time() - started < 2.0:
-                time.sleep(0.1)
 
             client.configure_failpoints((failpoint, "off"))
             location_conf = {"mode": "Detached", "tenant_conf": {}}
@@ -772,7 +770,7 @@ def test_ondemand_download_cancelled_by_config_location(neon_env_builder: NeonEn
         client.configure_failpoints((failpoint, "off"))
 
 
-def test_ondemand_download_timeouted(neon_env_builder: NeonEnvBuilder):
+def test_layer_download_timeouted(neon_env_builder: NeonEnvBuilder):
     """
     Pause using a pausable_failpoint longer than the client timeout to simulate the timeout happening.
     """
@@ -798,6 +796,7 @@ def test_ondemand_download_timeouted(neon_env_builder: NeonEnvBuilder):
 
     client.tenant_heatmap_upload(env.initial_tenant)
 
+    # evict so we can download it
     client.evict_layer(env.initial_tenant, env.initial_timeline, layer.layer_file_name)
 
     try:
@@ -812,10 +811,8 @@ def test_ondemand_download_timeouted(neon_env_builder: NeonEnvBuilder):
             _, offset = wait_until(
                 20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
             )
-
-            started = time.time()
-            while time.time() - started < 1.0:
-                time.sleep(0.1)
+            # ensure enough time while paused to trip the timeout
+            time.sleep(2)
 
             client.configure_failpoints((failpoint, "off"))
             download.result()
@@ -854,11 +851,8 @@ def test_ondemand_download_timeouted(neon_env_builder: NeonEnvBuilder):
             warmup = exec.submit(
                 client.tenant_secondary_download, env.initial_tenant, wait_ms=30000
             )
-
-            started = time.time()
-
-            while time.time() - started < 2.0:
-                time.sleep(0.1)
+            # ensure enough time while paused to trip the timeout
+            time.sleep(2)
 
             client.configure_failpoints((failpoint, "off"))
 
