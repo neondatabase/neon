@@ -337,7 +337,7 @@ where
             tracing::info!(
                 tenant_id=%tenant_shard_id.tenant_id,
                 shard_id=%tenant_shard_id.shard_slug(),
-               "Command already running, waiting for it"
+                "Command already running, waiting for it"
             );
             barrier
         } else {
