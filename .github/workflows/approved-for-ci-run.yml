@@ -100,20 +100,33 @@ jobs:
                                                        --label $LABELS \
                                                        --draft
           else
+            echo "ALREADY_CREATED=$ALREADY_CREATED>> $GITHUB_ENV"
             for OLD_PR in $ALREADY_CREATED
             do
               LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name'))
               LABELS_TO_REMOVE=${LABELS_TO_REMOVE//run-e2e-tests-in-draft/}
               LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name'))
-              [ -z "$LABELS_TO_ADD" ] && [ -z "$LABELS_TO_REMOVE" ] && continue
-              ADD_CMD=
-              REMOVE_CMD=
-              [ -z "$LABELS_TO_ADD" ] || ADD_CMD="--add-label ${LABELS_TO_ADD// /,}"
-              [ -z "$LABELS_TO_REMOVE" ] || REMOVE_CMD="--remove-label ${LABELS_TO_REMOVE// /,}"
-              echo gh pr --repo "${GITHUB_REPOSITORY}" edit $OLD_PR $ADD_CMD $REMOVE_CMD
-              gh pr --repo "${GITHUB_REPOSITORY}" edit $OLD_PR $ADD_CMD $REMOVE_CMD
+              echo "${OLD_PR}_LABELS_TO_ADD='$LABELS_TO_ADD' > $GITHUB_ENV"
+              echo "${OLD_PR}_LABELS_TO_REMOVE='$LABELS_TO_REMOVE' > $GITHUB_ENV"
             done
           fi
+      - name: Modify the existant pull request (if required)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for OLD_PR in $ALREADY_CREATED
+          do
+            declare LTA=${OLD_PR}_LABELS_TO_ADD
+            declare LTR=${OLD_PR}_LABELS_TO_REMOVE
+            [ -z "${!LTA}" ] && [ -z "${LTR}" ] && continue
+            ADD_CMD=
+            REMOVE_CMD=
+            [ -z "${!LTA}" ] || ADD_CMD="--add-label ${!LTA// /,}"
+            [ -z "${!LTR}" ] || REMOVE_CMD="--remove-label ${!LTR// /,}"
+            echo gh pr --repo "${GITHUB_REPOSITORY}" edit $OLD_PR $ADD_CMD $REMOVE_CMD
+            gh pr --repo "${GITHUB_REPOSITORY}" edit $OLD_PR $ADD_CMD $REMOVE_CMD
+          done
+             
 
   cleanup:
     # Close PRs and delete branchs if the original PR is closed.
