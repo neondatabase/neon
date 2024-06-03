@@ -1734,8 +1734,9 @@ impl RemoteTimelineClient {
 
                     let last_updater = upload_queue.clean.1;
                     let is_later = last_updater.is_some_and(|task_id| task_id < task.task_id);
+                    let monotone = is_later || last_updater.is_none();
 
-                    if is_later || last_updater.is_none() {
+                    if monotone {
                         // not taking ownership is wasteful
                         upload_queue.clean.0.clone_from(uploaded);
                         upload_queue.clean.1 = Some(task.task_id);
