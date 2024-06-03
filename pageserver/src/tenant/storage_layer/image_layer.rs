@@ -43,6 +43,7 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
+use futures::pin_mut;
 use hex;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
@@ -483,6 +484,34 @@ impl ImageLayerInner {
         reconstruct_state.on_image_layer_visited(&self.key_range);
 
         Ok(())
+    }
+
+    /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
+    pub(super) async fn load_key_values(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
+        let mut result = Vec::new();
+        let stream = tree_reader.get_stream_from(&[0; KEY_SIZE], ctx);
+        pin_mut!(stream);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let cursor = block_reader.block_cursor();
+        while let Some(item) = stream.next().await {
+            // TODO: dedup code with get_reconstruct_value
+            let (raw_key, offset) = item?;
+            let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+            // TODO: ctx handling and sharding
+            let blob = cursor
+                .read_blob(offset, ctx)
+                .await
+                .with_context(|| format!("failed to read value from offset {}", offset))?;
+            let value = Bytes::from(blob);
+            result.push((key, self.lsn, Value::Image(value)));
+        }
+        Ok(result)
     }
 
     /// Traverse the layer's index to build read operations on the overlap of the input keyspace

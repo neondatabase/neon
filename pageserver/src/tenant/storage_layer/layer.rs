@@ -16,7 +16,7 @@ use utils::sync::{gate, heavier_once_cell};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::repository::Key;
+use crate::repository::{Key, Value};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::GetVectoredError;
@@ -386,6 +386,22 @@ impl Layer {
                 ),
                 err => err,
             })
+    }
+
+    /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
+    pub(crate) async fn get_all(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
+        let layer = self
+            .0
+            .get_or_maybe_download(true, Some(ctx))
+            .await
+            .map_err(|err| match err {
+                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                other => GetVectoredError::Other(anyhow::anyhow!(other)),
+            })?;
+        layer.get_all(&self.0, ctx).await
     }
 
     /// Download the layer if evicted.
@@ -1754,6 +1770,19 @@ impl DownloadedLayer {
                 i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
                     .await
             }
+        }
+    }
+
+    async fn get_all(
+        &self,
+        owner: &Arc<LayerInner>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
+        use LayerKind::*;
+
+        match self.get(owner, ctx).await? {
+            Delta(d) => d.load_key_values(ctx).await,
+            Image(i) => i.load_key_values(ctx).await,
         }
     }
 
