@@ -4316,7 +4316,7 @@ def check_restored_datadir_content(
         restored_files = [f for f in restored_files if f not in ignored_files]
 
     # check that file sets are equal
-    # assert pgdata_files == restored_files
+    assert pgdata_files == restored_files
 
     # compare content of the files
     # filecmp returns (match, mismatch, error) lists
