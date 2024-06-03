@@ -100,7 +100,7 @@ jobs:
                                                        --label $LABELS \
                                                        --draft
           else
-            echo "ALREADY_CREATED='$ALREADY_CREATED'" >> $GITHUB_ENV
+            echo "ALREADY_CREATED=\"$ALREADY_CREATED\"" >> $GITHUB_ENV
             for OLD_PR in $ALREADY_CREATED
             do
               LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view $OLD_PR --json labels --jq '.labels.[].name'|sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name'))
@@ -114,7 +114,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for OLD_PR in ${ALREADY_CREATED//'/}
+          for OLD_PR in ${ALREADY_CREATED}
           do
             declare LTA=${OLD_PR}_LABELS_TO_ADD
             declare LTR=${OLD_PR}_LABELS_TO_REMOVE
