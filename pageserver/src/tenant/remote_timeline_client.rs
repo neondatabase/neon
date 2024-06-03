@@ -1731,6 +1731,8 @@ impl RemoteTimelineClient {
                 UploadOp::UploadMetadata { ref uploaded } => {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
 
+                    // the task id is reused as a monotonicity check for storing the "clean"
+                    // IndexPart.
                     let last_updater = upload_queue.clean.1;
                     let is_later = last_updater.is_some_and(|task_id| task_id < task.task_id);
                     let monotone = is_later || last_updater.is_none();
