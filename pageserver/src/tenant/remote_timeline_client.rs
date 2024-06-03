@@ -650,6 +650,11 @@ impl RemoteTimelineClient {
         // fix up the duplicated field
         upload_queue.dirty.disk_consistent_lsn = disk_consistent_lsn;
 
+        // make sure it serializes before doing it in perform_upload_task so that it doesn't
+        // look like a retryable error
+        let void = std::io::sink();
+        serde_json::to_writer(void, &upload_queue.dirty).context("serialize index_part.json")?;
+
         let index_part = &upload_queue.dirty;
 
         info!(
