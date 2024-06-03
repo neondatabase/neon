@@ -5158,6 +5158,7 @@ dependencies = [
  "tokio-io-timeout",
  "tokio-postgres",
  "tokio-stream",
+ "tokio-tar",
  "tokio-util",
  "toml_edit",
  "tracing",

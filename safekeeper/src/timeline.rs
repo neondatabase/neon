@@ -4,7 +4,7 @@
 use anyhow::{anyhow, bail, Result};
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use tokio::fs;
+use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
 
@@ -225,7 +225,7 @@ impl SharedState {
         })
     }
 
-    fn get_wal_seg_size(&self) -> usize {
+    pub(crate) fn get_wal_seg_size(&self) -> usize {
         self.sk.state.server.wal_seg_size as usize
     }
 
