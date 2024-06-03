@@ -428,6 +428,12 @@ impl<'de> Deserialize<'de> for TenantShardId {
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShardStripeSize(pub u32);
 
+impl Default for ShardStripeSize {
+    fn default() -> Self {
+        DEFAULT_STRIPE_SIZE
+    }
+}
+
 /// Layout version: for future upgrades where we might change how the key->shard mapping works
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShardLayout(u8);
@@ -711,6 +717,25 @@ fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Ke
     hash = hash_combine(hash, murmurhash32(key.field6 / stripe_size.0));
 
     ShardNumber((hash % count.0 as u32) as u8)
+}
+
+/// For debugging, while not exposing the internals.
+#[derive(Debug)]
+#[allow(unused)] // used by debug formatting by pagectl
+struct KeyShardingInfo {
+    shard0: bool,
+    shard_number: ShardNumber,
+}
+
+pub fn describe(
+    key: &Key,
+    shard_count: ShardCount,
+    stripe_size: ShardStripeSize,
+) -> impl std::fmt::Debug {
+    KeyShardingInfo {
+        shard0: key_is_shard0(key),
+        shard_number: key_to_shard_number(shard_count, stripe_size, key),
+    }
 }
 
 #[cfg(test)]

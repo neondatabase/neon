@@ -358,7 +358,7 @@ async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &Re
     // mean the synthetic size worker should terminate.
     let shutting_down = matches!(
         e.downcast_ref::<PageReconstructError>(),
-        Some(PageReconstructError::Cancelled | PageReconstructError::AncestorStopping(_))
+        Some(PageReconstructError::Cancelled)
     );
 
     if !shutting_down {

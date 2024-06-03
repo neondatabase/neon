@@ -255,6 +255,13 @@ impl LayerManager {
         updates.flush()
     }
 
+    #[cfg(test)]
+    pub(crate) fn force_insert_layer(&mut self, layer: ResidentLayer) {
+        let mut updates = self.layer_map.batch_update();
+        Self::insert_historic_layer(layer.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+        updates.flush()
+    }
+
     /// Helper function to insert a layer into the layer map and file manager.
     fn insert_historic_layer(
         layer: Layer,

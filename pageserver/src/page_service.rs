@@ -66,6 +66,7 @@ use crate::tenant::mgr::GetTenantError;
 use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
+use crate::tenant::timeline::FlushLayerError;
 use crate::tenant::timeline::WaitLsnError;
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
@@ -372,7 +373,7 @@ impl From<WaitLsnError> for PageStreamError {
         match value {
             e @ WaitLsnError::Timeout(_) => Self::LsnTimeout(e),
             WaitLsnError::Shutdown => Self::Shutdown,
-            WaitLsnError::BadState => Self::Reconnect("Timeline is not active".into()),
+            e @ WaitLsnError::BadState { .. } => Self::Reconnect(format!("{e}").into()),
         }
     }
 }
@@ -382,7 +383,7 @@ impl From<WaitLsnError> for QueryError {
         match value {
             e @ WaitLsnError::Timeout(_) => Self::Other(anyhow::Error::new(e)),
             WaitLsnError::Shutdown => Self::Shutdown,
-            WaitLsnError::BadState => Self::Reconnect,
+            WaitLsnError::BadState { .. } => Self::Reconnect,
         }
     }
 }
@@ -830,7 +831,10 @@ impl PageServerHandler {
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        timeline.freeze_and_flush().await?;
+        timeline.freeze_and_flush().await.map_err(|e| match e {
+            FlushLayerError::Cancelled => QueryError::Shutdown,
+            other => QueryError::Other(other.into()),
+        })?;
 
         info!("done");
         Ok(())

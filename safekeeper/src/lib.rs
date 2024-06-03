@@ -7,10 +7,7 @@ use tokio::runtime::Runtime;
 use std::time::Duration;
 use storage_broker::Uri;
 
-use utils::{
-    auth::SwappableJwtAuth,
-    id::{NodeId, TenantId, TenantTimelineId},
-};
+use utils::{auth::SwappableJwtAuth, id::NodeId};
 
 mod auth;
 pub mod broker;
@@ -89,15 +86,6 @@ pub struct SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    pub fn tenant_dir(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.workdir.join(tenant_id.to_string())
-    }
-
-    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> Utf8PathBuf {
-        self.tenant_dir(&ttid.tenant_id)
-            .join(ttid.timeline_id.to_string())
-    }
-
     pub fn is_wal_backup_enabled(&self) -> bool {
         self.remote_storage.is_some() && self.wal_backup_enabled
     }
