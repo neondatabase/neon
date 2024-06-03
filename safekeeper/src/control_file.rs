@@ -23,7 +23,7 @@ pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 8;
 
 // contains persistent metadata for safekeeper
-const CONTROL_FILE_NAME: &str = "safekeeper.control";
+pub const CONTROL_FILE_NAME: &str = "safekeeper.control";
 // needed to atomically update the state using `rename`
 const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
 pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();

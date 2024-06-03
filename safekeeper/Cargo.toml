@@ -46,6 +46,7 @@ tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true }
 tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
+tokio-tar.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
 url.workspace = true
