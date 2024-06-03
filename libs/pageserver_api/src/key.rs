@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::RepOriginId;
 use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops::Range};
@@ -37,6 +38,9 @@ pub const RELATION_SIZE_PREFIX: u8 = 0x61;
 
 /// The key prefix of AUX file keys.
 pub const AUX_KEY_PREFIX: u8 = 0x62;
+
+/// The key prefix of ReplOrigin keys.
+pub const REPL_ORIGIN_KEY_PREFIX: u8 = 0x63;
 
 /// Check if the key falls in the range of metadata keys.
 pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
@@ -586,6 +590,37 @@ pub const AUX_FILES_KEY: Key = Key {
     field5: 0,
     field6: 2,
 };
+
+#[inline(always)]
+pub fn repl_origin_key(origin_id: RepOriginId) -> Key {
+    Key {
+        field1: REPL_ORIGIN_KEY_PREFIX,
+        field2: 0,
+        field3: 0,
+        field4: 0,
+        field5: 0,
+        field6: origin_id as u32,
+    }
+}
+
+/// Get the range of replorigin keys.
+pub fn repl_origin_key_range() -> Range<Key> {
+    Key {
+        field1: REPL_ORIGIN_KEY_PREFIX,
+        field2: 0,
+        field3: 0,
+        field4: 0,
+        field5: 0,
+        field6: 0,
+    }..Key {
+        field1: REPL_ORIGIN_KEY_PREFIX,
+        field2: 0,
+        field3: 0,
+        field4: 0,
+        field5: 0,
+        field6: 0x10000,
+    }
+}
 
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.

@@ -362,6 +362,13 @@ where
                     ));
                     info!("Replication slot {} restart LSN={}", path, restart_lsn);
                     min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                } else if path == "pg_logical/replorigin_checkpoint" {
+                    // replorigin_checkoint is written only on compute shutdown, so it contains
+                    // deteriorated values. So we generate our own version of this file for the particular LSN
+                    // based on information about replorigins extracted from transaction commit records.
+                    // In future we will not generate AUX record for "pg_logical/replorigin_checkpoint" at all,
+                    // but now we should handle (skip) it for backward compatibility.
+                    continue;
                 }
                 let header = new_tar_header(&path, content.len() as u64)?;
                 self.ar
@@ -389,6 +396,32 @@ where
             .map_err(|e| BasebackupError::Server(e.into()))?
         {
             self.add_twophase_file(xid).await?;
+        }
+        let repl_origins = self
+            .timeline
+            .get_replorigins(self.lsn, self.ctx)
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?;
+        let n_origins = repl_origins.len();
+        if n_origins != 0 {
+            //
+            // Construct "pg_logical/replorigin_checkpoint" file based on information about replication origins
+            // extracted from transaction commit record. We are using this file to pass information about replication
+            // origins to compute to allow logical replication to restart from proper point.
+            //
+            let mut content = Vec::with_capacity(n_origins * 16 + 8);
+            content.extend_from_slice(&pg_constants::REPLICATION_STATE_MAGIC.to_le_bytes());
+            for (origin_id, origin_lsn) in repl_origins {
+                content.extend_from_slice(&origin_id.to_le_bytes());
+                content.extend_from_slice(&[0u8; 6]); // align to 8 bytes
+                content.extend_from_slice(&origin_lsn.0.to_le_bytes());
+            }
+            let crc32 = crc32c::crc32c(&content);
+            content.extend_from_slice(&crc32.to_le_bytes());
+            let header = new_tar_header("pg_logical/replorigin_checkpoint", content.len() as u64)?;
+            self.ar.append(&header, &*content).await.context(
+                "could not add pg_logical/replorigin_checkpoint file to basebackup tarball",
+            )?;
         }
 
         fail_point!("basebackup-before-control-file", |_| {
