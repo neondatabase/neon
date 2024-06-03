@@ -504,7 +504,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
                     .clone()
             }
         };
-        let permit = semaphore.acquire_deadline(now + self.timeout).await;
+        let permit = semaphore.acquire_timeout(self.timeout).await;
 
         self.metrics
             .semaphore_acquire_seconds
