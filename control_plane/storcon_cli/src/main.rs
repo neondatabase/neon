@@ -726,33 +726,13 @@ async fn main() -> anyhow::Result<()> {
                 .tenant_config(&TenantConfigRequest {
                     tenant_id,
                     config: TenantConfig {
-                        checkpoint_distance: None,
-                        checkpoint_timeout: None,
-                        compaction_target_size: None,
-                        compaction_period: None,
-                        compaction_threshold: None,
-                        compaction_algorithm: None,
-                        gc_horizon: None,
-                        gc_period: None,
-                        image_creation_threshold: None,
-                        pitr_interval: None,
-                        walreceiver_connect_timeout: None,
-                        lagging_wal_timeout: None,
-                        max_lsn_wal_lag: None,
-                        trace_read_requests: None,
                         eviction_policy: Some(EvictionPolicy::LayerAccessThreshold(
                             EvictionPolicyLayerAccessThreshold {
                                 period: period.into(),
                                 threshold: threshold.into(),
                             },
                         )),
-                        min_resident_size_override: None,
-                        evictions_low_residence_duration_metric_threshold: None,
-                        heatmap_period: None,
-                        lazy_slru_download: None,
-                        timeline_get_throttle: None,
-                        image_layer_creation_check_threshold: None,
-                        switch_aux_file_policy: None,
+                        ..Default::default()
                     },
                 })
                 .await?;
