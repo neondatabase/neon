@@ -723,7 +723,7 @@ def test_layer_download_cancelled_by_config_location(neon_env_builder: NeonEnvBu
             download.result()
 
         env.pageserver.assert_log_contains(
-            ".*layer file download failed: Cancelled, shutting down.*"
+            ".*downloading failed, possibly for shutdown.*"
         )
 
         detach.result()
