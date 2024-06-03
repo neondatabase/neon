@@ -691,83 +691,75 @@ def test_layer_download_cancelled_by_config_location(neon_env_builder: NeonEnvBu
     # evict the initdb layer so we can download it
     client.evict_layer(env.initial_tenant, env.initial_timeline, layer.layer_file_name)
 
-    try:
-        with ThreadPoolExecutor(max_workers=2) as exec:
-            download = exec.submit(
-                client.download_layer,
-                env.initial_tenant,
-                env.initial_timeline,
-                layer.layer_file_name,
-            )
+    with ThreadPoolExecutor(max_workers=2) as exec:
+        download = exec.submit(
+            client.download_layer,
+            env.initial_tenant,
+            env.initial_timeline,
+            layer.layer_file_name,
+        )
 
-            _, offset = wait_until(
-                20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
-            )
+        _, offset = wait_until(
+            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+        )
 
-            location_conf = {"mode": "Detached", "tenant_conf": {}}
-            # assume detach removes the layers
-            detach = exec.submit(client.tenant_location_conf, env.initial_tenant, location_conf)
+        location_conf = {"mode": "Detached", "tenant_conf": {}}
+        # assume detach removes the layers
+        detach = exec.submit(client.tenant_location_conf, env.initial_tenant, location_conf)
 
-            started = time.time()
-            _, offset = wait_until(
-                20,
-                0.5,
-                lambda: env.pageserver.assert_log_contains(
-                    "closing is taking longer than expected", offset
-                ),
-            )
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(
+                "closing is taking longer than expected", offset
+            ),
+        )
 
-            client.configure_failpoints((failpoint, "off"))
-
-            with pytest.raises(
-                PageserverApiException, match="downloading failed, possibly for shutdown"
-            ):
-                download.result()
-
-            env.pageserver.assert_log_contains(
-                ".*layer file download failed: Cancelled, shutting down.*"
-            )
-
-            detach.result()
-
-            client.configure_failpoints((failpoint, "pause"))
-
-            _, offset = wait_until(
-                20,
-                0.5,
-                lambda: env.pageserver.assert_log_contains(
-                    f"cfg failpoint: {failpoint} pause", offset
-                ),
-            )
-
-            location_conf = {
-                "mode": "Secondary",
-                "secondary_conf": {"warm": True},
-                "tenant_conf": {},
-            }
-
-            client.tenant_location_conf(env.initial_tenant, location_conf)
-
-            warmup = exec.submit(
-                client.tenant_secondary_download, env.initial_tenant, wait_ms=30000
-            )
-
-            _, offset = wait_until(
-                20,
-                0.5,
-                lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}", offset),
-            )
-
-            client.configure_failpoints((failpoint, "off"))
-            location_conf = {"mode": "Detached", "tenant_conf": {}}
-            client.tenant_location_conf(env.initial_tenant, location_conf)
-
-            client.configure_failpoints((failpoint, "off"))
-
-            # here we have nothing in the log, but we see that the warmup and conf location update worked
-            warmup.result()
-    finally:
         client.configure_failpoints((failpoint, "off"))
+
+        with pytest.raises(
+            PageserverApiException, match="downloading failed, possibly for shutdown"
+        ):
+            download.result()
+
+        env.pageserver.assert_log_contains(
+            ".*layer file download failed: Cancelled, shutting down.*"
+        )
+
+        detach.result()
+
+        client.configure_failpoints((failpoint, "pause"))
+
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(f"cfg failpoint: {failpoint} pause", offset),
+        )
+
+        location_conf = {
+            "mode": "Secondary",
+            "secondary_conf": {"warm": True},
+            "tenant_conf": {},
+        }
+
+        client.tenant_location_conf(env.initial_tenant, location_conf)
+
+        warmup = exec.submit(client.tenant_secondary_download, env.initial_tenant, wait_ms=30000)
+
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}", offset),
+        )
+
+        client.configure_failpoints((failpoint, "off"))
+        location_conf = {"mode": "Detached", "tenant_conf": {}}
+        client.tenant_location_conf(env.initial_tenant, location_conf)
+
+        client.configure_failpoints((failpoint, "off"))
+
+        # here we have nothing in the log, but we see that the warmup and conf location update worked
+        warmup.result()
 
 
 def test_layer_download_timeouted(neon_env_builder: NeonEnvBuilder):
@@ -799,77 +791,68 @@ def test_layer_download_timeouted(neon_env_builder: NeonEnvBuilder):
     # evict so we can download it
     client.evict_layer(env.initial_tenant, env.initial_timeline, layer.layer_file_name)
 
-    try:
-        with ThreadPoolExecutor(max_workers=2) as exec:
-            download = exec.submit(
-                client.download_layer,
-                env.initial_tenant,
-                env.initial_timeline,
-                layer.layer_file_name,
-            )
+    with ThreadPoolExecutor(max_workers=2) as exec:
+        download = exec.submit(
+            client.download_layer,
+            env.initial_tenant,
+            env.initial_timeline,
+            layer.layer_file_name,
+        )
 
-            _, offset = wait_until(
-                20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
-            )
-            # ensure enough time while paused to trip the timeout
-            time.sleep(2)
+        _, offset = wait_until(
+            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+        )
+        # ensure enough time while paused to trip the timeout
+        time.sleep(2)
 
-            client.configure_failpoints((failpoint, "off"))
-            download.result()
-
-            _, offset = env.pageserver.assert_log_contains(
-                ".*failed, will retry \\(attempt 0\\): timeout.*"
-            )
-            _, offset = env.pageserver.assert_log_contains(
-                ".*succeeded after [0-9]+ retries.*", offset
-            )
-
-            client.evict_layer(env.initial_tenant, env.initial_timeline, layer.layer_file_name)
-
-            client.configure_failpoints((failpoint, "pause"))
-
-            # capture the next offset for a new synchronization with the failpoint
-            _, offset = wait_until(
-                20,
-                0.5,
-                lambda: env.pageserver.assert_log_contains(
-                    f"cfg failpoint: {failpoint} pause", offset
-                ),
-            )
-
-            location_conf = {
-                "mode": "Secondary",
-                "secondary_conf": {"warm": True},
-                "tenant_conf": {},
-            }
-
-            client.tenant_location_conf(
-                env.initial_tenant,
-                location_conf,
-            )
-
-            warmup = exec.submit(
-                client.tenant_secondary_download, env.initial_tenant, wait_ms=30000
-            )
-            # ensure enough time while paused to trip the timeout
-            time.sleep(2)
-
-            client.configure_failpoints((failpoint, "off"))
-
-            warmup.result()
-
-            elapsed = time.time() - started
-
-            _, offset = env.pageserver.assert_log_contains(
-                ".*failed, will retry \\(attempt 0\\): timeout.*", offset
-            )
-            _, offset = env.pageserver.assert_log_contains(
-                ".*succeeded after [0-9]+ retries.*", offset
-            )
-
-            assert elapsed < 30, "too long passed: {elapsed=}"
-    finally:
         client.configure_failpoints((failpoint, "off"))
+        download.result()
+
+        _, offset = env.pageserver.assert_log_contains(
+            ".*failed, will retry \\(attempt 0\\): timeout.*"
+        )
+        _, offset = env.pageserver.assert_log_contains(".*succeeded after [0-9]+ retries.*", offset)
+
+        client.evict_layer(env.initial_tenant, env.initial_timeline, layer.layer_file_name)
+
+        client.configure_failpoints((failpoint, "pause"))
+
+        # capture the next offset for a new synchronization with the failpoint
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(f"cfg failpoint: {failpoint} pause", offset),
+        )
+
+        location_conf = {
+            "mode": "Secondary",
+            "secondary_conf": {"warm": True},
+            "tenant_conf": {},
+        }
+
+        client.tenant_location_conf(
+            env.initial_tenant,
+            location_conf,
+        )
+
+        started = time.time()
+
+        warmup = exec.submit(client.tenant_secondary_download, env.initial_tenant, wait_ms=30000)
+        # ensure enough time while paused to trip the timeout
+        time.sleep(2)
+
+        client.configure_failpoints((failpoint, "off"))
+
+        warmup.result()
+
+        elapsed = time.time() - started
+
+        _, offset = env.pageserver.assert_log_contains(
+            ".*failed, will retry \\(attempt 0\\): timeout.*", offset
+        )
+        _, offset = env.pageserver.assert_log_contains(".*succeeded after [0-9]+ retries.*", offset)
+
+        assert elapsed < 30, "too long passed: {elapsed=}"
 
 
 def stringify(conf: Dict[str, Any]) -> Dict[str, str]:
