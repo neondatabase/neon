@@ -5,10 +5,11 @@ import json
 import logging
 import os
 from collections import defaultdict
-from typing import DefaultDict, Dict
+from typing import Any, DefaultDict, Dict, Optional
 
 import psycopg2
 import psycopg2.extras
+import toml
 
 FLAKY_TESTS_QUERY = """
     SELECT
@@ -58,6 +59,24 @@ def main(args: argparse.Namespace):
     else:
         pageserver_virtual_file_io_engine_parameter = ""
 
+    # re-use existing records of flaky tests from before parametrization by compaction_algorithm
+    def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+        """Duplicated from parametrize.py"""
+        toml_table = os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
+        if toml_table is None:
+            return None
+        v = toml.loads(toml_table)
+        assert isinstance(v, dict)
+        return v
+
+    pageserver_default_tenant_config_compaction_algorithm_parameter = ""
+    if (
+        explicit_default := get_pageserver_default_tenant_config_compaction_algorithm()
+    ) is not None:
+        pageserver_default_tenant_config_compaction_algorithm_parameter = (
+            f"-{explicit_default['kind']}"
+        )
+
     for row in rows:
         # We don't want to automatically rerun tests in a performance suite
         if row["parent_suite"] != "test_runner.regress":
@@ -66,10 +85,10 @@ def main(args: argparse.Namespace):
         if row["name"].endswith("]"):
             parametrized_test = row["name"].replace(
                 "[",
-                f"[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}-",
+                f"[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}-",
             )
         else:
-            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}]"
+            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}]"
 
         res[row["parent_suite"]][row["suite"]][parametrized_test] = True
 

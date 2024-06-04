@@ -9,7 +9,10 @@ use std::ops::{Deref, Range};
 use std::sync::Arc;
 
 use super::layer_manager::LayerManager;
-use super::{CompactFlags, DurationRecorder, ImageLayerCreationMode, RecordedDuration, Timeline};
+use super::{
+    CompactFlags, CreateImageLayersError, DurationRecorder, ImageLayerCreationMode,
+    RecordedDuration, Timeline,
+};
 
 use anyhow::{anyhow, Context};
 use enumset::EnumSet;
@@ -22,14 +25,13 @@ use tracing::{debug, info, info_span, trace, warn, Instrument};
 use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
+use crate::page_cache;
 use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
-use crate::tenant::timeline::{drop_rlock, is_rel_fsm_block_key, is_rel_vm_block_key, Hole};
+use crate::tenant::timeline::{drop_rlock, Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::DeltaLayer;
-use crate::tenant::PageReconstructError;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
-use crate::{page_cache, ZERO_PAGE};
 
 use crate::keyspace::KeySpace;
 use crate::repository::Key;
@@ -116,9 +118,13 @@ impl Timeline {
 
                 // 3. Create new image layers for partitions that have been modified
                 // "enough".
-                let dense_layers = self
+                let mut partitioning = dense_partitioning;
+                partitioning
+                    .parts
+                    .extend(sparse_partitioning.into_dense().parts);
+                let image_layers = self
                     .create_image_layers(
-                        &dense_partitioning,
+                        &partitioning,
                         lsn,
                         if flags.contains(CompactFlags::ForceImageLayerCreation) {
                             ImageLayerCreationMode::Force
@@ -127,27 +133,10 @@ impl Timeline {
                         },
                         &image_ctx,
                     )
-                    .await
-                    .map_err(anyhow::Error::from)?;
+                    .await?;
 
-                // For now, nothing will be produced...
-                let sparse_layers = self
-                    .create_image_layers(
-                        &sparse_partitioning.clone().into_dense(),
-                        lsn,
-                        if flags.contains(CompactFlags::ForceImageLayerCreation) {
-                            ImageLayerCreationMode::Force
-                        } else {
-                            ImageLayerCreationMode::Try
-                        },
-                        &image_ctx,
-                    )
-                    .await
-                    .map_err(anyhow::Error::from)?;
-                assert!(sparse_layers.is_empty());
-
-                self.upload_new_image_layers(dense_layers)?;
-                dense_partitioning.parts.len()
+                self.upload_new_image_layers(image_layers)?;
+                partitioning.parts.len()
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -186,13 +175,24 @@ impl Timeline {
     async fn compact_shard_ancestors(
         self: &Arc<Self>,
         rewrite_max: usize,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut drop_layers = Vec::new();
-        let layers_to_rewrite: Vec<Layer> = Vec::new();
+        let mut layers_to_rewrite: Vec<Layer> = Vec::new();
 
-        // We will use the PITR cutoff as a condition for rewriting layers.
-        let pitr_cutoff = self.gc_info.read().unwrap().cutoffs.pitr;
+        // We will use the Lsn cutoff of the last GC as a threshold for rewriting layers: if a
+        // layer is behind this Lsn, it indicates that the layer is being retained beyond the
+        // pitr_interval, for example because a branchpoint references it.
+        //
+        // Holding this read guard also blocks [`Self::gc_timeline`] from entering while we
+        // are rewriting layers.
+        let latest_gc_cutoff = self.get_latest_gc_cutoff_lsn();
+
+        tracing::info!(
+            "latest_gc_cutoff: {}, pitr cutoff {}",
+            *latest_gc_cutoff,
+            self.gc_info.read().unwrap().cutoffs.pitr
+        );
 
         let layers = self.layers.read().await;
         for layer_desc in layers.layer_map().iter_historic_layers() {
@@ -251,9 +251,9 @@ impl Timeline {
 
             // Don't bother re-writing a layer if it is within the PITR window: it will age-out eventually
             // without incurring the I/O cost of a rewrite.
-            if layer_desc.get_lsn_range().end >= pitr_cutoff {
-                debug!(%layer, "Skipping rewrite of layer still in PITR window ({} >= {})",
-                    layer_desc.get_lsn_range().end, pitr_cutoff);
+            if layer_desc.get_lsn_range().end >= *latest_gc_cutoff {
+                debug!(%layer, "Skipping rewrite of layer still in GC window ({} >= {})",
+                    layer_desc.get_lsn_range().end, *latest_gc_cutoff);
                 continue;
             }
 
@@ -263,13 +263,10 @@ impl Timeline {
                 continue;
             }
 
-            // Only rewrite layers if they would have different remote paths: either they belong to this
-            // shard but an old generation, or they belonged to another shard.  This also implicitly
-            // guarantees that the layer is persistent in remote storage (as only remote persistent
-            // layers are carried across shard splits, any local-only layer would be in the current generation)
-            if layer.metadata().generation == self.generation
-                && layer.metadata().shard.shard_count == self.shard_identity.count
-            {
+            // Only rewrite layers if their generations differ.  This guarantees:
+            //  - that local rewrite is safe, as local layer paths will differ between existing layer and rewritten one
+            //  - that the layer is persistent in remote storage, as we only see old-generation'd layer via loading from remote storage
+            if layer.metadata().generation == self.generation {
                 debug!(%layer, "Skipping rewrite, is not from old generation");
                 continue;
             }
@@ -282,26 +279,77 @@ impl Timeline {
             }
 
             // Fall through: all our conditions for doing a rewrite passed.
-            // TODO: implement rewriting
-            tracing::debug!(%layer, "Would rewrite layer");
+            layers_to_rewrite.push(layer);
         }
 
-        // Drop the layers read lock: we will acquire it for write in [`Self::rewrite_layers`]
+        // Drop read lock on layer map before we start doing time-consuming I/O
         drop(layers);
 
-        // TODO: collect layers to rewrite
-        let replace_layers = Vec::new();
+        let mut replace_image_layers = Vec::new();
+
+        for layer in layers_to_rewrite {
+            tracing::info!(layer=%layer, "Rewriting layer after shard split...");
+            let mut image_layer_writer = ImageLayerWriter::new(
+                self.conf,
+                self.timeline_id,
+                self.tenant_shard_id,
+                &layer.layer_desc().key_range,
+                layer.layer_desc().image_layer_lsn(),
+                ctx,
+            )
+            .await?;
+
+            // Safety of layer rewrites:
+            // - We are writing to a different local file path than we are reading from, so the old Layer
+            //   cannot interfere with the new one.
+            // - In the page cache, contents for a particular VirtualFile are stored with a file_id that
+            //   is different for two layers with the same name (in `ImageLayerInner::new` we always
+            //   acquire a fresh id from [`crate::page_cache::next_file_id`].  So readers do not risk
+            //   reading the index from one layer file, and then data blocks from the rewritten layer file.
+            // - Any readers that have a reference to the old layer will keep it alive until they are done
+            //   with it. If they are trying to promote from remote storage, that will fail, but this is the same
+            //   as for compaction generally: compaction is allowed to delete layers that readers might be trying to use.
+            // - We do not run concurrently with other kinds of compaction, so the only layer map writes we race with are:
+            //    - GC, which at worst witnesses us "undelete" a layer that they just deleted.
+            //    - ingestion, which only inserts layers, therefore cannot collide with us.
+            let resident = layer.download_and_keep_resident().await?;
+
+            let keys_written = resident
+                .filter(&self.shard_identity, &mut image_layer_writer, ctx)
+                .await?;
+
+            if keys_written > 0 {
+                let new_layer = image_layer_writer.finish(self, ctx).await?;
+                tracing::info!(layer=%new_layer, "Rewrote layer, {} -> {} bytes",
+                    layer.metadata().file_size,
+                    new_layer.metadata().file_size);
+
+                replace_image_layers.push((layer, new_layer));
+            } else {
+                // Drop the old layer.  Usually for this case we would already have noticed that
+                // the layer has no data for us with the ShardedRange check above, but
+                drop_layers.push(layer);
+            }
+        }
+
+        // At this point, we have replaced local layer files with their rewritten form, but not yet uploaded
+        // metadata to reflect that. If we restart here, the replaced layer files will look invalid (size mismatch
+        // to remote index) and be removed. This is inefficient but safe.
+        fail::fail_point!("compact-shard-ancestors-localonly");
 
         // Update the LayerMap so that readers will use the new layers, and enqueue it for writing to remote storage
-        self.rewrite_layers(replace_layers, drop_layers).await?;
+        self.rewrite_layers(replace_image_layers, drop_layers)
+            .await?;
 
-        if let Some(remote_client) = self.remote_client.as_ref() {
-            // We wait for all uploads to complete before finishing this compaction stage.  This is not
-            // necessary for correctness, but it simplifies testing, and avoids proceeding with another
-            // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
-            // load.
-            remote_client.wait_completion().await?;
-        }
+        fail::fail_point!("compact-shard-ancestors-enqueued");
+
+        // We wait for all uploads to complete before finishing this compaction stage.  This is not
+        // necessary for correctness, but it simplifies testing, and avoids proceeding with another
+        // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
+        // load.
+        self.remote_client.wait_completion().await?;
+
+        fail::fail_point!("compact-shard-ancestors-persistent");
 
         Ok(())
     }
@@ -501,8 +549,11 @@ impl Timeline {
 
         for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
             if let Some(prev_key) = prev {
-                // just first fast filter
-                if next_key.to_i128() - prev_key.to_i128() >= min_hole_range {
+                // just first fast filter, do not create hole entries for metadata keys. The last hole in the
+                // compaction is the gap between data key and metadata keys.
+                if next_key.to_i128() - prev_key.to_i128() >= min_hole_range
+                    && !Key::is_metadata_key(&prev_key)
+                {
                     let key_range = prev_key..next_key;
                     // Measuring hole by just subtraction of i128 representation of key range boundaries
                     // has not so much sense, because largest holes will corresponds field1/field2 changes.
@@ -1161,10 +1212,10 @@ impl TimelineAdaptor {
         lsn: Lsn,
         key_range: &Range<Key>,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<(), CreateImageLayersError> {
         let timer = self.timeline.metrics.create_images_time_histo.start_timer();
 
-        let mut image_layer_writer = ImageLayerWriter::new(
+        let image_layer_writer = ImageLayerWriter::new(
             self.timeline.conf,
             self.timeline.timeline_id,
             self.timeline.tenant_shard_id,
@@ -1175,47 +1226,34 @@ impl TimelineAdaptor {
         .await?;
 
         fail_point!("image-layer-writer-fail-before-finish", |_| {
-            Err(PageReconstructError::Other(anyhow::anyhow!(
+            Err(CreateImageLayersError::Other(anyhow::anyhow!(
                 "failpoint image-layer-writer-fail-before-finish"
             )))
         });
-        let keyspace_ranges = self.get_keyspace(key_range, lsn, ctx).await?;
-        for range in &keyspace_ranges {
-            let mut key = range.start;
-            while key < range.end {
-                let img = match self.timeline.get(key, lsn, ctx).await {
-                    Ok(img) => img,
-                    Err(err) => {
-                        // If we fail to reconstruct a VM or FSM page, we can zero the
-                        // page without losing any actual user data. That seems better
-                        // than failing repeatedly and getting stuck.
-                        //
-                        // We had a bug at one point, where we truncated the FSM and VM
-                        // in the pageserver, but the Postgres didn't know about that
-                        // and continued to generate incremental WAL records for pages
-                        // that didn't exist in the pageserver. Trying to replay those
-                        // WAL records failed to find the previous image of the page.
-                        // This special case allows us to recover from that situation.
-                        // See https://github.com/neondatabase/neon/issues/2601.
-                        //
-                        // Unfortunately we cannot do this for the main fork, or for
-                        // any metadata keys, keys, as that would lead to actual data
-                        // loss.
-                        if is_rel_fsm_block_key(key) || is_rel_vm_block_key(key) {
-                            warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
-                            ZERO_PAGE.clone()
-                        } else {
-                            return Err(err);
-                        }
-                    }
-                };
-                image_layer_writer.put_image(key, img, ctx).await?;
-                key = key.next();
-            }
-        }
-        let image_layer = image_layer_writer.finish(&self.timeline, ctx).await?;
 
-        self.new_images.push(image_layer);
+        let keyspace = KeySpace {
+            ranges: self.get_keyspace(key_range, lsn, ctx).await?,
+        };
+        // TODO set proper (stateful) start. The create_image_layer_for_rel_blocks function mostly
+        let start = Key::MIN;
+        let ImageLayerCreationOutcome {
+            image,
+            next_start_key: _,
+        } = self
+            .timeline
+            .create_image_layer_for_rel_blocks(
+                &keyspace,
+                image_layer_writer,
+                lsn,
+                ctx,
+                key_range.clone(),
+                start,
+            )
+            .await?;
+
+        if let Some(image_layer) = image {
+            self.new_images.push(image_layer);
+        }
 
         timer.stop_and_record();
 

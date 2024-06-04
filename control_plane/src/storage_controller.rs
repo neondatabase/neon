@@ -243,9 +243,13 @@ impl StorageController {
                 anyhow::bail!("initdb failed with status {status}");
             }
 
+            // Write a minimal config file:
+            // - Specify the port, since this is chosen dynamically
+            // - Switch off fsync, since we're running on lightweight test environments and when e.g. scale testing
+            //   the storage controller we don't want a slow local disk to interfere with that.
             tokio::fs::write(
                 &pg_data_path.join("postgresql.conf"),
-                format!("port = {}", self.postgres_port),
+                format!("port = {}\nfsync=off\n", self.postgres_port),
             )
             .await?;
         };
@@ -303,6 +307,10 @@ impl StorageController {
             args.push(format!(
                 "--compute-hook-url={control_plane_compute_hook_api}"
             ));
+        }
+
+        if let Some(split_threshold) = self.config.split_threshold.as_ref() {
+            args.push(format!("--split-threshold={split_threshold}"))
         }
 
         background_process::start_process(

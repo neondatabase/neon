@@ -2,9 +2,11 @@ use pageserver_api::{models::HistoricLayerInfo, shard::TenantShardId};
 
 use pageserver_client::mgmt_api;
 use rand::seq::SliceRandom;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use utils::id::{TenantTimelineId, TimelineId};
 
+use std::{f64, sync::Arc};
 use tokio::{
     sync::{mpsc, OwnedSemaphorePermit},
     task::JoinSet,
@@ -12,10 +14,7 @@ use tokio::{
 
 use std::{
     num::NonZeroUsize,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -51,19 +50,31 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct Output {
+    downloads_count: u64,
+    downloads_bytes: u64,
+    evictions_count: u64,
+    timeline_restarts: u64,
+    #[serde(with = "humantime_serde")]
+    runtime: Duration,
+}
+
 #[derive(Debug, Default)]
 struct LiveStats {
-    evictions: AtomicU64,
-    downloads: AtomicU64,
+    evictions_count: AtomicU64,
+    downloads_count: AtomicU64,
+    downloads_bytes: AtomicU64,
     timeline_restarts: AtomicU64,
 }
 
 impl LiveStats {
     fn eviction_done(&self) {
-        self.evictions.fetch_add(1, Ordering::Relaxed);
+        self.evictions_count.fetch_add(1, Ordering::Relaxed);
     }
-    fn download_done(&self) {
-        self.downloads.fetch_add(1, Ordering::Relaxed);
+    fn download_done(&self, size: u64) {
+        self.downloads_count.fetch_add(1, Ordering::Relaxed);
+        self.downloads_bytes.fetch_add(size, Ordering::Relaxed);
     }
     fn timeline_restart_done(&self) {
         self.timeline_restarts.fetch_add(1, Ordering::Relaxed);
@@ -92,28 +103,49 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
+    let token = CancellationToken::new();
     let mut tasks = JoinSet::new();
 
-    let live_stats = Arc::new(LiveStats::default());
+    let periodic_stats = Arc::new(LiveStats::default());
+    let total_stats = Arc::new(LiveStats::default());
+
+    let start = Instant::now();
     tasks.spawn({
-        let live_stats = Arc::clone(&live_stats);
+        let periodic_stats = Arc::clone(&periodic_stats);
+        let total_stats = Arc::clone(&total_stats);
+        let cloned_token = token.clone();
         async move {
             let mut last_at = Instant::now();
             loop {
+                if cloned_token.is_cancelled() {
+                    return;
+                }
                 tokio::time::sleep_until((last_at + Duration::from_secs(1)).into()).await;
                 let now = Instant::now();
                 let delta: Duration = now - last_at;
                 last_at = now;
 
                 let LiveStats {
-                    evictions,
-                    downloads,
+                    evictions_count,
+                    downloads_count,
+                    downloads_bytes,
                     timeline_restarts,
-                } = &*live_stats;
-                let evictions = evictions.swap(0, Ordering::Relaxed) as f64 / delta.as_secs_f64();
-                let downloads = downloads.swap(0, Ordering::Relaxed) as f64 / delta.as_secs_f64();
+                } = &*periodic_stats;
+                let evictions_count = evictions_count.swap(0, Ordering::Relaxed);
+                let downloads_count = downloads_count.swap(0, Ordering::Relaxed);
+                let downloads_bytes = downloads_bytes.swap(0, Ordering::Relaxed);
                 let timeline_restarts = timeline_restarts.swap(0, Ordering::Relaxed);
-                info!("evictions={evictions:.2}/s downloads={downloads:.2}/s timeline_restarts={timeline_restarts}");
+
+                total_stats.evictions_count.fetch_add(evictions_count, Ordering::Relaxed);
+                total_stats.downloads_count.fetch_add(downloads_count, Ordering::Relaxed);
+                total_stats.downloads_bytes.fetch_add(downloads_bytes, Ordering::Relaxed);
+                total_stats.timeline_restarts.fetch_add(timeline_restarts, Ordering::Relaxed);
+
+                let evictions_per_s = evictions_count as f64 / delta.as_secs_f64();
+                let downloads_per_s = downloads_count as f64 / delta.as_secs_f64();
+                let downloads_mibs_per_s = downloads_bytes as f64 / delta.as_secs_f64() / ((1 << 20) as f64);
+
+                info!("evictions={evictions_per_s:.2}/s downloads={downloads_per_s:.2}/s download_bytes={downloads_mibs_per_s:.2}MiB/s timeline_restarts={timeline_restarts}");
             }
         }
     });
@@ -124,14 +156,42 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                 args,
                 Arc::clone(&mgmt_api_client),
                 tl,
-                Arc::clone(&live_stats),
+                Arc::clone(&periodic_stats),
+                token.clone(),
             ));
         }
+    }
+    if let Some(runtime) = args.runtime {
+        tokio::spawn(async move {
+            tokio::time::sleep(runtime.into()).await;
+            token.cancel();
+        });
     }
 
     while let Some(res) = tasks.join_next().await {
         res.unwrap();
     }
+    let end = Instant::now();
+    let duration: Duration = end - start;
+
+    let output = {
+        let LiveStats {
+            evictions_count,
+            downloads_count,
+            downloads_bytes,
+            timeline_restarts,
+        } = &*total_stats;
+        Output {
+            downloads_count: downloads_count.load(Ordering::Relaxed),
+            downloads_bytes: downloads_bytes.load(Ordering::Relaxed),
+            evictions_count: evictions_count.load(Ordering::Relaxed),
+            timeline_restarts: timeline_restarts.load(Ordering::Relaxed),
+            runtime: duration,
+        }
+    };
+    let output = serde_json::to_string_pretty(&output).unwrap();
+    println!("{output}");
+
     Ok(())
 }
 
@@ -140,6 +200,7 @@ async fn timeline_actor(
     mgmt_api_client: Arc<pageserver_client::mgmt_api::Client>,
     timeline: TenantTimelineId,
     live_stats: Arc<LiveStats>,
+    token: CancellationToken,
 ) {
     // TODO: support sharding
     let tenant_shard_id = TenantShardId::unsharded(timeline.tenant_id);
@@ -149,7 +210,7 @@ async fn timeline_actor(
         layers: Vec<mpsc::Sender<OwnedSemaphorePermit>>,
         concurrency: Arc<tokio::sync::Semaphore>,
     }
-    loop {
+    while !token.is_cancelled() {
         debug!("restarting timeline");
         let layer_map_info = mgmt_api_client
             .layer_map_info(tenant_shard_id, timeline.timeline_id)
@@ -185,7 +246,7 @@ async fn timeline_actor(
 
         live_stats.timeline_restart_done();
 
-        loop {
+        while !token.is_cancelled() {
             assert!(!timeline.joinset.is_empty());
             if let Some(res) = timeline.joinset.try_join_next() {
                 debug!(?res, "a layer actor exited, should not happen");
@@ -255,7 +316,7 @@ async fn layer_actor(
                     .layer_ondemand_download(tenant_shard_id, timeline_id, layer.layer_file_name())
                     .await
                     .unwrap();
-                live_stats.download_done();
+                live_stats.download_done(layer.layer_file_size());
                 did_it
             }
         };

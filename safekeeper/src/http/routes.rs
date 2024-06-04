@@ -85,11 +85,11 @@ impl From<TermSwitchApiEntry> for TermLsn {
     }
 }
 
-/// Augment AcceptorState with epoch for convenience
+/// Augment AcceptorState with last_log_term for convenience
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AcceptorStateStatus {
     pub term: Term,
-    pub epoch: Term,
+    pub epoch: Term, // aka last_log_term
     pub term_history: Vec<TermSwitchApiEntry>,
 }
 
@@ -130,7 +130,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     let (inmem, state) = tli.get_state().await;
     let flush_lsn = tli.get_flush_lsn().await;
 
-    let epoch = state.acceptor_state.get_epoch(flush_lsn);
+    let last_log_term = state.acceptor_state.get_last_log_term(flush_lsn);
     let term_history = state
         .acceptor_state
         .term_history
@@ -143,7 +143,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         .collect();
     let acc_state = AcceptorStateStatus {
         term: state.acceptor_state.term,
-        epoch,
+        epoch: last_log_term,
         term_history,
     };
 
@@ -249,6 +249,10 @@ async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body
     };
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let tli = tli
+        .full_access_guard()
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     let response = debug_dump::calculate_digest(&tli, request)
         .await
@@ -268,8 +272,12 @@ async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>
     let filename: String = parse_request_param(&request, "filename")?;
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let tli = tli
+        .full_access_guard()
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
-    let filepath = tli.timeline_dir.join(filename);
+    let filepath = tli.get_timeline_dir().join(filename);
     let mut file = File::open(&filepath)
         .await
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
@@ -285,6 +293,26 @@ async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>
         .header("Content-Type", "application/octet-stream")
         .body(Body::from(content))
         .map_err(|e| ApiError::InternalServerError(e.into()))
+}
+
+/// Force persist control file.
+async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+
+    let tli = GlobalTimelines::get(ttid)?;
+    tli.write_shared_state()
+        .await
+        .sk
+        .state
+        .flush()
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, ())
 }
 
 /// Deactivates the timeline and removes its data directory.
@@ -350,6 +378,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         backup_lsn: sk_info.backup_lsn.0,
         local_start_lsn: sk_info.local_start_lsn.0,
         availability_zone: None,
+        standby_horizon: sk_info.standby_horizon.0,
     };
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
@@ -551,6 +580,10 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .patch(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/control_file",
             |r| request_span(r, patch_control_file_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
+            |r| request_span(r, timeline_checkpoint_handler),
         )
         // for tests
         .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {

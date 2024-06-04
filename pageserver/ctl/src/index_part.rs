@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use pageserver::tenant::remote_timeline_client::index::IndexLayerMetadata;
+use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::{metadata::TimelineMetadata, IndexPart};
 use utils::lsn::Lsn;
@@ -19,7 +19,7 @@ pub(crate) async fn main(cmd: &IndexPartCmd) -> anyhow::Result<()> {
             let des: IndexPart = IndexPart::from_s3_bytes(&bytes).context("deserialize")?;
             #[derive(serde::Serialize)]
             struct Output<'a> {
-                layer_metadata: &'a HashMap<LayerName, IndexLayerMetadata>,
+                layer_metadata: &'a HashMap<LayerName, LayerFileMetadata>,
                 disk_consistent_lsn: Lsn,
                 timeline_metadata: &'a TimelineMetadata,
             }

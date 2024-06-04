@@ -189,6 +189,7 @@ use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
 pub(crate) use download::download_initdb_tar_zst;
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -196,6 +197,7 @@ pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
+use utils::pausable_failpoint;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -317,7 +319,7 @@ pub struct RemoteTimelineClient {
 
     upload_queue: Mutex<UploadQueue>,
 
-    metrics: Arc<RemoteTimelineClientMetrics>,
+    pub(crate) metrics: Arc<RemoteTimelineClientMetrics>,
 
     storage_impl: GenericRemoteStorage,
 
@@ -461,11 +463,11 @@ impl RemoteTimelineClient {
         } else {
             0
         };
-        self.metrics.remote_physical_size_set(size);
+        self.metrics.remote_physical_size_gauge.set(size);
     }
 
     pub fn get_remote_physical_size(&self) -> u64 {
-        self.metrics.remote_physical_size_get()
+        self.metrics.remote_physical_size_gauge.get()
     }
 
     //
@@ -518,6 +520,7 @@ impl RemoteTimelineClient {
         &self,
         layer_file_name: &LayerName,
         layer_metadata: &LayerFileMetadata,
+        local_path: &Utf8Path,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<u64> {
@@ -536,6 +539,7 @@ impl RemoteTimelineClient {
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
+                local_path,
                 cancel,
                 ctx,
             )
@@ -609,6 +613,17 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Launch an index-file upload operation in the background, with only aux_file_policy flag updated.
+    pub(crate) fn schedule_index_upload_for_aux_file_policy_update(
+        self: &Arc<Self>,
+        last_aux_file_policy: Option<AuxFilePolicy>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        upload_queue.last_aux_file_policy = last_aux_file_policy;
+        self.schedule_index_upload(upload_queue);
+        Ok(())
+    }
     ///
     /// Launch an index-file upload operation in the background, if necessary.
     ///
@@ -1127,6 +1142,11 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    pub(crate) fn is_deleting(&self) -> bool {
+        let mut locked = self.upload_queue.lock().unwrap();
+        locked.stopped_mut().is_ok()
+    }
+
     pub(crate) async fn preserve_initdb_archive(
         self: &Arc<Self>,
         tenant_id: &TenantId,
@@ -1173,7 +1193,7 @@ impl RemoteTimelineClient {
                     &self.storage_impl,
                     uploaded.local_path(),
                     &remote_path,
-                    uploaded.metadata().file_size(),
+                    uploaded.metadata().file_size,
                     cancel,
                 )
                 .await
@@ -1554,7 +1574,7 @@ impl RemoteTimelineClient {
                         &self.storage_impl,
                         local_path,
                         &remote_path,
-                        layer_metadata.file_size(),
+                        layer_metadata.file_size,
                         &self.cancel,
                     )
                     .measure_remote_op(
@@ -1749,7 +1769,7 @@ impl RemoteTimelineClient {
             UploadOp::UploadLayer(_, m) => (
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Upload,
-                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size()),
+                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size),
             ),
             UploadOp::UploadMetadata(_, _) => (
                 RemoteOpFileKind::Index,
@@ -1844,6 +1864,7 @@ impl RemoteTimelineClient {
                         dangling_files: HashMap::default(),
                         shutting_down: false,
                         shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
+                        last_aux_file_policy: initialized.last_aux_file_policy,
                     };
 
                     let upload_queue = std::mem::replace(
@@ -2132,7 +2153,7 @@ mod tests {
             tenant_ctx: _tenant_ctx,
         } = test_setup;
 
-        let client = timeline.remote_client.as_ref().unwrap();
+        let client = &timeline.remote_client;
 
         // Download back the index.json, and check that the list of files is correct
         let initial_index_part = match client
@@ -2323,7 +2344,7 @@ mod tests {
             timeline,
             ..
         } = TestSetup::new("metrics").await.unwrap();
-        let client = timeline.remote_client.as_ref().unwrap();
+        let client = &timeline.remote_client;
 
         let layer_file_name_1: LayerName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
         let local_path = local_layer_path(

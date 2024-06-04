@@ -135,7 +135,8 @@ impl Gate {
         let started_at = std::time::Instant::now();
         let mut do_close = std::pin::pin!(self.do_close());
 
-        let nag_after = Duration::from_secs(1);
+        // with 1s we rarely saw anything, let's try if we get more gate closing reasons with 100ms
+        let nag_after = Duration::from_millis(100);
 
         let Err(_timeout) = tokio::time::timeout(nag_after, &mut do_close).await else {
             return;

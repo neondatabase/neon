@@ -19,6 +19,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::ShardIndex;
 use pageserver_api::shard::ShardNumber;
+use pageserver_api::shard::TenantShardId;
 use postgres_backend::{is_expected_io_error, AuthType, PostgresBackend, QueryError};
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
@@ -32,6 +33,8 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
@@ -49,7 +52,6 @@ use utils::{
 use crate::auth::check_permission;
 use crate::basebackup;
 use crate::basebackup::BasebackupError;
-use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
@@ -59,13 +61,16 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
-use crate::tenant::mgr;
-use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
+use crate::tenant::mgr::GetTenantError;
+use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
+use crate::tenant::mgr::TenantManager;
+use crate::tenant::timeline::FlushLayerError;
 use crate::tenant::timeline::WaitLsnError;
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
+use crate::tenant::Tenant;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
 use pageserver_api::key::rel_block_to_key;
@@ -135,7 +140,7 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
 /// Listens for connections, and launches a new handler task for each.
 ///
 pub async fn libpq_listener_main(
-    conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
     broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: TcpListener,
@@ -180,7 +185,7 @@ pub async fn libpq_listener_main(
                     "serving compute connection task",
                     false,
                     page_service_conn_main(
-                        conf,
+                        tenant_manager.clone(),
                         broker_client.clone(),
                         local_auth,
                         socket,
@@ -203,7 +208,7 @@ pub async fn libpq_listener_main(
 
 #[instrument(skip_all, fields(peer_addr))]
 async fn page_service_conn_main(
-    conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
     broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
@@ -256,11 +261,14 @@ async fn page_service_conn_main(
     socket.set_timeout(Some(std::time::Duration::from_millis(socket_timeout_ms)));
     let socket = std::pin::pin!(socket);
 
+    fail::fail_point!("ps::connection-start::pre-login");
+
     // XXX: pgbackend.run() should take the connection_ctx,
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler = PageServerHandler::new(conf, broker_client, auth, connection_ctx);
+    let mut conn_handler =
+        PageServerHandler::new(tenant_manager, broker_client, auth, connection_ctx);
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
@@ -291,10 +299,11 @@ struct HandlerTimeline {
 }
 
 struct PageServerHandler {
-    _conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
+
+    tenant_manager: Arc<TenantManager>,
 
     /// The context created for the lifetime of the connection
     /// services by this PageServerHandler.
@@ -364,7 +373,7 @@ impl From<WaitLsnError> for PageStreamError {
         match value {
             e @ WaitLsnError::Timeout(_) => Self::LsnTimeout(e),
             WaitLsnError::Shutdown => Self::Shutdown,
-            WaitLsnError::BadState => Self::Reconnect("Timeline is not active".into()),
+            e @ WaitLsnError::BadState { .. } => Self::Reconnect(format!("{e}").into()),
         }
     }
 }
@@ -374,20 +383,20 @@ impl From<WaitLsnError> for QueryError {
         match value {
             e @ WaitLsnError::Timeout(_) => Self::Other(anyhow::Error::new(e)),
             WaitLsnError::Shutdown => Self::Shutdown,
-            WaitLsnError::BadState => Self::Reconnect,
+            WaitLsnError::BadState { .. } => Self::Reconnect,
         }
     }
 }
 
 impl PageServerHandler {
     pub fn new(
-        conf: &'static PageServerConf,
+        tenant_manager: Arc<TenantManager>,
         broker_client: storage_broker::BrokerClientChannel,
         auth: Option<Arc<SwappableJwtAuth>>,
         connection_ctx: RequestContext,
     ) -> Self {
         PageServerHandler {
-            _conf: conf,
+            tenant_manager,
             broker_client,
             auth,
             claims: None,
@@ -552,13 +561,9 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
-        let tenant = mgr::get_active_tenant_with_timeout(
-            tenant_id,
-            ShardSelector::First,
-            ACTIVE_TENANT_TIMEOUT,
-            &task_mgr::shutdown_token(),
-        )
-        .await?;
+        let tenant = self
+            .get_active_tenant_with_timeout(tenant_id, ShardSelector::First, ACTIVE_TENANT_TIMEOUT)
+            .await?;
 
         // Make request tracer if needed
         let mut tracer = if tenant.get_trace_read_requests() {
@@ -601,6 +606,7 @@ impl PageServerHandler {
             };
 
             trace!("query: {copy_data_bytes:?}");
+            fail::fail_point!("ps::handle-pagerequest-message");
 
             // Trace request if needed
             if let Some(t) = tracer.as_mut() {
@@ -615,6 +621,7 @@ impl PageServerHandler {
 
             let (response, span) = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::exists");
                     let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_rel_exists_request(tenant_id, timeline_id, &req, &ctx)
@@ -624,6 +631,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::Nblocks(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                     let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &ctx)
@@ -633,6 +641,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetPage(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::getpage");
                     // shard_id is filled in by the handler
                     let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.request_lsn);
                     (
@@ -643,6 +652,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::DbSize(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                     let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
                     (
                         self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
@@ -652,6 +662,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetSlruSegment(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                     let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
                     (
                         self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &ctx)
@@ -726,13 +737,9 @@ impl PageServerHandler {
 
         // Create empty timeline
         info!("creating new timeline");
-        let tenant = get_active_tenant_with_timeout(
-            tenant_id,
-            ShardSelector::Zero,
-            ACTIVE_TENANT_TIMEOUT,
-            &task_mgr::shutdown_token(),
-        )
-        .await?;
+        let tenant = self
+            .get_active_tenant_with_timeout(tenant_id, ShardSelector::Zero, ACTIVE_TENANT_TIMEOUT)
+            .await?;
         let timeline = tenant
             .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
             .await?;
@@ -824,7 +831,10 @@ impl PageServerHandler {
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        timeline.freeze_and_flush().await?;
+        timeline.freeze_and_flush().await.map_err(|e| match e {
+            FlushLayerError::Cancelled => QueryError::Shutdown,
+            other => QueryError::Other(other.into()),
+        })?;
 
         info!("done");
         Ok(())
@@ -907,6 +917,39 @@ impl PageServerHandler {
             // stick to that for now.
             Ok(std::cmp::min(last_record_lsn, request_lsn))
         }
+    }
+
+    #[instrument(skip_all, fields(shard_id, %lsn))]
+    async fn handle_make_lsn_lease<IO>(
+        &self,
+        pgb: &mut PostgresBackend<IO>,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), QueryError>
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        let shard_selector = ShardSelector::Known(tenant_shard_id.to_index());
+        let timeline = self
+            .get_active_tenant_timeline(tenant_shard_id.tenant_id, timeline_id, shard_selector)
+            .await?;
+        let lease = timeline.make_lsn_lease(lsn, ctx)?;
+        let valid_until = lease
+            .valid_until
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|e| QueryError::Other(e.into()))?;
+
+        pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
+            b"valid_until",
+        )]))?
+        .write_message_noflush(&BeMessage::DataRow(&[Some(
+            &valid_until.as_millis().to_be_bytes(),
+        )]))?
+        .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+
+        Ok(())
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -1370,17 +1413,68 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         selector: ShardSelector,
     ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
-        let tenant = get_active_tenant_with_timeout(
-            tenant_id,
-            selector,
-            ACTIVE_TENANT_TIMEOUT,
-            &task_mgr::shutdown_token(),
-        )
-        .await
-        .map_err(GetActiveTimelineError::Tenant)?;
+        let tenant = self
+            .get_active_tenant_with_timeout(tenant_id, selector, ACTIVE_TENANT_TIMEOUT)
+            .await
+            .map_err(GetActiveTimelineError::Tenant)?;
         let timeline = tenant.get_timeline(timeline_id, true)?;
         set_tracing_field_shard_id(&timeline);
         Ok(timeline)
+    }
+
+    /// Get a shard's [`Tenant`] in its active state, if present.  If we don't find the shard and some
+    /// slots for this tenant are `InProgress` then we will wait.
+    /// If we find the [`Tenant`] and it's not yet in state [`TenantState::Active`], we will wait.
+    ///
+    /// `timeout` is used as a total timeout for the whole wait operation.
+    async fn get_active_tenant_with_timeout(
+        &self,
+        tenant_id: TenantId,
+        shard_selector: ShardSelector,
+        timeout: Duration,
+    ) -> Result<Arc<Tenant>, GetActiveTenantError> {
+        let wait_start = Instant::now();
+        let deadline = wait_start + timeout;
+
+        // Resolve TenantId to TenantShardId.  This is usually a quick one-shot thing, the loop is
+        // for handling the rare case that the slot we're accessing is InProgress.
+        let tenant_shard = loop {
+            let resolved = self
+                .tenant_manager
+                .resolve_attached_shard(&tenant_id, shard_selector);
+            match resolved {
+                ShardResolveResult::Found(tenant_shard) => break tenant_shard,
+                ShardResolveResult::NotFound => {
+                    return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
+                        tenant_id,
+                    )));
+                }
+                ShardResolveResult::InProgress(barrier) => {
+                    // We can't authoritatively answer right now: wait for InProgress state
+                    // to end, then try again
+                    tokio::select! {
+                        _ = self.await_connection_cancelled() => {
+                            return Err(GetActiveTenantError::Cancelled)
+                        },
+                        _  = barrier.wait() => {
+                            // The barrier completed: proceed around the loop to try looking up again
+                        },
+                        _ = tokio::time::sleep(deadline.duration_since(Instant::now())) => {
+                            return Err(GetActiveTenantError::WaitForActiveTimeout {
+                                latest_state: None,
+                                wait_time: timeout,
+                            });
+                        }
+                    }
+                }
+            };
+        };
+
+        tracing::debug!("Waiting for tenant to enter active state...");
+        tenant_shard
+            .wait_to_become_active(deadline.duration_since(Instant::now()))
+            .await?;
+        Ok(tenant_shard)
     }
 }
 
@@ -1423,6 +1517,7 @@ where
         _pgb: &mut PostgresBackend<IO>,
         _sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
+        fail::fail_point!("ps::connection-start::startup-packet");
         Ok(())
     }
 
@@ -1437,11 +1532,12 @@ where
             Err(QueryError::SimulatedConnectionError)
         });
 
+        fail::fail_point!("ps::connection-start::process-query");
+
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
-        if query_string.starts_with("pagestream_v2 ") {
-            let (_, params_raw) = query_string.split_at("pagestream_v2 ".len());
-            let params = params_raw.split(' ').collect::<Vec<_>>();
+        let parts = query_string.split_whitespace().collect::<Vec<_>>();
+        if let Some(params) = parts.strip_prefix(&["pagestream_v2"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for pagestream command"
@@ -1466,9 +1562,7 @@ where
                 ctx,
             )
             .await?;
-        } else if query_string.starts_with("pagestream ") {
-            let (_, params_raw) = query_string.split_at("pagestream ".len());
-            let params = params_raw.split(' ').collect::<Vec<_>>();
+        } else if let Some(params) = parts.strip_prefix(&["pagestream"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for pagestream command"
@@ -1493,10 +1587,7 @@ where
                 ctx,
             )
             .await?;
-        } else if query_string.starts_with("basebackup ") {
-            let (_, params_raw) = query_string.split_at("basebackup ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
-
+        } else if let Some(params) = parts.strip_prefix(&["basebackup"]) {
             if params.len() < 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for basebackup command"
@@ -1514,26 +1605,23 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            let lsn = if params.len() >= 3 {
+            let lsn = if let Some(lsn_str) = params.get(2) {
                 Some(
-                    Lsn::from_str(params[2])
-                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                    Lsn::from_str(lsn_str)
+                        .with_context(|| format!("Failed to parse Lsn from {lsn_str}"))?,
                 )
             } else {
                 None
             };
 
-            let gzip = if params.len() >= 4 {
-                if params[3] == "--gzip" {
-                    true
-                } else {
+            let gzip = match params.get(3) {
+                Some(&"--gzip") => true,
+                None => false,
+                Some(third_param) => {
                     return Err(QueryError::Other(anyhow::anyhow!(
-                        "Parameter in position 3 unknown {}",
-                        params[3],
-                    )));
+                        "Parameter in position 3 unknown {third_param}",
+                    )))
                 }
-            } else {
-                false
             };
 
             let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&ctx);
@@ -1557,10 +1645,7 @@ where
             res?;
         }
         // return pair of prev_lsn and last_lsn
-        else if query_string.starts_with("get_last_record_rlsn ") {
-            let (_, params_raw) = query_string.split_at("get_last_record_rlsn ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
-
+        else if let Some(params) = parts.strip_prefix(&["get_last_record_rlsn"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for get_last_record_rlsn command"
@@ -1602,10 +1687,7 @@ where
             .await?;
         }
         // same as basebackup, but result includes relational data as well
-        else if query_string.starts_with("fullbackup ") {
-            let (_, params_raw) = query_string.split_at("fullbackup ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
-
+        else if let Some(params) = parts.strip_prefix(&["fullbackup"]) {
             if params.len() < 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for fullbackup command"
@@ -1622,18 +1704,18 @@ where
                 .record("timeline_id", field::display(timeline_id));
 
             // The caller is responsible for providing correct lsn and prev_lsn.
-            let lsn = if params.len() > 2 {
+            let lsn = if let Some(lsn_str) = params.get(2) {
                 Some(
-                    Lsn::from_str(params[2])
-                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                    Lsn::from_str(lsn_str)
+                        .with_context(|| format!("Failed to parse Lsn from {lsn_str}"))?,
                 )
             } else {
                 None
             };
-            let prev_lsn = if params.len() > 3 {
+            let prev_lsn = if let Some(prev_lsn_str) = params.get(3) {
                 Some(
-                    Lsn::from_str(params[3])
-                        .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?,
+                    Lsn::from_str(prev_lsn_str)
+                        .with_context(|| format!("Failed to parse Lsn from {prev_lsn_str}"))?,
                 )
             } else {
                 None
@@ -1666,8 +1748,7 @@ where
             // 2. Run:
             // cat my_backup/base.tar | psql -h $PAGESERVER \
             //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
-            let (_, params_raw) = query_string.split_at("import basebackup ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            let params = &parts[2..];
             if params.len() != 5 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for import basebackup command"
@@ -1716,8 +1797,7 @@ where
             //
             // Files are scheduled to be persisted to remote storage, and the
             // caller should poll the http api to check when that is done.
-            let (_, params_raw) = query_string.split_at("import wal ".len());
-            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            let params = &parts[2..];
             if params.len() != 4 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for import wal command"
@@ -1755,10 +1835,45 @@ where
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("show ") {
+        } else if query_string.starts_with("lease lsn ") {
+            let params = &parts[2..];
+            if params.len() != 3 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number {} for lease lsn command",
+                    params.len()
+                )));
+            }
+
+            let tenant_shard_id = TenantShardId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_shard_id))
+                .record("timeline_id", field::display(timeline_id));
+
+            self.check_permission(Some(tenant_shard_id.tenant_id))?;
+
+            // The caller is responsible for providing correct lsn.
+            let lsn = Lsn::from_str(params[2])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
+
+            match self
+                .handle_make_lsn_lease(pgb, tenant_shard_id, timeline_id, lsn, &ctx)
+                .await
+            {
+                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
+                Err(e) => {
+                    error!("error obtaining lsn lease for {lsn}: {e:?}");
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(
+                        &e.to_string(),
+                        Some(e.pg_error_code()),
+                    ))?
+                }
+            };
+        } else if let Some(params) = parts.strip_prefix(&["show"]) {
             // show <tenant_id>
-            let (_, params_raw) = query_string.split_at("show ".len());
-            let params = params_raw.split(' ').collect::<Vec<_>>();
             if params.len() != 1 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for config command"
@@ -1771,13 +1886,13 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = get_active_tenant_with_timeout(
-                tenant_id,
-                ShardSelector::Zero,
-                ACTIVE_TENANT_TIMEOUT,
-                &task_mgr::shutdown_token(),
-            )
-            .await?;
+            let tenant = self
+                .get_active_tenant_with_timeout(
+                    tenant_id,
+                    ShardSelector::Zero,
+                    ACTIVE_TENANT_TIMEOUT,
+                )
+                .await?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),

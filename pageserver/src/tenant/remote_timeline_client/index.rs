@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
+use pageserver_api::models::AuxFilePolicy;
 use serde::{Deserialize, Serialize};
 use utils::id::TimelineId;
 
@@ -16,46 +17,6 @@ use pageserver_api::shard::ShardIndex;
 
 use utils::lsn::Lsn;
 
-/// Metadata gathered for each of the layer files.
-///
-/// Fields have to be `Option`s because remote [`IndexPart`]'s can be from different version, which
-/// might have less or more metadata depending if upgrading or rolling back an upgrade.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-//#[cfg_attr(test, derive(Default))]
-pub struct LayerFileMetadata {
-    file_size: u64,
-
-    pub(crate) generation: Generation,
-
-    pub(crate) shard: ShardIndex,
-}
-
-impl From<&'_ IndexLayerMetadata> for LayerFileMetadata {
-    fn from(other: &IndexLayerMetadata) -> Self {
-        LayerFileMetadata {
-            file_size: other.file_size,
-            generation: other.generation,
-            shard: other.shard,
-        }
-    }
-}
-
-impl LayerFileMetadata {
-    pub fn new(file_size: u64, generation: Generation, shard: ShardIndex) -> Self {
-        LayerFileMetadata {
-            file_size,
-            generation,
-            shard,
-        }
-    }
-
-    pub fn file_size(&self) -> u64 {
-        self.file_size
-    }
-}
-
-// TODO seems like another part of the remote storage file format
-// compatibility issue, see https://github.com/neondatabase/neon/issues/3072
 /// In-memory representation of an `index_part.json` file
 ///
 /// Contains the data about all files in the timeline, present remotely and its metadata.
@@ -76,7 +37,7 @@ pub struct IndexPart {
     ///
     /// Older versions of `IndexPart` will not have this property or have only a part of metadata
     /// that latest version stores.
-    pub layer_metadata: HashMap<LayerName, IndexLayerMetadata>,
+    pub layer_metadata: HashMap<LayerName, LayerFileMetadata>,
 
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
     // It's duplicated for convenience when reading the serialized structure, but is
@@ -88,6 +49,16 @@ pub struct IndexPart {
 
     #[serde(default)]
     pub(crate) lineage: Lineage,
+
+    /// Describes the kind of aux files stored in the timeline.
+    ///
+    /// The value is modified during file ingestion when the latest wanted value communicated via tenant config is applied if it is acceptable.
+    /// A V1 setting after V2 files have been committed is not accepted.
+    ///
+    /// None means no aux files have been written to the storage before the point
+    /// when this flag is introduced.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) last_aux_file_policy: Option<AuxFilePolicy>,
 }
 
 impl IndexPart {
@@ -101,10 +72,11 @@ impl IndexPart {
     ///      is always generated from the keys of `layer_metadata`)
     /// - 4: timeline_layers is fully removed.
     /// - 5: lineage was added
-    const LATEST_VERSION: usize = 5;
+    /// - 6: last_aux_file_policy is added.
+    const LATEST_VERSION: usize = 6;
 
     // Versions we may see when reading from a bucket.
-    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5];
+    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6];
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
@@ -113,11 +85,9 @@ impl IndexPart {
         disk_consistent_lsn: Lsn,
         metadata: TimelineMetadata,
         lineage: Lineage,
+        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> Self {
-        let layer_metadata = layers_and_metadata
-            .iter()
-            .map(|(k, v)| (k.to_owned(), IndexLayerMetadata::from(v)))
-            .collect();
+        let layer_metadata = layers_and_metadata.clone();
 
         Self {
             version: Self::LATEST_VERSION,
@@ -126,6 +96,7 @@ impl IndexPart {
             metadata,
             deleted_at: None,
             lineage,
+            last_aux_file_policy,
         }
     }
 
@@ -155,7 +126,12 @@ impl IndexPart {
             example_metadata.disk_consistent_lsn(),
             example_metadata,
             Default::default(),
+            Some(AuxFilePolicy::V1),
         )
+    }
+
+    pub(crate) fn last_aux_file_policy(&self) -> Option<AuxFilePolicy> {
+        self.last_aux_file_policy
     }
 }
 
@@ -165,13 +141,22 @@ impl From<&UploadQueueInitialized> for IndexPart {
         let metadata = uq.latest_metadata.clone();
         let lineage = uq.latest_lineage.clone();
 
-        Self::new(&uq.latest_files, disk_consistent_lsn, metadata, lineage)
+        Self::new(
+            &uq.latest_files,
+            disk_consistent_lsn,
+            metadata,
+            lineage,
+            uq.last_aux_file_policy,
+        )
     }
 }
 
-/// Serialized form of [`LayerFileMetadata`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct IndexLayerMetadata {
+/// Metadata gathered for each of the layer files.
+///
+/// Fields have to be `Option`s because remote [`IndexPart`]'s can be from different version, which
+/// might have less or more metadata depending if upgrading or rolling back an upgrade.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LayerFileMetadata {
     pub file_size: u64,
 
     #[serde(default = "Generation::none")]
@@ -183,12 +168,12 @@ pub struct IndexLayerMetadata {
     pub shard: ShardIndex,
 }
 
-impl From<&LayerFileMetadata> for IndexLayerMetadata {
-    fn from(other: &LayerFileMetadata) -> Self {
-        IndexLayerMetadata {
-            file_size: other.file_size,
-            generation: other.generation,
-            shard: other.shard,
+impl LayerFileMetadata {
+    pub fn new(file_size: u64, generation: Generation, shard: ShardIndex) -> Self {
+        LayerFileMetadata {
+            file_size,
+            generation,
+            shard,
         }
     }
 }
@@ -282,12 +267,12 @@ mod tests {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded()
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
@@ -299,6 +284,7 @@ mod tests {
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: None,
             lineage: Lineage::default(),
+            last_aux_file_policy: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -323,12 +309,12 @@ mod tests {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 1,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded()
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
@@ -340,6 +326,7 @@ mod tests {
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: None,
             lineage: Lineage::default(),
+            last_aux_file_policy: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -365,12 +352,12 @@ mod tests {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
             version: 2,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded()
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
@@ -383,6 +370,7 @@ mod tests {
             deleted_at: Some(chrono::NaiveDateTime::parse_from_str(
                 "2023-07-31T09:00:00.123000000", "%Y-%m-%dT%H:%M:%S.%f").unwrap()),
             lineage: Lineage::default(),
+            last_aux_file_policy: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -428,6 +416,7 @@ mod tests {
             .unwrap(),
             deleted_at: None,
             lineage: Lineage::default(),
+            last_aux_file_policy: None,
         };
 
         let empty_layers_parsed = IndexPart::from_s3_bytes(empty_layers_json.as_bytes()).unwrap();
@@ -451,12 +440,12 @@ mod tests {
         let expected = IndexPart {
             version: 4,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
                     generation: Generation::none(),
                     shard: ShardIndex::unsharded()
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: 9007199254741001,
@@ -468,6 +457,7 @@ mod tests {
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             lineage: Lineage::default(),
+            last_aux_file_policy: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -492,12 +482,12 @@ mod tests {
         let expected = IndexPart {
             version: 5,
             layer_metadata: HashMap::from([
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014EF420-00000000014EF499".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014EF420-00000000014EF499".parse().unwrap(), LayerFileMetadata {
                     file_size: 23289856,
                     generation: Generation::new(1),
                     shard: ShardIndex::unsharded(),
                 }),
-                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014EF499-00000000015A7619".parse().unwrap(), IndexLayerMetadata {
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000014EF499-00000000015A7619".parse().unwrap(), LayerFileMetadata {
                     file_size: 1015808,
                     generation: Generation::new(1),
                     shard: ShardIndex::unsharded(),
@@ -511,6 +501,57 @@ mod tests {
                 reparenting_history: vec![TimelineId::from_str("e1bfd8c633d713d279e6fcd2bcc15b6d").unwrap()],
                 original_ancestor: Some((TimelineId::from_str("e2bfd8c633d713d279e6fcd2bcc15b6d").unwrap(), Lsn::from_str("0/15A7618").unwrap(), parse_naive_datetime("2024-05-07T18:52:36.322426563"))),
             },
+            last_aux_file_policy: None,
+        };
+
+        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        assert_eq!(part, expected);
+    }
+
+    #[test]
+    fn v6_indexpart_is_parsed() {
+        let example = r#"{
+            "version":6,
+            "layer_metadata":{
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000 },
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001 }
+            },
+            "disk_consistent_lsn":"0/16960E8",
+            "metadata_bytes":[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "deleted_at": "2023-07-31T09:00:00.123",
+            "lineage":{
+                "original_ancestor":["e2bfd8c633d713d279e6fcd2bcc15b6d","0/15A7618","2024-05-07T18:52:36.322426563"],
+                "reparenting_history":["e1bfd8c633d713d279e6fcd2bcc15b6d"]
+            },
+            "last_aux_file_policy": "V2"
+        }"#;
+
+        let expected = IndexPart {
+            version: 6,
+            layer_metadata: HashMap::from([
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
+                    file_size: 25600000,
+                    generation: Generation::none(),
+                    shard: ShardIndex::unsharded()
+                }),
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
+                    // serde_json should always parse this but this might be a double with jq for
+                    // example.
+                    file_size: 9007199254741001,
+                    generation: Generation::none(),
+                    shard: ShardIndex::unsharded()
+                })
+            ]),
+            disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
+            metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
+            deleted_at: Some(chrono::NaiveDateTime::parse_from_str(
+                "2023-07-31T09:00:00.123000000", "%Y-%m-%dT%H:%M:%S.%f").unwrap()),
+            lineage: Lineage {
+                reparenting_history_truncated: false,
+                reparenting_history: vec![TimelineId::from_str("e1bfd8c633d713d279e6fcd2bcc15b6d").unwrap()],
+                original_ancestor: Some((TimelineId::from_str("e2bfd8c633d713d279e6fcd2bcc15b6d").unwrap(), Lsn::from_str("0/15A7618").unwrap(), parse_naive_datetime("2024-05-07T18:52:36.322426563"))),
+            },
+            last_aux_file_policy: Some(AuxFilePolicy::V2),
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();

@@ -56,14 +56,8 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     (tenant0, timeline0, pg0) = tenant_timelines[0]
     log.info(f"Timeline {tenant0}/{timeline0} is left intact")
 
-    (tenant1, timeline1, pg1) = tenant_timelines[1]
-    metadata_path = f"{env.pageserver.workdir}/tenants/{tenant1}/timelines/{timeline1}/metadata"
-    with open(metadata_path, "w") as f:
-        f.write("overwritten with garbage!")
-    log.info(f"Timeline {tenant1}/{timeline1} got its metadata spoiled")
-
-    (tenant2, timeline2, pg2) = tenant_timelines[2]
-    timeline_path = f"{env.pageserver.workdir}/tenants/{tenant2}/timelines/{timeline2}/"
+    (tenant1, timeline1, pg1) = tenant_timelines[2]
+    timeline_path = f"{env.pageserver.workdir}/tenants/{tenant1}/timelines/{timeline1}/"
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):
             # Looks like a layer file. Corrupt it
@@ -72,7 +66,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
             with open(p, "wb") as f:
                 f.truncate(0)
                 f.truncate(size)
-    log.info(f"Timeline {tenant2}/{timeline2} got its local layer files spoiled")
+    log.info(f"Timeline {tenant1}/{timeline1} got its local layer files spoiled")
 
     env.pageserver.start()
 
@@ -80,19 +74,15 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     pg0.start()
     assert pg0.safe_psql("SELECT COUNT(*) FROM t")[0][0] == 100
 
-    # Tenant with corrupt local metadata works: remote storage is authoritative for metadata
-    pg1.start()
-    assert pg1.safe_psql("SELECT COUNT(*) FROM t")[0][0] == 100
-
     # Second timeline will fail during basebackup, because the local layer file is corrupt.
     # It will fail when we try to read (and reconstruct) a page from it, ergo the error message.
     # (We don't check layer file contents on startup, when loading the timeline)
     #
     # This will change when we implement checksums for layers
     with pytest.raises(Exception, match=f"{reconstruct_function_name} for layer ") as err:
-        pg2.start()
+        pg1.start()
     log.info(
-        f"As expected, compute startup failed for timeline {tenant2}/{timeline2} with corrupt layers: {err}"
+        f"As expected, compute startup failed for timeline {tenant1}/{timeline1} with corrupt layers: {err}"
     )
 
 

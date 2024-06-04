@@ -502,9 +502,14 @@ def test_get_tenant_size_with_multiple_branches(
 
     gc_horizon = 128 * 1024
 
-    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='0s', gc_period='0s', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
-
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "compaction_period": "0s",
+            "gc_period": "0s",
+            "pitr_interval": "0sec",
+            "gc_horizon": gc_horizon,
+        }
+    )
 
     # FIXME: we have a race condition between GC and delete timeline. GC might fail with this
     # error. Similar to https://github.com/neondatabase/neon/issues/2671

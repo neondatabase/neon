@@ -4,10 +4,13 @@ import json
 import os
 import re
 import subprocess
+import tarfile
 import threading
 import time
+from hashlib import sha256
 from pathlib import Path
 from typing import (
+    IO,
     TYPE_CHECKING,
     Any,
     Callable,
@@ -15,8 +18,10 @@ from typing import (
     Iterable,
     List,
     Optional,
+    Set,
     Tuple,
     TypeVar,
+    Union,
 )
 from urllib.parse import urlencode
 
@@ -191,7 +196,7 @@ def query_scalar(cur: cursor, query: str) -> Any:
 
 
 # Traverse directory to get total size.
-def get_dir_size(path: str) -> int:
+def get_dir_size(path: Path) -> int:
     """Return size in bytes."""
     totalbytes = 0
     for root, _dirs, files in os.walk(path):
@@ -490,12 +495,90 @@ def assert_no_errors(log_file, service, allowed_errors):
 
 @enum.unique
 class AuxFileStore(str, enum.Enum):
-    V1 = "V1"
-    V2 = "V2"
-    CrossValidation = "CrossValidation"
+    V1 = "v1"
+    V2 = "v2"
+    CrossValidation = "cross-validation"
 
     def __repr__(self) -> str:
         return f"'aux-{self.value}'"
 
     def __str__(self) -> str:
         return f"'aux-{self.value}'"
+
+
+def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str]):
+    """
+    This is essentially:
+
+    lines=$(comm -3 \
+        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        | wc -l)
+    [ "$lines" = "0" ]
+
+    But in a more mac friendly fashion.
+    """
+    started_at = time.time()
+
+    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
+        assert reader is not None
+        digest = sha256(usedforsecurity=False)
+        while True:
+            buf = reader.read(64 * 1024)
+            if not buf:
+                break
+            digest.update(buf)
+        return digest.digest()
+
+    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
+        with tarfile.open(p) as f:
+            matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
+            ret = list(
+                map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files)
+            )
+            ret.sort(key=lambda t: t[0])
+            return ret
+
+    left_list, right_list = map(build_hash_list, [left, right])
+
+    assert len(left_list) == len(
+        right_list
+    ), f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
+
+    mismatching = set()
+
+    for left_tuple, right_tuple in zip(left_list, right_list):
+        left_path, left_hash = left_tuple
+        right_path, right_hash = right_tuple
+        assert (
+            left_path == right_path
+        ), f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        if left_hash != right_hash:
+            mismatching.add(left_path)
+
+    assert len(mismatching) == 0, f"files with hash mismatch: {mismatching}"
+
+    elapsed = time.time() - started_at
+    log.info(f"assert_pageserver_backups_equal completed in {elapsed}s")
+
+
+class PropagatingThread(threading.Thread):
+    _target: Any
+    _args: Any
+    _kwargs: Any
+    """
+    Simple Thread wrapper with join() propagating the possible exception in the thread.
+    """
+
+    def run(self):
+        self.exc = None
+        try:
+            self.ret = self._target(*self._args, **self._kwargs)
+        except BaseException as e:
+            self.exc = e
+
+    def join(self, timeout=None):
+        super(PropagatingThread, self).join(timeout)
+        if self.exc:
+            raise self.exc
+        return self.ret

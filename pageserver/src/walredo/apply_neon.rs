@@ -3,7 +3,7 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, BytesMut};
-use pageserver_api::key::{key_to_rel_block, key_to_slru_block, Key};
+use pageserver_api::key::Key;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
@@ -14,6 +14,7 @@ use postgres_ffi::v14::nonrelfile_utils::{
 use postgres_ffi::BLCKSZ;
 use tracing::*;
 use utils::bin_ser::BeSer;
+use utils::lsn::Lsn;
 
 /// Can this request be served by neon redo functions
 /// or we need to pass it to wal-redo postgres process?
@@ -32,6 +33,7 @@ pub(crate) fn can_apply_in_neon(rec: &NeonWalRecord) -> bool {
 
 pub(crate) fn apply_in_neon(
     record: &NeonWalRecord,
+    lsn: Lsn,
     key: Key,
     page: &mut BytesMut,
 ) -> Result<(), anyhow::Error> {
@@ -48,7 +50,7 @@ pub(crate) fn apply_in_neon(
             flags,
         } => {
             // sanity check that this is modifying the correct relation
-            let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
+            let (rel, blknum) = key.to_rel_block().context("invalid record")?;
             assert!(
                 rel.forknum == VISIBILITYMAP_FORKNUM,
                 "ClearVisibilityMapFlags record on unexpected rel {}",
@@ -67,6 +69,7 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
+                postgres_ffi::page_set_lsn(page, lsn);
             }
 
             // Repeat for 'old_heap_blkno', if any
@@ -80,12 +83,13 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
+                postgres_ffi::page_set_lsn(page, lsn);
             }
         }
         // Non-relational WAL records are handled here, with custom code that has the
         // same effects as the corresponding Postgres WAL redo function.
         NeonWalRecord::ClogSetCommitted { xids, timestamp } => {
-            let (slru_kind, segno, blknum) = key_to_slru_block(key).context("invalid record")?;
+            let (slru_kind, segno, blknum) = key.to_slru_block().context("invalid record")?;
             assert_eq!(
                 slru_kind,
                 SlruKind::Clog,
@@ -130,7 +134,7 @@ pub(crate) fn apply_in_neon(
             }
         }
         NeonWalRecord::ClogSetAborted { xids } => {
-            let (slru_kind, segno, blknum) = key_to_slru_block(key).context("invalid record")?;
+            let (slru_kind, segno, blknum) = key.to_slru_block().context("invalid record")?;
             assert_eq!(
                 slru_kind,
                 SlruKind::Clog,
@@ -160,7 +164,7 @@ pub(crate) fn apply_in_neon(
             }
         }
         NeonWalRecord::MultixactOffsetCreate { mid, moff } => {
-            let (slru_kind, segno, blknum) = key_to_slru_block(key).context("invalid record")?;
+            let (slru_kind, segno, blknum) = key.to_slru_block().context("invalid record")?;
             assert_eq!(
                 slru_kind,
                 SlruKind::MultiXactOffsets,
@@ -192,7 +196,7 @@ pub(crate) fn apply_in_neon(
             LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
         }
         NeonWalRecord::MultixactMembersCreate { moff, members } => {
-            let (slru_kind, segno, blknum) = key_to_slru_block(key).context("invalid record")?;
+            let (slru_kind, segno, blknum) = key.to_slru_block().context("invalid record")?;
             assert_eq!(
                 slru_kind,
                 SlruKind::MultiXactMembers,
@@ -285,7 +289,7 @@ mod test {
         let mut page = BytesMut::from_iter(base_image);
 
         for record in deltas {
-            apply_in_neon(&record, file_path, &mut page)?;
+            apply_in_neon(&record, Lsn(8), file_path, &mut page)?;
         }
 
         let reconstructed = AuxFilesDirectory::des(&page)?;

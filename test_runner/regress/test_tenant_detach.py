@@ -302,7 +302,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     # gc should not try to even start on a timeline that doesn't exist
     with pytest.raises(
-        expected_exception=PageserverApiException, match="gc target timeline does not exist"
+        expected_exception=PageserverApiException, match="NotFound: Timeline not found"
     ):
         bogus_timeline_id = TimelineId.generate()
         pageserver_http.timeline_gc(tenant_id, bogus_timeline_id, 0)
@@ -310,7 +310,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.extend(
         [
             # the error will be printed to the log too
-            ".*gc target timeline does not exist.*",
+            ".*NotFound: Timeline not found.*",
             # Timelines get stopped during detach, ignore the gc calls that error, witnessing that
             ".*InternalServerError\\(timeline is Stopping.*",
         ]

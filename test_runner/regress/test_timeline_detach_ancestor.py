@@ -1,13 +1,9 @@
 import datetime
 import enum
-import tarfile
-import time
 from concurrent.futures import ThreadPoolExecutor
-from hashlib import sha256
-from pathlib import Path
 from queue import Empty, Queue
 from threading import Barrier
-from typing import IO, List, Set, Tuple, Union
+from typing import List, Tuple
 
 import pytest
 from fixtures.common_types import Lsn, TimelineId
@@ -17,9 +13,10 @@ from fixtures.neon_fixtures import (
     PgBin,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import HistoricLayerInfo
-from fixtures.pageserver.utils import wait_timeline_detail_404
+from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
+from fixtures.pageserver.utils import wait_tenant_status_404, wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage
+from fixtures.utils import assert_pageserver_backups_equal
 
 
 def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
@@ -68,7 +65,6 @@ SHUTDOWN_ALLOWED_ERRORS = [
 @pytest.mark.parametrize("write_to_branch_first", [True, False])
 def test_ancestor_detach_branched_from(
     test_output_dir,
-    pg_distrib_dir,
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
     branchpoint: Branchpoint,
@@ -80,7 +76,6 @@ def test_ancestor_detach_branched_from(
     """
     env = neon_env_builder.init_start()
 
-    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
     client = env.pageserver.http_client()
@@ -160,16 +155,9 @@ def test_ancestor_detach_branched_from(
     # run fullbackup to make sure there are no off by one errors
     # take this on the parent
     fullbackup_before = test_output_dir / "fullbackup-before.tar"
-    cmd = [
-        "psql",
-        "--no-psqlrc",
-        env.pageserver.connstr(),
-        "-c",
-        f"fullbackup {env.initial_tenant} {env.initial_timeline} {branch_at}",
-        "-o",
-        str(fullbackup_before),
-    ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, env.initial_timeline, branch_at, fullbackup_before
+    )
 
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
     assert all_reparented == set()
@@ -200,16 +188,9 @@ def test_ancestor_detach_branched_from(
 
     # take this on the detached, at same lsn
     fullbackup_after = test_output_dir / "fullbackup-after.tar"
-    cmd = [
-        "psql",
-        "--no-psqlrc",
-        env.pageserver.connstr(),
-        "-c",
-        f"fullbackup {env.initial_tenant} {timeline_id} {branch_at}",
-        "-o",
-        str(fullbackup_after),
-    ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, timeline_id, branch_at, fullbackup_after
+    )
 
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline, 10, 1.0)
@@ -218,52 +199,7 @@ def test_ancestor_detach_branched_from(
     # as there is always "PREV_LSN: invalid" for "before"
     skip_files = {"zenith.signal"}
 
-    tar_cmp(fullbackup_before, fullbackup_after, skip_files)
-
-
-def tar_cmp(left: Path, right: Path, skip_files: Set[str]):
-    """
-    This is essentially:
-
-    lines=$(comm -3 \
-        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
-        <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
-        | wc -l)
-    [ "$lines" = "0" ]
-
-    But in a more mac friendly fashion.
-    """
-    started_at = time.time()
-
-    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
-        assert reader is not None
-        digest = sha256(usedforsecurity=False)
-        while True:
-            buf = reader.read(64 * 1024)
-            if not buf:
-                break
-            digest.update(buf)
-        return digest.digest()
-
-    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
-        with tarfile.open(p) as f:
-            matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
-            ret = list(
-                map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files)
-            )
-            ret.sort(key=lambda t: t[0])
-            return ret
-
-    left_list, right_list = map(build_hash_list, [left, right])
-
-    try:
-        assert len(left_list) == len(right_list)
-
-        for left_tuple, right_tuple in zip(left_list, right_list):
-            assert left_tuple == right_tuple
-    finally:
-        elapsed = time.time() - started_at
-        log.info(f"tar_cmp completed in {elapsed}s")
+    assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, skip_files)
 
 
 def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
@@ -480,6 +416,173 @@ def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEn
         assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
 
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+
+def test_compaction_induced_by_detaches_in_history(
+    neon_env_builder: NeonEnvBuilder, test_output_dir, pg_bin: PgBin
+):
+    """
+    Assuming the tree of timelines:
+
+    root
+    |- child1
+       |- ...
+          |- wanted_detached_child
+
+    Each detach can add N more L0 per level, this is actually unbounded because
+    compaction can be arbitrarily delayed (or detach happen right before one
+    starts). If "wanted_detached_child" has already made progress and compacted
+    L1s, we want to make sure "compaction in the history" does not leave the
+    timeline broken.
+    """
+
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # we want to create layers manually so we don't branch on arbitrary
+            # Lsn, but we also do not want to compact L0 -> L1.
+            "compaction_threshold": "99999",
+            "compaction_period": "0s",
+            # shouldn't matter, but just in case
+            "gc_period": "0s",
+        }
+    )
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+    client = env.pageserver.http_client()
+
+    def delta_layers(timeline_id: TimelineId):
+        # shorthand for more readable formatting
+        return client.layer_map_info(env.initial_tenant, timeline_id).delta_layers()
+
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql("create table integers (i bigint not null);")
+        ep.safe_psql("insert into integers (i) values (42)")
+        branch_lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+
+        client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
+
+        assert len(delta_layers(env.initial_timeline)) == 2
+
+    more_good_numbers = range(0, 3)
+
+    branches: List[Tuple[str, TimelineId]] = [("main", env.initial_timeline)]
+
+    for num in more_good_numbers:
+        branch_name = f"br-{len(branches)}"
+        branch_timeline_id = env.neon_cli.create_branch(
+            branch_name,
+            ancestor_branch_name=branches[-1][0],
+            tenant_id=env.initial_tenant,
+            ancestor_start_lsn=branch_lsn,
+        )
+        branches.append((branch_name, branch_timeline_id))
+
+        with env.endpoints.create_start(branches[-1][0], tenant_id=env.initial_tenant) as ep:
+            ep.safe_psql(
+                f"insert into integers (i) select i from generate_series({num}, {num + 100}) as s(i)"
+            )
+            branch_lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, branch_timeline_id)
+            client.timeline_checkpoint(env.initial_tenant, branch_timeline_id)
+
+        assert len(delta_layers(branch_timeline_id)) == 1
+
+    # now fill in the final, most growing timeline
+
+    branch_name, branch_timeline_id = branches[-1]
+    with env.endpoints.create_start(branch_name, tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql("insert into integers (i) select i from generate_series(50, 500) s(i)")
+
+        last_suffix = None
+        for suffix in range(0, 4):
+            ep.safe_psql(f"create table other_table_{suffix} as select * from integers")
+            wait_for_last_flush_lsn(env, ep, env.initial_tenant, branch_timeline_id)
+            client.timeline_checkpoint(env.initial_tenant, branch_timeline_id)
+            last_suffix = suffix
+
+        assert last_suffix is not None
+
+        assert len(delta_layers(branch_timeline_id)) == 5
+
+        client.patch_tenant_config_client_side(
+            env.initial_tenant, {"compaction_threshold": 5}, None
+        )
+
+        client.timeline_compact(env.initial_tenant, branch_timeline_id)
+
+        # one more layer
+        ep.safe_psql(f"create table other_table_{last_suffix + 1} as select * from integers")
+        wait_for_last_flush_lsn(env, ep, env.initial_tenant, branch_timeline_id)
+
+        # we need to wait here, because the detaches will do implicit tenant restart,
+        # and we could get unexpected layer counts
+        client.timeline_checkpoint(env.initial_tenant, branch_timeline_id, wait_until_uploaded=True)
+
+    assert len([filter(lambda x: x.l0, delta_layers(branch_timeline_id))]) == 1
+
+    skip_main = branches[1:]
+    branch_lsn = client.timeline_detail(env.initial_tenant, branch_timeline_id)["ancestor_lsn"]
+
+    # take the fullbackup before and after inheriting the new L0s
+    fullbackup_before = test_output_dir / "fullbackup-before.tar"
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, branch_timeline_id, branch_lsn, fullbackup_before
+    )
+
+    for _, timeline_id in skip_main:
+        reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
+        assert reparented == set(), "we have no earlier branches at any level"
+
+    post_detach_l0s = list(filter(lambda x: x.l0, delta_layers(branch_timeline_id)))
+    assert len(post_detach_l0s) == 5, "should had inherited 4 L0s, have 5 in total"
+
+    # checkpoint does compaction, which in turn decides to run, because
+    # there is now in total threshold number L0s even if they are not
+    # adjacent in Lsn space:
+    #
+    # inherited  flushed during this checkpoint
+    #       \\\\ /
+    #       1234X5---> lsn
+    #           |
+    #       l1 layers from "fill in the final, most growing timeline"
+    #
+    # branch_lsn is between 4 and first X.
+    client.timeline_checkpoint(env.initial_tenant, branch_timeline_id)
+
+    post_compact_l0s = list(filter(lambda x: x.l0, delta_layers(branch_timeline_id)))
+    assert len(post_compact_l0s) == 1, "only the consecutive inherited L0s should be compacted"
+
+    fullbackup_after = test_output_dir / "fullbackup_after.tar"
+    pg_bin.take_fullbackup(
+        env.pageserver, env.initial_tenant, branch_timeline_id, branch_lsn, fullbackup_after
+    )
+
+    # we don't need to skip any files, because zenith.signal will be identical
+    assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
+
+
+def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    client = env.pageserver.http_client()
+
+    with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, env.initial_timeline)
+    assert info.value.status_code == 409
+
+    first_branch = env.neon_cli.create_branch("first_branch")
+    second_branch = env.neon_cli.create_branch("second_branch", ancestor_branch_name="first_branch")
+
+    # funnily enough this does not have a prefix
+    with pytest.raises(PageserverApiException, match="too many ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, second_branch)
+    assert info.value.status_code == 400
+
+    client.tenant_delete(env.initial_tenant)
+    wait_tenant_status_404(client, env.initial_tenant, 10, 1)
+
+    with pytest.raises(PageserverApiException) as e:
+        client.detach_ancestor(env.initial_tenant, first_branch)
+    assert e.value.status_code == 404
 
 
 # TODO:
