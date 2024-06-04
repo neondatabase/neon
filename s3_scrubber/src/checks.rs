@@ -93,12 +93,12 @@ pub(crate) fn branch_cleanup_and_check_errors(
                     }
 
                     if index_part.metadata.disk_consistent_lsn()
-                        != index_part.get_disk_consistent_lsn()
+                        != index_part.duplicated_disk_consistent_lsn()
                     {
                         result.errors.push(format!(
                             "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
                             index_part.metadata.disk_consistent_lsn(),
-                            index_part.get_disk_consistent_lsn(),
+                            index_part.duplicated_disk_consistent_lsn(),
                         ))
                     }
 
