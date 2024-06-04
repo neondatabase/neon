@@ -119,7 +119,9 @@ jobs:
           echo "LABELS_TO_ADD=$LABELS_TO_ADD" >> $GITHUB_OUTPUT
           echo "LABELS_TO_REMOVE=$LABELS_TO_REMOVE" >> $GITHUB_OUTPUT
       - name: Modify the existant pull request (if required)
-        if: ${{ steps.create_pr.outputs.LABELS_TO_ADD }} != '' or ${{ steps.create_pr.outputs.LABELS_TO_REMOVE }} != ''
+        if: |
+          steps.create_pr.outputs.LABELS_TO_ADD != '' || 
+          steps.create_pr.outputs.LABELS_TO_REMOVE != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LABELS_TO_ADD: ${{ steps.create_pr.outputs.LABELS_TO_ADD }}
