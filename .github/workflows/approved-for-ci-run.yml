@@ -120,6 +120,8 @@ jobs:
           LABELS_TO_ADD=${{ steps.create_pr.outputs.LABELS_TO_ADD }}
           LABELS_TO_REMOVE=${{ steps.create_pr.outputs.LABELS_TO_REMOVE }}
           if [ -z "${LABELS_TO_ADD}" ] && [ -z "${LABELS_TO_REMOVE}" ] ; then 
+            exit 0
+          fi
           ADD_CMD=
           REMOVE_CMD=
           [ -z "${LABELS_TO_ADD}" ] || ADD_CMD="--add-label ${LABELS_TO_ADD}"
