@@ -509,7 +509,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         self.metrics
             .semaphore_acquire_seconds
             .observe(now.elapsed().as_secs_f64());
-
+        info!("acquired permit {:?}", now.elapsed().as_secs_f64());
         Ok(WakeComputePermit { permit: permit? })
     }
 
