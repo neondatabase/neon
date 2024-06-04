@@ -1,4 +1,6 @@
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -8,7 +10,7 @@ use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::block_io::BlockCursor;
 use pageserver::tenant::disk_btree::DiskBtreeReader;
 use pageserver::tenant::storage_layer::delta_layer::{BlobRef, Summary};
-use pageserver::tenant::storage_layer::{delta_layer, image_layer};
+use pageserver::tenant::storage_layer::{delta_layer, image_layer, LayerName};
 use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer};
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use pageserver::{page_cache, virtual_file};
@@ -20,7 +22,9 @@ use pageserver::{
     },
     virtual_file::VirtualFile,
 };
+use remote_storage::{ListingMode, RemotePath, RemoteStorageConfig};
 use std::fs;
+use tokio_util::sync::CancellationToken;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
 
@@ -57,7 +61,10 @@ pub(crate) enum LayerCmd {
     },
     Compress {
         dest_path: Utf8PathBuf,
-        layer_file_path: Utf8PathBuf,
+        layer_file_path: Option<Utf8PathBuf>,
+        tenant_remote_prefix: Option<String>,
+        tenant_remote_config: Option<String>,
+        layers_dir: Option<Utf8PathBuf>,
     },
 }
 
@@ -247,18 +254,76 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
         LayerCmd::Compress {
             dest_path,
             layer_file_path,
+            tenant_remote_prefix,
+            tenant_remote_config,
+            layers_dir,
         } => {
             pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
             pageserver::page_cache::init(100);
 
             let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
-            let stats =
-                ImageLayer::compression_statistics(dest_path, layer_file_path, &ctx).await?;
-            println!(
-                "Statistics: {stats:#?}\n{}",
-                serde_json::to_string(&stats).unwrap()
-            );
+            if let Some(layer_file_path) = layer_file_path {
+                let stats =
+                    ImageLayer::compression_statistics(dest_path, layer_file_path, &ctx).await?;
+                println!(
+                    "Statistics: {stats:#?}\n{}",
+                    serde_json::to_string(&stats).unwrap()
+                );
+            } else if let (
+                Some(tenant_remote_prefix),
+                Some(tenant_remote_config),
+                Some(layers_dir),
+            ) = (tenant_remote_prefix, tenant_remote_config, layers_dir)
+            {
+                let toml_document = toml_edit::Document::from_str(&tenant_remote_config)?;
+                let toml_item = toml_document
+                    .get("remote_storage")
+                    .expect("need remote_storage");
+                let config = RemoteStorageConfig::from_toml(toml_item)?.expect("incomplete config");
+                let storage = remote_storage::GenericRemoteStorage::from_config(&config)?;
+
+                let cancel = CancellationToken::new();
+                let path = RemotePath::from_string(&tenant_remote_prefix)?;
+                let max_files = NonZeroU32::new(8000);
+                let files_list = storage
+                    .list(Some(&path), ListingMode::NoDelimiter, max_files, &cancel)
+                    .await?;
+
+                for file_key in files_list.keys.iter() {
+                    let Some(file_name) = file_key.object_name() else {
+                        continue;
+                    };
+                    let Ok(LayerName::Image(_layer_file_name)) = LayerName::from_str(file_name)
+                    else {
+                        // Skipping because it's either not a layer or a delta layer
+                        continue;
+                    };
+                    let json_file_path = layers_dir.join(format!("{file_name}.json"));
+                    if tokio::fs::try_exists(&json_file_path).await? {
+                        // If we have already created a report for the layer, skip it.
+                        continue;
+                    }
+                    let local_layer_path = layers_dir.join(file_name);
+                    let download = storage.download(file_key, &cancel).await?;
+                    let mut dest_layer_file = tokio::fs::File::create(&local_layer_path).await?;
+                    let mut body = tokio_util::io::StreamReader::new(download.download_stream);
+                    let _size = tokio::io::copy_buf(&mut body, &mut dest_layer_file).await?;
+                    let stats = ImageLayer::compression_statistics(
+                        &local_layer_path,
+                        &local_layer_path,
+                        &ctx,
+                    )
+                    .await?;
+
+                    let stats_str = serde_json::to_string(&stats).unwrap();
+                    tokio::fs::write(json_file_path, stats_str).await?;
+                    println!("Statistics for {file_name}: {stats:#?}\n");
+                }
+            } else {
+                anyhow::bail!("No tenant dir or remote config or layers dir specified");
+            }
+
             return Ok(());
         }
     }
