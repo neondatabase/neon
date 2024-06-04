@@ -295,15 +295,13 @@ extern void neon_immedsync(SMgrRelation reln, ForkNumber forknum);
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);
 extern bool get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size);
-extern bool set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber new_size, BlockNumber* old_size);
+extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber new_size);
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
-extern bool start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, BlockNumber* relsize);
-extern bool is_unlogged_build_extend(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, BlockNumber* relsize);
-extern bool is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber* relsize);
-extern bool stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum);
-extern void resume_unlogged_build(void);
+extern void start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum);
+extern bool is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum);
+extern void stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum);
 
 
 

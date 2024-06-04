@@ -136,13 +136,10 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 
 /*
  * Cache relation size.
- * Returns true if it happens during unlogged build.
- * In thids case lock isnot released.
  */
-bool
-set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber new_size, BlockNumber* old_size)
+void
+set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
-	bool unlogged = false;
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
@@ -170,11 +167,7 @@ set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber new_size,
 				relsize_ctl->size -= 1;
 			}
 		}
-		if (old_size)
-		{
-			*old_size = found ? entry->size : 0;
-		}
-		entry->size = new_size;
+		entry->size = size;
 		if (!found)
 		{
 			entry->unlogged = false;
@@ -209,18 +202,9 @@ set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber new_size,
 		{
 			dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
 		}
-		else
-		{
-			Assert(old_size);
-			unlogged = true;
-		}
 		relsize_ctl->writes += 1;
-		if (!unlogged)
-		{
-			LWLockRelease(relsize_lock);
-		}
+		LWLockRelease(relsize_lock);
 	}
-	return unlogged;
 }
 
 void
@@ -305,28 +289,22 @@ forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
  * The criteria for starting iunlogged build is writing page without normal LSN.
  * It can happen in any backend when page is evicted from shared buffers.
  * Or can not happen at all if index fits in shared buffers.
- *
- * If this function really starts unlogged build, then it returns true, remove entry from LRU list
- * (protecting it from eviction until the end of unlogged build) and keeps lock on relsize hash.
- * This lock should be later released using resume_unlogged_build(). It allows caller to perform some actions
- * in critical section, for example right now it create relation on the disk using mdcreate
  */
-bool
-start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, BlockNumber* relsize)
+void
+start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum)
 {
-	bool start = false;
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
 		RelSizeEntry *entry;
 		bool		found;
+		bool start = false;
 
 		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
 		entry = hash_search(relsize_hash, &tag, HASH_ENTER, &found);
 		if (!found) {
-			*relsize = 0;
 			entry->size = blocknum + 1;
 			start = true;
 
@@ -351,7 +329,6 @@ start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknu
 		{
 			start = !entry->unlogged;
 
-			*relsize = entry->size;
 			if (entry->size <= blocknum)
 			{
 				entry->size = blocknum + 1;
@@ -373,18 +350,15 @@ start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknu
 		if (start)
 			elog(LOG, "Start unlogged build for %u/%u/%u.%u",
 				 RelFileInfoFmt(rinfo), forknum);
+		LWLockRelease(relsize_lock);
 	}
-	return start;
 }
 
 /*
  * Check if unlogged build is in progress.
- * If so, true is returns and lock on relsize cache is hold.
- * It should be later released by called using resume_unlogged_build().
- * It allows to read page from local file without risk that it is removed by stop_unlogged_build by some other backend.
  */
 bool
-is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber* relsize)
+is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 {
 	bool		unlogged = false;
 
@@ -400,82 +374,23 @@ is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber* relsize)
 		if (entry != NULL)
 		{
 			unlogged = entry->unlogged;
-			*relsize = entry->size;
 			relsize_ctl->hits += 1;
 		}
 		else
 		{
 			relsize_ctl->misses += 1;
 		}
-		if (!unlogged)
-			LWLockRelease(relsize_lock);
+		LWLockRelease(relsize_lock);
 	}
 	return unlogged;
 }
 
 /*
- * Check if releation is extended during unlogged build.
- * If it is unlogged, true is returns and lock on relsize cache is hold.
- * It should be later released by called using resume_unlogged_build().
- * It allows to atomocally extend local file.
+ * Clear unlogged build if it was set.
  */
-bool
-is_unlogged_build_extend(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, BlockNumber* relsize)
-{
-	bool		unlogged = false;
-
-	if (relsize_hash_size > 0)
-	{
-		RelTag		tag;
-		RelSizeEntry *entry;
-
-		tag.rinfo = rinfo;
-		tag.forknum = forknum;
-
-		LWLockAcquire(relsize_lock, LW_SHARED);
-		entry = hash_search(relsize_hash, &tag, HASH_FIND, NULL);
-		if (entry != NULL)
-		{
-			if (entry->size <= blocknum)
-			{
-				/* Very rare case: it can happen only if relation is thrown away from relcache before unlogged build is detected */
-				/* Repeat search under exclusive lock */
-				LWLockRelease(relsize_lock);
-				LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
-				entry = hash_search(relsize_hash, &tag, HASH_FIND, NULL);
-				if (entry == NULL)
-				{
-					relsize_ctl->misses += 1;
-					LWLockRelease(relsize_lock);
-					return false;
-				}
-			}
-			unlogged = entry->unlogged;
-			*relsize = entry->size;
-			if (entry->size <= blocknum)
-			{
-				entry->size = blocknum + 1;
-			}
-			relsize_ctl->hits += 1;
-		}
-		else
-		{
-			relsize_ctl->misses += 1;
-		}
-		if (!unlogged)
-			LWLockRelease(relsize_lock);
-	}
-	return unlogged;
-}
-
-/*
- * Check if unlogged build is in progress and if so, clear th flag, return entry to LRU list and return true.
- */
-bool
+void
 stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 {
-	bool		unlogged = false;
-
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
@@ -487,7 +402,7 @@ stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 		entry = hash_search(relsize_hash, &tag, HASH_FIND, NULL);
 		if (entry != NULL)
 		{
-			unlogged = entry->unlogged;
+			bool unlogged = entry->unlogged;
 			entry->unlogged = false;
 			relsize_ctl->hits += 1;
 			if (unlogged)
@@ -504,19 +419,7 @@ stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 		}
 		LWLockRelease(relsize_lock);
 	}
-	return unlogged;
 }
-
-/*
- * Release lock obtained by start_unlogged_build or is_unlogged-build functions
- */
-void
-resume_unlogged_build(void)
-{
-	if (relsize_hash_size > 0)
-		LWLockRelease(relsize_lock);
-}
-
 
 void
 relsize_hash_init(void)

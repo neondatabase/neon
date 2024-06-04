@@ -1389,21 +1389,6 @@ PageIsEmptyHeapPage(char *buffer)
 	return memcmp(buffer, empty_page.data, BLCKSZ) == 0;
 }
 
-/*
- * A page is being evicted from the shared buffer cache. Update the
- * last-written LSN of the page, and WAL-log it if needed.
- */
-static void
-unlogged_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber old_relsize, BlockNumber new_relsize)
-{
-#if PG_MAJORVERSION_NUM < 16
-	mdextend(reln, forknum, new_relsize, (char *) zero_buffer.data, true);
-#else
-	mdzeroextend(reln, forknum, old_relsize, new_relsize - old_relsize, true);
-#endif
-}
-
-
 static void
 #if PG_MAJORVERSION_NUM < 16
 neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool force)
@@ -1428,13 +1413,28 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 		Assert(XLogInsertAllowed());
 		log_page = true;
 	}
-	else if (XLogInsertAllowed() &&
-			 !ShutdownRequestPending &&
-			 (forknum == FSM_FORKNUM || forknum == VISIBILITYMAP_FORKNUM))
+	else if (XLogInsertAllowed() && !ShutdownRequestPending)
 	{
-		log_page = true;
+		if (forknum == MAIN_FORKNUM)
+		{
+			if (!PageIsNew((Page) buffer))
+			{
+				if (lsn < FirstNormalUnloggedLSN)
+				{
+					start_unlogged_build(InfoFromSMgrRel(reln), forknum, blocknum);
+					log_page = true;
+				}
+				else if (is_unlogged_build(InfoFromSMgrRel(reln), forknum))
+				{
+					log_page = true;
+				}
+			}
+		}
+		else
+		{
+			log_page = true;
+		}
 	}
-
 	if (log_page)
 	{
 		XLogRecPtr	recptr;
@@ -1486,21 +1486,19 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
 		}
-		else if (forknum != FSM_FORKNUM && forknum != VISIBILITYMAP_FORKNUM)
+		else
 		{
-			if (start_unlogged_build(InfoFromSMgrRel(reln), forknum, blocknum, &relsize))
-			{
-				mdcreate(reln, forknum, true);
-			}
-			if (blocknum >= relsize)
-			{
-				unlogged_extend(reln, forknum, relsize, blocknum+1);
-			}
-			mdwrite(reln, forknum, blocknum, buffer, true);
-			resume_unlogged_build();
-
-			ereport(SmgrTrace,
-					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is saved locally.",
+			/*
+			 * Its a bad sign if there is a page with zero LSN in the buffer
+			 * cache in a standby, too. However, PANICing seems like a cure
+			 * worse than the disease, as the damage has likely already been
+			 * done in the primary. So in a standby, make this an assertion,
+			 * and in a release build just LOG the error and soldier on. We
+			 * update the last-written LSN of the page with a conservative
+			 * value in that case, which is the last replayed LSN.
+			 */
+			ereport(RecoveryInProgress() ? LOG : PANIC,
+					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
 							blocknum,
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
@@ -1508,51 +1506,6 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 
 			lsn = GetXLogReplayRecPtr(NULL); /* in standby mode, soldier on */
 		}
-	}
-	else if (lsn < FirstNormalUnloggedLSN)
-	{
-		if (start_unlogged_build(InfoFromSMgrRel(reln),forknum, blocknum, &relsize))
-		{
-			mdcreate(reln, forknum, true);
-		}
-		if (blocknum >= relsize)
-		{
-			unlogged_extend(reln, forknum, relsize, blocknum+1);
-		}
-		mdwrite(reln, forknum, blocknum, buffer, true);
-		resume_unlogged_build();
-
-		ereport(SmgrTrace,
-				(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is saved locally.",
-						blocknum,
-						RelFileInfoFmt(InfoFromSMgrRel(reln)),
-						forknum)));
-	}
-	else
-	{
-		if (is_unlogged_build_extend(InfoFromSMgrRel(reln), forknum, blocknum, &relsize))
-		{
-			if (blocknum >= relsize)
-			{
-				unlogged_extend(reln, forknum, relsize, blocknum+1);
-			}
-			mdwrite(reln, forknum, blocknum, buffer, true);
-			resume_unlogged_build();
-
-			ereport(SmgrTrace,
-					(errmsg(NEON_TAG "Page %u with LSN=%X/%X of relation %u/%u/%u.%u is saved locally.",
-							blocknum,
-							LSN_FORMAT_ARGS(lsn),
-							RelFileInfoFmt(InfoFromSMgrRel(reln)),
-							forknum)));
-		}
-		else
-			ereport(SmgrTrace,
-					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is already wal-logged at lsn=%X/%X",
-						blocknum,
-						RelFileInfoFmt(InfoFromSMgrRel(reln)),
-						forknum, LSN_FORMAT_ARGS(lsn)
-					)));
 	}
 
 	/*
@@ -1571,15 +1524,8 @@ static void
 neon_log_newpage_range_callback(Relation rel, ForkNumber forknum)
 {
 	SMgrRelation smgr = RelationGetSmgr(rel);
-	if (stop_unlogged_build(InfoFromSMgrRel(smgr), forknum))
-	{
-		mdclose(smgr, forknum);
-		/* use isRedo == true, so that we drop it immediately */
-		mdunlink(InfoBFromSMgrRel(smgr), forknum, true);
-	}
+	stop_unlogged_build(InfoFromSMgrRel(smgr), forknum);
 }
-
-
 
 
 /*
@@ -2081,7 +2027,7 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 						   &reln->smgr_cached_nblocks[forkNum]);
 	}
 	else
-		set_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0, NULL);
+		set_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2141,7 +2087,6 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 #endif
 {
 	XLogRecPtr	lsn;
-	BlockNumber old_relsize;
 	BlockNumber n_blocks = 0;
 
 	switch (reln->smgr_relpersistence)
@@ -2194,11 +2139,8 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 
 	neon_wallog_page(reln, forkNum, blkno, buffer, false);
 
-	if (set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1, &old_relsize))
-	{
-		unlogged_extend(reln, forkNum, old_relsize, blkno + 1);
-		resume_unlogged_build();
-	}
+	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1);
+
 	lsn = PageGetLSN((Page) buffer);
 	neon_log(SmgrTrace, "smgrextend called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
@@ -2232,7 +2174,6 @@ void
 neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 				int nblocks, bool skipFsync)
 {
-	BlockNumber old_relsize;
 	BlockNumber	remblocks = nblocks;
 	XLogRecPtr	lsn = 0;
 
@@ -2283,11 +2224,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	if (!XLogInsertAllowed())
 		return;
 
-	if (set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum + nblocks, &old_relsize))
-	{
-		unlogged_extend(reln, forkNum, old_relsize, blocknum + nblocks);
-		resume_unlogged_build();
-	}
+	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum + nblocks);
 
 	if (forkNum != MAIN_FORKNUM) /* no need to wal-log zero pages except VM/FSM forks  */
 	{
@@ -2632,27 +2569,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 
 	request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno);
 	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
-	if (is_unlogged_build(InfoFromSMgrRel(reln), forkNum, &relsize))
-	{
-		if (blkno >= relsize)
-		{
-			elog(SmgrTrace, "Get empty local page %d of relation %u/%u/%u.%u",
-				 blkno, RelFileInfoFmt(InfoFromSMgrRel(reln)), forkNum);
-			memset(buffer, 0, BLCKSZ);
-		}
-		else
-		{
-			elog(SmgrTrace, "Read local page %d of relation %u/%u/%u.%u",
-				 blkno, RelFileInfoFmt(InfoFromSMgrRel(reln)), forkNum);
-			mdread(reln, forkNum, blkno, buffer);
-		}
-		resume_unlogged_build();
-	}
-	else
-	{
-		request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno);
-		neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
-	}
+
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
 	{
@@ -2762,22 +2679,11 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *bu
 neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const void *buffer, bool skipFsync)
 #endif
 {
-	BlockNumber relsize;
 	XLogRecPtr	lsn;
 
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			if (is_unlogged_build_extend(InfoFromSMgrRel(reln), forknum, blocknum, &relsize))
-			{
-				if (blocknum >= relsize)
-				{
-					unlogged_extend(reln, forknum, relsize, blocknum+1);
-				}
-				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
-				resume_unlogged_build();
-				return;
-			}
 			/* This is a bit tricky. Check if the relation exists locally */
 			if (mdexists(reln, forknum))
 			{
@@ -2982,7 +2888,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	set_cached_relsize(InfoFromSMgrRel(reln), forknum, nblocks, NULL);
+	set_cached_relsize(InfoFromSMgrRel(reln), forknum, nblocks);
 
 	/*
 	 * Truncating a relation drops all its buffers from the buffer cache
@@ -3238,7 +3144,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 
 		relsize = Max(nbresponse->n_blocks, blkno + 1);
 
-		set_cached_relsize(rinfo, forknum, relsize, NULL);
+		set_cached_relsize(rinfo, forknum, relsize);
 		SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
 
 		neon_log(SmgrTrace, "Set length to %d", relsize);
