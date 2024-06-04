@@ -238,7 +238,7 @@ def test_uploads_and_deletions(
     # https://github.com/neondatabase/neon/issues/7707
     # https://github.com/neondatabase/neon/issues/7759
     allowed_errors = [
-        ".*duplicated L1 layer.*",
+        ".*/checkpoint.*rename temporary file as correct path for.*",  # EEXIST
         ".*delta layer created with.*duplicate values.*",
         ".*assertion failed: self.lsn_range.start <= lsn.*",
         ".*HTTP request handler task panicked: task.*panicked.*",

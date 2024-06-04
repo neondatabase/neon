@@ -12,42 +12,14 @@ from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from requests.exceptions import ConnectionError
 
 
-def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
-    env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
-
-    # use a failpoint to return all L0s as L1s
-    message = ".*duplicated L1 layer layer=.*"
-    env.pageserver.allowed_errors.append(message)
-
-    # Use aggressive compaction and checkpoint settings
-    tenant_id, _ = env.neon_cli.create_tenant(
-        conf={
-            "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
-            "compaction_period": "5 s",
-            "compaction_threshold": "3",
-        }
-    )
-
-    pageserver_http.configure_failpoints(("compact-level0-phase1-return-same", "return"))
-
-    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
-    connstr = endpoint.connstr(options="-csynchronous_commit=off")
-    pg_bin.run_capture(["pgbench", "-i", "-s1", connstr])
-
-    time.sleep(10)  # let compaction to be performed
-    env.pageserver.assert_log_contains("compact-level0-phase1-return-same")
-
-
-def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     """
-    Test sets fail point at the end of first compaction phase: after
-    flushing new L1 layer but before deletion of L0 layers.
+    Test case for docs/rfcs/027-crash-consistent-layer-map-through-index-part.md.
 
-    The L1 used to be overwritten, but with crash-consistency via remote
-    index_part.json, we end up deleting the not yet uploaded L1 layer on
-    startup.
+    Simulate crash after compaction has written layers to disk
+    but before they have been uploaded/linked into remote index_part.json.
+
+    Startup handles this situation by deleting the not yet uploaded L1 layer files.
     """
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
@@ -126,13 +98,6 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
     # give time for log flush
     time.sleep(1)
 
-    message = f".*duplicated L1 layer layer={l1_found}"
-    found_msg = env.pageserver.log_contains(message)
-    # resident or evicted, it should not be overwritten, however it should had been non-existing at startup
-    assert (
-        found_msg is None
-    ), "layer should had been removed during startup, did it live on as evicted?"
-
     assert env.pageserver.layer_exists(tenant_id, timeline_id, l1_found), "the L1 reappears"
 
     wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
@@ -141,3 +106,6 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
         tenant_id, timeline_id, l1_found.to_str()
     )
     assert uploaded.exists(), "the L1 is uploaded"
+
+
+# TODO: same test for L0s produced by ingest.

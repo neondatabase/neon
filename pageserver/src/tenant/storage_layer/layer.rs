@@ -277,9 +277,10 @@ impl Layer {
 
         let downloaded = resident.expect("just initialized");
 
-        // if the rename works, the path is as expected
-        // TODO: sync system call
-        std::fs::rename(temp_path, owner.local_path())
+        // We never want to overwrite an existing file, so we use `RENAME_NOREPLACE`.
+        // TODO: this leaves the temp file in place if the rename fails, risking us running
+        // out of space. Should we clean it up here or does the calling context deal with this?
+        utils::fs_ext::rename_noreplace(temp_path.as_std_path(), owner.local_path().as_std_path())
             .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
 
         Ok(ResidentLayer { downloaded, owner })
