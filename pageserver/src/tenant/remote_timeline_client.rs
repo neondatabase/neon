@@ -1737,35 +1737,20 @@ impl RemoteTimelineClient {
                     let is_later = last_updater.is_some_and(|task_id| task_id < task.task_id);
                     let monotone = is_later || last_updater.is_none();
 
-                    if monotone {
-                        // not taking ownership is wasteful
-                        upload_queue.clean.0.clone_from(uploaded);
-                        upload_queue.clean.1 = Some(task.task_id);
+                    assert!(monotone, "no two index uploads should be completing at the same time, prev={last_updater:?}, task.task_id={}", task.task_id);
 
-                        let lsn = upload_queue.clean.0.metadata.disk_consistent_lsn();
+                    // not taking ownership is wasteful
+                    upload_queue.clean.0.clone_from(uploaded);
+                    upload_queue.clean.1 = Some(task.task_id);
 
-                        if self.generation.is_none() {
-                            // Legacy mode: skip validating generation
-                            upload_queue.visible_remote_consistent_lsn.store(lsn);
-                            None
-                        } else {
-                            Some((lsn, upload_queue.visible_remote_consistent_lsn.clone()))
-                        }
-                    } else {
-                        // do we want to log? this is perfectly valid, since the ordering in
-                        // which completing tasks get to lock the upload_queue is not the task
-                        // spawning order. log because it is very rare situation requiring two
-                        // consecutive index uploads (like we do with gc).
+                    let lsn = upload_queue.clean.0.metadata.disk_consistent_lsn();
 
-                        // keeping this warn to see if it's immediatedly triggered in regress tests
-                        tracing::warn!(
-                            prev=?last_updater,
-                            now=?task.task_id,
-                            prev_lsn=%upload_queue.clean.0.metadata.disk_consistent_lsn(),
-                            now_lsn=%uploaded.metadata.disk_consistent_lsn(),
-                            "monotonicity check failed"
-                        );
+                    if self.generation.is_none() {
+                        // Legacy mode: skip validating generation
+                        upload_queue.visible_remote_consistent_lsn.store(lsn);
                         None
+                    } else {
+                        Some((lsn, upload_queue.visible_remote_consistent_lsn.clone()))
                     }
                 }
                 UploadOp::Delete(_) => {
