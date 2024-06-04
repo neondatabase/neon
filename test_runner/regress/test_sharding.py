@@ -697,6 +697,9 @@ def test_sharding_ingest_layer_sizes(
         # small checkpointing and compaction targets to ensure we generate many upload operations
         "checkpoint_distance": f"{expect_layer_size}",
         "compaction_target_size": f"{expect_layer_size}",
+        # aim to reduce flakyness, we are not doing explicit checkpointing
+        "compaction_period": "0s",
+        "gc_period": "0s",
     }
     shard_count = 4
     neon_env_builder.num_pageservers = shard_count
