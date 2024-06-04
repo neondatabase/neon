@@ -100,10 +100,6 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
             ]
         )
 
-        # these can happen, if we shutdown at a good time. to be fixed as part of #5172.
-        message = ".*duplicated L1 layer layer=.*"
-        ps.allowed_errors.append(message)
-
     workload = Workload(env, tenant_id, timeline_id)
     workload.init(env.pageservers[0].id)
     workload.write_rows(256, env.pageservers[0].id)

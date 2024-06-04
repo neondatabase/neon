@@ -98,13 +98,6 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
     # give time for log flush
     time.sleep(1)
 
-    message = f".*duplicated L1 layer layer={l1_found}"
-    found_msg = env.pageserver.log_contains(message)
-    # resident or evicted, it should not be overwritten, however it should had been non-existing at startup
-    assert (
-        found_msg is None
-    ), "layer should had been removed during startup, did it live on as evicted?"
-
     assert env.pageserver.layer_exists(tenant_id, timeline_id, l1_found), "the L1 reappears"
 
     wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)

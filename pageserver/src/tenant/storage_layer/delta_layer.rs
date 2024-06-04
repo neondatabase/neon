@@ -482,9 +482,9 @@ impl DeltaLayerWriterInner {
         let temp_path = self.path.clone();
         let result = self.finish0(key_end, timeline, ctx).await;
         if result.is_err() {
-            tracing::warn!("Cleaning up temporary file {temp_path} after error during writing");
+            tracing::info!(%temp_path, "cleaning up temporary file after error during writing");
             if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!("Error cleaning up temporary layer file {temp_path}: {e:?}")
+                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
             }
         }
         result
