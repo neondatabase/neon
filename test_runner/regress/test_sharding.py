@@ -712,6 +712,14 @@ def test_sharding_ingest_layer_sizes(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    initial_layers_per_shard = {}
+    for shard in env.storage_controller.locate(tenant_id):
+        shard_id = shard["shard_id"]
+        layers = (
+            env.get_pageserver(shard["node_id"]).http_client().layer_map_info(shard_id, timeline_id)
+        )
+        initial_layers_per_shard[shard_id] = set(layers.historic_layers)
+
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
     workload.write_rows(4096, upload=False)
@@ -733,7 +741,13 @@ def test_sharding_ingest_layer_sizes(
 
         historic_layers = sorted(layer_map.historic_layers, key=lambda layer: layer.lsn_start)
 
+        initial_layers = initial_layers_per_shard[shard_id]
+
         for layer in historic_layers:
+            if layer in initial_layers:
+                # ignore the initdb image layers for the size histogram
+                continue
+
             if layer.layer_file_size < expect_layer_size // 2:
                 classification = "Small"
                 small_layer_count += 1
