@@ -269,6 +269,7 @@ LogicalSlotsMonitorMain(Datum main_arg)
 void
 _PG_init(void)
 {
+	extern void		(*LogicalFuncs_Custom_XLogReaderRoutines)(XLogReaderRoutine *xlr);
 	/*
 	 * Also load 'neon_rmgr'. This makes it unnecessary to list both 'neon'
 	 * and 'neon_rmgr' in shared_preload_libraries.
@@ -280,6 +281,7 @@ _PG_init(void)
 	pg_init_libpagestore();
 	pg_init_walproposer();
         WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitLogicalReplicationMonitor();
 
