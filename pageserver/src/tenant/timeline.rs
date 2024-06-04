@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use std::{
     array,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::atomic::AtomicU64,
 };
 use std::{
@@ -4663,27 +4663,43 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         let mut guard = self.layers.write().await;
 
+        let mut duplicated_layers = HashSet::new();
+
+        let mut insert_layers = Vec::with_capacity(new_deltas.len());
+
         for l in new_deltas {
             if guard.contains(l.as_ref()) {
-                error!("duplicate L1 layer; \
-                 likely we already overwrote the exiting file on disk with a possibly different bit pattern, \
-                 causing incoherency with in-memory copies (PS page cache) {l}");
-                std::process::abort();
+                // expected in tests
+                tracing::error!(layer=%l, "duplicated L1 layer");
+
+                // good ways to cause a duplicate: we repeatedly error after taking the writelock
+                // `guard`  on self.layers. as of writing this, there are no error returns except
+                // for compact_level0_phase1 creating an L0, which does not happen in practice
+                // because we have not implemented L0 => L0 compaction.
+                duplicated_layers.insert(l.layer_desc().key());
             } else if LayerMap::is_l0(l.layer_desc()) {
-                error!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
-                std::process::abort(); // if we returned an error, we'd not check the remaining `new_delta` layers for duplicates
+                bail!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
+            } else {
+                insert_layers.push(l.clone());
             }
         }
+
+        // only remove those inputs which were not outputs
+        let remove_layers: Vec<Layer> = layers_to_remove
+            .iter()
+            .filter(|l| !duplicated_layers.contains(&l.layer_desc().key()))
+            .cloned()
+            .collect();
 
         if !new_images.is_empty() {
             guard.track_new_image_layers(new_images, &self.metrics);
         }
 
         // deletion will happen later, the layer file manager calls garbage_collect_on_drop
-        guard.finish_compact_l0(layers_to_remove, new_deltas, &self.metrics);
+        guard.finish_compact_l0(&remove_layers, &insert_layers, &self.metrics);
 
         self.remote_client
-            .schedule_compaction_update(layers_to_remove, new_deltas)?;
+            .schedule_compaction_update(&remove_layers, new_deltas)?;
 
         drop_wlock(guard);
 
