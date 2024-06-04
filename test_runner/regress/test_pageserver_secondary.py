@@ -563,6 +563,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
             )
         ),
     )
+    workload.stop()
 
 
 def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
