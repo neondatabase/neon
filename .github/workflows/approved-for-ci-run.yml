@@ -69,12 +69,22 @@ jobs:
         with:
           ref: main
           token: ${{ secrets.CI_ACCESS_TOKEN }}
+      
+      - name: Look for existant PR
+        id: "get_pr"
+        run: |
+          ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
+          echo "ALREADY_CREATED=$ALREADY_CREATED" >> $GITHUB_OUTPUTS
+
 
       - run: gh pr checkout "${PR_NUMBER}"
 
       - run: git checkout -b "${BRANCH}"
 
-      - run: git push --force origin "${BRANCH}"
+      - run: |
+          if [ -z "${{ steps.get_pr.outputs.ALREADY_CREATED }}" ] ; then
+            git push --force origin "${BRANCH}"
+          fi
 
       - name: Create a Pull Request for CI run (if required)
         id: "create_pr"
@@ -89,8 +99,7 @@ jobs:
             Feel free to review/comment/discuss the original PR #${PR_NUMBER}.
           EOF
 
-          ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
-          echo "ALREADY_CREATED=$ALREADY_CREATED" >> $GITHUB_OUTPUTS
+          ALREADY_CREATED=${{ steps.get_pr.outputs.ALREADY_CREATED }}
           if [ -z "${ALREADY_CREATED}" ]; then
             LABELS=$(gh pr view ${PR_NUMBER}  --json labels --jq '.labels.[].name' | \
             awk 'BEGIN {labels="run-e2e-tests-in-draft"} {if ($1 ~ /^run/) labels=labels "," $1;} END {print labels}')
@@ -113,7 +122,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ALREADY_CREATED=${{ steps.create_pr.outputs.ALREADY_CREATED }}
+          ALREADY_CREATED=${{ steps.get_pr.outputs.ALREADY_CREATED }}
           if [ -z "${ALREADY_CREATED}" ] ; then 
             exit 0
           fi
@@ -128,6 +137,11 @@ jobs:
           [ -z "${LABELS_TO_REMOVE}" ] || REMOVE_CMD="--remove-label ${LABELS_TO_REMOVE}"
           echo gh pr --repo "${GITHUB_REPOSITORY}" edit ${OLD_PR} ${ADD_CMD} ${REMOVE_CMD}
           gh pr --repo "${GITHUB_REPOSITORY}" edit ${OLD_PR} ${ADD_CMD} ${REMOVE_CMD}
+
+      - run: |
+          if [ -n "${{ steps.get_pr.outputs.ALREADY_CREATED }}" ] ; then
+            git push --force origin "${BRANCH}"
+          fi
              
 
   cleanup:
