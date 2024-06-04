@@ -2,7 +2,7 @@ name: Handle `approved-for-ci-run` label
 # This workflow helps to run CI pipeline for PRs made by external contributors (from forks).
 
 on:
-  pull_request_target:
+  pull_request:
     branches:
       - main
     types:
