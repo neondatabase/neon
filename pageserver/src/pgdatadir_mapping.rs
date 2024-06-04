@@ -718,8 +718,20 @@ impl Timeline {
                 result.insert(fname, content);
             }
         }
-        self.aux_file_size_estimator.on_base_backup(sz);
+        self.aux_file_size_estimator.on_initial(sz);
         Ok(result)
+    }
+
+    pub(crate) async fn trigger_aux_file_size_computation(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), PageReconstructError> {
+        let current_policy = self.last_aux_file_policy.load();
+        if let Some(AuxFilePolicy::V2) | Some(AuxFilePolicy::CrossValidation) = current_policy {
+            self.list_aux_files_v2(lsn, ctx).await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn list_aux_files(
