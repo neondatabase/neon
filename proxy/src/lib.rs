@@ -3,6 +3,7 @@
 use std::convert::Infallible;
 
 use anyhow::{bail, Context};
+use intern::{EndpointIdInt, EndpointIdTag, InternId};
 use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -129,18 +130,20 @@ macro_rules! smol_str_wrapper {
 
 const POOLER_SUFFIX: &str = "-pooler";
 
-pub trait Normalize {
-    fn normalize(&self) -> Self;
-}
-
-impl<S: Clone + AsRef<str> + From<String>> Normalize for S {
+impl EndpointId {
     fn normalize(&self) -> Self {
-        if self.as_ref().ends_with(POOLER_SUFFIX) {
-            let mut s = self.as_ref().to_string();
-            s.truncate(s.len() - POOLER_SUFFIX.len());
-            s.into()
+        if let Some(stripped) = self.as_ref().strip_suffix(POOLER_SUFFIX) {
+            stripped.into()
         } else {
             self.clone()
+        }
+    }
+
+    fn normalize_intern(&self) -> EndpointIdInt {
+        if let Some(stripped) = self.as_ref().strip_suffix(POOLER_SUFFIX) {
+            EndpointIdTag::get_interner().get_or_intern(stripped)
+        } else {
+            self.into()
         }
     }
 }

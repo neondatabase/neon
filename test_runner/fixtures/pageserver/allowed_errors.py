@@ -66,7 +66,7 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
     ".*task iteration took longer than the configured period.*",
     # these can happen anytime we do compactions from background task and shutdown pageserver
-    r".*ERROR.*ancestor timeline \S+ is being stopped",
+    ".*could not compact.*cancelled.*",
     # this is expected given our collaborative shutdown approach for the UploadQueue
     ".*Compaction failed.*, retrying in .*: Other\\(queue is in state Stopped.*",
     ".*Compaction failed.*, retrying in .*: ShuttingDown",

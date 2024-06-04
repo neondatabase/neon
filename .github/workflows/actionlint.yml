@@ -24,7 +24,7 @@ jobs:
 
   actionlint:
     needs: [ check-permissions ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: reviewdog/action-actionlint@v1
@@ -36,3 +36,15 @@ jobs:
           fail_on_error: true
           filter_mode: nofilter
           level: error
+      - run: |
+          PAT='^\s*runs-on:.*-latest'
+          if grep -ERq $PAT .github/workflows
+          then
+            grep -ERl $PAT .github/workflows |\
+            while read -r f
+            do
+              l=$(grep -nE $PAT .github/workflows/release.yml | awk -F: '{print $1}' | head -1)
+              echo "::error file=$f,line=$l::Please, do not use ubuntu-latest images to run on, use LTS instead."
+            done
+            exit 1
+          fi

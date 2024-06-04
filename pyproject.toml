@@ -54,6 +54,7 @@ build-backend = "poetry.core.masonry.api"
 exclude = [
     "^vendor/",
     "^target/",
+    "test_runner/performance/pgvector/loaddata.py",
 ]
 check_untyped_defs = true
 # Help mypy find imports when running against list of individual files.

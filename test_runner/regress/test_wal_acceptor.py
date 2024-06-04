@@ -17,6 +17,7 @@ import psycopg2
 import psycopg2.errors
 import psycopg2.extras
 import pytest
+import requests
 from fixtures.broker import NeonBroker
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
@@ -841,7 +842,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # fetch something sensible from status
     tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
-    epoch = tli_status.acceptor_epoch
+    term = tli_status.term
     timeline_start_lsn = tli_status.timeline_start_lsn
 
     if auth_enabled:
@@ -862,8 +863,8 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     endpoint.safe_psql("insert into t values(10)")
 
     tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
-    epoch_after_reboot = tli_status.acceptor_epoch
-    assert epoch_after_reboot > epoch
+    term_after_reboot = tli_status.term
+    assert term_after_reboot > term
 
     # and timeline_start_lsn stays the same
     assert tli_status.timeline_start_lsn == timeline_start_lsn
@@ -1104,11 +1105,11 @@ def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
     # First check that term / flush_lsn are the same: it is easier to
     # report/understand if WALs are different due to that.
     statuses = [sk_http_cli.timeline_status(tenant_id, timeline_id) for sk_http_cli in sk_http_clis]
-    term_flush_lsns = [(s.acceptor_epoch, s.flush_lsn) for s in statuses]
+    term_flush_lsns = [(s.last_log_term, s.flush_lsn) for s in statuses]
     for tfl, sk in zip(term_flush_lsns[1:], sks[1:]):
         assert (
             term_flush_lsns[0] == tfl
-        ), f"(term, flush_lsn) are not equal on sks {sks[0].id} and {sk.id}: {term_flush_lsns[0]} != {tfl}"
+        ), f"(last_log_term, flush_lsn) are not equal on sks {sks[0].id} and {sk.id}: {term_flush_lsns[0]} != {tfl}"
 
     # check that WALs are identic.
     segs = [sk.list_segments(tenant_id, timeline_id) for sk in sks]
@@ -1865,6 +1866,65 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
         for sk in [src_sk, dst_sk]
     ]
     assert digests[0] == digests[1], f"digest on src is {digests[0]} but on dst is {digests[1]}"
+
+
+# Test pull_timeline while concurrently changing term on the donor:
+# 1) Start pull_timeline, listing files to fetch.
+# 2) Change term on the donor
+# 3) Finish pull_timeline.
+#
+# Currently (until proper membership change procedure), we want to pull_timeline
+# to fetch the log up to <last_log_term, flush_lsn>. This is unsafe if term
+# changes during the procedure (unless timeline is locked all the time but we
+# don't want that): recepient might end up with mix of WAL from different
+# histories. Thus the schedule above is expected to fail. Later we'd allow
+# pull_timeline to only initialize timeline to any valid state (up to
+# commit_lsn), holding switch to fully new configuration until it recovers
+# enough, so it won't be affected by term change anymore.
+#
+# Expected to fail while term check is not implemented.
+@pytest.mark.xfail
+def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    (src_sk, dst_sk) = (env.safekeepers[0], env.safekeepers[2])
+
+    log.info("use only first 2 safekeepers, 3rd will be seeded")
+    ep = env.endpoints.create("main")
+    ep.active_safekeepers = [1, 2]
+    ep.start()
+    ep.safe_psql("create table t(key int, value text)")
+    ep.safe_psql("insert into t select generate_series(1, 1000), 'pear'")
+
+    dst_http = dst_sk.http_client()
+    # run pull_timeline which will halt before downloading files
+    dst_http.configure_failpoints(("sk-pull-timeline-after-list-pausable", "pause"))
+    pt_handle = PropagatingThread(
+        target=dst_sk.pull_timeline, args=([src_sk], tenant_id, timeline_id)
+    )
+    pt_handle.start()
+    dst_sk.wait_until_paused("sk-pull-timeline-after-list-pausable")
+
+    src_http = src_sk.http_client()
+    term_before = src_http.timeline_status(tenant_id, timeline_id).term
+
+    # restart compute to bump term
+    ep.stop()
+    ep = env.endpoints.create("main")
+    ep.active_safekeepers = [1, 2]
+    ep.start()
+    ep.safe_psql("insert into t select generate_series(1, 100), 'pear'")
+
+    term_after = src_http.timeline_status(tenant_id, timeline_id).term
+    assert term_after > term_before, f"term_after={term_after}, term_before={term_before}"
+
+    dst_http.configure_failpoints(("sk-pull-timeline-after-list-pausable", "off"))
+    with pytest.raises(requests.exceptions.HTTPError):
+        pt_handle.join()
 
 
 # In this test we check for excessive START_REPLICATION and START_WAL_PUSH queries

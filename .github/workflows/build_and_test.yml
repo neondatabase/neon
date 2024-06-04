@@ -35,7 +35,7 @@ jobs:
   cancel-previous-e2e-tests:
     needs: [ check-permissions ]
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Cancel previous e2e-tests runs for this PR
@@ -549,7 +549,7 @@ jobs:
   report-benchmarks-failures:
     needs: [ benchmarks, create-test-report ]
     if: github.ref_name == 'main' && failure() && needs.benchmarks.result == 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
     - uses: slackapi/slack-github-action@v1
@@ -774,7 +774,7 @@ jobs:
 
   neon-image:
     needs: [ neon-image-arch, tag ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: docker/login-action@v3
@@ -884,7 +884,7 @@ jobs:
 
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     strategy:
       matrix:
@@ -1032,7 +1032,7 @@ jobs:
 
   promote-images:
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     env:
       VERSIONS: v14 v15 v16
@@ -1077,7 +1077,7 @@ jobs:
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
