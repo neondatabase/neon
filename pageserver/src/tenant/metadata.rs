@@ -367,7 +367,7 @@ pub(crate) mod modern_serde {
     #[error("re-serializing for crc32 failed")]
     struct Crc32CalculationFailed<E>(#[source] E);
 
-    // this should be false for a week, after that we can change it to true
+    // this should be true for one release, after that we can change it to false
     // remember to check the IndexPart::metadata field TODO comment as well
     const LEGACY_BINCODED_BYTES: bool = true;
 
