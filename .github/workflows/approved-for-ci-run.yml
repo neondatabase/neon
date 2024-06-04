@@ -135,8 +135,8 @@ jobs:
           REMOVE_CMD=
           [ -z "${LABELS_TO_ADD}" ] || ADD_CMD="--add-label ${LABELS_TO_ADD}"
           [ -z "${LABELS_TO_REMOVE}" ] || REMOVE_CMD="--remove-label ${LABELS_TO_REMOVE}"
-          echo gh pr --repo "${GITHUB_REPOSITORY}" edit ${OLD_PR} ${ADD_CMD} ${REMOVE_CMD}
-          gh pr --repo "${GITHUB_REPOSITORY}" edit ${OLD_PR} ${ADD_CMD} ${REMOVE_CMD}
+          echo gh pr --repo "${GITHUB_REPOSITORY}" edit ${ALREADY_CREATED} ${ADD_CMD} ${REMOVE_CMD}
+          gh pr --repo "${GITHUB_REPOSITORY}" edit ${ALREADY_CREATED} ${ADD_CMD} ${REMOVE_CMD}
 
       - run: |
           if [ -n "${{ steps.get_pr.outputs.ALREADY_CREATED }}" ] ; then
