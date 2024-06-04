@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -22,8 +23,11 @@ use pageserver::{
     },
     virtual_file::VirtualFile,
 };
-use remote_storage::{ListingMode, RemotePath, RemoteStorageConfig};
+use pageserver_api::models::ImageCompressionAlgorithm;
+use remote_storage::{GenericRemoteStorage, ListingMode, RemotePath, RemoteStorageConfig};
 use std::fs;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
@@ -65,6 +69,7 @@ pub(crate) enum LayerCmd {
         tenant_remote_prefix: Option<String>,
         tenant_remote_config: Option<String>,
         layers_dir: Option<Utf8PathBuf>,
+        parallelism: Option<u32>,
     },
 }
 
@@ -257,6 +262,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             tenant_remote_prefix,
             tenant_remote_config,
             layers_dir,
+            parallelism,
         } => {
             pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
             pageserver::page_cache::init(100);
@@ -276,20 +282,24 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 Some(layers_dir),
             ) = (tenant_remote_prefix, tenant_remote_config, layers_dir)
             {
-                let toml_document = toml_edit::Document::from_str(&tenant_remote_config)?;
+                let toml_document = toml_edit::Document::from_str(tenant_remote_config)?;
                 let toml_item = toml_document
                     .get("remote_storage")
                     .expect("need remote_storage");
                 let config = RemoteStorageConfig::from_toml(toml_item)?.expect("incomplete config");
                 let storage = remote_storage::GenericRemoteStorage::from_config(&config)?;
+                let storage = Arc::new(storage);
 
                 let cancel = CancellationToken::new();
-                let path = RemotePath::from_string(&tenant_remote_prefix)?;
-                let max_files = NonZeroU32::new(8000);
+                let path = RemotePath::from_string(tenant_remote_prefix)?;
+                let max_files = NonZeroU32::new(16000);
                 let files_list = storage
                     .list(Some(&path), ListingMode::NoDelimiter, max_files, &cancel)
                     .await?;
 
+                let semaphore = Arc::new(Semaphore::new(parallelism.unwrap_or(1) as usize));
+
+                let mut tasks = JoinSet::new();
                 for file_key in files_list.keys.iter() {
                     let Some(file_name) = file_key.object_name() else {
                         continue;
@@ -305,26 +315,55 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                         continue;
                     }
                     let local_layer_path = layers_dir.join(file_name);
-                    let download = storage.download(file_key, &cancel).await?;
-                    let mut dest_layer_file = tokio::fs::File::create(&local_layer_path).await?;
-                    let mut body = tokio_util::io::StreamReader::new(download.download_stream);
-                    let _size = tokio::io::copy_buf(&mut body, &mut dest_layer_file).await?;
-                    let stats = ImageLayer::compression_statistics(
-                        &local_layer_path,
-                        &local_layer_path,
-                        &ctx,
-                    )
-                    .await?;
+                    async fn stats(
+                        semaphore: Arc<Semaphore>,
+                        local_layer_path: Utf8PathBuf,
+                        json_file_path: Utf8PathBuf,
+                        dest_path: Utf8PathBuf,
+                        storage: Arc<GenericRemoteStorage>,
+                        file_key: RemotePath,
+                    ) -> Result<Vec<(Option<ImageCompressionAlgorithm>, u64)>, anyhow::Error>
+                    {
+                        let _permit = semaphore.acquire().await?;
+                        let cancel = CancellationToken::new();
+                        let download = storage.download(&file_key, &cancel).await?;
+                        let mut dest_layer_file =
+                            tokio::fs::File::create(&local_layer_path).await?;
+                        let mut body = tokio_util::io::StreamReader::new(download.download_stream);
+                        let _size = tokio::io::copy_buf(&mut body, &mut dest_layer_file).await?;
+                        let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+                        let stats =
+                            ImageLayer::compression_statistics(&dest_path, &local_layer_path, &ctx)
+                                .await?;
 
-                    let stats_str = serde_json::to_string(&stats).unwrap();
-                    tokio::fs::write(json_file_path, stats_str).await?;
-                    println!("Statistics for {file_name}: {stats:#?}\n");
+                        let stats_str = serde_json::to_string(&stats).unwrap();
+                        tokio::fs::write(json_file_path, stats_str).await?;
+                        Ok(stats)
+                    }
+                    let semaphore = semaphore.clone();
+                    let file_key = file_key.to_owned();
+                    let storage = storage.clone();
+                    let dest_path = dest_path.to_owned();
+                    let file_name = file_name.to_owned();
+                    tasks.spawn(async move {
+                        let stats = stats(
+                            semaphore,
+                            local_layer_path.to_owned(),
+                            json_file_path.to_owned(),
+                            dest_path,
+                            storage,
+                            file_key,
+                        )
+                        .await;
+                        println!("Statistics for {file_name}: {stats:#?}\n");
+                    });
                 }
+                while let Some(_res) = tasks.join_next().await {}
             } else {
                 anyhow::bail!("No tenant dir or remote config or layers dir specified");
             }
 
-            return Ok(());
+            Ok(())
         }
     }
 }
