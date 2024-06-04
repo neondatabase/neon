@@ -109,7 +109,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry/virtualenvs
-          key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+          key: v2-${{ runner.os }}-temp-python-deps-${{ hashFiles('poetry.lock') }}
 
       - name: Install Python deps
         run: ./scripts/pysync
@@ -299,21 +299,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-temp-v2-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
         uses: actions/cache@v4
         with:
           path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-temp-v2-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
         uses: actions/cache@v4
         with:
           path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-temp-v2-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
@@ -411,7 +411,7 @@ jobs:
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
         with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
+          name: neon-${{ runner.os }}-bookworm-${{ matrix.build_type }}-artifact
           path: /tmp/neon
 
       # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
@@ -639,7 +639,7 @@ jobs:
       - name: Get Neon artifact
         uses: ./.github/actions/download
         with:
-          name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
+          name: neon-${{ runner.os }}-bookworm-${{ matrix.build_type }}-artifact
           path: /tmp/neon
 
       - name: Get coverage artifact
@@ -804,7 +804,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14 ]
+        # version: [ v14, v15, v16 ]
         arch: [ x64, arm64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
@@ -1276,7 +1277,7 @@ jobs:
           # Update Neon artifact for the release (reuse already uploaded artifact)
           for build_type in debug release; do
             OLD_PREFIX=artifacts/${GITHUB_RUN_ID}
-            FILENAME=neon-${{ runner.os }}-${build_type}-artifact.tar.zst
+            FILENAME=neon-${{ runner.os }}-bookworm-${build_type}-artifact.tar.zst
 
             S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
             if [ -z "${S3_KEY}" ]; then
