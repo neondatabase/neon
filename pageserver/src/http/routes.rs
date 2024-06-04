@@ -2452,13 +2452,11 @@ async fn perf_info(
     let lsn = timeline.get_last_record_lsn();
 
     for key in all_layer_files {
+        split_points.insert(key.key_range.start);
+        split_points.insert(key.key_range.end);
         if key.is_delta {
-            split_points.insert(key.key_range.start);
-            split_points.insert(key.key_range.end);
             delta_ranges.push((key.key_range.clone(), key.lsn_range.clone()));
         } else {
-            split_points.insert(key.key_range.start);
-            split_points.insert(key.key_range.end);
             image_ranges.push((key.key_range.clone(), key.lsn_range.start));
         }
     }
