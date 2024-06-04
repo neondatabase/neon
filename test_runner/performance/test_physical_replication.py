@@ -35,12 +35,12 @@ def test_ro_replica_lag(
     sync_interval_min = 1
 
     project = neon_create_project(neon_api_key, neon_api_base_url, pg_version)
+    neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
     project_id = project["project"]["id"]
     should_delete = True
     try:
         branch_id = project["branch"]["id"]
         master_connstr = project["connection_uris"][0]["connection_uri"]
-        neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
 
         replica = neon_create_endpoint(
             neon_api_key,
@@ -168,7 +168,7 @@ def test_replication_start_stop(
                     cur_replica[ireplica] = conn_replica[ireplica].cursor()
 
                 lag = measure_replication_lag(cur_master, cur_replica[ireplica])
-                print(f"Replica {ireplica} lagging behind master by {lag} seconds after configuration {iconfig:>b}")
+                log.info(f"Replica {ireplica} lagging behind master by {lag} seconds after configuration {iconfig:>b}")
     except:
         should_delete = False
     finally:

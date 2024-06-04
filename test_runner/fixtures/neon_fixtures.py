@@ -195,7 +195,7 @@ def neon_api_key() -> str:
 
 @pytest.fixture(scope="session")
 def neon_api_base_url() -> str:
-    return os.getenv("NEON_API_BASE_URL", "https://console-stage.neon.build/api/v2/").strip("/")
+    return os.getenv("NEON_API_BASE_URL", "https://console-stage.neon.build/api/v2").strip("/")
 
 
 def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "function"]:
@@ -2728,7 +2728,6 @@ class PgBin:
         self.pg_lib_dir = pg_distrib_dir / pg_version.v_prefixed / "lib"
         self.env = os.environ.copy()
         self.env["LD_LIBRARY_PATH"] = str(self.pg_lib_dir)
-        self.popen = None
 
     def _fixpath(self, command: List[str]):
         if "/" not in str(command[0]):
@@ -2770,6 +2769,18 @@ class PgBin:
         env: Optional[Env] = None,
         cwd: Optional[Union[str, Path]] = None,
     ):
+        """
+        Run one of the postgres binaries, not waiting for it to finish
+
+        The command should be in list form, e.g. ['pgbench', '-p', '55432']
+
+        All the necessary environment variables will be set.
+
+        If the first argument (the command name) doesn't include a path (no '/'
+        characters present), then it will be edited to include the correct path.
+
+        If you want stdout/stderr captured to files, use `run_capture` instead.
+        """
         proc = self.run_nonblocking(command, env, cwd)
         proc.wait()
         if proc.returncode != 0:
