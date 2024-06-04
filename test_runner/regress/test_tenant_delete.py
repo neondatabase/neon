@@ -88,6 +88,9 @@ def test_tenant_delete_smoke(
 
         parent = timeline
 
+    # Upload a heatmap so that we exercise deletion of that too
+    ps_http.tenant_heatmap_upload(tenant_id)
+
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 2
