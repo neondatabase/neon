@@ -74,7 +74,7 @@ jobs:
         id: "get_pr"
         run: |
           ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
-          echo "ALREADY_CREATED=$ALREADY_CREATED" >> $GITHUB_OUTPUTS
+          echo "ALREADY_CREATED=$ALREADY_CREATED" >> $GITHUB_OUTPUT
 
 
       - run: gh pr checkout "${PR_NUMBER}"
@@ -115,8 +115,8 @@ jobs:
             LABELS_TO_REMOVE=$(echo $LABELS_TO_REMOVE | awk 'BEGIN {list=""} {for (i=1;i<=NF;i++) if (length($i)>0) if (length(list)>0) list=list "," $i; else list=$i;} END {print list}')
             LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'|  grep -E '^run' |sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  grep -E '^run' | sort ))
             LABELS_TO_ADD=$(echo $LABELS_TO_ADD | awk 'BEGIN {list=""} {for (i=1;i<=NF;i++) if (length($i)>0) if (length(list)>0) list=list "," $i; else list=$i;} END {print list}')
-            echo "LABELS_TO_ADD=$LABELS_TO_ADD" >> $GITHUB_OUTPUTS
-            echo "LABELS_TO_REMOVE=$LABELS_TO_REMOVE" >> $GITHUB_OUTPUTS
+            echo "LABELS_TO_ADD=$LABELS_TO_ADD" >> $GITHUB_OUTPUT
+            echo "LABELS_TO_REMOVE=$LABELS_TO_REMOVE" >> $GITHUB_OUTPUT
           fi
       - name: Modify the existant pull request (if required)
         env:
