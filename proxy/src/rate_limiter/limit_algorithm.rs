@@ -1,9 +1,10 @@
 //! Algorithms for controlling concurrency limits.
 use parking_lot::Mutex;
 use std::{pin::pin, sync::Arc, time::Duration};
-use tokio::{sync::Notify, time::Instant};
-
-use crate::console::provider::ApiLockError;
+use tokio::{
+    sync::Notify,
+    time::{error::Elapsed, Instant},
+};
 
 use self::aimd::Aimd;
 
@@ -91,18 +92,12 @@ impl LimiterInner {
     }
 
     fn take(&mut self, ready: &Notify) -> Option<()> {
-        tracing::info!(
-            "available: {}, in_flight: {}, limit: {}",
-            self.available,
-            self.in_flight,
-            self.limit
-        );
         if self.available >= 1 {
             self.available -= 1;
             self.in_flight += 1;
 
             // tell the next in the queue that there is a permit ready
-            if self.available > 1 {
+            if self.available >= 1 {
                 ready.notify_one();
             }
             Some(())
@@ -162,19 +157,12 @@ impl DynamicLimiter {
     }
 
     /// Try to acquire a concurrency [Token], waiting for `duration` if there are none available.
-    ///
-    /// Returns `None` if there are none available after `duration`.
-    pub async fn acquire_timeout(
-        self: &Arc<Self>,
-        duration: Duration,
-    ) -> Result<Token, ApiLockError> {
+    pub async fn acquire_timeout(self: &Arc<Self>, duration: Duration) -> Result<Token, Elapsed> {
         tokio::time::timeout(duration, self.acquire()).await?
     }
 
-    /// Try to acquire a concurrency [Token], waiting until `deadline` if there are none available.
-    ///
-    /// Returns `None` if there are none available after `deadline`.
-    pub async fn acquire(self: &Arc<Self>) -> Result<Token, ApiLockError> {
+    /// Try to acquire a concurrency [Token].
+    async fn acquire(self: &Arc<Self>) -> Result<Token, Elapsed> {
         if self.config.initial_limit == 0 {
             // If the rate limiter is disabled, we can always acquire a token.
             Ok(Token::disabled())
@@ -187,7 +175,7 @@ impl DynamicLimiter {
                     if inner.take(&self.ready).is_some() {
                         break Ok(Token::new(self.clone()));
                     } else {
-                        break Err(ApiLockError::PermitError);
+                        notified.set(self.ready.notified());
                     }
                 }
                 notified.as_mut().await;

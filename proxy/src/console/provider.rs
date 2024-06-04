@@ -454,15 +454,12 @@ pub struct ApiLocks<K> {
 pub enum ApiLockError {
     #[error("timeout acquiring resource permit")]
     TimeoutError(#[from] tokio::time::error::Elapsed),
-    #[error("error acquiring resource permit")]
-    PermitError,
 }
 
 impl ReportableError for ApiLockError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             ApiLockError::TimeoutError(_) => crate::error::ErrorKind::RateLimit,
-            ApiLockError::PermitError => crate::error::ErrorKind::RateLimit,
         }
     }
 }
