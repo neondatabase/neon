@@ -81,10 +81,8 @@ jobs:
 
       - run: git checkout -b "${BRANCH}"
 
-      - run: |
-          if [ -z "${{ steps.get_pr.outputs.ALREADY_CREATED }}" ] ; then
-            git push --force origin "${BRANCH}"
-          fi
+      - run: git push --force origin "${BRANCH}"
+        if: steps.get_pr.outputs.ALREADY_CREATED == ''
 
       - name: Create a Pull Request for CI run (if required)
         id: "create_pr"
