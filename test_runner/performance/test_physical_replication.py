@@ -1,5 +1,7 @@
 import time
 from pathlib import Path
+import subprocess
+from typing import List, Optional, Any
 
 import psycopg2
 import psycopg2.extras
@@ -145,8 +147,12 @@ def test_replication_start_stop(
         conn_master = psycopg2.connect(master_connstr)
         cur_master = conn_master.cursor()
 
-        conn_replica = [psycopg2.connect(replica_connstr[i]) for i in range(num_replicas)]
-        cur_replica = [conn_replica[i].cursor() for i in range(num_replicas)]
+        conn_replica: List[Optional[psycopg2.connection]] = [psycopg2.connect(replica_connstr[i]) for i in range(num_replicas)]
+        cur_replica: List[Optional[psycopg2.cursor]] = []
+        for i in range(num_replicas):
+            conn = conn_replica[i]
+            assert conn is not None
+            cur_replica.append(conn.cursor())
 
         # Sync replicas
         for i in range(num_replicas):
@@ -164,7 +170,7 @@ def test_replication_start_stop(
                 master_connstr,
             ]
         )
-        replica_pgbench = [None for i in range(num_replicas)]
+        replica_pgbench: List[Optional[subprocess.Popen[Any]]] = [None for i in range(num_replicas)]
 
         for iconfig in range((1 << num_replicas) - 1, -1, -1):
 
@@ -187,8 +193,10 @@ def test_replication_start_stop(
                         ]
                     )
                 elif not replica_enabled(ireplica) and replica_pgbench[ireplica] is not None:
-                    replica_pgbench[ireplica].terminate()
-                    replica_pgbench[ireplica].wait()
+                    pgb = replica_pgbench[ireplica]
+                    assert pgb is not None
+                    pgb.terminate()
+                    pgb.wait()
                     replica_pgbench[ireplica] = None
                     conn_replica[ireplica] = None
                     cur_replica[ireplica] = None
@@ -203,9 +211,11 @@ def test_replication_start_stop(
             time.sleep(configuration_test_time_sec)
 
             for ireplica in range(num_replicas):
-                if conn_replica[ireplica] is None:
-                    conn_replica[ireplica] = psycopg2.connect(replica_connstr[i])
-                    cur_replica[ireplica] = conn_replica[ireplica].cursor()
+                conn = conn_replica[ireplica]
+                if conn is None:
+                    conn = psycopg2.connect(replica_connstr[i])
+                    conn_replica[ireplica] = conn
+                    cur_replica[ireplica] = conn.cursor()
 
                 lag = measure_replication_lag(cur_master, cur_replica[ireplica])
                 log.info(

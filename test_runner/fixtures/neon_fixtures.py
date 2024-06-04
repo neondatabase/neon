@@ -2745,7 +2745,7 @@ class PgBin:
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[Union[str, Path]] = None,
-    ) -> subprocess.Popen:
+    ) -> subprocess.Popen[Any]:
         """
         Run one of the postgres binaries, not waiting for it to finish
 
