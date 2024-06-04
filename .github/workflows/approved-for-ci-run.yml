@@ -115,7 +115,7 @@ jobs:
           EOF
 
           LABELS=$(gh pr view ${PR_NUMBER}  --json labels --jq '.labels.[].name' | \
-          awk 'BEGIN {labels="run-e2e-tests-in-draft"} {if ($1 ~ /^run/) labels=labels "," $1;} END {print labels}')
+          | grep -E '^run' | paste -sd , -)
           gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
                                                        --body-file "body.md" \
                                                        --head "${BRANCH}" \
