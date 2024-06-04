@@ -14,6 +14,7 @@ use postgres_ffi::v14::nonrelfile_utils::{
 use postgres_ffi::BLCKSZ;
 use tracing::*;
 use utils::bin_ser::BeSer;
+use utils::lsn::Lsn;
 
 /// Can this request be served by neon redo functions
 /// or we need to pass it to wal-redo postgres process?
@@ -32,6 +33,7 @@ pub(crate) fn can_apply_in_neon(rec: &NeonWalRecord) -> bool {
 
 pub(crate) fn apply_in_neon(
     record: &NeonWalRecord,
+    lsn: Lsn,
     key: Key,
     page: &mut BytesMut,
 ) -> Result<(), anyhow::Error> {
@@ -67,6 +69,7 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
+                postgres_ffi::page_set_lsn(page, lsn);
             }
 
             // Repeat for 'old_heap_blkno', if any
@@ -80,6 +83,7 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
+                postgres_ffi::page_set_lsn(page, lsn);
             }
         }
         // Non-relational WAL records are handled here, with custom code that has the
@@ -285,7 +289,7 @@ mod test {
         let mut page = BytesMut::from_iter(base_image);
 
         for record in deltas {
-            apply_in_neon(&record, file_path, &mut page)?;
+            apply_in_neon(&record, Lsn(8), file_path, &mut page)?;
         }
 
         let reconstructed = AuxFilesDirectory::des(&page)?;

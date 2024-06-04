@@ -361,10 +361,10 @@ impl PostgresRedoManager {
         &self,
         key: Key,
         page: &mut BytesMut,
-        _record_lsn: Lsn,
+        record_lsn: Lsn,
         record: &NeonWalRecord,
     ) -> anyhow::Result<()> {
-        apply_neon::apply_in_neon(record, key, page)?;
+        apply_neon::apply_in_neon(record, record_lsn, key, page)?;
 
         Ok(())
     }
