@@ -70,7 +70,7 @@ jobs:
           ref: main
           token: ${{ secrets.CI_ACCESS_TOKEN }}
       
-      - name: Look for existant PR
+      - name: Look for existing PR
         id: "get_pr"
         run: |
           ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
