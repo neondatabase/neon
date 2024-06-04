@@ -2,6 +2,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
@@ -61,6 +62,9 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     last_flush_lsn = wait_for_last_flush_lsn(env, endpoint_main, tenant_id, timeline_id)
 
     with env.pageserver.http_client() as client:
+        failpoint = "timeline-request-cancelled"
+        client.configure_failpoints((failpoint, "off"))
+
         # Check edge cases
         # Timestamp is in the future
         probe_timestamp = tbl[-1][1] + timedelta(hours=1)
@@ -106,6 +110,17 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         assert result["kind"] == "past"
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) >= last_flush_lsn
+
+        client.configure_failpoints((failpoint, "return"))
+
+        with pytest.raises(
+            PageserverApiException,
+            match="Request cancelled",
+        ) as exc:
+            probe_timestamp = tbl[1][1]
+            client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
+
+        assert exc.value.status_code == 500
 
 
 # Test pageserver get_timestamp_of_lsn API
