@@ -20,7 +20,6 @@
 
 /// Process lifecycle and abstracction for the IPC protocol.
 mod process;
-use postgres_ffi::{page_get_lsn, page_is_new};
 pub use process::Kind as ProcessKind;
 
 /// Code to apply [`NeonWalRecord`]s.
@@ -98,7 +97,6 @@ impl PostgresRedoManager {
         let base_img_lsn = base_img.as_ref().map(|p| p.0).unwrap_or(Lsn::INVALID);
         let mut img = base_img.map(|p| p.1);
         let mut batch_neon = apply_neon::can_apply_in_neon(&records[0].1);
-        let page_lsn = records.last().unwrap().0;
         let mut batch_start = 0;
         for (i, record) in records.iter().enumerate().skip(1) {
             let rec_neon = apply_neon::can_apply_in_neon(&record.1);
