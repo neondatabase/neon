@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Union
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
+from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -18,6 +19,8 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
+    assert_prefix_empty,
+    assert_prefix_not_empty,
     enable_remote_storage_versioning,
     list_prefix,
     remote_storage_delete_key,
@@ -837,6 +840,86 @@ def test_storage_controller_tenant_conf(neon_env_builder: NeonEnvBuilder):
     assert "pitr_interval" not in readback_ps.tenant_specific_overrides
 
     env.storage_controller.consistency_check()
+
+
+def test_storage_controller_tenant_deletion(
+    neon_env_builder: NeonEnvBuilder,
+    compute_reconfigure_listener: ComputeReconfigure,
+):
+    """
+    Validate that:
+    - Deleting a tenant deletes all its shards
+    - Deletion does not require the compute notification hook to be responsive
+    - Deleting a tenant also removes all secondary locations
+    """
+    neon_env_builder.num_pageservers = 4
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.control_plane_compute_hook_api = (
+        compute_reconfigure_listener.control_plane_compute_hook_api
+    )
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_tenant(
+        tenant_id, timeline_id, shard_count=2, placement_policy='{"Attached":1}'
+    )
+
+    # Ensure all the locations are configured, including secondaries
+    env.storage_controller.reconcile_until_idle()
+
+    shard_ids = [
+        TenantShardId.parse(shard["shard_id"]) for shard in env.storage_controller.locate(tenant_id)
+    ]
+
+    # Assert attachments all have local content
+    for shard_id in shard_ids:
+        pageserver = env.get_tenant_pageserver(shard_id)
+        assert pageserver.tenant_dir(shard_id).exists()
+
+    # Assert all shards have some content in remote storage
+    for shard_id in shard_ids:
+        assert_prefix_not_empty(
+            neon_env_builder.pageserver_remote_storage,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(shard_id),
+                )
+            ),
+        )
+
+    # Break the compute hook: we are checking that deletion does not depend on the compute hook being available
+    def break_hook():
+        raise RuntimeError("Unexpected call to compute hook")
+
+    compute_reconfigure_listener.register_on_notify(break_hook)
+
+    # No retry loop: deletion should complete in one shot without polling for 202 responses, because
+    # it cleanly detaches all the shards first, and then deletes them in remote storage
+    env.storage_controller.pageserver_api().tenant_delete(tenant_id)
+
+    # Assert no pageservers have any local content
+    for pageserver in env.pageservers:
+        for shard_id in shard_ids:
+            assert not pageserver.tenant_dir(shard_id).exists()
+
+    for shard_id in shard_ids:
+        assert_prefix_empty(
+            neon_env_builder.pageserver_remote_storage,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(shard_id),
+                )
+            ),
+        )
+
+    # Assert the tenant is not visible in storage controller API
+    with pytest.raises(StorageControllerApiException):
+        env.storage_controller.tenant_describe(tenant_id)
 
 
 class Failure:
