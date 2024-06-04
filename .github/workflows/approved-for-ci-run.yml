@@ -86,8 +86,9 @@ jobs:
 
       - name: Create a Pull Request for CI run (if required)
         id: "create_pr"
-        env:
+        env: 
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          ALREADY_CREATED: ${{ steps.get_pr.outputs.ALREADY_CREATED }}
         run: |
           cat << EOF > body.md
             This Pull Request is created automatically to run the CI pipeline for #${PR_NUMBER}
@@ -97,7 +98,8 @@ jobs:
             Feel free to review/comment/discuss the original PR #${PR_NUMBER}.
           EOF
 
-          ALREADY_CREATED=${{ steps.get_pr.outputs.ALREADY_CREATED }}
+          LABELS_TO_ADD=
+          LABELS_TO_REMOVE=
           if [ -z "${ALREADY_CREATED}" ]; then
             LABELS=$(gh pr view ${PR_NUMBER}  --json labels --jq '.labels.[].name' | \
             awk 'BEGIN {labels="run-e2e-tests-in-draft"} {if ($1 ~ /^run/) labels=labels "," $1;} END {print labels}')
@@ -113,22 +115,16 @@ jobs:
             LABELS_TO_REMOVE=$(echo $LABELS_TO_REMOVE | awk 'BEGIN {list=""} {for (i=1;i<=NF;i++) if (length($i)>0) if (length(list)>0) list=list "," $i; else list=$i;} END {print list}')
             LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'|  grep -E '^run' |sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  grep -E '^run' | sort ))
             LABELS_TO_ADD=$(echo $LABELS_TO_ADD | awk 'BEGIN {list=""} {for (i=1;i<=NF;i++) if (length($i)>0) if (length(list)>0) list=list "," $i; else list=$i;} END {print list}')
-            echo "LABELS_TO_ADD=$LABELS_TO_ADD" >> $GITHUB_OUTPUT
-            echo "LABELS_TO_REMOVE=$LABELS_TO_REMOVE" >> $GITHUB_OUTPUT
           fi
+          echo "LABELS_TO_ADD=$LABELS_TO_ADD" >> $GITHUB_OUTPUT
+          echo "LABELS_TO_REMOVE=$LABELS_TO_REMOVE" >> $GITHUB_OUTPUT
       - name: Modify the existant pull request (if required)
+        if: ${{ steps.create_pr.outputs.LABELS_TO_ADD }} != '' or ${{ steps.create_pr.outputs.LABELS_TO_REMOVE }} != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LABELS_TO_ADD: ${{ steps.create_pr.outputs.LABELS_TO_ADD }}
+          LABELS_TO_REMOVE: ${{ steps.create_pr.outputs.LABELS_TO_REMOVE }}
         run: |
-          ALREADY_CREATED=${{ steps.get_pr.outputs.ALREADY_CREATED }}
-          if [ -z "${ALREADY_CREATED}" ] ; then 
-            exit 0
-          fi
-          LABELS_TO_ADD=${{ steps.create_pr.outputs.LABELS_TO_ADD }}
-          LABELS_TO_REMOVE=${{ steps.create_pr.outputs.LABELS_TO_REMOVE }}
-          if [ -z "${LABELS_TO_ADD}" ] && [ -z "${LABELS_TO_REMOVE}" ] ; then 
-            exit 0
-          fi
           ADD_CMD=
           REMOVE_CMD=
           [ -z "${LABELS_TO_ADD}" ] || ADD_CMD="--add-label ${LABELS_TO_ADD}"
