@@ -62,9 +62,6 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     last_flush_lsn = wait_for_last_flush_lsn(env, endpoint_main, tenant_id, timeline_id)
 
     with env.pageserver.http_client() as client:
-        failpoint = "timeline-request-cancelled"
-        client.configure_failpoints((failpoint, "off"))
-
         # Check edge cases
         # Timestamp is in the future
         probe_timestamp = tbl[-1][1] + timedelta(hours=1)
@@ -111,13 +108,56 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) >= last_flush_lsn
 
+
+#
+# Test if cancelled pageserver get_lsn_by_timestamp request is correctly handled.
+#
+# Added as an effort to improve error handling and avoid full anyhow backtrace
+# https://github.com/neondatabase/neon/pull/7949
+#
+def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    tenant_id, _ = env.neon_cli.create_tenant(
+        conf={
+            # disable default GC and compaction
+            "gc_period": "1000 m",
+            "compaction_period": "0 s",
+            "gc_horizon": f"{1024 ** 2}",
+            "checkpoint_distance": f"{1024 ** 2}",
+            "compaction_target_size": f"{1024 ** 2}",
+        }
+    )
+
+    timeline_id = env.neon_cli.create_branch(
+        "test_get_lsn_by_timestamp_cancelled", tenant_id=tenant_id
+    )
+    endpoint_main = env.endpoints.create_start(
+        "test_get_lsn_by_timestamp_cancelled", tenant_id=tenant_id
+    )
+    timeline_id = endpoint_main.safe_psql("show neon.timeline_id")[0][0]
+
+    cur = endpoint_main.connect().cursor()
+    cur.execute("SET synchronous_commit=off")
+    cur.execute("CREATE TABLE foo (x integer)")
+    tbl = []
+    cur.execute("INSERT INTO foo VALUES(0)")
+    # Get the timestamp at UTC
+    after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=None)
+    tbl.append([0, after_timestamp])
+
+    cur.execute("SET synchronous_commit=on")
+    cur.execute("INSERT INTO foo VALUES (-1)")
+
+    with env.pageserver.http_client() as client:
+        failpoint = "timeline-request-cancelled"
         client.configure_failpoints((failpoint, "return"))
 
         with pytest.raises(
             PageserverApiException,
             match="Request cancelled",
         ) as exc:
-            probe_timestamp = tbl[1][1]
+            probe_timestamp = tbl[0][1]
             client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
 
         assert exc.value.status_code == 500
