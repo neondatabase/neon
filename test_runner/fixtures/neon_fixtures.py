@@ -2770,7 +2770,7 @@ class PgBin:
         cwd: Optional[Union[str, Path]] = None,
     ):
         """
-        Run one of the postgres binaries, not waiting for it to finish
+        Run one of the postgres binaries, waiting for it to finish
 
         The command should be in list form, e.g. ['pgbench', '-p', '55432']
 

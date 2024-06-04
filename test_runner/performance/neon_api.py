@@ -1,13 +1,14 @@
 from __future__ import annotations
-import time
 
+import time
 from typing import TYPE_CHECKING, cast
 
 import requests
-from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
     from typing import Any, Literal, Optional
+
+    from fixtures.pg_version import PgVersion
 
 
 def neon_create_project(
@@ -65,7 +66,7 @@ def neon_delete_project(
     )
 
     return cast("dict[str, Any]", resp.json())
-    
+
 
 def neon_start_endpoint(
     neon_api_key: str,
@@ -229,23 +230,6 @@ def neon_get_operations(
 
     return cast("dict[str, Any]", resp.json())
 
-def neon_suspend_compute(
-        neon_api_key: str,
-        neon_api_base_url: str,
-        project_id: str,
-        endpoint_id: str,
-) -> dict[str, Any]:
-    resp = requests.post(
-        f"{neon_api_base_url}/projects/{project_id}/endpoints/{endpoint_id}/suspend",
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {neon_api_key}",
-        },
-    )
-
-    assert resp.status_code == 200
-
-    return cast("dict[str, Any]", resp.json())
 
 def neon_wait_for_operation_to_finish(neon_api_key: str, neon_api_base_url: str, project_id: str):
     has_running = True
