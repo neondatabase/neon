@@ -117,36 +117,19 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 #
 def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
+    endpoint = env.endpoints.create_start("main")
 
-    tenant_id, _ = env.neon_cli.create_tenant(
-        conf={
-            # disable default GC and compaction
-            "gc_period": "1000 m",
-            "compaction_period": "0 s",
-            "gc_horizon": f"{1024 ** 2}",
-            "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
-        }
-    )
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
-    timeline_id = env.neon_cli.create_branch(
-        "test_get_lsn_by_timestamp_cancelled", tenant_id=tenant_id
-    )
-    endpoint_main = env.endpoints.create_start(
-        "test_get_lsn_by_timestamp_cancelled", tenant_id=tenant_id
-    )
-    timeline_id = endpoint_main.safe_psql("show neon.timeline_id")[0][0]
-
-    cur = endpoint_main.connect().cursor()
-    cur.execute("SET synchronous_commit=off")
+    conn = endpoint.connect()
+    cur = conn.cursor()
     cur.execute("CREATE TABLE foo (x integer)")
     tbl = []
     cur.execute("INSERT INTO foo VALUES(0)")
     # Get the timestamp at UTC
     after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=None)
     tbl.append([0, after_timestamp])
-
-    cur.execute("SET synchronous_commit=on")
     cur.execute("INSERT INTO foo VALUES (-1)")
 
     with env.pageserver.http_client() as client:

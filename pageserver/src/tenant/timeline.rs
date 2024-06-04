@@ -3139,11 +3139,6 @@ impl Timeline {
         let mut result = ValueReconstructResult::Continue;
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
-        // This fallpoint is used to check whether error propagation is handled correctly for cancelled request.
-        fail::fail_point!("timeline-request-cancelled", |_| {
-            Err(PageReconstructError::Cancelled)
-        });
-
         'outer: loop {
             if self.cancel.is_cancelled() {
                 return Err(PageReconstructError::Cancelled);

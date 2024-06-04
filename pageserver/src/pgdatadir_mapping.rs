@@ -424,6 +424,12 @@ impl Timeline {
 
         let mut found_smaller = false;
         let mut found_larger = false;
+
+        // This fallpoint is used to check whether error propagation is handled correctly for cancelled request.
+        fail::fail_point!("timeline-request-cancelled", |_| {
+            Err(PageReconstructError::Cancelled)
+        });
+
         while low < high {
             if cancel.is_cancelled() {
                 return Err(PageReconstructError::Cancelled);
