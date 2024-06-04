@@ -138,10 +138,8 @@ jobs:
           echo gh pr --repo "${GITHUB_REPOSITORY}" edit ${ALREADY_CREATED} ${ADD_CMD} ${REMOVE_CMD}
           gh pr --repo "${GITHUB_REPOSITORY}" edit ${ALREADY_CREATED} ${ADD_CMD} ${REMOVE_CMD}
 
-      - run: |
-          if [ -n "${{ steps.get_pr.outputs.ALREADY_CREATED }}" ] ; then
-            git push --force origin "${BRANCH}"
-          fi
+      - run: git push --force origin "${BRANCH}"
+        if: steps.get_pr.outputs.ALREADY_CREATED != ''
              
 
   cleanup:
