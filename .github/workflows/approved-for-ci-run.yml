@@ -84,11 +84,10 @@ jobs:
           LABELS_TO_ADD=
           LABELS_TO_REMOVE=
           if [ -n "$ALREADY_CREATED" ]; then
-            LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'| grep -E '^run' | sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  grep -E '^run' | sort ))
-            LABELS_TO_REMOVE=${LABELS_TO_REMOVE//run-e2e-tests-in-draft/}
-            LABELS_TO_REMOVE=$(echo $LABELS_TO_REMOVE | awk 'BEGIN {list=""} {for (i=1;i<=NF;i++) if (length($i)>0) if (length(list)>0) list=list "," $i; else list=$i;} END {print list}')
-            LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'|  grep -E '^run' |sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  grep -E '^run' | sort ))
-            LABELS_TO_ADD=$(echo $LABELS_TO_ADD | awk 'BEGIN {list=""} {for (i=1;i<=NF;i++) if (length($i)>0) if (length(list)>0) list=list "," $i; else list=$i;} END {print list}')
+            LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'| grep -E '^run' | sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  grep -E '^run' | sort ) |\
+            grep -v run-e2e-tests-in-draft | paste -sd , -)
+            LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'|  grep -E '^run' |sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  grep -E '^run' | sort ) |\
+            paste -sd , -)
           fi
           echo "LABELS_TO_ADD=$LABELS_TO_ADD" >> $GITHUB_OUTPUT
           echo "LABELS_TO_REMOVE=$LABELS_TO_REMOVE" >> $GITHUB_OUTPUT
@@ -123,7 +122,7 @@ jobs:
                                                        --base "main" \
                                                        --label $LABELS \
                                                        --draft
-      - name: Modify the existant pull request (if required)
+      - name: Modify the existing pull request (if required)
         if: |
           steps.get_labels.outputs.LABELS_TO_ADD != '' || 
           steps.get_labels.outputs.LABELS_TO_REMOVE != ''
