@@ -978,6 +978,8 @@ RUN cd /ext-src/ && for f in *.tar.gz; \
     rm -rf $dname; mkdir $dname; tar xzf $f --strip-components=1 -C $dname \
     || exit 1; rm -f $f; done
 RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch 
+# cmake is required for the h3 test
+RUN apt-get update && apt-get install -y cmake
 RUN cd /ext-src/pg_hint_plan-src/expected && cat ut-A.out \
     | awk '{if (NR == 12 || NR == 17 || NR == 19) print "LOG:  Sending request to compute_ctl: http://localhost:3080/extension_server/pg_hint_plan"; print $0;}' \
     > ut-A_1.out &&\
