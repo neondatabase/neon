@@ -71,9 +71,15 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
             # L0
             continue
 
+        candidate = parse_layer_file_name(path.name)
+
+        if isinstance(candidate, ImageLayerName):
+            continue
+
         if l1_found is not None:
-            raise RuntimeError(f"found multiple L1: {l1_found.name} and {path.name}")
-        l1_found = parse_layer_file_name(path.name)
+            raise RuntimeError(f"found multiple L1: {l1_found.to_str()} and {path.name}")
+
+        l1_found = candidate
 
     assert l1_found is not None, "failed to find L1 locally"
 
