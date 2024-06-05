@@ -97,9 +97,9 @@ jobs:
         if: steps.get_pr.outputs.ALREADY_CREATED == ''
 
       - name: Create a Pull Request for CI run (if required)
+        if: steps.get_pr.outputs.ALREADY_CREATED == ''
         env: 
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
-        if: steps.get_pr.outputs.ALREADY_CREATED == ''
         run: |
           cat << EOF > body.md
             This Pull Request is created automatically to run the CI pipeline for #${PR_NUMBER}
