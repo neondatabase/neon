@@ -1576,6 +1576,7 @@ neon_log_newpage_range_callback(Relation rel, ForkNumber forknum)
 		mdclose(smgr, forknum);
 		/* use isRedo == true, so that we drop it immediately */
 		mdunlink(InfoBFromSMgrRel(smgr), forknum, true);
+		resume_unlogged_build(); /* doesn't actually resume build, just release lock */
 	}
 }
 
@@ -2630,8 +2631,6 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 		return;
 	}
 
-	request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno);
-	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
 	if (is_unlogged_build(InfoFromSMgrRel(reln), forkNum, &relsize))
 	{
 		if (blkno >= relsize)

@@ -137,7 +137,7 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 /*
  * Cache relation size.
  * Returns true if it happens during unlogged build.
- * In thids case lock isnot released.
+ * In this case lock is not released.
  */
 bool
 set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber new_size, BlockNumber* old_size)
@@ -307,8 +307,9 @@ forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
  * Or can not happen at all if index fits in shared buffers.
  *
  * If this function really starts unlogged build, then it returns true, remove entry from LRU list
- * (protecting it from eviction until the end of unlogged build) and keeps lock on relsize hash.
- * This lock should be later released using resume_unlogged_build(). It allows caller to perform some actions
+ * protecting it from eviction until the end of unlogged build.
+ * Also it keeps lock on relsize hash. This lock should be later released using resume_unlogged_build().
+ * It allows caller to perform some actions
  * in critical section, for example right now it create relation on the disk using mdcreate
  */
 bool
@@ -379,8 +380,8 @@ start_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknu
 
 /*
  * Check if unlogged build is in progress.
- * If so, true is returns and lock on relsize cache is hold.
- * It should be later released by called using resume_unlogged_build().
+ * If so, true is returned and lock on relsize cache is hold.
+ * It should be later released by calling resume_unlogged_build().
  * It allows to read page from local file without risk that it is removed by stop_unlogged_build by some other backend.
  */
 bool
@@ -414,10 +415,10 @@ is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber* relsize)
 }
 
 /*
- * Check if releation is extended during unlogged build.
- * If it is unlogged, true is returns and lock on relsize cache is hold.
- * It should be later released by called using resume_unlogged_build().
- * It allows to atomocally extend local file.
+ * Check if relation is extended during unlogged build.
+ * If it is unlogged build, true is returned and lock on relsize cache is hold.
+ * It should be later released by calling resume_unlogged_build().
+ * It allows to atomically extend local file.
  */
 bool
 is_unlogged_build_extend(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blocknum, BlockNumber* relsize)
@@ -469,7 +470,10 @@ is_unlogged_build_extend(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blo
 }
 
 /*
- * Check if unlogged build is in progress and if so, clear th flag, return entry to LRU list and return true.
+ * Check if unlogged build is in progress and if so, clear the flag and return entry to LRU list.
+ * If it was unlogged build, true is returned and lock on relsize cache is hold.
+ * It should be later released by calling resume_unlogged_build().
+ * It allows to atomically unlink local file.
  */
 bool
 stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
