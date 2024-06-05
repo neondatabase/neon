@@ -42,7 +42,6 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
     pg_bin.run_capture(["pgbench", "-i", "-s1", connstr])
 
     lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-    endpoint.stop()
 
     # make sure we receive no new wal after this, so that we'll write over the same L1 file.
     endpoint.stop()
