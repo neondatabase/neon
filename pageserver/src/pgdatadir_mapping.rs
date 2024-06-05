@@ -36,6 +36,7 @@ use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
+use utils::pausable_failpoint;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
@@ -409,6 +410,8 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
+        pausable_failpoint!("find-lsn-for-timestamp-pausable");
+
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         // We use this method to figure out the branching LSN for the new branch, but the
         // GC cutoff could be before the branching point and we cannot create a new branch
@@ -424,11 +427,6 @@ impl Timeline {
 
         let mut found_smaller = false;
         let mut found_larger = false;
-
-        // This fallpoint is used to check whether error propagation is handled correctly for cancelled request.
-        fail::fail_point!("timeline-request-cancelled", |_| {
-            Err(PageReconstructError::Cancelled)
-        });
 
         while low < high {
             if cancel.is_cancelled() {
