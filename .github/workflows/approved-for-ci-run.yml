@@ -111,7 +111,7 @@ jobs:
             Feel free to review/comment/discuss the original PR #${PR_NUMBER}.
           EOF
 
-          LABELS=$((gh pr --repo "${GITHUB_REPOSITORY}" view ${PR_NUMBER}  --json labels --jq '.labels.[].name'; echo run-e2e-tests-in-draft  )| \
+          LABELS=$( (gh pr --repo "${GITHUB_REPOSITORY}" view ${PR_NUMBER}  --json labels --jq '.labels.[].name'; echo run-e2e-tests-in-draft  )| \
           grep -E '^run' | paste -sd , -)
           gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
                                                        --body-file "body.md" \
