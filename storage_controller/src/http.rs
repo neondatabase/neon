@@ -288,7 +288,12 @@ async fn handle_tenant_delete(
         .await
         .and_then(map_reqwest_hyper_status)?;
 
-    json_response(status_code, ())
+    if status_code == StatusCode::NOT_FOUND {
+        // The pageserver uses 404 for successful deletion, but we use 200
+        json_response(StatusCode::OK, ())
+    } else {
+        json_response(status_code, ())
+    }
 }
 
 async fn handle_tenant_timeline_create(
