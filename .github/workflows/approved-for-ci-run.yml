@@ -82,11 +82,11 @@ jobs:
         env:
           ALREADY_CREATED: ${{ steps.get-pr.outputs.ALREADY_CREATED }}
         run: |
-          LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'| ( grep -E '^run' || true ) | sort) \
-          <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' | ( grep -E '^run' || true ) | sort ) |\
+          LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view ${ALREADY_CREATED} --json labels --jq '.labels.[].name'| ( grep -E '^run' || true ) | sort) \
+          <(gh pr --repo ${GITHUB_REPOSITORY} view ${PR_NUMBER} --json labels --jq '.labels.[].name' | ( grep -E '^run' || true ) | sort ) |\
           ( grep -v run-e2e-tests-in-draft || true ) | paste -sd , -)
-          LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'| ( grep -E '^run' || true ) |sort) \
-          <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  ( grep -E '^run' || true ) | sort ) |\
+          LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view ${ALREADY_CREATED} --json labels --jq '.labels.[].name'| ( grep -E '^run' || true ) |sort) \
+          <(gh pr --repo ${GITHUB_REPOSITORY} view ${PR_NUMBER} --json labels --jq '.labels.[].name' |  ( grep -E '^run' || true ) | sort ) |\
           paste -sd , -)
           echo "LABELS_TO_ADD=${LABELS_TO_ADD}" >> ${GITHUB_OUTPUT}
           echo "LABELS_TO_REMOVE=${LABELS_TO_REMOVE}" >> ${GITHUB_OUTPUT}
@@ -117,7 +117,7 @@ jobs:
                                                        --body-file "body.md" \
                                                        --head "${BRANCH}" \
                                                        --base "main" \
-                                                       --label $LABELS \
+                                                       --label ${LABELS} \
                                                        --draft
       - name: Modify the existing pull request (if required)
         if: steps.get-pr.outputs.ALREADY_CREATED != ''
