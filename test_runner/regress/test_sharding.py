@@ -715,12 +715,21 @@ def test_sharding_ingest_layer_sizes(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    # ignore the initdb layer(s) for the purposes of the size comparison as a initdb image layer optimization
+    # will produce a lot more smaller layers.
     initial_layers_per_shard = {}
+    log.info("initdb distribution (not asserted on):")
     for shard in env.storage_controller.locate(tenant_id):
+        pageserver = env.get_pageserver(shard["node_id"])
         shard_id = shard["shard_id"]
         layers = (
             env.get_pageserver(shard["node_id"]).http_client().layer_map_info(shard_id, timeline_id)
         )
+        for layer in layers.historic_layers:
+            log.info(
+                f"layer[{pageserver.id}]: {layer.layer_file_name} (size {layer.layer_file_size})"
+            )
+
         initial_layers_per_shard[shard_id] = set(layers.historic_layers)
 
     workload = Workload(env, tenant_id, timeline_id)
