@@ -142,7 +142,7 @@ async fn handle_tenant_create(
     )
 }
 
-// For tenant and timeline deletions, which both implement an "initially return 202, then 404 once
+// For timeline deletions, which both implement an "initially return 202, then 404 once
 // we're done" semantic, we wrap with a retry loop to expose a simpler API upstream.  This avoids
 // needing to track a "deleting" state for tenants.
 async fn deletion_wrapper<R, F>(service: Arc<Service>, f: F) -> Result<Response<Body>, ApiError>
@@ -283,13 +283,12 @@ async fn handle_tenant_delete(
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
 
-    deletion_wrapper(service, move |service| async move {
-        service
-            .tenant_delete(tenant_id)
-            .await
-            .and_then(map_reqwest_hyper_status)
-    })
-    .await
+    let status_code = service
+        .tenant_delete(tenant_id)
+        .await
+        .and_then(map_reqwest_hyper_status)?;
+
+    json_response(status_code, ())
 }
 
 async fn handle_tenant_timeline_create(
