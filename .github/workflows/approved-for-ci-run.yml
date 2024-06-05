@@ -83,9 +83,9 @@ jobs:
           ALREADY_CREATED: ${{ steps.get-pr.outputs.ALREADY_CREATED }}
         run: |
           LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'| grep -E '^run' | sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  grep -E '^run' | sort ) |\
-          grep -v run-e2e-tests-in-draft | paste -sd , -)
+          grep -v run-e2e-tests-in-draft | paste -sd , -) || echo FAILED REMOVE
           LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view $ALREADY_CREATED --json labels --jq '.labels.[].name'|  grep -E '^run' |sort) <(gh pr --repo ${GITHUB_REPOSITORY} view $PR_NUMBER --json labels --jq '.labels.[].name' |  grep -E '^run' | sort ) |\
-          paste -sd , -)
+          paste -sd , -) || echo FAILED ADD
           echo ${LABELS_TO_ADD}
           echo "LABELS_TO_ADD=${LABELS_TO_ADD}" >> ${GITHUB_OUTPUT}
           echo "LABELS_TO_REMOVE=${LABELS_TO_REMOVE}" >> ${GITHUB_OUTPUT}
