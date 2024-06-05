@@ -2387,9 +2387,14 @@ impl Service {
             {
                 shard_ids.push(*tenant_shard_id);
 
-                shard.set_scheduling_policy(ShardSchedulingPolicy::Pause);
+                // Update the tenant's intent to remove all attachments
                 shard.policy = PlacementPolicy::Detached;
-                shard.intent.clear(scheduler);
+                shard
+                    .schedule(scheduler, &mut ScheduleContext::default())
+                    .expect("De-scheduling is infallible");
+                debug_assert!(shard.intent.get_attached().is_none());
+                debug_assert!(shard.intent.get_secondary().is_empty());
+
                 if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
                     detach_waiters.push(waiter);
                 }
