@@ -2036,11 +2036,11 @@ impl Timeline {
             true
         } else if distance > 0 && opened_at.elapsed() >= self.get_checkpoint_timeout() {
             info!(
-                    "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
-                    projected_lsn,
-                    layer_size,
-                    opened_at.elapsed()
-                );
+                "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
+                projected_lsn,
+                layer_size,
+                opened_at.elapsed()
+            );
 
             true
         } else {
