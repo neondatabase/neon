@@ -1367,58 +1367,6 @@ impl TenantManager {
         }
     }
 
-    pub(crate) async fn delete_tenant_attached(
-        &self,
-        slot_guard: SlotGuard,
-        tenant: Arc<Tenant>,
-        activation_timeout: Duration,
-    ) -> Result<StatusCode, DeleteTenantError> {
-        match tenant.current_state() {
-            TenantState::Broken { .. } | TenantState::Stopping { .. } => {
-                // If deletion is already in progress, return success (the semantics of this
-                // function are to rerturn success afterr deletion is spawned in background).
-                // Otherwise fall through and let [`DeleteTenantFlow`] handle this state.
-                if DeleteTenantFlow::is_in_progress(&tenant) {
-                    // The `delete_progress` lock is held: deletion is already happening
-                    // in the bacckground
-                    slot_guard.revert();
-                    return Ok(StatusCode::ACCEPTED);
-                }
-            }
-            _ => {
-                tenant
-                    .wait_to_become_active(activation_timeout)
-                    .await
-                    .map_err(|e| match e {
-                        GetActiveTenantError::WillNotBecomeActive(_)
-                        | GetActiveTenantError::Broken(_) => {
-                            DeleteTenantError::InvalidState(tenant.current_state())
-                        }
-                        GetActiveTenantError::Cancelled => DeleteTenantError::Cancelled,
-                        GetActiveTenantError::NotFound(_) => DeleteTenantError::NotAttached,
-                        GetActiveTenantError::WaitForActiveTimeout {
-                            latest_state: _latest_state,
-                            wait_time: _wait_time,
-                        } => DeleteTenantError::InvalidState(tenant.current_state()),
-                    })?;
-            }
-        }
-
-        let result = DeleteTenantFlow::run(
-            self.conf,
-            self.resources.remote_storage.clone(),
-            &TENANTS,
-            tenant,
-            &self.cancel,
-        )
-        .await;
-
-        // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
-        slot_guard.revert();
-        let () = result?;
-        Ok(StatusCode::ACCEPTED)
-    }
-
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1501,6 +1449,58 @@ impl TenantManager {
 
         // Callers use 404 as success for deletions, for historical reasons.
         Ok(StatusCode::NOT_FOUND)
+    }
+
+    async fn delete_tenant_attached(
+        &self,
+        slot_guard: SlotGuard,
+        tenant: Arc<Tenant>,
+        activation_timeout: Duration,
+    ) -> Result<StatusCode, DeleteTenantError> {
+        match tenant.current_state() {
+            TenantState::Broken { .. } | TenantState::Stopping { .. } => {
+                // If deletion is already in progress, return success (the semantics of this
+                // function are to rerturn success afterr deletion is spawned in background).
+                // Otherwise fall through and let [`DeleteTenantFlow`] handle this state.
+                if DeleteTenantFlow::is_in_progress(&tenant) {
+                    // The `delete_progress` lock is held: deletion is already happening
+                    // in the bacckground
+                    slot_guard.revert();
+                    return Ok(StatusCode::ACCEPTED);
+                }
+            }
+            _ => {
+                tenant
+                    .wait_to_become_active(activation_timeout)
+                    .await
+                    .map_err(|e| match e {
+                        GetActiveTenantError::WillNotBecomeActive(_)
+                        | GetActiveTenantError::Broken(_) => {
+                            DeleteTenantError::InvalidState(tenant.current_state())
+                        }
+                        GetActiveTenantError::Cancelled => DeleteTenantError::Cancelled,
+                        GetActiveTenantError::NotFound(_) => DeleteTenantError::NotAttached,
+                        GetActiveTenantError::WaitForActiveTimeout {
+                            latest_state: _latest_state,
+                            wait_time: _wait_time,
+                        } => DeleteTenantError::InvalidState(tenant.current_state()),
+                    })?;
+            }
+        }
+
+        let result = DeleteTenantFlow::run(
+            self.conf,
+            self.resources.remote_storage.clone(),
+            &TENANTS,
+            tenant,
+            &self.cancel,
+        )
+        .await;
+
+        // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
+        slot_guard.revert();
+        let () = result?;
+        Ok(StatusCode::ACCEPTED)
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant.get_tenant_shard_id().tenant_id, shard_id=%tenant.get_tenant_shard_id().shard_slug(), new_shard_count=%new_shard_count.literal()))]
