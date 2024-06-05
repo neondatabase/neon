@@ -1,3 +1,9 @@
+commit 7dd414ee75f2875cffb1d6ba474df1f135a6fc6f
+Author: Alexey Masterov <alexeymasterov@neon.tech>
+Date:   Fri May 31 06:34:26 2024 +0000
+
+    These alternative expected files were added to consider the neon features
+
 diff --git a/ext-src/pg_anon-src/tests/expected/permissions_masked_role_1.out b/ext-src/pg_anon-src/tests/expected/permissions_masked_role_1.out
 new file mode 100644
 index 0000000..2539cfd
