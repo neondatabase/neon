@@ -61,20 +61,27 @@ for pg_version in 14 15 16; do
         docker exec $COMPUTE_CONTAINER_NAME bash -c "sed -i '\$d' /var/db/postgres/compute/pg_hba.conf && echo -e 'host\t all\t all\t all\t trust' >> /var/db/postgres/compute/pg_hba.conf"
         echo Adding postgres role
         docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "CREATE ROLE postgres SUPERUSER LOGIN"
+        # This is required for the pg_anon extension test
         echo Adding auto-loading of anon
         docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "ALTER SYSTEM SET session_preload_libraries='anon'"
         docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "SELECT pg_reload_conf()"
+        # This is required for the pg_hintplan test, to prevent flaky log message causing test to fail
         echo Adding dummy config
         docker exec $COMPUTE_CONTAINER_NAME touch /var/db/postgres/compute/compute_ctl_temp_override.conf
+        # This block is required for the pg_anon extension test.
+        # The test assumes that it is running on the same host with the postgres engine.
+        # In our case it's not true, that's why we are copying files to the compute node
         TMPDIR=$(mktemp -d)
         docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
         echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
         docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
         rm -rf $TMPDIR
         TMPDIR=$(mktemp -d)
+        # The following block does the same for the pg_hintplan test
         docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/data
         docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/ext-src/pg_hint_plan-src/
         rm -rf $TMPDIR
+        # We are running tests now
         if docker exec -e SKIP=rum-src,timescaledb-src,rdkit-src,postgis-src,pgx_ulid-src,pgtap-src,pg_tiktoken-src,pg_jsonschema-src,pg_graphql-src,kq_imcx-src,wal2json_2_5-src \
             $TEST_CONTAINER_NAME /run-tests.sh | tee testout.txt
         then
