@@ -1,7 +1,7 @@
+import subprocess
 import time
 from pathlib import Path
-import subprocess
-from typing import List, Optional, Any
+from typing import Any, List, Optional
 
 import psycopg2
 import psycopg2.extras
@@ -147,7 +147,9 @@ def test_replication_start_stop(
         conn_master = psycopg2.connect(master_connstr)
         cur_master = conn_master.cursor()
 
-        conn_replica: List[Optional[psycopg2.connection]] = [psycopg2.connect(replica_connstr[i]) for i in range(num_replicas)]
+        conn_replica: List[Optional[psycopg2.connection]] = [
+            psycopg2.connect(replica_connstr[i]) for i in range(num_replicas)
+        ]
         cur_replica: List[Optional[psycopg2.cursor]] = []
         for i in range(num_replicas):
             conn = conn_replica[i]
