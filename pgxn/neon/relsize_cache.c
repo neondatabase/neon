@@ -506,7 +506,8 @@ stop_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum)
 		{
 			relsize_ctl->misses += 1;
 		}
-		LWLockRelease(relsize_lock);
+		if (!unlogged)
+			LWLockRelease(relsize_lock);
 	}
 	return unlogged;
 }
