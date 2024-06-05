@@ -8,6 +8,7 @@
 !scripts/combine_control_files.py
 !scripts/ninstall.sh
 !vm-cgconfig.conf
+!docker-compose/run-tests.sh
 
 # Directories
 !.cargo/

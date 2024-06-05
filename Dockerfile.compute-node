@@ -986,7 +986,7 @@ RUN cd /ext-src/pg_hint_plan-src/expected && cat ut-A.out \
     cat ut-fdw.out | \
     awk '{if (NR == 10) print "LOG:  Sending request to compute_ctl: http://localhost:3080/extension_server/file_fdw"; print $0;}' \
     > ut-fdw_1.out 
-COPY docker-compose/run-tests.sh /
+COPY docker-compose/run-tests.sh /run-tests.sh
 RUN chmod 755 /run-tests.sh
 RUN patch -p1 </ext-src/pg_anon.patch
 RUN sed -i 's/REGRESS_OPTS/#REGRESS_OPTS/' /ext-src/pg_cron-src/Makefile
