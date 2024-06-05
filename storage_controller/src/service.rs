@@ -2376,61 +2376,80 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
-        self.ensure_attached_wait(tenant_id).await?;
-
-        // TODO: refactor into helper
-        let targets = {
-            let locked = self.inner.read().unwrap();
-            let mut targets = Vec::new();
-
+        // Detach all shards
+        let (detach_waiters, shard_ids, node) = {
+            let mut shard_ids = Vec::new();
+            let mut detach_waiters = Vec::new();
+            let mut locked = self.inner.write().unwrap();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
             for (tenant_shard_id, shard) in
-                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+                tenants.range_mut(TenantShardId::tenant_range(tenant_id))
             {
-                let node_id = shard.intent.get_attached().ok_or_else(|| {
-                    ApiError::InternalServerError(anyhow::anyhow!("Shard not scheduled"))
-                })?;
-                let node = locked
-                    .nodes
-                    .get(&node_id)
-                    .expect("Pageservers may not be deleted while referenced");
+                shard_ids.push(*tenant_shard_id);
 
-                targets.push((*tenant_shard_id, node.clone()));
+                // Update the tenant's intent to remove all attachments
+                shard.policy = PlacementPolicy::Detached;
+                shard
+                    .schedule(scheduler, &mut ScheduleContext::default())
+                    .expect("De-scheduling is infallible");
+                debug_assert!(shard.intent.get_attached().is_none());
+                debug_assert!(shard.intent.get_secondary().is_empty());
+
+                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                    detach_waiters.push(waiter);
+                }
             }
-            targets
+
+            // Pick an arbitrary node to use for remote deletions (does not have to be where the tenant
+            // was attached, just has to be able to see the S3 content)
+            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
+            let node = nodes
+                .get(&node_id)
+                .expect("Pageservers may not be deleted while lock is active");
+            (detach_waiters, shard_ids, node.clone())
         };
 
-        // Phase 1: delete on the pageservers
-        let mut any_pending = false;
-        for (tenant_shard_id, node) in targets {
-            let client = PageserverClient::new(
-                node.get_id(),
-                node.base_url(),
-                self.config.jwt_token.as_deref(),
-            );
-            // TODO: this, like many other places, requires proper retry handling for 503, timeout: those should not
-            // surface immediately as an error to our caller.
-            let status = client.tenant_delete(tenant_shard_id).await.map_err(|e| {
-                ApiError::InternalServerError(anyhow::anyhow!(
-                    "Error deleting shard {tenant_shard_id} on node {node}: {e}",
-                ))
-            })?;
-            tracing::info!(
-                "Shard {tenant_shard_id} on node {node}, delete returned {}",
-                status
-            );
-            if status == StatusCode::ACCEPTED {
-                any_pending = true;
-            }
+        if let Err(e) = self.await_waiters(detach_waiters, RECONCILE_TIMEOUT).await {
+            // Failing to detach shouldn't hold up deletion, e.g. if a node is offline we should be able
+            // to use some other node to run the remote deletion.
+            tracing::warn!("Failed to detach some locations: {e}");
         }
 
-        if any_pending {
-            // Caller should call us again later.  When we eventually see 404s from
-            // all the shards, we may proceed to delete our records of the tenant.
-            tracing::info!(
-                "Tenant {} has some shards pending deletion, returning 202",
-                tenant_id
-            );
-            return Ok(StatusCode::ACCEPTED);
+        let locations = shard_ids
+            .into_iter()
+            .map(|s| (s, node.clone()))
+            .collect::<Vec<_>>();
+        let results = self.tenant_for_shards_api(
+            locations,
+            |tenant_shard_id, client| async move { client.tenant_delete(tenant_shard_id).await },
+            1,
+            3,
+            RECONCILE_TIMEOUT,
+            &self.cancel,
+        )
+        .await;
+        for result in results {
+            match result {
+                Ok(StatusCode::ACCEPTED) => {
+                    // This could happen if we failed detach above, and hit a pageserver where the tenant
+                    // is still attached: it will accept the deletion in the background
+                    tracing::warn!(
+                        "Unexpectedly still attached on {}, client should retry",
+                        node
+                    );
+                    return Ok(StatusCode::ACCEPTED);
+                }
+                Ok(_) => {}
+                Err(mgmt_api::Error::Cancelled) => {
+                    return Err(ApiError::ShuttingDown);
+                }
+                Err(e) => {
+                    // This is unexpected: remote deletion should be infallible, unless the object store
+                    // at large is unavailable.
+                    tracing::error!("Error deleting via node {}: {e}", node);
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
+                }
+            }
         }
 
         // Fall through: deletion of the tenant on pageservers is complete, we may proceed to drop
