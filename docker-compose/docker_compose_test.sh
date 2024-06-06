@@ -61,6 +61,10 @@ for pg_version in 14 15 16; do
         docker exec $COMPUTE_CONTAINER_NAME bash -c "sed -i '\$d' /var/db/postgres/compute/pg_hba.conf && echo -e 'host\t all\t all\t all\t trust' >> /var/db/postgres/compute/pg_hba.conf && psql $PSQL_OPTION -c 'select pg_reload_conf()' "
         echo Adding postgres role
         docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "CREATE ROLE postgres SUPERUSER LOGIN"
+        # This is required for the pg_hintplan test, to prevent flaky log message causing the test to fail
+        # It cannot be moved to Dockderfile now because the database directory is creaetd ater the start of the container
+        echo Adding dummy config
+        docker exec $COMPUTE_CONTAINER_NAME touch /var/db/postgres/compute/compute_ctl_temp_override.conf
         # This block is required for the pg_anon extension test.
         # The test assumes that it is running on the same host with the postgres engine.
         # In our case it's not true, that's why we are copying files to the compute node
