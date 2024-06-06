@@ -306,7 +306,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             let semaphore = Arc::new(Semaphore::new(parallelism.unwrap_or(1) as usize));
 
             let mut tasks = JoinSet::new();
-            for file_key in files_list.keys.iter() {
+            for (file_idx, file_key) in files_list.keys.iter().enumerate() {
                 let Some(file_name) = file_key.object_name() else {
                     continue;
                 };
@@ -360,6 +360,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 let storage = storage.clone();
                 let tmp_dir = tmp_dir.to_owned();
                 let file_name = file_name.to_owned();
+                let percent = (file_idx * 100) / files_list.keys.len();
                 tasks.spawn(async move {
                     let stats = stats(
                         semaphore,
@@ -371,7 +372,9 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     )
                     .await;
                     match stats {
-                        Ok(stats) => println!("Statistics for {file_name}: {stats:?}\n"),
+                        Ok(stats) => {
+                            println!("Statistics for {file_name} ({percent}%): {stats:?}\n")
+                        }
                         Err(e) => eprintln!("Error for {file_name}: {e:?}"),
                     };
                 });
