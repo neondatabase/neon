@@ -3,22 +3,29 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Where to install Postgres, default is ./pg_install, maybe useful for package managers
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 
+OPENSSL_PREFIX := /usr/local/openssl
+ICU_PREFIX := /usr/local/icu
+
 #
 # We differentiate between release / debug build types using the BUILD_TYPE
 # environment variable.
 #
 BUILD_TYPE ?= debug
 ifeq ($(BUILD_TYPE),release)
-	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
-	PG_CFLAGS = -O2 -g3 $(CFLAGS)
+	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --with-icu
+	PG_CFLAGS = -O2 -g3 $(CFLAGS) -I$(OPENSSL_PREFIX)/include
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
 else ifeq ($(BUILD_TYPE),debug)
-	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
-	PG_CFLAGS = -O0 -g3 $(CFLAGS)
+	PG_CONFIGURE_OPTS = --enable-debug --enable-cassert --enable-depend --with-openssl --with-icu
+	PG_CFLAGS = -O0 -g3 $(CFLAGS) -I$(OPENSSL_PREFIX)/include
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
+
+PG_CONFIGURE_OPTS += ICU_CFLAGS='-I/$(ICU_PREFIX)/include -DU_STATIC_IMPLEMENTATION'
+PG_CONFIGURE_OPTS += ICU_LIBS='-L$(ICU_PREFIX)/lib -L$(ICU_PREFIX)/lib64 -licui18n -licuuc -licudata -lstdc++ -Wl,-Bdynamic -lm'
+PG_CONFIGURE_OPTS += LDFLAGS='-L$(OPENSSL_PREFIX)/lib -L$(OPENSSL_PREFIX)/lib64 -L$(ICU_PREFIX)/lib -L$(ICU_PREFIX)/lib64 -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -lrt -lm -ldl -lpthread'
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
