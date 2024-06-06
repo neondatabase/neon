@@ -310,7 +310,12 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 let Some(file_name) = file_key.object_name() else {
                     continue;
                 };
-                let Ok(LayerName::Image(_layer_file_name)) = LayerName::from_str(file_name) else {
+                let Some(file_without_generation) = file_name.rsplit_once('-') else {
+                    continue;
+                };
+                let Ok(LayerName::Image(_layer_file_name)) =
+                    LayerName::from_str(file_without_generation.0)
+                else {
                     // Skipping because it's either not a layer or a delta layer
                     println!("object {file_name}: not a delta layer");
                     continue;
