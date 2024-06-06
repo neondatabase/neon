@@ -440,11 +440,16 @@ impl ImageLayer {
         .await?;
 
         let cursor = block_reader.block_cursor();
+        let mut counter = 0u32;
         while let Some(r) = key_offset_stream.next().await {
             let (key, offset) = r?;
             let key = Key::from_slice(&key);
             let content = cursor.read_blob(offset, ctx).await?;
             writer.put_image(key, content.into(), ctx).await?;
+            counter += 1;
+            if counter % 2048 == 0 {
+                tokio::task::yield_now().await;
+            }
         }
         Ok(writer.size())
     }
