@@ -240,8 +240,17 @@ ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
 )
 
 
-def allure_attach_from_dir(dir: Path):
+def allure_attach_from_dir(dir: Path, preserve_database_files: bool = False):
     """Attach all non-empty files from `dir` that matches `ATTACHMENT_NAME_REGEX` to Allure report"""
+
+    if preserve_database_files:
+        zst_file = dir.with_suffix(".tar.zst")
+        with zst_file.open("wb") as zst:
+            cctx = zstandard.ZstdCompressor()
+            with cctx.stream_writer(zst) as compressor:
+                with tarfile.open(fileobj=compressor, mode="w") as tar:
+                    tar.add(dir, arcname="")
+        allure.attach.file(zst_file, "everything.tar.zst", "application/zstd", "tar.zst")
 
     for attachment in Path(dir).glob("**/*"):
         if ATTACHMENT_NAME_REGEX.fullmatch(attachment.name) and attachment.stat().st_size > 0:
