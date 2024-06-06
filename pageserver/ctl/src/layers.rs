@@ -370,7 +370,10 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                         file_key,
                     )
                     .await;
-                    println!("Statistics for {file_name}: {stats:#?}\n");
+                    match stats {
+                        Ok(stats) => println!("Statistics for {file_name}: {stats:#?}\n"),
+                        Err(e) => eprintln!("Error for {file_name}: {e:?}"),
+                    };
                 });
             }
             while let Some(_res) = tasks.join_next().await {}
