@@ -17,7 +17,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.utils import wait_until
+from fixtures.utils import human_bytes, wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
 
@@ -216,19 +216,6 @@ def count_layers_per_tenant(
             ret[tenant_id] += 1
 
     return dict(ret)
-
-
-def human_bytes(amt: float) -> str:
-    suffixes = ["", "Ki", "Mi", "Gi"]
-
-    last = suffixes[-1]
-
-    for name in suffixes:
-        if amt < 1024 or name == last:
-            return f"{int(round(amt))} {name}B"
-        amt = amt / 1024
-
-    raise RuntimeError("unreachable")
 
 
 def _eviction_env(
