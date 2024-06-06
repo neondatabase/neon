@@ -317,12 +317,12 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     LayerName::from_str(file_without_generation.0)
                 else {
                     // Skipping because it's either not a layer or a delta layer
-                    println!("object {file_name}: not a delta layer");
+                    //println!("object {file_name}: not a delta layer");
                     continue;
                 };
                 let json_file_path = layers_dir.join(format!("{file_name}.json"));
                 if tokio::fs::try_exists(&json_file_path).await? {
-                    println!("object {file_name}: report already created");
+                    //println!("object {file_name}: report already created");
                     // If we have already created a report for the layer, skip it.
                     continue;
                 }
@@ -342,6 +342,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     let mut dest_layer_file = tokio::fs::File::create(&local_layer_path).await?;
                     let mut body = tokio_util::io::StreamReader::new(download.download_stream);
                     let _size = tokio::io::copy_buf(&mut body, &mut dest_layer_file).await?;
+                    println!("Downloaded file to {local_layer_path}");
                     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
                     let stats =
                         ImageLayer::compression_statistics(&tmp_dir, &local_layer_path, &ctx)
