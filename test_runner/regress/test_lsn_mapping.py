@@ -152,7 +152,7 @@ def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
             20,
             0.5,
             lambda: env.pageserver.assert_log_contains(
-                "Cancelled request finished with an error: Cancelled$.*", offset
+                "Cancelled request finished with an error: Cancelled$", offset
             ),
         )
 
