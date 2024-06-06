@@ -3038,6 +3038,13 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (stop_unlogged_build(InfoFromSMgrRel(reln), forknum))
+			{
+				mdclose(reln, forknum);
+				/* use isRedo == true, so that we drop it immediately */
+				mdunlink(InfoBFromSMgrRel(reln), forknum, true);
+				resume_unlogged_build(); /* doesn't actually resume build, just release lock */
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
