@@ -2256,8 +2256,9 @@ impl TimelineMetrics {
             .swap(true, std::sync::atomic::Ordering::Relaxed);
 
         if was_shutdown {
-            // See https://github.com/neondatabase/neon/issues/7341#issuecomment-2152205276
-            tracing::warn!("double-shutdown for TimelineMetrics, ignoring...");
+            // this happens on tenant deletion because tenant first shuts down timelines, then
+            // invokes timeline deletion which first shuts down the timeline again.
+            // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
             return;
         }
 
