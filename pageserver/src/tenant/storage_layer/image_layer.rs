@@ -43,7 +43,6 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
-use futures::pin_mut;
 use hex;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
@@ -495,8 +494,7 @@ impl ImageLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
         let mut result = Vec::new();
-        let stream = tree_reader.get_stream_from(&[0; KEY_SIZE], ctx);
-        pin_mut!(stream);
+        let mut stream = Box::pin(tree_reader.get_stream_from(&[0; KEY_SIZE], ctx));
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let cursor = block_reader.block_cursor();
         while let Some(item) = stream.next().await {

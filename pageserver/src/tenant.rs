@@ -6799,7 +6799,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(image_at_gc_horizon.len(), 10);
-        let expected_lsn = vec![0x10, 0x20, 0x30, 0x10, 0x10, 0x20, 0x20, 0x10, 0x10, 0x10];
+        let expected_lsn = [0x10, 0x20, 0x30, 0x10, 0x10, 0x20, 0x20, 0x10, 0x10, 0x10];
         for idx in 0..10 {
             assert_eq!(
                 image_at_gc_horizon[idx],

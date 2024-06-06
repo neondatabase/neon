@@ -960,6 +960,7 @@ impl Timeline {
     /// the GC horizon without considering retain_lsns. Then, it does a full compaction over all these delta
     /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
     /// and create delta layers with all deltas >= gc horizon.
+    #[allow(dead_code)]
     pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
         _cancel: &CancellationToken,
@@ -1005,17 +1006,17 @@ impl Timeline {
         }
         impl PartialOrd for ValueWrapper<'_> {
             fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-                Some(self.cmp(&other))
+                Some(self.cmp(other))
             }
         }
         impl PartialEq for ValueWrapper<'_> {
             fn eq(&self, other: &Self) -> bool {
-                self.cmp(&other) == std::cmp::Ordering::Equal
+                self.cmp(other) == std::cmp::Ordering::Equal
             }
         }
         impl Eq for ValueWrapper<'_> {}
         all_key_values.sort_by(|(k1, l1, v1), (k2, l2, v2)| {
-            (k1, l1, ValueWrapper(&v1)).cmp(&(k2, l2, ValueWrapper(&v2)))
+            (k1, l1, ValueWrapper(v1)).cmp(&(k2, l2, ValueWrapper(v2)))
         });
         let max_lsn = all_key_values
             .iter()

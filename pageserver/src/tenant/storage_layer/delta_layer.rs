@@ -46,7 +46,7 @@ use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
-use futures::{pin_mut, StreamExt};
+use futures::{ StreamExt};
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
@@ -941,8 +941,7 @@ impl DeltaLayerInner {
             block_reader,
         );
         let mut result = Vec::new();
-        let stream = self.stream_index_forwards(&index_reader, &[0; DELTA_KEY_SIZE], ctx);
-        pin_mut!(stream);
+        let mut stream = Box::pin(self.stream_index_forwards(&index_reader, &[0; DELTA_KEY_SIZE], ctx));
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let cursor = block_reader.block_cursor();
         let mut buf = Vec::new();
