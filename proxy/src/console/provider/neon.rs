@@ -329,7 +329,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
         return Ok(response.json().await?);
     }
     info!("response_error: {:?}", response);
-    let s: String = response.json().await?;
+    let s = response.text().await?;
     info!("response_error: {:?}", s);
     return Err(ApiError::Console {
         status,
