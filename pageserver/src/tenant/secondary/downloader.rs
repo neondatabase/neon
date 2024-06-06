@@ -1000,7 +1000,7 @@ impl<'a> TenantDownloader<'a> {
             layer.name,
             layer.metadata.file_size
         );
-        let downloaded_bytes = match download_layer_file(
+        let downloaded_bytes = download_layer_file(
             self.conf,
             self.remote_storage,
             *tenant_shard_id,
@@ -1011,8 +1011,9 @@ impl<'a> TenantDownloader<'a> {
             &self.secondary_state.cancel,
             ctx,
         )
-        .await
-        {
+        .await;
+
+        let downloaded_bytes = match downloaded_bytes {
             Ok(bytes) => bytes,
             Err(DownloadError::NotFound) => {
                 // A heatmap might be out of date and refer to a layer that doesn't exist any more.

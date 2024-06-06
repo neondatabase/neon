@@ -36,6 +36,7 @@ use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
+use utils::pausable_failpoint;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
@@ -409,6 +410,8 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
+        pausable_failpoint!("find-lsn-for-timestamp-pausable");
+
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         // We use this method to figure out the branching LSN for the new branch, but the
         // GC cutoff could be before the branching point and we cannot create a new branch
@@ -424,6 +427,7 @@ impl Timeline {
 
         let mut found_smaller = false;
         let mut found_larger = false;
+
         while low < high {
             if cancel.is_cancelled() {
                 return Err(PageReconstructError::Cancelled);
@@ -718,8 +722,20 @@ impl Timeline {
                 result.insert(fname, content);
             }
         }
-        self.aux_file_size_estimator.on_base_backup(sz);
+        self.aux_file_size_estimator.on_initial(sz);
         Ok(result)
+    }
+
+    pub(crate) async fn trigger_aux_file_size_computation(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), PageReconstructError> {
+        let current_policy = self.last_aux_file_policy.load();
+        if let Some(AuxFilePolicy::V2) | Some(AuxFilePolicy::CrossValidation) = current_policy {
+            self.list_aux_files_v2(lsn, ctx).await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn list_aux_files(

@@ -1,12 +1,15 @@
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
+from requests.exceptions import ReadTimeout
 
 
 #
@@ -106,6 +109,52 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         assert result["kind"] == "past"
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) >= last_flush_lsn
+
+
+def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
+    """
+    Test if cancelled pageserver get_lsn_by_timestamp request is correctly handled.
+    Added as an effort to improve error handling and avoid full anyhow backtrace.
+    """
+
+    env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request was dropped before completing.*",
+            ".*Cancelled request finished with an error: Cancelled",
+        ]
+    )
+
+    client = env.pageserver.http_client()
+    failpoint = "find-lsn-for-timestamp-pausable"
+    client.configure_failpoints((failpoint, "pause"))
+
+    with ThreadPoolExecutor(max_workers=1) as exec:
+        # Request get_lsn_by_timestamp, hit the pausable failpoint
+        failing = exec.submit(
+            client.timeline_get_lsn_by_timestamp,
+            env.initial_tenant,
+            env.initial_timeline,
+            datetime.now(),
+            timeout=2,
+        )
+
+        _, offset = wait_until(
+            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+        )
+
+        with pytest.raises(ReadTimeout):
+            failing.result()
+
+        client.configure_failpoints((failpoint, "off"))
+
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(
+                "Cancelled request finished with an error: Cancelled$", offset
+            ),
+        )
 
 
 # Test pageserver get_timestamp_of_lsn API

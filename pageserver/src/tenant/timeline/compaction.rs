@@ -421,48 +421,6 @@ impl Timeline {
             return Ok(CompactLevel0Phase1Result::default());
         }
 
-        // This failpoint is used together with `test_duplicate_layers` integration test.
-        // It returns the compaction result exactly the same layers as input to compaction.
-        // We want to ensure that this will not cause any problem when updating the layer map
-        // after the compaction is finished.
-        //
-        // Currently, there are two rare edge cases that will cause duplicated layers being
-        // inserted.
-        // 1. The compaction job is inturrupted / did not finish successfully. Assume we have file 1, 2, 3, 4, which
-        //    is compacted to 5, but the page server is shut down, next time we start page server we will get a layer
-        //    map containing 1, 2, 3, 4, and 5, whereas 5 has the same content as 4. If we trigger L0 compation at this
-        //    point again, it is likely that we will get a file 6 which has the same content and the key range as 5,
-        //    and this causes an overwrite. This is acceptable because the content is the same, and we should do a
-        //    layer replace instead of the normal remove / upload process.
-        // 2. The input workload pattern creates exactly n files that are sorted, non-overlapping and is of target file
-        //    size length. Compaction will likely create the same set of n files afterwards.
-        //
-        // This failpoint is a superset of both of the cases.
-        if cfg!(feature = "testing") {
-            let active = (|| {
-                ::fail::fail_point!("compact-level0-phase1-return-same", |_| true);
-                false
-            })();
-
-            if active {
-                let mut new_layers = Vec::with_capacity(level0_deltas.len());
-                for delta in &level0_deltas {
-                    // we are just faking these layers as being produced again for this failpoint
-                    new_layers.push(
-                        delta
-                            .download_and_keep_resident()
-                            .await
-                            .context("download layer for failpoint")?,
-                    );
-                }
-                tracing::info!("compact-level0-phase1-return-same"); // so that we can check if we hit the failpoint
-                return Ok(CompactLevel0Phase1Result {
-                    new_layers,
-                    deltas_to_compact: level0_deltas,
-                });
-            }
-        }
-
         // Gather the files to compact in this iteration.
         //
         // Start with the oldest Level 0 delta file, and collect any other

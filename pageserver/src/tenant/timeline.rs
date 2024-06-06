@@ -2787,17 +2787,21 @@ impl Timeline {
                     crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
                 };
 
-                match self_ref
+                let calculated_size = self_ref
                     .logical_size_calculation_task(
                         initial_part_end,
                         LogicalSizeCalculationCause::Initial,
                         background_ctx,
                     )
-                    .await
-                {
-                    Ok(calculated_size) => Ok((calculated_size, metrics_guard)),
-                    Err(e) => Err(e),
-                }
+                    .await?;
+
+                self_ref
+                    .trigger_aux_file_size_computation(initial_part_end, background_ctx)
+                    .await?;
+
+                // TODO: add aux file size to logical size
+
+                Ok((calculated_size, metrics_guard))
             }
         };
 
@@ -4441,6 +4445,12 @@ impl Timeline {
                 }
                 if mode == ImageLayerCreationMode::Initial {
                     return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
+                }
+                if mode == ImageLayerCreationMode::Try && !check_for_image_layers {
+                    // Skip compaction if there are not enough updates. Metadata compaction will do a scan and
+                    // might mess up with evictions.
+                    start = img_range.end;
+                    continue;
                 }
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
