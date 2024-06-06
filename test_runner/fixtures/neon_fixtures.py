@@ -1478,6 +1478,8 @@ def neon_env_builder(
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
     ) as builder:
         yield builder
+        if builder.preserve_database_files:
+            request.node.user_properties.append(("preserve_database_files", True))
 
 
 @dataclass
@@ -4478,7 +4480,13 @@ def test_output_dir(
 
     yield test_dir
 
-    allure_attach_from_dir(test_dir)
+    preserve_database_files = False
+    for k, v in request.node.user_properties:
+        if k == "preserve_database_files":
+            assert isinstance(v, bool)
+            preserve_database_files = v
+
+    allure_attach_from_dir(test_dir, preserve_database_files)
 
 
 class FileAndThreadLock:
