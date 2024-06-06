@@ -338,6 +338,8 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
 
                         let stats_str = serde_json::to_string(&stats).unwrap();
                         tokio::fs::write(json_file_path, stats_str).await?;
+
+                        tokio::fs::remove_file(&local_layer_path).await?;
                         Ok(stats)
                     }
                     let semaphore = semaphore.clone();
