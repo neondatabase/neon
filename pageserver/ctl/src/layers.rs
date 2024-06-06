@@ -301,6 +301,8 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 .list(Some(&path), ListingMode::NoDelimiter, max_files, &cancel)
                 .await?;
 
+            println!("Listing gave {} keys", files_list.keys.len());
+
             let semaphore = Arc::new(Semaphore::new(parallelism.unwrap_or(1) as usize));
 
             let mut tasks = JoinSet::new();
