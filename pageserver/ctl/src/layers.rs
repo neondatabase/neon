@@ -312,10 +312,12 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 };
                 let Ok(LayerName::Image(_layer_file_name)) = LayerName::from_str(file_name) else {
                     // Skipping because it's either not a layer or a delta layer
+                    println!("object {file_name}: not a delta layer");
                     continue;
                 };
                 let json_file_path = layers_dir.join(format!("{file_name}.json"));
                 if tokio::fs::try_exists(&json_file_path).await? {
+                    println!("object {file_name}: report already created");
                     // If we have already created a report for the layer, skip it.
                     continue;
                 }
