@@ -68,7 +68,7 @@ pub(crate) enum LayerCmd {
         layer_file_path: Utf8PathBuf,
     },
     CompressMany {
-        dest_path: Utf8PathBuf,
+        tmp_dir: Utf8PathBuf,
         tenant_remote_prefix: String,
         tenant_remote_config: String,
         layers_dir: Utf8PathBuf,
@@ -277,7 +277,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             Ok(())
         }
         LayerCmd::CompressMany {
-            dest_path,
+            tmp_dir,
             tenant_remote_prefix,
             tenant_remote_config,
             layers_dir,
@@ -326,7 +326,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     semaphore: Arc<Semaphore>,
                     local_layer_path: Utf8PathBuf,
                     json_file_path: Utf8PathBuf,
-                    dest_path: Utf8PathBuf,
+                    tmp_dir: Utf8PathBuf,
                     storage: Arc<GenericRemoteStorage>,
                     file_key: RemotePath,
                 ) -> Result<Vec<(Option<ImageCompressionAlgorithm>, u64)>, anyhow::Error>
@@ -339,7 +339,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     let _size = tokio::io::copy_buf(&mut body, &mut dest_layer_file).await?;
                     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
                     let stats =
-                        ImageLayer::compression_statistics(&dest_path, &local_layer_path, &ctx)
+                        ImageLayer::compression_statistics(&tmp_dir, &local_layer_path, &ctx)
                             .await?;
 
                     let stats_str = serde_json::to_string(&stats).unwrap();
@@ -351,14 +351,14 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 let semaphore = semaphore.clone();
                 let file_key = file_key.to_owned();
                 let storage = storage.clone();
-                let dest_path = dest_path.to_owned();
+                let tmp_dir = tmp_dir.to_owned();
                 let file_name = file_name.to_owned();
                 tasks.spawn(async move {
                     let stats = stats(
                         semaphore,
                         local_layer_path.to_owned(),
                         json_file_path.to_owned(),
-                        dest_path,
+                        tmp_dir,
                         storage,
                         file_key,
                     )
