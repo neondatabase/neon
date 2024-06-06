@@ -1098,6 +1098,7 @@ impl Timeline {
                     delta_layer_writer.put_value(key, lsn, val, ctx).await?;
                 }
                 accumulated_values.clear();
+                accumulated_values.push(item);
                 last_key = *key;
             }
         }
