@@ -466,7 +466,7 @@ impl RemoteStorage for AzureBlobStorage {
                 }
                 let warn_threshold = 3;
                 let max_retries = 5;
-                let response = backoff::retry(
+                backoff::retry(
                     || async {
                         let blob_client = self.client.blob_client(self.relative_path_to_name(path));
 
@@ -503,10 +503,7 @@ impl RemoteStorage for AzureBlobStorage {
                     AzureOrTimeout::AzureError(err) => anyhow::Error::from(err),
                     AzureOrTimeout::Timeout => TimeoutOrCancel::Timeout.into(),
                     AzureOrTimeout::Cancel => TimeoutOrCancel::Cancel.into(),
-                });
-                if let Err(e) = response {
-                    return Err(e);
-                }
+                })?;
             }
             Ok(())
         };
