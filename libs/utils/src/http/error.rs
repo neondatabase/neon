@@ -78,7 +78,7 @@ impl ApiError {
                 StatusCode::REQUEST_TIMEOUT,
             ),
             ApiError::Cancelled => HttpErrorBody::response_from_msg_and_status(
-                "Request cancelled".to_string(),
+                self.to_string(),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(

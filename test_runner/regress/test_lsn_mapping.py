@@ -121,7 +121,7 @@ def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.extend(
         [
             ".*request was dropped before completing.*",
-            ".*Cancelled request finished with an error: Cancelled\n",
+            ".*Cancelled request finished with an error: Cancelled",
         ]
     )
 
@@ -129,44 +129,32 @@ def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
     failpoint = "find-lsn-for-timestamp-pausable"
     client.configure_failpoints((failpoint, "pause"))
 
-    with env.endpoints.create_start("main") as endpoint:
-        conn = endpoint.connect()
-        cur = conn.cursor()
-        cur.execute("CREATE TABLE foo (x integer)")
-        cur.execute("INSERT INTO foo VALUES(0)")
-        # Get the timestamp at UTC
-        probe_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=None)
-        cur.execute("INSERT INTO foo VALUES (-1)")
+    with ThreadPoolExecutor(max_workers=1) as exec:
+        # Request get_lsn_by_timestamp, hit the pausable failpoint
+        failing = exec.submit(
+            client.timeline_get_lsn_by_timestamp,
+            env.initial_tenant,
+            env.initial_timeline,
+            datetime.now(),
+            timeout=2,
+        )
 
-        with ThreadPoolExecutor(max_workers=1) as exec:
-            # Request get_lsn_by_timestamp, hit the pausable failpoint
-            failing = exec.submit(
-                client.timeline_get_lsn_by_timestamp,
-                env.initial_tenant,
-                env.initial_timeline,
-                probe_timestamp,
-                timeout=2,
-            )
+        _, offset = wait_until(
+            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+        )
 
-            _, offset = wait_until(
-                20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
-            )
+        with pytest.raises(ReadTimeout):
+            failing.result()
 
-            with pytest.raises(ReadTimeout):
-                failing.result()
+        client.configure_failpoints((failpoint, "off"))
 
-            client.configure_failpoints((failpoint, "off"))
-
-            msg, offset = wait_until(
-                20,
-                0.5,
-                lambda: env.pageserver.assert_log_contains(
-                    "Cancelled request finished with an error: Cancelled", offset
-                ),
-            )
-
-            # No more anyhow backtrace is printed.
-            assert msg.endswith("error: Cancelled\n")
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(
+                "Cancelled request finished with an error: Cancelled$.*", offset
+            ),
+        )
 
 
 # Test pageserver get_timestamp_of_lsn API
