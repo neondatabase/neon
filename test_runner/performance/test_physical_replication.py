@@ -1,3 +1,5 @@
+import csv
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -6,6 +8,7 @@ from typing import Any, List, Optional
 import psycopg2
 import psycopg2.extras
 import pytest
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import PgBin
@@ -42,6 +45,7 @@ def test_ro_replica_lag(
     neon_api_key: str,
     neon_api_base_url: str,
     pg_version: PgVersion,
+    zenbenchmark: NeonBenchmarker,
 ):
     test_duration_min = 5
     sync_interval_min = 1
@@ -89,6 +93,7 @@ def test_ro_replica_lag(
                     time.sleep(sync_interval_min * 60)
                     lag = measure_replication_lag(cur_master, cur_replica)
                     log.info(f"Replica lagged behind master by {lag} seconds")
+                    zenbenchmark.record("replica_lag", lag, "s", MetricReport.LOWER_IS_BETTER)
             finally:
                 replica_workload.terminate()
         finally:
@@ -100,6 +105,41 @@ def test_ro_replica_lag(
             neon_delete_project(neon_api_key, neon_api_base_url, project_id)
 
 
+def report_pgbench_aggregate_intervals(
+    output_dir: Path,
+    prefix: str,
+    zenbenchmark: NeonBenchmarker,
+):
+    for filename in os.listdir(output_dir):
+        if filename.startswith(prefix):
+            # The file will be in the form <prefix>_<node>.<pid>
+            # So we first lop off the .<pid>, and then lop off the prefix and the _
+            node = filename.split(".")[0][len(prefix) + 1 :]
+            with open(output_dir / filename) as f:
+                reader = csv.reader(f, delimiter=" ")
+                for line in reader:
+                    num_transactions = int(line[1])
+                    if num_transactions == 0:
+                        continue
+                    sum_latency = int(line[2])
+                    sum_lag = int(line[3])
+                    zenbenchmark.record(
+                        f"{node}_num_txns", num_transactions, "txns", MetricReport.HIGHER_IS_BETTER
+                    )
+                    zenbenchmark.record(
+                        f"{node}_avg_latency",
+                        sum_latency / num_transactions,
+                        "s",
+                        MetricReport.LOWER_IS_BETTER,
+                    )
+                    zenbenchmark.record(
+                        f"{node}_avg_lag",
+                        sum_lag / num_transactions,
+                        "s",
+                        MetricReport.LOWER_IS_BETTER,
+                    )
+
+
 @pytest.mark.remote_cluster
 @pytest.mark.timeout(0)
 def test_replication_start_stop(
@@ -108,7 +148,16 @@ def test_replication_start_stop(
     neon_api_key: str,
     neon_api_base_url: str,
     pg_version: PgVersion,
+    zenbenchmark: NeonBenchmarker,
 ):
+    """
+    Cycles through different configurations of read replicas being enabled disabled. The whole time,
+    there's a pgbench read/write workload going on the master. For each replica, we either turn it
+    on or off, and see how long it takes to catch up after some set amount of time of replicating
+    the pgbench.
+    """
+
+    prefix = "pgbench_agg"
     num_replicas = 2
     configuration_test_time_sec = 5
     should_delete = True
@@ -167,13 +216,16 @@ def test_replication_start_stop(
                 "-T1000",
                 "-Mprepared",
                 "--log",
-                f"--log-prefix={test_output_dir}/pgbench_master",
+                f"--log-prefix={test_output_dir}/{prefix}_master",
                 f"--aggregate-interval={configuration_test_time_sec}",
                 master_connstr,
             ]
         )
         replica_pgbench: List[Optional[subprocess.Popen[Any]]] = [None for i in range(num_replicas)]
 
+        # Use the bits of iconfig to tell us which configuration we are on. For example
+        # a iconfig of 2 is 10 in binary, indicating replica 0 is suspended and replica 1 is
+        # alive.
         for iconfig in range((1 << num_replicas) - 1, -1, -1):
 
             def replica_enabled(ireplica, iconfig=iconfig):
@@ -189,7 +241,7 @@ def test_replication_start_stop(
                             "-S",
                             "-T1000",
                             "--log",
-                            f"--log-prefix={test_output_dir}/pgbench_replica_{ireplica}",
+                            f"--log-prefix={test_output_dir}/{prefix}_replica_{ireplica}",
                             f"--aggregate-interval={configuration_test_time_sec}",
                             replica_connstr[ireplica],
                         ]
@@ -220,13 +272,17 @@ def test_replication_start_stop(
                     cur_replica[ireplica] = conn.cursor()
 
                 lag = measure_replication_lag(cur_master, cur_replica[ireplica])
+                zenbenchmark.record(
+                    f"Replica {ireplica} lag", lag, "s", MetricReport.LOWER_IS_BETTER
+                )
                 log.info(
                     f"Replica {ireplica} lagging behind master by {lag} seconds after configuration {iconfig:>b}"
                 )
-
         master_pgbench.terminate()
     except Exception:
         should_delete = False
     finally:
         if should_delete:
             neon_delete_project(neon_api_key, neon_api_base_url, project_id)
+            # Only report results if we didn't error out
+            report_pgbench_aggregate_intervals(test_output_dir, prefix, zenbenchmark)
