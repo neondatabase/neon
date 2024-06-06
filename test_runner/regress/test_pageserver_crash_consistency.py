@@ -95,7 +95,6 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
     # wait for us to catch up again
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)
 
-    pageserver_http.patch_tenant_config_client_side(tenant_id, {"compaction_threshold": 3})
     pageserver_http.timeline_compact(tenant_id, timeline_id, wait_until_uploaded=True)
 
     assert env.pageserver.layer_exists(tenant_id, timeline_id, l1_found), "the L1 reappears"
