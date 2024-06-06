@@ -2108,6 +2108,7 @@ pub(crate) struct TimelineMetrics {
     pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
     pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
+    shutdown: std::sync::atomic::AtomicBool,
 }
 
 impl TimelineMetrics {
@@ -2227,6 +2228,7 @@ impl TimelineMetrics {
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
+            shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
 
@@ -2249,6 +2251,16 @@ impl TimelineMetrics {
     }
 
     pub(crate) fn shutdown(&self) {
+        let was_shutdown = self
+            .shutdown
+            .swap(true, std::sync::atomic::Ordering::Relaxed);
+
+        if was_shutdown {
+            // See https://github.com/neondatabase/neon/issues/7341#issuecomment-2152205276
+            tracing::warn!("double-shutdown for TimelineMetrics, ignoring...");
+            return;
+        }
+
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;
