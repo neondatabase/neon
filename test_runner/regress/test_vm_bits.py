@@ -118,6 +118,9 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
 # record.
 #
 def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
+    # Debugging https://github.com/neondatabase/neon/issues/6967
+    neon_env_builder.preserve_database_files = True
+
     tenant_conf = {
         "checkpoint_distance": f"{128 * 1024}",
         "compaction_target_size": f"{128 * 1024}",
