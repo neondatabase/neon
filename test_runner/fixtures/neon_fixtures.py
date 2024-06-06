@@ -4305,10 +4305,20 @@ def check_restored_datadir_content(
 
     if pgdata_files != restored_files:
         # filter pg_xact and multixact files which are downloaded on demand
+        # also filter files with zero size which can remain after aborted unlogged build
         pgdata_files = [
             f
             for f in pgdata_files
-            if not f.startswith("pg_xact") and not f.startswith("pg_multixact")
+            if f in restored_files
+            or (
+                not f.startswith("pg_xact")
+                and not f.startswith("pg_multixact")
+                and f != "./pg_dynshmem"
+                and (
+                    not Path(os.path.join(endpoint.pgdata_dir, f)).exists()
+                    or os.path.getsize(os.path.join(endpoint.pgdata_dir, f)) != 0
+                )
+            )
         ]
 
     if ignored_files:

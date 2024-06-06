@@ -1396,11 +1396,14 @@ PageIsEmptyHeapPage(char *buffer)
 static void
 unlogged_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber old_relsize, BlockNumber new_relsize)
 {
+	if (new_relsize > old_relsize)
+	{
 #if PG_MAJORVERSION_NUM < 16
-	mdextend(reln, forknum, new_relsize, (char *) zero_buffer.data, true);
+		mdextend(reln, forknum, new_relsize, (char *) zero_buffer.data, true);
 #else
-	mdzeroextend(reln, forknum, old_relsize, new_relsize - old_relsize, true);
+		mdzeroextend(reln, forknum, old_relsize, new_relsize - old_relsize, true);
 #endif
+	}
 }
 
 
