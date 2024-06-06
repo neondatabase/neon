@@ -20,7 +20,6 @@
 
 use camino::Utf8PathBuf;
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
-use rand::Rng;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 
