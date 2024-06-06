@@ -181,9 +181,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::MissingKey(e) => {
                 ApiError::InternalServerError(anyhow::anyhow!("{e}"))
             }
-            PageReconstructError::Cancelled => {
-                ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
-            }
+            PageReconstructError::Cancelled => ApiError::Cancelled,
             PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }

@@ -34,6 +34,9 @@ pub enum ApiError {
     #[error("Timeout")]
     Timeout(Cow<'static, str>),
 
+    #[error("Request cancelled")]
+    Cancelled,
+
     #[error(transparent)]
     InternalServerError(anyhow::Error),
 }
@@ -73,6 +76,10 @@ impl ApiError {
             ApiError::Timeout(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),
                 StatusCode::REQUEST_TIMEOUT,
+            ),
+            ApiError::Cancelled => HttpErrorBody::response_from_msg_and_status(
+                self.to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
             ),
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),
@@ -133,6 +140,7 @@ pub fn api_error_handler(api_error: ApiError) -> Response<Body> {
         ApiError::InternalServerError(_) => error!("Error processing HTTP request: {api_error:?}"),
         ApiError::ShuttingDown => info!("Shut down while processing HTTP request"),
         ApiError::Timeout(_) => info!("Timeout while processing HTTP request: {api_error:#}"),
+        ApiError::Cancelled => info!("Request cancelled while processing HTTP request"),
         _ => info!("Error processing HTTP request: {api_error:#}"),
     }
 
