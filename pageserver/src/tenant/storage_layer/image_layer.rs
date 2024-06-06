@@ -393,6 +393,7 @@ impl ImageLayer {
             )
             .await?;
             stats.push((image_compression, size));
+            tokio::task::yield_now().await;
         }
         Ok(stats)
     }

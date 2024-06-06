@@ -371,7 +371,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     )
                     .await;
                     match stats {
-                        Ok(stats) => println!("Statistics for {file_name}: {stats:#?}\n"),
+                        Ok(stats) => println!("Statistics for {file_name}: {stats:?}\n"),
                         Err(e) => eprintln!("Error for {file_name}: {e:?}"),
                     };
                 });
