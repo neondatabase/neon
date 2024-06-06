@@ -296,7 +296,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
 
             let cancel = CancellationToken::new();
             let path = RemotePath::from_string(tenant_remote_prefix)?;
-            let max_files = NonZeroU32::new(16000);
+            let max_files = NonZeroU32::new(128_000);
             let files_list = storage
                 .list(Some(&path), ListingMode::NoDelimiter, max_files, &cancel)
                 .await?;
