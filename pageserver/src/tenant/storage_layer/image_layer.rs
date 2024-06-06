@@ -411,6 +411,7 @@ impl ImageLayer {
         let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = block_reader.read_blk(0, ctx).await?;
         let summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
+        let tenant_shard_id = TenantShardId::unsharded(summary.tenant_id);
         if summary.magic != IMAGE_FILE_MAGIC {
             anyhow::bail!("magic file mismatch");
         }
@@ -424,10 +425,13 @@ impl ImageLayer {
         let mut key_offset_stream =
             std::pin::pin!(tree_reader.get_stream_from(&[0u8; KEY_SIZE], ctx));
 
+        let timeline_path = conf.timeline_path(&tenant_shard_id, &summary.timeline_id);
+        tokio::fs::create_dir_all(timeline_path).await?;
+
         let mut writer = ImageLayerWriter::new(
             conf,
             summary.timeline_id,
-            TenantShardId::unsharded(summary.tenant_id),
+            tenant_shard_id,
             &summary.key_range,
             summary.lsn,
             ctx,
