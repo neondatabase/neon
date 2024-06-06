@@ -50,8 +50,6 @@ def test_sharding_smoke(
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
 
-    neon_env_builder.preserve_database_files = True
-
     env = neon_env_builder.init_start(
         initial_tenant_shard_count=shard_count, initial_tenant_shard_stripe_size=stripe_size
     )
@@ -365,8 +363,6 @@ def test_sharding_split_smoke(
     # that the scrubber doesn't barf when it sees a sharded tenant.
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
-
-    neon_env_builder.preserve_database_files = True
 
     non_default_tenant_config = {"gc_horizon": 77 * 1024 * 1024}
 
