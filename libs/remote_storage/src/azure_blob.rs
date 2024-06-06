@@ -488,8 +488,8 @@ impl RemoteStorage for AzureBlobStorage {
                         }
                     },
                     |err| match err {
-                        AzureOrTimeout::AzureError(_e) => false,
-                        AzureOrTimeout::Cancel | AzureOrTimeout::Timeout => true,
+                        AzureOrTimeout::AzureError(_) | AzureOrTimeout::Timeout => false,
+                        AzureOrTimeout::Cancel => true,
                     },
                     warn_threshold,
                     max_retries,
