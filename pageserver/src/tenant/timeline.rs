@@ -5678,7 +5678,7 @@ impl<'a> TimelineWriter<'a> {
         self.tl.flush_frozen_layers();
 
         let current_size = self.write_guard.as_ref().unwrap().current_size;
-        if current_size > self.get_checkpoint_distance() {
+        if current_size >= self.get_checkpoint_distance() * 2 {
             warn!("Flushed oversized open layer with size {}", current_size)
         }
 
