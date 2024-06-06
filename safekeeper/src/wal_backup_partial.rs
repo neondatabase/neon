@@ -276,13 +276,6 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
 
-    // sleep for random time to avoid thundering herd
-    {
-        let randf64 = rand::thread_rng().gen_range(0.0..1.0);
-        let sleep_duration = await_duration.mul_f64(randf64);
-        tokio::time::sleep(sleep_duration).await;
-    }
-
     let (_, persistent_state) = tli.get_state().await;
     let mut commit_lsn_rx = tli.get_commit_lsn_watch_rx();
     let mut flush_lsn_rx = tli.get_term_flush_lsn_watch_rx();
