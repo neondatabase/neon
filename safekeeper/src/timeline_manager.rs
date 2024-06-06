@@ -15,7 +15,7 @@ use utils::lsn::Lsn;
 
 use crate::{
     control_file::Storage,
-    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
+    metrics::{MANAGERS_RUNNING, MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
     send_wal::WalSenders,
@@ -83,7 +83,10 @@ pub async fn main_task(
     conf: SafeKeeperConf,
     broker_active_set: Arc<TimelinesSet>,
 ) {
+    MANAGERS_RUNNING.inc();
+
     scopeguard::defer! {
+        MANAGERS_RUNNING.dec();
         if tli.is_cancelled() {
             info!("manager task finished");
         } else {

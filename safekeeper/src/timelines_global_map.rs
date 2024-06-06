@@ -296,15 +296,21 @@ impl GlobalTimelines {
         }
     }
 
-    /// Returns all timelines. This is used for background timeline processes.
+    /// Returns all timelines. Note that it *includes* cancelled (deleted)
+    /// timelines.
     pub fn get_all() -> Vec<Arc<Timeline>> {
+        let global_lock = TIMELINES_STATE.lock().unwrap();
+        global_lock.timelines.values().cloned().collect()
+    }
+
+    /// Get number of cancelled timelines.
+    pub fn get_num_cancelled() -> usize {
         let global_lock = TIMELINES_STATE.lock().unwrap();
         global_lock
             .timelines
             .values()
-            .filter(|t| !t.is_cancelled())
-            .cloned()
-            .collect()
+            .filter(|t| t.is_cancelled())
+            .count()
     }
 
     /// Returns all timelines belonging to a given tenant. Used for deleting all timelines of a tenant,
