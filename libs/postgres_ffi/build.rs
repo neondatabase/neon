@@ -126,6 +126,7 @@ fn main() -> anyhow::Result<()> {
             .allowlist_type("PageHeaderData")
             .allowlist_type("DBState")
             .allowlist_type("RelMapFile")
+            .allowlist_type("RepOriginId")
             // Because structs are used for serialization, tell bindgen to emit
             // explicit padding fields.
             .explicit_padding(true)

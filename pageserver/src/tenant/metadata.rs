@@ -267,7 +267,7 @@ impl<'de> Deserialize<'de> for TimelineMetadata {
         D: serde::Deserializer<'de>,
     {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
-        Self::from_bytes(bytes.as_slice()).map_err(|e| D::Error::custom(format!("{e}")))
+        Self::from_bytes(bytes.as_slice()).map_err(D::Error::custom)
     }
 }
 
@@ -276,10 +276,160 @@ impl Serialize for TimelineMetadata {
     where
         S: Serializer,
     {
-        let bytes = self
-            .to_bytes()
-            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?;
+        let bytes = self.to_bytes().map_err(serde::ser::Error::custom)?;
         bytes.serialize(serializer)
+    }
+}
+
+pub(crate) mod modern_serde {
+    use crate::tenant::metadata::METADATA_FORMAT_VERSION;
+
+    use super::{
+        TimelineMetadata, TimelineMetadataBodyV2, TimelineMetadataHeader, METADATA_HDR_SIZE,
+    };
+    use serde::{Deserialize, Serialize};
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TimelineMetadata, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        // for legacy reasons versions 1-5 had TimelineMetadata serialized as a Vec<u8> field with
+        // BeSer.
+        struct Visitor;
+
+        impl<'d> serde::de::Visitor<'d> for Visitor {
+            type Value = TimelineMetadata;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("BeSer bytes or json structure")
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'d>,
+            {
+                use serde::de::Error;
+                let de = serde::de::value::SeqAccessDeserializer::new(seq);
+                Vec::<u8>::deserialize(de)
+                    .map(|v| TimelineMetadata::from_bytes(&v).map_err(A::Error::custom))?
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'d>,
+            {
+                use serde::de::Error;
+
+                let de = serde::de::value::MapAccessDeserializer::new(map);
+                let body = TimelineMetadataBodyV2::deserialize(de)?;
+
+                // jump through hoops to calculate the crc32 so that TimelineMetadata::ne works
+                // across serialization versions
+                let mut sink = Crc32Sink::default();
+                <TimelineMetadataBodyV2 as utils::bin_ser::BeSer>::ser_into(&body, &mut sink)
+                    .map_err(|e| A::Error::custom(Crc32CalculationFailed(e)))?;
+
+                let size = METADATA_HDR_SIZE + sink.count;
+
+                Ok(TimelineMetadata {
+                    hdr: TimelineMetadataHeader {
+                        checksum: sink.crc,
+                        size: size as u16,
+                        format_version: METADATA_FORMAT_VERSION,
+                    },
+                    body,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+
+    #[derive(Default)]
+    struct Crc32Sink {
+        crc: u32,
+        count: usize,
+    }
+
+    impl std::io::Write for Crc32Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.crc = crc32c::crc32c_append(self.crc, buf);
+            self.count += buf.len();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(thiserror::Error)]
+    #[error("re-serializing for crc32 failed")]
+    struct Crc32CalculationFailed<E>(#[source] E);
+
+    // this should be true for one release, after that we can change it to false
+    // remember to check the IndexPart::metadata field TODO comment as well
+    const LEGACY_BINCODED_BYTES: bool = true;
+
+    #[derive(serde::Serialize)]
+    #[serde(transparent)]
+    struct LegacyPaddedBytes<'a>(&'a TimelineMetadata);
+
+    struct JustTheBodyV2<'a>(&'a TimelineMetadata);
+
+    impl serde::Serialize for JustTheBodyV2<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            // header is not needed, upon reading we've upgraded all v1 to v2
+            self.0.body.serialize(serializer)
+        }
+    }
+
+    pub(crate) fn serialize<S>(
+        metadata: &TimelineMetadata,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // we cannot use TimelineMetadata::serialize for now because it'll do
+        // TimelineMetadata::to_bytes
+        if LEGACY_BINCODED_BYTES {
+            LegacyPaddedBytes(metadata).serialize(serializer)
+        } else {
+            JustTheBodyV2(metadata).serialize(serializer)
+        }
+    }
+
+    #[test]
+    fn deserializes_bytes_as_well_as_equivalent_body_v2() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Wrapper(#[serde(deserialize_with = "deserialize")] TimelineMetadata);
+
+        let too_many_bytes = "[216,111,252,208,0,54,0,4,0,0,0,0,1,73,253,144,1,0,0,0,0,1,73,253,24,0,0,0,0,0,0,0,0,0,0,0,0,0,1,73,253,24,0,0,0,0,1,73,253,24,0,0,0,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]";
+
+        let wrapper_from_bytes = serde_json::from_str::<Wrapper>(too_many_bytes).unwrap();
+
+        let serialized = serde_json::to_value(JustTheBodyV2(&wrapper_from_bytes.0)).unwrap();
+
+        assert_eq!(
+            serialized,
+            serde_json::json! {{
+                "disk_consistent_lsn": "0/149FD90",
+                "prev_record_lsn": "0/149FD18",
+                "ancestor_timeline": null,
+                "ancestor_lsn": "0/0",
+                "latest_gc_cutoff_lsn": "0/149FD18",
+                "initdb_lsn": "0/149FD18",
+                "pg_version": 15
+            }}
+        );
+
+        let wrapper_from_json = serde_json::value::from_value::<Wrapper>(serialized).unwrap();
+
+        assert_eq!(wrapper_from_bytes.0, wrapper_from_json.0);
     }
 }
 

@@ -81,11 +81,19 @@ page_cache_size=10
 
     non_vectored_sum = metrics.query_one("pageserver_layers_visited_per_read_global_sum")
     non_vectored_count = metrics.query_one("pageserver_layers_visited_per_read_global_count")
-    non_vectored_average = non_vectored_sum.value / non_vectored_count.value
-
+    if non_vectored_count.value != 0:
+        non_vectored_average = non_vectored_sum.value / non_vectored_count.value
+    else:
+        non_vectored_average = 0
     vectored_sum = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_sum")
     vectored_count = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_count")
-    vectored_average = vectored_sum.value / vectored_count.value
+    if vectored_count.value > 0:
+        assert vectored_sum.value > 0
+        vectored_average = vectored_sum.value / vectored_count.value
+    else:
+        # special case: running local tests with default legacy configuration
+        assert vectored_sum.value == 0
+        vectored_average = 0
 
     log.info(f"{non_vectored_average=} {vectored_average=}")
 
@@ -230,7 +238,7 @@ def test_uploads_and_deletions(
     # https://github.com/neondatabase/neon/issues/7707
     # https://github.com/neondatabase/neon/issues/7759
     allowed_errors = [
-        ".*duplicated L1 layer.*",
+        ".*/checkpoint.*rename temporary file as correct path for.*",  # EEXIST
         ".*delta layer created with.*duplicate values.*",
         ".*assertion failed: self.lsn_range.start <= lsn.*",
         ".*HTTP request handler task panicked: task.*panicked.*",

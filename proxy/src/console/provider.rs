@@ -452,7 +452,7 @@ pub struct ApiLocks<K> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiLockError {
-    #[error("permit could not be acquired")]
+    #[error("timeout acquiring resource permit")]
     TimeoutError(#[from] tokio::time::error::Elapsed),
 }
 
@@ -504,7 +504,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
                     .clone()
             }
         };
-        let permit = semaphore.acquire_deadline(now + self.timeout).await;
+        let permit = semaphore.acquire_timeout(self.timeout).await;
 
         self.metrics
             .semaphore_acquire_seconds

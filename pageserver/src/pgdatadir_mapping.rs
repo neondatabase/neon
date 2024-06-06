@@ -17,8 +17,8 @@ use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use itertools::Itertools;
 use pageserver_api::key::{
-    dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
-    rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
+    relmap_file_key, repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
@@ -27,7 +27,7 @@ use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{Oid, TimestampTz, TransactionId};
+use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
@@ -78,11 +78,19 @@ pub enum LsnForTimestamp {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CalculateLogicalSizeError {
+pub(crate) enum CalculateLogicalSizeError {
     #[error("cancelled")]
     Cancelled,
+
+    /// Something went wrong while reading the metadata we use to calculate logical size
+    /// Note that cancellation variants of `PageReconstructError` are transformed to [`Self::Cancelled`]
+    /// in the `From` implementation for this variant.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    PageRead(PageReconstructError),
+
+    /// Something went wrong deserializing metadata that we read to calculate logical size
+    #[error("decode error: {0}")]
+    Decode(#[from] DeserializeError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,10 +115,8 @@ impl From<PageReconstructError> for CollectKeySpaceError {
 impl From<PageReconstructError> for CalculateLogicalSizeError {
     fn from(pre: PageReconstructError) -> Self {
         match pre {
-            PageReconstructError::AncestorStopping(_) | PageReconstructError::Cancelled => {
-                Self::Cancelled
-            }
-            _ => Self::Other(pre.into()),
+            PageReconstructError::Cancelled => Self::Cancelled,
+            _ => Self::PageRead(pre),
         }
     }
 }
@@ -712,8 +718,20 @@ impl Timeline {
                 result.insert(fname, content);
             }
         }
-        self.aux_file_size_estimator.on_base_backup(sz);
+        self.aux_file_size_estimator.on_initial(sz);
         Ok(result)
+    }
+
+    pub(crate) async fn trigger_aux_file_size_computation(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), PageReconstructError> {
+        let current_policy = self.last_aux_file_policy.load();
+        if let Some(AuxFilePolicy::V2) | Some(AuxFilePolicy::CrossValidation) = current_policy {
+            self.list_aux_files_v2(lsn, ctx).await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn list_aux_files(
@@ -754,6 +772,27 @@ impl Timeline {
         }
     }
 
+    pub(crate) async fn get_replorigins(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
+        let kv = self
+            .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
+            .await
+            .context("scan")?;
+        let mut result = HashMap::new();
+        for (k, v) in kv {
+            let v = v.context("get value")?;
+            let origin_id = k.field6 as RepOriginId;
+            let origin_lsn = Lsn::des(&v).unwrap();
+            if origin_lsn != Lsn::INVALID {
+                result.insert(origin_id, origin_lsn);
+            }
+        }
+        Ok(result)
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///
@@ -763,7 +802,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn get_current_logical_size_non_incremental(
+    pub(crate) async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -772,7 +811,7 @@ impl Timeline {
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
+        let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
@@ -879,7 +918,9 @@ impl Timeline {
         Ok((
             result.to_keyspace(),
             /* AUX sparse key space */
-            SparseKeySpace(KeySpace::single(Key::metadata_aux_key_range())),
+            SparseKeySpace(KeySpace {
+                ranges: vec![repl_origin_key_range(), Key::metadata_aux_key_range()],
+            }),
         ))
     }
 
@@ -1146,6 +1187,20 @@ impl<'a> DatadirModification<'a> {
 
         self.put(twophase_file_key(xid), Value::Image(img));
         Ok(())
+    }
+
+    pub async fn set_replorigin(
+        &mut self,
+        origin_id: RepOriginId,
+        origin_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let key = repl_origin_key(origin_id);
+        self.put(key, Value::Image(origin_lsn.ser().unwrap().into()));
+        Ok(())
+    }
+
+    pub async fn drop_replorigin(&mut self, origin_id: RepOriginId) -> anyhow::Result<()> {
+        self.set_replorigin(origin_id, Lsn::INVALID).await
     }
 
     pub fn put_control_file(&mut self, img: Bytes) -> anyhow::Result<()> {
@@ -1552,7 +1607,7 @@ impl<'a> DatadirModification<'a> {
                     self.tline.aux_file_size_estimator.on_add(content.len());
                     new_files.push((path, content));
                 }
-                (None, true) => anyhow::bail!("removing non-existing aux file: {}", path),
+                (None, true) => warn!("removing non-existing aux file: {}", path),
             }
             let new_val = aux_file::encode_file_value(&new_files)?;
             self.put(key, Value::Image(new_val.into()));
@@ -1606,8 +1661,7 @@ impl<'a> DatadirModification<'a> {
                         aux_files.dir = Some(dir);
                     }
                     Err(
-                        e @ (PageReconstructError::AncestorStopping(_)
-                        | PageReconstructError::Cancelled
+                        e @ (PageReconstructError::Cancelled
                         | PageReconstructError::AncestorLsnTimeout(_)),
                     ) => {
                         // Important that we do not interpret a shutdown error as "not found" and thereby
@@ -1679,7 +1733,7 @@ impl<'a> DatadirModification<'a> {
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
             for (lsn, value) in values {
-                if is_rel_block_key(&key) || is_slru_block_key(key) {
+                if key.is_rel_block_key() || key.is_slru_block_key() {
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
                     writer.put(key, lsn, &value, ctx).await?;
