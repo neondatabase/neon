@@ -199,3 +199,6 @@ RUN whoami \
     && rustup --version --verbose \
     && rustc --version --verbose \
     && clang --version
+
+# Set following flag to check in Makefile if its running in Docker
+RUN touch /home/nonroot/.docker_build

@@ -12,20 +12,26 @@ ICU_PREFIX := /usr/local/icu
 #
 BUILD_TYPE ?= debug
 ifeq ($(BUILD_TYPE),release)
-	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --with-icu
-	PG_CFLAGS = -O2 -g3 $(CFLAGS) -I$(OPENSSL_PREFIX)/include
+	PG_CONFIGURE_OPTS = --enable-debug --with-openssl
+	PG_CFLAGS = -O2 -g3 $(CFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
 else ifeq ($(BUILD_TYPE),debug)
-	PG_CONFIGURE_OPTS = --enable-debug --enable-cassert --enable-depend --with-openssl --with-icu
-	PG_CFLAGS = -O0 -g3 $(CFLAGS) -I$(OPENSSL_PREFIX)/include
+	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
+	PG_CFLAGS = -O0 -g3 $(CFLAGS)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
 
-PG_CONFIGURE_OPTS += ICU_CFLAGS='-I/$(ICU_PREFIX)/include -DU_STATIC_IMPLEMENTATION'
-PG_CONFIGURE_OPTS += ICU_LIBS='-L$(ICU_PREFIX)/lib -L$(ICU_PREFIX)/lib64 -licui18n -licuuc -licudata -lstdc++ -Wl,-Bdynamic -lm'
-PG_CONFIGURE_OPTS += LDFLAGS='-L$(OPENSSL_PREFIX)/lib -L$(OPENSSL_PREFIX)/lib64 -L$(ICU_PREFIX)/lib -L$(ICU_PREFIX)/lib64 -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -lrt -lm -ldl -lpthread'
+ifeq ($(shell test -e /home/nonroot/.docker_build && echo -n yes),yes)
+	# Exclude static build openssl, icu for local build (MacOS, Linux)
+	# Only keep for build type release and debug
+	PG_CFLAGS += -I$(OPENSSL_PREFIX)/include
+	PG_CONFIGURE_OPTS += --with-icu
+	PG_CONFIGURE_OPTS += ICU_CFLAGS='-I/$(ICU_PREFIX)/include -DU_STATIC_IMPLEMENTATION'
+	PG_CONFIGURE_OPTS += ICU_LIBS='-L$(ICU_PREFIX)/lib -L$(ICU_PREFIX)/lib64 -licui18n -licuuc -licudata -lstdc++ -Wl,-Bdynamic -lm'
+	PG_CONFIGURE_OPTS += LDFLAGS='-L$(OPENSSL_PREFIX)/lib -L$(OPENSSL_PREFIX)/lib64 -L$(ICU_PREFIX)/lib -L$(ICU_PREFIX)/lib64 -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -lrt -lm -ldl -lpthread'
+endif
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
