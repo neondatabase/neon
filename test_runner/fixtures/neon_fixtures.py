@@ -973,6 +973,9 @@ class NeonEnvBuilder:
             for pageserver in self.env.pageservers:
                 pageserver.assert_no_errors()
 
+            for safekeeper in self.env.safekeepers:
+                safekeeper.assert_no_errors()
+
             self.env.storage_controller.assert_no_errors()
 
         try:
@@ -3813,6 +3816,9 @@ class Safekeeper(LogUtils):
         self.running = False
         return self
 
+    def assert_no_errors(self):
+        assert not self.log_contains("manager task finished prematurely")
+
     def append_logical_message(
         self, tenant_id: TenantId, timeline_id: TimelineId, request: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -3898,6 +3904,15 @@ class Safekeeper(LogUtils):
         """
         cli = self.http_client()
 
+        target_segment_file = lsn.segment_name()
+
+        def are_segments_removed():
+            segments = self.list_segments(tenant_id, timeline_id)
+            log.info(
+                f"waiting for all segments before {target_segment_file} to be removed from sk {self.id}, current segments: {segments}"
+            )
+            assert all(target_segment_file <= s for s in segments)
+
         def are_lsns_advanced():
             stat = cli.timeline_status(tenant_id, timeline_id)
             log.info(
@@ -3909,6 +3924,7 @@ class Safekeeper(LogUtils):
         # pageserver to this safekeeper
         wait_until(30, 1, are_lsns_advanced)
         cli.checkpoint(tenant_id, timeline_id)
+        wait_until(30, 1, are_segments_removed)
 
     def wait_until_paused(self, failpoint: str):
         msg = f"at failpoint {failpoint}"
@@ -3981,6 +3997,30 @@ class S3Scrubber:
             timeout=30,
         )
         log.info(f"tenant-snapshot output: {stdout}")
+
+    def pageserver_physical_gc(
+        self, min_age_secs: int, tenant_ids: Optional[list[TenantId]] = None
+    ):
+        args = ["pageserver-physical-gc", "--min-age", f"{min_age_secs}s"]
+
+        if tenant_ids is None:
+            tenant_ids = []
+
+        for tenant_id in tenant_ids:
+            args.extend(["--tenant-id", str(tenant_id)])
+
+        stdout = self.scrubber_cli(
+            args,
+            timeout=30,
+        )
+        try:
+            return json.loads(stdout)
+        except:
+            log.error(
+                "Failed to decode JSON output from `pageserver-physical_gc`.  Dumping stdout:"
+            )
+            log.error(stdout)
+            raise
 
 
 def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) -> Path:

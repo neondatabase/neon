@@ -45,6 +45,10 @@ pub fn api_error_into_response(this: ApiError) -> Response<Full<Bytes>> {
             err.to_string(),
             StatusCode::REQUEST_TIMEOUT,
         ),
+        ApiError::Cancelled => HttpErrorBody::response_from_msg_and_status(
+            this.to_string(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
         ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
             err.to_string(),
             StatusCode::INTERNAL_SERVER_ERROR,

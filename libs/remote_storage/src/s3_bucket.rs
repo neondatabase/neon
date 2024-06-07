@@ -46,15 +46,16 @@ use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
-    error::Cancelled, support::PermitCarrying, ConcurrencyLimiter, Download, DownloadError,
-    Listing, ListingMode, RemotePath, RemoteStorage, S3Config, TimeTravelError, TimeoutOrCancel,
-    MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    error::Cancelled,
+    metrics::{start_counting_cancelled_wait, start_measuring_requests},
+    support::PermitCarrying,
+    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
+    S3Config, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
-pub(super) mod metrics;
-
-use self::metrics::AttemptOutcome;
-pub(super) use self::metrics::RequestKind;
+use crate::metrics::AttemptOutcome;
+pub(super) use crate::metrics::RequestKind;
 
 /// AWS S3 storage.
 pub struct S3Bucket {
@@ -227,7 +228,7 @@ impl S3Bucket {
         };
 
         let started_at = ScopeGuard::into_inner(started_at);
-        metrics::BUCKET_METRICS
+        crate::metrics::BUCKET_METRICS
             .wait_seconds
             .observe_elapsed(kind, started_at);
 
@@ -248,7 +249,7 @@ impl S3Bucket {
         };
 
         let started_at = ScopeGuard::into_inner(started_at);
-        metrics::BUCKET_METRICS
+        crate::metrics::BUCKET_METRICS
             .wait_seconds
             .observe_elapsed(kind, started_at);
         Ok(permit)
@@ -287,7 +288,7 @@ impl S3Bucket {
                 // Count this in the AttemptOutcome::Ok bucket, because 404 is not
                 // an error: we expect to sometimes fetch an object and find it missing,
                 // e.g. when probing for timeline indices.
-                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
                     kind,
                     AttemptOutcome::Ok,
                     started_at,
@@ -295,7 +296,7 @@ impl S3Bucket {
                 return Err(DownloadError::NotFound);
             }
             Err(e) => {
-                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
                     kind,
                     AttemptOutcome::Err,
                     started_at,
@@ -371,12 +372,12 @@ impl S3Bucket {
             };
 
             let started_at = ScopeGuard::into_inner(started_at);
-            metrics::BUCKET_METRICS
+            crate::metrics::BUCKET_METRICS
                 .req_seconds
                 .observe_elapsed(kind, &resp, started_at);
 
             let resp = resp.context("request deletion")?;
-            metrics::BUCKET_METRICS
+            crate::metrics::BUCKET_METRICS
                 .deleted_objects_total
                 .inc_by(chunk.len() as u64);
 
@@ -435,14 +436,14 @@ pin_project_lite::pin_project! {
     /// Times and tracks the outcome of the request.
     struct TimedDownload<S> {
         started_at: std::time::Instant,
-        outcome: metrics::AttemptOutcome,
+        outcome: AttemptOutcome,
         #[pin]
         inner: S
     }
 
     impl<S> PinnedDrop for TimedDownload<S> {
         fn drop(mut this: Pin<&mut Self>) {
-            metrics::BUCKET_METRICS.req_seconds.observe_elapsed(RequestKind::Get, this.outcome, this.started_at);
+            crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(RequestKind::Get, this.outcome, this.started_at);
         }
     }
 }
@@ -451,7 +452,7 @@ impl<S> TimedDownload<S> {
     fn new(started_at: std::time::Instant, inner: S) -> Self {
         TimedDownload {
             started_at,
-            outcome: metrics::AttemptOutcome::Cancelled,
+            outcome: AttemptOutcome::Cancelled,
             inner,
         }
     }
@@ -468,8 +469,8 @@ impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
         let res = ready!(this.inner.poll_next(cx));
         match &res {
             Some(Ok(_)) => {}
-            Some(Err(_)) => *this.outcome = metrics::AttemptOutcome::Err,
-            None => *this.outcome = metrics::AttemptOutcome::Ok,
+            Some(Err(_)) => *this.outcome = AttemptOutcome::Err,
+            None => *this.outcome = AttemptOutcome::Ok,
         }
 
         Poll::Ready(res)
@@ -543,7 +544,7 @@ impl RemoteStorage for S3Bucket {
 
             let started_at = ScopeGuard::into_inner(started_at);
 
-            metrics::BUCKET_METRICS
+            crate::metrics::BUCKET_METRICS
                 .req_seconds
                 .observe_elapsed(kind, &response, started_at);
 
@@ -625,7 +626,7 @@ impl RemoteStorage for S3Bucket {
         if let Ok(inner) = &res {
             // do not incl. timeouts as errors in metrics but cancellations
             let started_at = ScopeGuard::into_inner(started_at);
-            metrics::BUCKET_METRICS
+            crate::metrics::BUCKET_METRICS
                 .req_seconds
                 .observe_elapsed(kind, inner, started_at);
         }
@@ -673,7 +674,7 @@ impl RemoteStorage for S3Bucket {
         };
 
         let started_at = ScopeGuard::into_inner(started_at);
-        metrics::BUCKET_METRICS
+        crate::metrics::BUCKET_METRICS
             .req_seconds
             .observe_elapsed(kind, &res, started_at);
 
@@ -975,28 +976,6 @@ impl RemoteStorage for S3Bucket {
         }
         Ok(())
     }
-}
-
-/// On drop (cancellation) count towards [`metrics::BucketMetrics::cancelled_waits`].
-fn start_counting_cancelled_wait(
-    kind: RequestKind,
-) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
-    scopeguard::guard_on_success(std::time::Instant::now(), move |_| {
-        metrics::BUCKET_METRICS.cancelled_waits.get(kind).inc()
-    })
-}
-
-/// On drop (cancellation) add time to [`metrics::BucketMetrics::req_seconds`].
-fn start_measuring_requests(
-    kind: RequestKind,
-) -> ScopeGuard<std::time::Instant, impl FnOnce(std::time::Instant), scopeguard::OnSuccess> {
-    scopeguard::guard_on_success(std::time::Instant::now(), move |started_at| {
-        metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-            kind,
-            AttemptOutcome::Cancelled,
-            started_at,
-        )
-    })
 }
 
 // Save RAM and only store the needed data instead of the entire ObjectVersion/DeleteMarkerEntry

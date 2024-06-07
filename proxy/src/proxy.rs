@@ -267,6 +267,8 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         };
     drop(pause);
 
+    ctx.set_db_options(params.clone());
+
     let hostname = mode.hostname(stream.get_ref());
 
     let common_names = tls.map(|tls| &tls.common_names);

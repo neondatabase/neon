@@ -184,8 +184,8 @@ NeonWALRead(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, Ti
 	}
 	else if (state->wre_errno == ENOENT)
 	{
-		nwr_log(LOG, "local read failed as segment at %X/%X doesn't exist, attempting remote",
-				LSN_FORMAT_ARGS(startptr));
+		nwr_log(LOG, "local read at %X/%X len %zu failed as segment file doesn't exist, attempting remote",
+				LSN_FORMAT_ARGS(startptr), count);
 		return NeonWALReadRemote(state, buf, startptr, count, tli);
 	}
 	else
@@ -614,6 +614,7 @@ NeonWALReadLocal(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size coun
 		uint32		startoff;
 		int			segbytes;
 		int			readbytes;
+		XLogSegNo	lastRemovedSegNo;
 
 		startoff = XLogSegmentOffset(recptr, state->segcxt.ws_segsize);
 
@@ -686,6 +687,23 @@ NeonWALReadLocal(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size coun
 				snprintf(state->err_msg, sizeof(state->err_msg), "could not read from log segment %s, offset %d: %m: unexpected EOF",
 						 fname, startoff);
 			}
+			return false;
+		}
+
+		/*
+		 * Recheck that the segment hasn't been removed while we were reading
+		 * it.
+		 */
+		lastRemovedSegNo = XLogGetLastRemovedSegno();
+		if (state->seg.ws_segno <= lastRemovedSegNo)
+		{
+			char		fname[MAXFNAMELEN];
+
+			state->wre_errno = ENOENT;
+
+			XLogFileName(fname, tli, state->seg.ws_segno, state->segcxt.ws_segsize);
+			snprintf(state->err_msg, sizeof(state->err_msg), "WAL segment %s has been removed during the read, lastRemovedSegNo " UINT64_FORMAT,
+					 fname, lastRemovedSegNo);
 			return false;
 		}
 

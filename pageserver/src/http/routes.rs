@@ -74,6 +74,7 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::CompactFlags;
+use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::SpawnMode;
@@ -180,12 +181,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::MissingKey(e) => {
                 ApiError::InternalServerError(anyhow::anyhow!("{e}"))
             }
-            PageReconstructError::Cancelled => {
-                ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
-            }
-            PageReconstructError::AncestorStopping(_) => {
-                ApiError::ResourceUnavailable(format!("{pre}").into())
-            }
+            PageReconstructError::Cancelled => ApiError::Cancelled,
             PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
@@ -1075,7 +1071,7 @@ async fn tenant_delete_handler(
 
     let state = get_state(&request);
 
-    state
+    let status = state
         .tenant_manager
         .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
         .instrument(info_span!("tenant_delete_handler",
@@ -1084,7 +1080,14 @@ async fn tenant_delete_handler(
         ))
         .await?;
 
-    json_response(StatusCode::ACCEPTED, ())
+    // Callers use 404 as success for deletions, for historical reasons.
+    if status == StatusCode::NOT_FOUND {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Deletion complete").into(),
+        ));
+    }
+
+    json_response(status, ())
 }
 
 /// HTTP endpoint to query the current tenant_size of a tenant.
@@ -1813,11 +1816,22 @@ async fn timeline_checkpoint_handler(
         timeline
             .freeze_and_flush()
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| {
+                match e {
+                    tenant::timeline::FlushLayerError::Cancelled => ApiError::ShuttingDown,
+                    other => ApiError::InternalServerError(other.into()),
+
+                }
+            })?;
         timeline
             .compact(&cancel, flags, &ctx)
             .await
-            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            .map_err(|e|
+                match e {
+                    CompactionError::ShuttingDown => ApiError::ShuttingDown,
+                    CompactionError::Other(e) => ApiError::InternalServerError(e)
+                }
+            )?;
 
         if wait_until_uploaded {
             timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
@@ -2173,7 +2187,7 @@ async fn tenant_scan_remote_handler(
             {
                 Ok((index_part, index_generation)) => {
                     tracing::info!("Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
-                        index_part.layer_metadata.len(), index_part.get_disk_consistent_lsn());
+                        index_part.layer_metadata.len(), index_part.metadata.disk_consistent_lsn());
                     generation = std::cmp::max(generation, index_generation);
                 }
                 Err(DownloadError::NotFound) => {

@@ -72,6 +72,18 @@ class Lsn:
     def segment_lsn(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> "Lsn":
         return Lsn(self.lsn_int - (self.lsn_int % seg_sz))
 
+    def segno(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> int:
+        return self.lsn_int // seg_sz
+
+    def segment_name(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> str:
+        segno = self.segno(seg_sz)
+        # The filename format is 00000001XXXXXXXX000000YY, where XXXXXXXXYY is segno in hex.
+        # XXXXXXXX is the higher 8 hex digits of segno
+        high_bits = segno >> 8
+        # YY is the lower 2 hex digits of segno
+        low_bits = segno & 0xFF
+        return f"00000001{high_bits:08X}000000{low_bits:02X}"
+
 
 @dataclass(frozen=True)
 class Key:

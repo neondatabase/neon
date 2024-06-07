@@ -344,21 +344,21 @@ macro_rules! with_file {
 
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
-    pub async fn open(
-        path: &Utf8Path,
+    pub async fn open<P: AsRef<Utf8Path>>(
+        path: P,
         ctx: &RequestContext,
     ) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(path, OpenOptions::new().read(true), ctx).await
+        Self::open_with_options(path.as_ref(), OpenOptions::new().read(true), ctx).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
-    pub async fn create(
-        path: &Utf8Path,
+    pub async fn create<P: AsRef<Utf8Path>>(
+        path: P,
         ctx: &RequestContext,
     ) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(
-            path,
+            path.as_ref(),
             OpenOptions::new().write(true).create(true).truncate(true),
             ctx,
         )
@@ -370,12 +370,13 @@ impl VirtualFile {
     /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
     /// they will be applied also when the file is subsequently re-opened, not only
     /// on the first time. Make sure that's sane!
-    pub async fn open_with_options(
-        path: &Utf8Path,
+    pub async fn open_with_options<P: AsRef<Utf8Path>>(
+        path: P,
         open_options: &OpenOptions,
         _ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
     ) -> Result<VirtualFile, std::io::Error> {
-        let path_str = path.to_string();
+        let path_ref = path.as_ref();
+        let path_str = path_ref.to_string();
         let parts = path_str.split('/').collect::<Vec<&str>>();
         let (tenant_id, shard_id, timeline_id) =
             if parts.len() > 5 && parts[parts.len() - 5] == TENANTS_SEGMENT_NAME {
@@ -401,7 +402,7 @@ impl VirtualFile {
         // where our caller doesn't get to use the returned VirtualFile before its
         // slot gets re-used by someone else.
         let file = observe_duration!(StorageIoOperation::Open, {
-            open_options.open(path.as_std_path()).await?
+            open_options.open(path_ref.as_std_path()).await?
         });
 
         // Strip all options other than read and write.
@@ -417,7 +418,7 @@ impl VirtualFile {
         let vfile = VirtualFile {
             handle: RwLock::new(handle),
             pos: 0,
-            path: path.to_path_buf(),
+            path: path_ref.to_path_buf(),
             open_options: reopen_options,
             tenant_id,
             shard_id,
