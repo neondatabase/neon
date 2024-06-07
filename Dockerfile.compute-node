@@ -963,6 +963,7 @@ COPY --from=pg-hint-plan-pg-build /pg_hint_plan.tar.gz /ext-src
 COPY patches/pg_hintplan.patch /ext-src
 #COPY --from=kq-imcx-pg-build /kq_imcx.tar.gz /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
+COPY patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
 COPY --from=rdkit-pg-build /rdkit.tar.gz /ext-src
 COPY --from=pg-uuidv7-pg-build /pg_uuidv7.tar.gz /ext-src
@@ -982,10 +983,9 @@ RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
 # cmake is required for the h3 test
 RUN apt-get update && apt-get install -y cmake
 RUN patch -p1 < /ext-src/pg_hintplan.patch
-COPY docker-compose/run-tests.sh /run-tests.sh
-RUN chmod 755 /run-tests.sh
+COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN patch -p1 </ext-src/pg_anon.patch
-RUN sed -i 's/REGRESS_OPTS/#REGRESS_OPTS/' /ext-src/pg_cron-src/Makefile
+RUN patch -p1 </ext-src/pg_cron.patch
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433

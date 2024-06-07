@@ -199,6 +199,6 @@ services:
       - "/bin/bash"
       - "-c"
     command:
-      - "while true; do sleep 60; done"
+      - sleep 1800
     depends_on:
       - compute
