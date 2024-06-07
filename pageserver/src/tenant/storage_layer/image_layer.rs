@@ -57,6 +57,7 @@ use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use tokio::time::Instant;
 use tokio_stream::StreamExt;
 use tracing::*;
 
@@ -370,7 +371,7 @@ impl ImageLayer {
         dest_repo_path: &Utf8Path,
         path: &Utf8Path,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Option<ImageCompressionAlgorithm>, u64)>> {
+    ) -> anyhow::Result<Vec<(Option<ImageCompressionAlgorithm>, u64, u64)>> {
         fn make_conf(
             image_compression: Option<ImageCompressionAlgorithm>,
             dest_repo_path: &Utf8Path,
@@ -388,13 +389,15 @@ impl ImageLayer {
         ];
         let mut stats = Vec::new();
         for image_compression in image_compressions {
+            let start = Instant::now();
             let size = Self::compressed_size_for_conf(
                 path,
                 ctx,
                 make_conf(image_compression, dest_repo_path),
             )
             .await?;
-            stats.push((image_compression, size));
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            stats.push((image_compression, size, elapsed_ms));
             tokio::task::yield_now().await;
         }
         Ok(stats)
@@ -442,16 +445,11 @@ impl ImageLayer {
         .await?;
 
         let cursor = block_reader.block_cursor();
-        let mut counter = 0u32;
         while let Some(r) = key_offset_stream.next().await {
             let (key, offset) = r?;
             let key = Key::from_slice(&key);
             let content = cursor.read_blob(offset, ctx).await?;
             writer.put_image(key, content.into(), ctx).await?;
-            counter += 1;
-            if counter % 2048 == 0 {
-                tokio::task::yield_now().await;
-            }
         }
         Ok(writer.size())
     }
