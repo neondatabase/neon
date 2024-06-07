@@ -303,6 +303,8 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
 
             println!("Listing gave {} keys", files_list.keys.len());
 
+            tokio::fs::create_dir_all(&layers_dir).await?;
+
             let semaphore = Arc::new(Semaphore::new(parallelism.unwrap_or(1) as usize));
 
             let mut tasks = JoinSet::new();

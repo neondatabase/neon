@@ -470,6 +470,7 @@ pub enum CompactionAlgorithm {
 #[strum(serialize_all = "kebab-case")]
 pub enum ImageCompressionAlgorithm {
     Zstd,
+    ZstdHigh,
     LZ4,
 }
 

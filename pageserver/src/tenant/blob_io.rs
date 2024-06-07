@@ -11,6 +11,7 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
+use async_compression::Level;
 use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use tokio::io::AsyncWriteExt;
@@ -266,9 +267,16 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 const ZSTD: u8 = UNCOMPRESSED | 0x10;
                 const LZ4: u8 = UNCOMPRESSED | 0x20;
                 let (high_bit_mask, len_written, srcbuf) = match algorithm {
-                    Some(ImageCompressionAlgorithm::Zstd) => {
+                    Some(ImageCompressionAlgorithm::Zstd | ImageCompressionAlgorithm::ZstdHigh) => {
                         let mut encoder =
-                            async_compression::tokio::write::ZstdEncoder::new(Vec::new());
+                            if matches!(algorithm, Some(ImageCompressionAlgorithm::ZstdHigh)) {
+                                async_compression::tokio::write::ZstdEncoder::with_quality(
+                                    Vec::new(),
+                                    Level::Precise(6),
+                                )
+                            } else {
+                                async_compression::tokio::write::ZstdEncoder::new(Vec::new())
+                            };
                         let slice = srcbuf.slice(..);
                         encoder.write_all(&slice[..]).await.unwrap();
                         encoder.flush().await.unwrap();

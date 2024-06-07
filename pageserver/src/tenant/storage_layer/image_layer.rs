@@ -382,6 +382,7 @@ impl ImageLayer {
         let image_compressions = [
             None,
             Some(ImageCompressionAlgorithm::Zstd),
+            Some(ImageCompressionAlgorithm::ZstdHigh),
             Some(ImageCompressionAlgorithm::LZ4),
         ];
         let mut stats = Vec::new();
