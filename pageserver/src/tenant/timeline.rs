@@ -5700,15 +5700,16 @@ impl<'a> TimelineWriter<'a> {
             return OpenLayerAction::Open;
         };
 
+        #[cfg(feature = "testing")]
         if state.cached_last_freeze_at < self.tl.last_freeze_at.load() {
-            // TODO(#7993): branch is needed before refactoring the many places of freezing for the
-            // possibility `state` having a "dangling" reference to an already frozen in-memory
-            // layer.
+            // this check and assertion are not really needed because freeze_inmem_layer_at will
+            // always clear out the TimelineWriterState if something is frozen. we can advance
+            // last_freeze_at when there is no TimelineWriterState.
             assert!(
                 state.open_layer.end_lsn.get().is_some(),
                 "our open_layer must be outdated"
             );
-            return OpenLayerAction::Open;
+            panic!("BUG: TimelineWriterState held on to frozen in-memory layer.");
         }
 
         if state.prev_lsn == Some(lsn) {
