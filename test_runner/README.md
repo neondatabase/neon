@@ -291,7 +291,8 @@ tenant/timeline for testing.
 ```python
 def test_foobar2(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start() # Start the environment
-    endpoint = env.endpoints.create_start("main") # Start the compute endpoint
+    with env.endpoints.create_start("main") as endpoint:
+        # Start the compute endpoint
     client = env.pageserver.http_client() # Get the pageserver client
 
     tenant_id = env.initial_tenant
