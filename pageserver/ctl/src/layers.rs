@@ -312,17 +312,24 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 let Some(file_name) = file_key.object_name() else {
                     continue;
                 };
-                // Split off the final part. Sometimes this cuts off actually important pieces in case of legacy layer files, but usually it doesn't.
-                let Some(file_without_generation) = file_name.rsplit_once('-') else {
-                    continue;
-                };
-                let Ok(LayerName::Image(_layer_file_name)) =
-                    LayerName::from_str(file_without_generation.0)
-                else {
-                    // Skipping because it's either not a layer or an image layer
-                    //println!("object {file_name}: not an image layer");
-                    continue;
-                };
+                match LayerName::from_str(file_name) {
+                    Ok(LayerName::Delta(_)) => continue,
+                    Ok(LayerName::Image(_)) => (),
+                    Err(_e) => {
+                        // Split off the final part. We ensured above that this is not turning a
+                        // generation-less delta layer file name into an image layer file name.
+                        let Some(file_without_generation) = file_name.rsplit_once('-') else {
+                            continue;
+                        };
+                        let Ok(LayerName::Image(_layer_file_name)) =
+                            LayerName::from_str(file_without_generation.0)
+                        else {
+                            // Skipping because it's either not a layer or an image layer
+                            //println!("object {file_name}: not an image layer");
+                            continue;
+                        };
+                    }
+                }
                 let json_file_path = layers_dir.join(format!("{file_name}.json"));
                 if tokio::fs::try_exists(&json_file_path).await? {
                     //println!("object {file_name}: report already created");
