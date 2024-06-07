@@ -1575,11 +1575,9 @@ impl Timeline {
             // Freeze the current open in-memory layer. It will be written to disk on next
             // iteration.
             let mut g = self.write_lock.lock().await;
-            // remove the reference to an open layer
-            g.take();
 
             let to_lsn = self.get_last_record_lsn();
-            self.freeze_inmem_layer_at(to_lsn).await;
+            self.freeze_inmem_layer_at(to_lsn, &mut g).await;
             to_lsn
         };
         self.flush_frozen_layers_and_wait(to_lsn).await
@@ -3657,7 +3655,13 @@ impl Timeline {
         self.last_record_lsn.advance(new_lsn);
     }
 
-    async fn freeze_inmem_layer_at(&self, at: Lsn) {
+    async fn freeze_inmem_layer_at(
+        &self,
+        at: Lsn,
+        write_lock: &mut tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
+    ) {
+        // remove the reference to an open layer
+        write_lock.take();
         let mut guard = self.layers.write().await;
         guard
             .try_freeze_in_memory_layer(at, &self.last_freeze_at)
@@ -5662,16 +5666,18 @@ impl<'a> TimelineWriter<'a> {
     }
 
     async fn roll_layer(&mut self, freeze_at: Lsn) -> anyhow::Result<()> {
-        assert!(self.write_guard.is_some());
+        let current_size = self.write_guard.as_ref().unwrap().current_size;
 
-        self.tl.freeze_inmem_layer_at(freeze_at).await;
+        // self.write_guard will be taken by the freezing
+        self.tl
+            .freeze_inmem_layer_at(freeze_at, &mut self.write_guard)
+            .await;
 
         let now = Instant::now();
         *(self.last_freeze_ts.write().unwrap()) = now;
 
         self.tl.flush_frozen_layers();
 
-        let current_size = self.write_guard.as_ref().unwrap().current_size;
         if current_size >= self.get_checkpoint_distance() * 2 {
             warn!("Flushed oversized open layer with size {}", current_size)
         }
