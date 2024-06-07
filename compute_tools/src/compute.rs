@@ -1084,6 +1084,8 @@ impl ComputeNode {
         };
         info!(?metrics, "compute start finished");
 
+        start_lsn_lease_for_static(&compute_state);
+
         Ok(pg_process)
     }
 
@@ -1384,4 +1386,57 @@ pub fn forward_termination_signal() {
         // use 'immediate' shutdown (SIGQUIT): https://www.postgresql.org/docs/current/server-shutdown.html
         kill(pg_pid, Signal::SIGQUIT).ok();
     }
+}
+
+// Start a thread that will periodically renew LSN lease for static compute
+fn start_lsn_lease_for_static(compute_state: &ComputeState) {
+    let spec = compute_state.pspec.as_ref().expect("spec must be set");
+
+    let lsn = match spec.spec.mode {
+        ComputeMode::Static(lsn) => lsn,
+        _ => return,
+    };
+
+    let conn_strings = spec.pageserver_connstr.split(',');
+
+    let configs = conn_strings
+        .map(|connstr| {
+            let mut config = postgres::Config::from_str(connstr).expect("invalid connstr");
+            if let Some(storage_auth_token) = &spec.storage_auth_token {
+                info!("Got storage auth token from spec file");
+                config.password(storage_auth_token.clone());
+            } else {
+                info!("Storage auth token not set");
+            }
+            config
+        })
+        .collect::<Vec<_>>();
+
+    let cmd = format!("lease lsn {} {} {} ", spec.tenant_id, spec.timeline_id, lsn);
+
+    let lsn_lease_interval = spec.spec.lsn_lease_interval;
+    thread::spawn(move || lsn_lease_loop(lsn_lease_interval, configs, cmd));
+}
+
+fn lsn_lease_loop(interval_secs: u64, configs: Vec<postgres::Config>, cmd: String) {
+    loop {
+        match lsn_lease_request(&configs, &cmd) {
+            Ok(_) => {
+                thread::sleep(tokio::time::Duration::from_secs(interval_secs));
+            }
+            Err(e) => {
+                error!("lsn_lease_request failed: {:#}", e);
+                thread::sleep(tokio::time::Duration::from_secs(10));
+            }
+        }
+    }
+}
+
+fn lsn_lease_request(configs: &[postgres::Config], cmd: &str) -> Result<()> {
+    info!("lsn_lease_request: {}", cmd);
+    for config in configs {
+        let mut client = config.connect(NoTls)?;
+        let _ = client.simple_query(&cmd)?;
+    }
+    Ok(())
 }

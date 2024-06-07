@@ -102,6 +102,13 @@ pub struct ComputeSpec {
     // This is used to determine if replica should wait for
     // RUNNING_XACTS from primary or not.
     pub primary_is_running: Option<bool>,
+
+    #[serde(default = "default_lsn_lease_interval")]
+    pub lsn_lease_interval: u64,
+}
+
+pub fn default_lsn_lease_interval() -> u64 {
+    1800
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
