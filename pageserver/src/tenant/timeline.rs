@@ -1571,7 +1571,17 @@ impl Timeline {
     // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
     // polluting the span hierarchy.
     pub(crate) async fn freeze_and_flush0(&self) -> Result<(), FlushLayerError> {
-        let to_lsn = self.freeze_inmem_layer(false).await;
+        let to_lsn = {
+            // Freeze the current open in-memory layer. It will be written to disk on next
+            // iteration.
+            let mut g = self.write_lock.lock().await;
+            // remove the reference to an open layer
+            g.take();
+
+            let to_lsn = self.get_last_record_lsn();
+            self.freeze_inmem_layer_at(to_lsn).await;
+            to_lsn
+        };
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
 
@@ -3645,26 +3655,6 @@ impl Timeline {
 
         self.metrics.last_record_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
-    }
-
-    /// Whether there was a layer to freeze or not, return the value of get_last_record_lsn
-    /// before we attempted the freeze: this guarantees that ingested data is frozen up to this lsn (inclusive).
-    async fn freeze_inmem_layer(&self, write_lock_held: bool) -> Lsn {
-        // Freeze the current open in-memory layer. It will be written to disk on next
-        // iteration.
-
-        let _write_guard = if write_lock_held {
-            None
-        } else {
-            let mut g = self.write_lock.lock().await;
-            // remove the reference to an open layer
-            g.take();
-            Some(g)
-        };
-
-        let to_lsn = self.get_last_record_lsn();
-        self.freeze_inmem_layer_at(to_lsn).await;
-        to_lsn
     }
 
     async fn freeze_inmem_layer_at(&self, at: Lsn) {
