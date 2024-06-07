@@ -32,7 +32,8 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             "checkpoint_distance": f"{checkpoint_distance}",
-            # this test is interested in L0 sizes
+            "compaction_target_size": f"{checkpoint_distance}",
+            # this test is primarly interested in L0 sizes but we'll compact after ingestion to ensure sizes are good even then
             "compaction_period": "0s",
             "gc_period": "0s",
             "compaction_threshold": "255",
@@ -66,11 +67,29 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
     log.info("non-cumulative layer size distribution after ingestion:")
     print_layer_size_histogram(post_ingest)
 
+    # since all we have are L0s, we should be getting nice L1s and images out of them now
+    ps_http.patch_tenant_config_client_side(env.initial_tenant, {
+        "compaction_threshold": 1,
+        "image_creation_threshold": 1,
+    })
+
+    ps_http.timeline_compact(env.initial_tenant, env.initial_timeline, True, True)
+
+    infos = ps_http.layer_map_info(env.initial_tenant, env.initial_timeline)
+    assert len(infos.in_memory_layers) == 0, "no new inmem layers expected"
+    post_compact = histogram_historic_layers(infos, buckets)
+
+    log.info("non-cumulative layer size distribution after compaction:")
+    print_layer_size_histogram(post_compact)
+
     assert (
         post_ingest.counts[3] == 0
     ), f"there should be no layers larger than 2*checkpoint_distance ({human_bytes(2*checkpoint_distance)})"
     assert post_ingest.counts[1] == 1, "expect one smaller layer for initdb"
     assert post_ingest.counts[0] <= 1, "expect at most one tiny layer from shutting down the endpoint"
+
+    # just make sure we don't have trouble splitting the layers apart
+    assert post_compact.counts[3] == 0
 
 
 @dataclass
