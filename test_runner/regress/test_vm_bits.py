@@ -172,12 +172,12 @@ def test_vm_bit_clear_on_heap_lock_whitebox(neon_env_builder: NeonEnvBuilder):
     assert vm_page_at_pageserver == vm_page_in_cache
 
 
-#
-# The previous test is enough to verify the bug that was fixed in
-# commit 66fa176cc8. But for good measure, we also reproduce the
-# original problem that the missing VM page update caused.
-#
 def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
+    """
+    The previous test is enough to verify the bug that was fixed in
+    commit 66fa176cc8. But for good measure, we also reproduce the
+    original problem that the missing VM page update caused.
+    """
     tenant_conf = {
         "checkpoint_distance": f"{128 * 1024}",
         "compaction_target_size": f"{128 * 1024}",
