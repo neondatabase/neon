@@ -1678,11 +1678,14 @@ impl Timeline {
                     drop(layers_guard);
                     let mut layers_guard = self.layers.write().await;
                     layers_guard
-                        .try_freeze_in_memory_layer(current_lsn, &self.last_freeze_at)
+                        .try_freeze_in_memory_layer(
+                            current_lsn,
+                            &self.last_freeze_at,
+                            &mut write_guard,
+                        )
                         .await;
                 }
             }
-            write_guard.take();
             self.flush_frozen_layers();
         }
     }
@@ -3660,12 +3663,16 @@ impl Timeline {
         at: Lsn,
         write_lock: &mut tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
     ) {
-        // remove the reference to an open layer
-        write_lock.take();
-        let mut guard = self.layers.write().await;
-        guard
-            .try_freeze_in_memory_layer(at, &self.last_freeze_at)
-            .await;
+        let frozen = {
+            let mut guard = self.layers.write().await;
+            guard
+                .try_freeze_in_memory_layer(at, &self.last_freeze_at, write_lock)
+                .await
+        };
+        if frozen {
+            let now = Instant::now();
+            *(self.last_freeze_ts.write().unwrap()) = now;
+        }
     }
 
     /// Layer flusher task's main loop.
@@ -5672,9 +5679,6 @@ impl<'a> TimelineWriter<'a> {
         self.tl
             .freeze_inmem_layer_at(freeze_at, &mut self.write_guard)
             .await;
-
-        let now = Instant::now();
-        *(self.last_freeze_ts.write().unwrap()) = now;
 
         self.tl.flush_frozen_layers();
 
