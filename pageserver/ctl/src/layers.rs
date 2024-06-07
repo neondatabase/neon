@@ -362,7 +362,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 let storage = storage.clone();
                 let tmp_dir = tmp_dir.to_owned();
                 let file_name = file_name.to_owned();
-                let percent = (file_idx * 100) / files_list.keys.len();
+                let percent = (file_idx * 100) as f64 / files_list.keys.len() as f64;
                 tasks.spawn(async move {
                     let stats = stats(
                         semaphore,
@@ -375,7 +375,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     .await;
                     match stats {
                         Ok(stats) => {
-                            println!("Statistics for {file_name} ({percent}%): {stats:?}\n")
+                            println!("Statistics for {file_name} ({percent:.1}%): {stats:?}\n")
                         }
                         Err(e) => eprintln!("Error for {file_name}: {e:?}"),
                     };
