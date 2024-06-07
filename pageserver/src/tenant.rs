@@ -65,9 +65,9 @@ use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
+use self::timeline::GcCutoffs;
 use self::timeline::TimelineResources;
 use self::timeline::WaitLsnError;
-use self::timeline::{GcCutoffs, GcInfo};
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -3007,12 +3007,30 @@ impl Tenant {
             {
                 let mut target = timeline.gc_info.write().unwrap();
 
+                // FIXME(yuchen): Maybe we can move this before taking `gc_cs`?
+                {
+                    // Collect expired leases
+                    let lsns_with_expired_lease = target
+                        .leases
+                        .iter()
+                        .filter_map(|(lsn, lease)| {
+                            if lease.is_expired() {
+                                None
+                            } else {
+                                Some(lsn.clone())
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    for lsn in lsns_with_expired_lease {
+                        target.leases.remove(&lsn);
+                    }
+                }
+
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
-                        *target = GcInfo {
-                            retain_lsns: branchpoints,
-                            cutoffs,
-                        };
+                        target.retain_lsns = branchpoints;
+                        target.cutoffs = cutoffs;
                     }
                     None => {
                         // reasons for this being unavailable:

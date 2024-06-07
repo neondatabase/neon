@@ -177,6 +177,13 @@ serde_with::serde_conv!(
     |value: String| -> Result<_, humantime::TimestampError> { humantime::parse_rfc3339(&value) }
 );
 
+impl LsnLease {
+    /// Checks whether the lease is expired.
+    pub fn is_expired(&self) -> bool {
+        SystemTime::now() > self.valid_until
+    }
+}
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
