@@ -62,7 +62,7 @@ for pg_version in 14 15 16; do
         echo Adding postgres role
         docker exec $COMPUTE_CONTAINER_NAME psql $PSQL_OPTION -c "CREATE ROLE postgres SUPERUSER LOGIN"
         # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
-        # It cannot be moved to Dockderfile now because the database directory is creaetd ater the start of the container
+        # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
         echo Adding dummy config
         docker exec $COMPUTE_CONTAINER_NAME touch /var/db/postgres/compute/compute_ctl_temp_override.conf
         # This block is required for the pg_anon extension test.
