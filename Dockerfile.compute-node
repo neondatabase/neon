@@ -241,7 +241,6 @@ RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz -
 FROM build-deps AS vector-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-COPY patches/pgvector.patch /pgvector.patch
 
 # By default, pgvector Makefile uses `-march=native`. We don't want that, 
 # because we build the images on different machines than where we run them.
@@ -249,7 +248,6 @@ COPY patches/pgvector.patch /pgvector.patch
 RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.0.tar.gz -O pgvector.tar.gz && \
     echo "1b5503a35c265408b6eb282621c5e1e75f7801afc04eecb950796cfee2e3d1d8 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xvzf ../pgvector.tar.gz --strip-components=1 -C . && \
-    patch -p1 < /pgvector.patch && \
     make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/vector.control
