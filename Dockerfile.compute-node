@@ -981,7 +981,7 @@ RUN cd /ext-src/ && for f in *.tar.gz; \
 RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch 
 # cmake is required for the h3 test
 RUN apt-get update && apt-get install -y cmake
-RUN cd /ext-src/pg_hint_plan-src/expected && cp ut-A.out ut-A_1.out && cp ut-fdw.out ut-fdw_1.out && cd / && patch -p1 < /ext-src/pg_hintplan.patch
+RUN patch -p1 < /ext-src/pg_hintplan.patch
 COPY docker-compose/run-tests.sh /run-tests.sh
 RUN chmod 755 /run-tests.sh
 RUN patch -p1 </ext-src/pg_anon.patch
