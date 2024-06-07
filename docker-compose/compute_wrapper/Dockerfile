@@ -12,7 +12,7 @@ RUN apt-get update &&       \
                        netcat
 #Faker is required for the pg_anon test
 RUN pip3 install Faker
+#This is required for the pg_hintplan test
+RUN mkdir -p /ext-src/pg_hint_plan-src && chown postgres /ext-src/pg_hint_plan-src 
 
 USER postgres
-# This is required for the pg_hintplan test, to prevent flaky log message causing test to fail
-RUN touch /var/db/postgres/compute/compute_ctl_temp_override.conf
