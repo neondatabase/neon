@@ -381,6 +381,7 @@ impl ImageLayer {
         }
         let image_compressions = [
             None,
+            Some(ImageCompressionAlgorithm::ZstdLow),
             Some(ImageCompressionAlgorithm::Zstd),
             Some(ImageCompressionAlgorithm::ZstdHigh),
             Some(ImageCompressionAlgorithm::LZ4),

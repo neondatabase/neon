@@ -266,10 +266,16 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 const UNCOMPRESSED: u8 = 0x80;
                 const ZSTD: u8 = UNCOMPRESSED | 0x10;
                 const LZ4: u8 = UNCOMPRESSED | 0x20;
+                use ImageCompressionAlgorithm::*;
                 let (high_bit_mask, len_written, srcbuf) = match algorithm {
-                    Some(ImageCompressionAlgorithm::Zstd | ImageCompressionAlgorithm::ZstdHigh) => {
+                    Some(ZstdLow | Zstd | ZstdHigh) => {
                         let mut encoder =
-                            if matches!(algorithm, Some(ImageCompressionAlgorithm::ZstdHigh)) {
+                            if matches!(algorithm, Some(ZstdLow)) {
+                                async_compression::tokio::write::ZstdEncoder::with_quality(
+                                    Vec::new(),
+                                    Level::Precise(1),
+                                )
+                            } else if matches!(algorithm, Some(ZstdHigh)) {
                                 async_compression::tokio::write::ZstdEncoder::with_quality(
                                     Vec::new(),
                                     Level::Precise(6),
