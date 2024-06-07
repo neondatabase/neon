@@ -5715,6 +5715,9 @@ impl<'a> TimelineWriter<'a> {
         if state.prev_lsn == Some(lsn) {
             // Rolling mid LSN is not supported by downstream code.
             // Hence, only roll at LSN boundaries.
+            //
+            // TODO: could we have more hints here what actually goes wrong? is it just that we
+            // assume the next layer starts from where the previous layer ends?
             return OpenLayerAction::None;
         }
 
