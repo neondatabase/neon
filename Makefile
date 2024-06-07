@@ -35,7 +35,7 @@ else ifeq ($(UNAME_S),Darwin)
 	ifndef DISABLE_HOMEBREW
 		# macOS with brew-installed openssl requires explicit paths
 		# It can be configured with OPENSSL_PREFIX variable
-		OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
+		OPENSSL_PREFIX := $(shell brew --prefix openssl@3)
 		PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
 		PG_CONFIGURE_OPTS += PKG_CONFIG_PATH=$(shell brew --prefix icu4c)/lib/pkgconfig
 		# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure
