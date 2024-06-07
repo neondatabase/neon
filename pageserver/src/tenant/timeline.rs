@@ -1665,28 +1665,35 @@ impl Timeline {
             self.last_freeze_at.load(),
             open_layer.get_opened_at(),
         ) {
-            match open_layer.info() {
+            let at_lsn = match open_layer.info() {
                 InMemoryLayerInfo::Frozen { lsn_start, lsn_end } => {
                     // We may reach this point if the layer was already frozen by not yet flushed: flushing
                     // happens asynchronously in the background.
                     tracing::debug!(
                         "Not freezing open layer, it's already frozen ({lsn_start}..{lsn_end})"
                     );
+                    None
                 }
                 InMemoryLayerInfo::Open { .. } => {
                     // Upgrade to a write lock and freeze the layer
                     drop(layers_guard);
                     let mut layers_guard = self.layers.write().await;
-                    layers_guard
+                    let froze = layers_guard
                         .try_freeze_in_memory_layer(
                             current_lsn,
                             &self.last_freeze_at,
                             &mut write_guard,
                         )
                         .await;
+                    Some(current_lsn).filter(|_| froze)
+                }
+            };
+            if let Some(lsn) = at_lsn {
+                let res: Result<u64, _> = self.flush_frozen_layers(lsn);
+                if let Err(e) = res {
+                    tracing::info!("failed to flush frozen layer after background freeze: {e:#}");
                 }
             }
-            self.flush_frozen_layers();
         }
     }
 
@@ -2395,7 +2402,7 @@ impl Timeline {
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
-                assert!(matches!(*flush_loop_state, FlushLoopState::Running{ ..}));
+                assert!(matches!(*flush_loop_state, FlushLoopState::Running{..}));
                 *flush_loop_state  = FlushLoopState::Exited;
                 Ok(())
             }
@@ -3769,15 +3776,11 @@ impl Timeline {
     /// Request the flush loop to write out all frozen layers up to `to_lsn` as Delta L0 files to disk.
     /// The caller is responsible for the freezing, e.g., [`Self::freeze_inmem_layer`].
     ///
-    /// `last_record_lsn` may be higher than the highest LSN of a frozen layer: if this is the case,
-    /// it means no data will be written between the top of the highest frozen layer and to_lsn,
-    /// e.g. because this tenant shard has ingested up to to_lsn and not written any data locally for that part of the WAL.
-    async fn flush_frozen_layers_and_wait(
-        &self,
-        last_record_lsn: Lsn,
-    ) -> Result<(), FlushLayerError> {
-        let mut rx = self.layer_flush_done_tx.subscribe();
-
+    /// `last_record_lsn` may be higher than the highest LSN of a frozen layer: if this is the
+    /// case, it means no data will be written between the top of the highest frozen layer and
+    /// to_lsn, e.g. because this tenant shard has ingested up to to_lsn and not written any data
+    /// locally for that part of the WAL.
+    fn flush_frozen_layers(&self, at_lsn: Lsn) -> Result<u64, FlushLayerError> {
         // Increment the flush cycle counter and wake up the flush task.
         // Remember the new value, so that when we listen for the flush
         // to finish, we know when the flush that we initiated has
@@ -3792,13 +3795,18 @@ impl Timeline {
         self.layer_flush_start_tx.send_modify(|(counter, lsn)| {
             my_flush_request = *counter + 1;
             *counter = my_flush_request;
-            *lsn = std::cmp::max(last_record_lsn, *lsn);
+            *lsn = std::cmp::max(at_lsn, *lsn);
         });
 
+        Ok(my_flush_request)
+    }
+
+    async fn wait_flush_completion(&self, request: u64) -> Result<(), FlushLayerError> {
+        let mut rx = self.layer_flush_done_tx.subscribe();
         loop {
             {
                 let (last_result_counter, last_result) = &*rx.borrow();
-                if *last_result_counter >= my_flush_request {
+                if *last_result_counter >= request {
                     if let Err(err) = last_result {
                         // We already logged the original error in
                         // flush_loop. We cannot propagate it to the caller
@@ -3825,12 +3833,9 @@ impl Timeline {
         }
     }
 
-    fn flush_frozen_layers(&self) {
-        self.layer_flush_start_tx.send_modify(|(counter, lsn)| {
-            *counter += 1;
-
-            *lsn = std::cmp::max(*lsn, Lsn(self.last_freeze_at.load().0 - 1));
-        });
+    async fn flush_frozen_layers_and_wait(&self, at_lsn: Lsn) -> Result<(), FlushLayerError> {
+        let token = self.flush_frozen_layers(at_lsn)?;
+        self.wait_flush_completion(token).await
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
@@ -5680,7 +5685,7 @@ impl<'a> TimelineWriter<'a> {
             .freeze_inmem_layer_at(freeze_at, &mut self.write_guard)
             .await;
 
-        self.tl.flush_frozen_layers();
+        self.tl.flush_frozen_layers(freeze_at)?;
 
         if current_size >= self.get_checkpoint_distance() * 2 {
             warn!("Flushed oversized open layer with size {}", current_size)
