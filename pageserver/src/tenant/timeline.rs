@@ -2787,17 +2787,21 @@ impl Timeline {
                     crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
                 };
 
-                match self_ref
+                let calculated_size = self_ref
                     .logical_size_calculation_task(
                         initial_part_end,
                         LogicalSizeCalculationCause::Initial,
                         background_ctx,
                     )
-                    .await
-                {
-                    Ok(calculated_size) => Ok((calculated_size, metrics_guard)),
-                    Err(e) => Err(e),
-                }
+                    .await?;
+
+                self_ref
+                    .trigger_aux_file_size_computation(initial_part_end, background_ctx)
+                    .await?;
+
+                // TODO: add aux file size to logical size
+
+                Ok((calculated_size, metrics_guard))
             }
         };
 
@@ -3879,22 +3883,25 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
+            // FIXME(auxfilesv2): support multiple metadata key partitions might need initdb support as well?
+            // This code path will not be hit during regression tests. After #7099 we have a single partition
+            // with two key ranges. If someone wants to fix initdb optimization in the future, this might need
+            // to be fixed.
+
             // For metadata, always create delta layers.
             let delta_layer = if !metadata_partition.parts.is_empty() {
                 assert_eq!(
                     metadata_partition.parts.len(),
                     1,
-                    "currently sparse keyspace should only contain a single aux file keyspace"
+                    "currently sparse keyspace should only contain a single metadata keyspace"
                 );
                 let metadata_keyspace = &metadata_partition.parts[0];
-                assert_eq!(
-                    metadata_keyspace.0.ranges.len(),
-                    1,
-                    "aux file keyspace should be a single range"
-                );
                 self.create_delta_layer(
                     &frozen_layer,
-                    Some(metadata_keyspace.0.ranges[0].clone()),
+                    Some(
+                        metadata_keyspace.0.ranges.first().unwrap().start
+                            ..metadata_keyspace.0.ranges.last().unwrap().end,
+                    ),
                     ctx,
                 )
                 .await
@@ -4438,6 +4445,12 @@ impl Timeline {
                 }
                 if mode == ImageLayerCreationMode::Initial {
                     return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
+                }
+                if mode == ImageLayerCreationMode::Try && !check_for_image_layers {
+                    // Skip compaction if there are not enough updates. Metadata compaction will do a scan and
+                    // might mess up with evictions.
+                    start = img_range.end;
+                    continue;
                 }
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
@@ -5665,7 +5678,7 @@ impl<'a> TimelineWriter<'a> {
         self.tl.flush_frozen_layers();
 
         let current_size = self.write_guard.as_ref().unwrap().current_size;
-        if current_size > self.get_checkpoint_distance() {
+        if current_size >= self.get_checkpoint_distance() * 2 {
             warn!("Flushed oversized open layer with size {}", current_size)
         }
 

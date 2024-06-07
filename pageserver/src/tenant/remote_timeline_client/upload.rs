@@ -1,6 +1,7 @@
 //! Helper functions to upload files to remote storage with a RemoteStorage
 
 use anyhow::{bail, Context};
+use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
 use pageserver_api::shard::TenantShardId;
@@ -11,10 +12,10 @@ use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
 use utils::{backoff, pausable_failpoint};
 
+use super::index::IndexPart;
 use super::Generation;
 use crate::tenant::remote_timeline_client::{
-    index::IndexPart, remote_index_path, remote_initdb_archive_path,
-    remote_initdb_preserved_archive_path,
+    remote_index_path, remote_initdb_archive_path, remote_initdb_preserved_archive_path,
 };
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeTravelError};
 use utils::id::{TenantId, TimelineId};
@@ -27,7 +28,7 @@ pub(crate) async fn upload_index_part<'a>(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     generation: Generation,
-    index_part: &'a IndexPart,
+    index_part: &IndexPart,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading new index part");
@@ -37,16 +38,16 @@ pub(crate) async fn upload_index_part<'a>(
     });
     pausable_failpoint!("before-upload-index-pausable");
 
-    let index_part_bytes = index_part
-        .to_s3_bytes()
-        .context("serialize index part file into bytes")?;
-    let index_part_size = index_part_bytes.len();
-    let index_part_bytes = bytes::Bytes::from(index_part_bytes);
+    // FIXME: this error comes too late
+    let serialized = index_part.to_s3_bytes()?;
+    let serialized = Bytes::from(serialized);
+
+    let index_part_size = serialized.len();
 
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, generation);
     storage
         .upload_storage_object(
-            futures::stream::once(futures::future::ready(Ok(index_part_bytes))),
+            futures::stream::once(futures::future::ready(Ok(serialized))),
             index_part_size,
             &remote_path,
             cancel,

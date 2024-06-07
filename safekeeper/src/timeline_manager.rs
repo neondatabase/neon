@@ -213,6 +213,9 @@ pub async fn main_task(
         }
     };
 
+    // remove timeline from the broker active set sooner, before waiting for background tasks
+    tli_broker_active.set(false);
+
     // shutdown background tasks
     if conf.is_wal_backup_enabled() {
         wal_backup::update_task(&conf, &tli, false, &last_state, &mut backup_task).await;

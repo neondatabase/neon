@@ -69,15 +69,41 @@ jobs:
         with:
           ref: main
           token: ${{ secrets.CI_ACCESS_TOKEN }}
+      
+      - name: Look for existing PR
+        id: get-pr
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
+          echo "ALREADY_CREATED=${ALREADY_CREATED}" >> ${GITHUB_OUTPUT}
+      
+      - name: Get changed labels
+        id: get-labels
+        if: steps.get-pr.outputs.ALREADY_CREATED != ''
+        env:
+          ALREADY_CREATED: ${{ steps.get-pr.outputs.ALREADY_CREATED }}
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view ${ALREADY_CREATED} --json labels --jq '.labels.[].name'| ( grep -E '^run' || true ) | sort) \
+          <(gh pr --repo ${GITHUB_REPOSITORY} view ${PR_NUMBER} --json labels --jq '.labels.[].name' | ( grep -E '^run' || true ) | sort ) |\
+          ( grep -v run-e2e-tests-in-draft || true ) | paste -sd , -)
+          LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view ${ALREADY_CREATED} --json labels --jq '.labels.[].name'| ( grep -E '^run' || true ) |sort) \
+          <(gh pr --repo ${GITHUB_REPOSITORY} view ${PR_NUMBER} --json labels --jq '.labels.[].name' |  ( grep -E '^run' || true ) | sort ) |\
+          paste -sd , -)
+          echo "LABELS_TO_ADD=${LABELS_TO_ADD}" >> ${GITHUB_OUTPUT}
+          echo "LABELS_TO_REMOVE=${LABELS_TO_REMOVE}" >> ${GITHUB_OUTPUT}
 
       - run: gh pr checkout "${PR_NUMBER}"
 
       - run: git checkout -b "${BRANCH}"
 
       - run: git push --force origin "${BRANCH}"
+        if: steps.get-pr.outputs.ALREADY_CREATED == ''
 
       - name: Create a Pull Request for CI run (if required)
-        env:
+        if: steps.get-pr.outputs.ALREADY_CREATED == ''
+        env: 
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           cat << EOF > body.md
@@ -88,16 +114,33 @@ jobs:
             Feel free to review/comment/discuss the original PR #${PR_NUMBER}.
           EOF
 
-          ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
-          if [ -z "${ALREADY_CREATED}" ]; then
-            gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
+          LABELS=$( (gh pr --repo "${GITHUB_REPOSITORY}" view ${PR_NUMBER}  --json labels --jq '.labels.[].name'; echo run-e2e-tests-in-draft  )| \
+          grep -E '^run' | paste -sd , -)
+          gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
                                                        --body-file "body.md" \
                                                        --head "${BRANCH}" \
                                                        --base "main" \
-                                                       --label "run-e2e-tests-in-draft" \
+                                                       --label ${LABELS} \
                                                        --draft
+      - name: Modify the existing pull request (if required)
+        if: steps.get-pr.outputs.ALREADY_CREATED != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LABELS_TO_ADD: ${{ steps.get-labels.outputs.LABELS_TO_ADD }}
+          LABELS_TO_REMOVE: ${{ steps.get-labels.outputs.LABELS_TO_REMOVE }}
+          ALREADY_CREATED: ${{ steps.get-pr.outputs.ALREADY_CREATED }}
+        run: |
+          ADD_CMD=
+          REMOVE_CMD=
+          [ -z "${LABELS_TO_ADD}" ] || ADD_CMD="--add-label ${LABELS_TO_ADD}"
+          [ -z "${LABELS_TO_REMOVE}" ] || REMOVE_CMD="--remove-label ${LABELS_TO_REMOVE}"
+          if [ -n "${ADD_CMD}" ] || [ -n "${REMOVE_CMD}" ]; then
+            gh pr --repo "${GITHUB_REPOSITORY}" edit ${ALREADY_CREATED} ${ADD_CMD} ${REMOVE_CMD}
           fi
 
+      - run: git push --force origin "${BRANCH}"
+        if: steps.get-pr.outputs.ALREADY_CREATED != ''
+             
   cleanup:
     # Close PRs and delete branchs if the original PR is closed.
 
