@@ -1481,6 +1481,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
 		}
+		#if 0
 		else if (PageIsEmptyHeapPage((Page) buffer))
 		{
 			ereport(SmgrTrace,
@@ -1489,12 +1490,23 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
 		}
+		#endif
 		else if (forknum != FSM_FORKNUM && forknum != VISIBILITYMAP_FORKNUM)
 		{
 			if (start_unlogged_build(InfoFromSMgrRel(reln), forknum, blocknum, &relsize))
 			{
 				mdcreate(reln, forknum, true);
+				if (relsize != 0)
+					unlogged_extend(reln, forknum, 0, relsize);
+				elog(SmgrTrace, "neon_wallog_page: start unlogged %u/%u/%u.%u blk %u, relsize %u",
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forknum, blocknum, relsize);
 			}
+			else
+				elog(SmgrTrace, "neon_wallog_page: continue unlogged %u/%u/%u.%u blk %u, relsize %u",
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forknum, blocknum, relsize);
+
 			if (blocknum >= relsize)
 			{
 				unlogged_extend(reln, forknum, relsize, blocknum+1);
@@ -1515,7 +1527,16 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 		if (start_unlogged_build(InfoFromSMgrRel(reln),forknum, blocknum, &relsize))
 		{
 			mdcreate(reln, forknum, true);
+			if (relsize != 0)
+				unlogged_extend(reln, forknum, 0, relsize);
+			elog(SmgrTrace, "neon_wallog_page: start unlogged %u/%u/%u.%u blk %u, relsize %u, LSN %X",
+				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+				 forknum, blocknum, relsize, (unsigned)lsn);
 		}
+		else
+			elog(SmgrTrace, "neon_wallog_page: continue unlogged %u/%u/%u.%u blk %u, relsize %u, LSN %X",
+				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+				 forknum, blocknum, relsize, (unsigned)lsn);
 		if (blocknum >= relsize)
 		{
 			unlogged_extend(reln, forknum, relsize, blocknum+1);
@@ -1533,13 +1554,14 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 	{
 		if (is_unlogged_build_extend(InfoFromSMgrRel(reln), forknum, blocknum, &relsize))
 		{
+			elog(SmgrTrace, "neon_wallog_page: unlogged extend %u/%u/%u.%u blk %u, relsize %u",
+				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+				 forknum, blocknum, relsize);
 			if (blocknum >= relsize)
 			{
 				unlogged_extend(reln, forknum, relsize, blocknum+1);
 			}
 			mdwrite(reln, forknum, blocknum, buffer, true);
-			resume_unlogged_build();
-
 			ereport(SmgrTrace,
 					(errmsg(NEON_TAG "Page %u with LSN=%X/%X of relation %u/%u/%u.%u is saved locally.",
 							blocknum,
@@ -1548,12 +1570,15 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 							forknum)));
 		}
 		else
+		{
 			ereport(SmgrTrace,
 					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is already wal-logged at lsn=%X/%X",
 						blocknum,
 						RelFileInfoFmt(InfoFromSMgrRel(reln)),
 						forknum, LSN_FORMAT_ARGS(lsn)
 					)));
+		}
+		resume_unlogged_build();
 	}
 
 	/*
@@ -2764,6 +2789,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 {
 	BlockNumber relsize;
 	XLogRecPtr	lsn;
+	bool unlogged = false;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2774,23 +2800,23 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 				{
 					unlogged_extend(reln, forknum, relsize, blocknum+1);
 				}
-				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
-				resume_unlogged_build();
-				return;
+				unlogged = true;
+				elog(SmgrTrace, "neon_write: extend %u/%u/%u.%u blk %u, relsize %u",
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forknum, blocknum, relsize);
+			} else {
+				unlogged = mdexists(reln, forknum);
 			}
-			/* This is a bit tricky. Check if the relation exists locally */
-			if (mdexists(reln, forknum))
+			if (unlogged)
 			{
-				/* It exists locally. Guess it's unlogged then. */
+				elog(SmgrTrace, "neon_write: mdwrite %u/%u/%u.%u blk %u",
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forknum, blocknum);
 				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
-
-				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
-				 */
+			}
+			resume_unlogged_build();
+			if (unlogged)
+			{
 				return;
 			}
 			break;

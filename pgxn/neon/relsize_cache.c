@@ -416,8 +416,8 @@ is_unlogged_build(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber* relsize)
 
 /*
  * Check if relation is extended during unlogged build.
- * If it is unlogged build, true is returned and lock on relsize cache is hold.
- * It should be later released by calling resume_unlogged_build().
+ * This function object lock on relsize cache which
+ * should be later released by calling resume_unlogged_build().
  * It allows to atomically extend local file.
  */
 bool
@@ -463,8 +463,6 @@ is_unlogged_build_extend(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blo
 		{
 			relsize_ctl->misses += 1;
 		}
-		if (!unlogged)
-			LWLockRelease(relsize_lock);
 	}
 	return unlogged;
 }
