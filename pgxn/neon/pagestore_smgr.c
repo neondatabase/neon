@@ -2226,13 +2226,14 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		unlogged_extend(reln, forkNum, old_relsize, blkno + 1);
 		resume_unlogged_build();
 	}
+	else /* Do not store pages during unlogedbuild in LFC two avoid double local storage consumption */
+		lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
+
 	lsn = PageGetLSN((Page) buffer);
 	neon_log(SmgrTrace, "smgrextend called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
-
-	lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2262,6 +2263,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	BlockNumber old_relsize;
 	BlockNumber	remblocks = nblocks;
 	XLogRecPtr	lsn = 0;
+	bool unlogged = false;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2314,6 +2316,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	{
 		unlogged_extend(reln, forkNum, old_relsize, blocknum + nblocks);
 		resume_unlogged_build();
+		unlogged = true;
 	}
 
 	if (forkNum != MAIN_FORKNUM) /* no need to wal-log zero pages except VM/FSM forks  */
@@ -2354,7 +2357,8 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		}
 		for (int i = 0; i < count; i++)
 		{
-			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, zero_buffer.data);
+			if (!unlogged) /* Do not store pages during unlogedbuild in LFC two avoid double local storage consumption */
+				lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, zero_buffer.data);
 			SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forkNum,
 									  blocknum + i);
 		}
@@ -2651,12 +2655,6 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	/* Try to read from local file cache */
-	if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
-	{
-		return;
-	}
-
 	if (is_unlogged_build(InfoFromSMgrRel(reln), forkNum, &relsize))
 	{
 		if (blkno >= relsize)
@@ -2675,6 +2673,12 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	}
 	else
 	{
+		/* Try to read from local file cache */
+		if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
+		{
+			return;
+		}
+
 		request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno);
 		neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
 	}
