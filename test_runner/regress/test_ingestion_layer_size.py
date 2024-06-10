@@ -120,8 +120,8 @@ def histogram_historic_layers(
         )
         return layer
 
-    sizes = map(log_layer, infos.historic_layers)
-    sizes = (x.layer_file_size for x in sizes)
+    layers = map(log_layer, infos.historic_layers)
+    sizes = (x.layer_file_size for x in layers)
     return histogram(sizes, minimum_sizes)
 
 
