@@ -39,7 +39,7 @@ def measure_replication_lag(master, replica):
 
 
 @pytest.mark.remote_cluster
-@pytest.mark.timeout(0)
+@pytest.mark.timeout(2 * 60 * 60)
 def test_ro_replica_lag(
     pg_bin: PgBin,
     neon_api_key: str,
@@ -47,8 +47,8 @@ def test_ro_replica_lag(
     pg_version: PgVersion,
     zenbenchmark: NeonBenchmarker,
 ):
-    test_duration_min = 5
-    sync_interval_min = 1
+    test_duration_min = 60
+    sync_interval_min = 6
 
     project = neon_create_project(neon_api_key, neon_api_base_url, pg_version)
     project_id = project["project"]["id"]
@@ -141,7 +141,7 @@ def report_pgbench_aggregate_intervals(
 
 
 @pytest.mark.remote_cluster
-@pytest.mark.timeout(0)
+@pytest.mark.timeout(2 * 60 * 60)
 def test_replication_start_stop(
     pg_bin: PgBin,
     test_output_dir: Path,
@@ -159,7 +159,7 @@ def test_replication_start_stop(
 
     prefix = "pgbench_agg"
     num_replicas = 2
-    configuration_test_time_sec = 5
+    configuration_test_time_sec = 10 * 60
     should_delete = True
 
     project = neon_create_project(neon_api_key, neon_api_base_url, pg_version)
