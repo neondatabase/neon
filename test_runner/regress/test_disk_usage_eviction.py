@@ -657,7 +657,6 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
     tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
     (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, True)
 
-    # cut 10 percent
     response = env.pageserver.http_client().disk_usage_eviction_run(
         {"evict_bytes": total_on_disk // 5, "eviction_order": order.config()}
     )
