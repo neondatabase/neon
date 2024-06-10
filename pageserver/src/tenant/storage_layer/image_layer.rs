@@ -29,7 +29,9 @@ use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
-use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
+use crate::tenant::disk_btree::{
+    DiskBtreeBuilder, DiskBtreeError, DiskBtreeReader, VisitDirection,
+};
 use crate::tenant::storage_layer::{
     LayerAccessStats, ValueReconstructResult, ValueReconstructState,
 };
@@ -43,17 +45,20 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
+use futures::Stream;
 use hex;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
+use pageserver_compaction::interface::CompactionKey;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -689,6 +694,17 @@ impl ImageLayerInner {
             };
         }
     }
+
+    async fn iter<'a, 'ctx>(&'a self, ctx: &'ctx RequestContext) -> ImageLayerIterator<'a, 'ctx> {
+        ImageLayerIterator {
+            image_layer: self,
+            ctx,
+            next_batch_start_key: Key::MIN,
+            key_values_batch: Vec::new(),
+            next_idx_in_batch: 0,
+            is_end: false,
+        }
+    }
 }
 
 /// A builder object for constructing a new image layer.
@@ -940,6 +956,106 @@ impl Drop for ImageLayerWriter {
         if let Some(inner) = self.inner.take() {
             inner.blob_writer.into_inner().remove();
         }
+    }
+}
+
+pub struct ImageLayerIterator<'a, 'ctx> {
+    image_layer: &'a ImageLayerInner,
+    ctx: &'ctx RequestContext,
+    next_batch_start_key: Key,
+    key_values_batch: Vec<(Key, Lsn, Value)>,
+    next_idx_in_batch: usize,
+    is_end: bool,
+}
+
+impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
+    /// Retrieve a batch of key-value pairs into the iterator buffer with a single (vectored) I/O.
+    async fn next_batch(&mut self) -> anyhow::Result<()> {
+        assert!(self.next_idx_in_batch >= self.key_values_batch.len());
+        assert!(!self.is_end);
+        self.key_values_batch.clear();
+        self.next_idx_in_batch = 0;
+
+        let block_reader = FileBlockReader::new(&self.image_layer.file, self.image_layer.file_id);
+        let tree_reader = DiskBtreeReader::new(
+            self.image_layer.index_start_blk,
+            self.image_layer.index_root_blk,
+            &block_reader,
+        );
+        let mut search_key = [0; KEY_SIZE];
+        self.next_batch_start_key
+            .write_to_byte_slice(&mut search_key);
+        let mut read_planner = VectoredReadPlanner::new(1024 * 8192); // TODO: avoid hard-coded constant
+        let mut cnt = 0;
+        let mut range_end_handled = false;
+        // TODO: dedup with vectored read?
+        tree_reader
+            .visit(
+                &search_key,
+                VisitDirection::Forwards,
+                |raw_key, offset| {
+                    read_planner.handle(
+                        Key::from_slice(&raw_key[..KEY_SIZE]),
+                        self.image_layer.lsn,
+                        offset,
+                        BlobFlag::None,
+                    );
+                    cnt += 1;
+                    // read at most 1024 keys, TODO: avoid hardcoded constants
+                    if cnt > 1024 {
+                        read_planner.handle_range_end(offset);
+                        range_end_handled = true;
+                        false
+                    } else {
+                        true
+                    }
+                },
+                self.ctx,
+            )
+            .await?;
+        if cnt == 0 {
+            self.is_end = true;
+            return Ok(());
+        }
+        if !range_end_handled {
+            let payload_end = self.image_layer.index_start_blk as u64 * PAGE_SZ as u64;
+            read_planner.handle_range_end(payload_end);
+        }
+        let plan = read_planner.finish();
+        let vectored_blob_reader = VectoredBlobReader::new(&self.image_layer.file);
+        let mut next_batch = Vec::new();
+        for read in plan {
+            let buf_size = read.size();
+            let buf = BytesMut::with_capacity(buf_size);
+            let blobs_buf = vectored_blob_reader
+                .read_blobs(&read, buf, self.ctx)
+                .await?;
+            let frozen_buf: Bytes = blobs_buf.buf.freeze();
+            for meta in blobs_buf.blobs.iter() {
+                let img_buf = frozen_buf.slice(meta.start..meta.end);
+                next_batch.push((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
+            }
+        }
+        let (last_key, _, _) = next_batch.last().unwrap();
+        self.next_batch_start_key = last_key.next();
+        self.key_values_batch = next_batch;
+        Ok(())
+    }
+
+    async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
+        if self.is_end {
+            return Ok(None);
+        }
+        if self.next_idx_in_batch >= self.key_values_batch.len() {
+            self.next_batch().await?;
+            if self.is_end {
+                return Ok(None);
+            }
+        }
+        assert!(!self.key_values_batch.is_empty());
+        let ret = self.key_values_batch[self.next_idx_in_batch].clone();
+        self.next_idx_in_batch += 1;
+        Ok(Some(ret))
     }
 }
 
