@@ -3395,6 +3395,12 @@ impl Tenant {
         let tenant_shard_id = raw_timeline.owning_tenant.tenant_shard_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
 
+        // Flush the new layer files to disk, before we make the timeline as available to
+        // the outside world.
+        //
+        // Flush loop needs to be spawned in order to be able to flush.
+        unfinished_timeline.maybe_spawn_flush_loop();
+
         import_datadir::import_timeline_from_postgres_datadir(
             unfinished_timeline,
             &pgdata_path,
@@ -3405,12 +3411,6 @@ impl Tenant {
         .with_context(|| {
             format!("Failed to import pgdatadir for timeline {tenant_shard_id}/{timeline_id}")
         })?;
-
-        // Flush the new layer files to disk, before we make the timeline as available to
-        // the outside world.
-        //
-        // Flush loop needs to be spawned in order to be able to flush.
-        unfinished_timeline.maybe_spawn_flush_loop();
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
             anyhow::bail!("failpoint before-checkpoint-new-timeline");
