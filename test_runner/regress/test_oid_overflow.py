@@ -1,5 +1,6 @@
-from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnvBuilder
+
 
 def test_next_xid(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
