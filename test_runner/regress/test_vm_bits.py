@@ -1,7 +1,9 @@
 import time
+from contextlib import closing
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, fork_at_current_lsn
+from fixtures.utils import query_scalar
 
 
 #
@@ -128,11 +130,17 @@ def test_vm_bit_clear_on_heap_lock_whitebox(neon_env_builder: NeonEnvBuilder):
             # If auto-analyze runs at the same time that we run VACUUM FREEZE, it
             # can hold a snasphot that prevent the tuples from being frozen.
             "autovacuum=off",
-            "log_checkpoints=on"
+            "log_checkpoints=on",
         ],
     )
 
-    pg_conn = endpoint.connect()
+    # Run the tests in a dedicated database, because the activity monitor
+    # periodically runs some queries on to the 'postgres' database. If that
+    # happens at the same time that we're trying to freeze, the activity
+    # monitor's queries can hold back the xmin horizon and prevent freezing.
+    with closing(endpoint.connect()) as pg_conn:
+        pg_conn.cursor().execute("CREATE DATABASE vmbitsdb")
+    pg_conn = endpoint.connect(dbname="vmbitsdb")
     cur = pg_conn.cursor()
 
     # Install extension containing function needed for test
@@ -141,10 +149,23 @@ def test_vm_bit_clear_on_heap_lock_whitebox(neon_env_builder: NeonEnvBuilder):
 
     # Create a test table and freeze it to set the all-frozen VM bit on all pages.
     cur.execute("CREATE TABLE vmtest_lock (id integer PRIMARY KEY)")
+    cur.execute("BEGIN")
     cur.execute("INSERT INTO vmtest_lock SELECT g FROM generate_series(1, 50000) g")
+    xid = int(query_scalar(cur, "SELECT txid_current()"))
+    cur.execute("COMMIT")
     cur.execute("VACUUM (FREEZE, DISABLE_PAGE_SKIPPING true, VERBOSE) vmtest_lock")
     for notice in pg_conn.notices:
         log.info(f"{notice}")
+
+    # This test has been flaky in the past, because background activity like
+    # auto-analyze and compute_ctl's activity monitor queries have prevented the
+    # tuples from being frozen. Check that they were frozen.
+    relfrozenxid = int(
+        query_scalar(cur, "SELECT relfrozenxid FROM pg_class WHERE relname='vmtest_lock'")
+    )
+    assert (
+        relfrozenxid > xid
+    ), f"Inserted rows were not frozen. This can be caused by concurrent activity in the database. (XID {xid}, relfrozenxid {relfrozenxid}"
 
     # Lock a row. This clears the all-frozen VM bit for that page.
     cur.execute("BEGIN")
