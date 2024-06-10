@@ -3773,8 +3773,8 @@ impl Timeline {
         }
     }
 
-    /// Request the flush loop to write out all frozen layers up to `to_lsn` as Delta L0 files to disk.
-    /// The caller is responsible for the freezing, e.g., [`Self::freeze_inmem_layer`].
+    /// Request the flush loop to write out all frozen layers up to `at_lsn` as Delta L0 files to disk.
+    /// The caller is responsible for the freezing, e.g., [`Self::freeze_inmem_layer_at`].
     ///
     /// `at_lsn` may be higher than the highest LSN of a frozen layer: if this is the
     /// case, it means no data will be written between the top of the highest frozen layer and
