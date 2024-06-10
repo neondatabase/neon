@@ -1,10 +1,11 @@
 from dataclasses import dataclass
+from typing import Iterable, List, Union
+
 import pytest
-from typing import List, Union, Iterable
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
-from fixtures.utils import human_bytes
 from fixtures.pageserver.http import HistoricLayerInfo, LayerMapInfo
+from fixtures.utils import human_bytes
 
 
 def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, build_type: str):
@@ -27,7 +28,9 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
     # bucket lower limits
     buckets = [0, minimum_initdb_size, minimum_good_layer_size, minimum_too_large_layer_size]
 
-    assert minimum_initdb_size < minimum_good_layer_size, "keep checkpoint_distance higher than the initdb size (find it by experimenting)"
+    assert (
+        minimum_initdb_size < minimum_good_layer_size
+    ), "keep checkpoint_distance higher than the initdb size (find it by experimenting)"
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
@@ -47,13 +50,17 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
         cur.execute(
             f"create table int_array_test as select array_agg(g) as int_array from generate_series(1, {rows}) g group by g / 10;"
         )
-        cur.execute("create index int_array_test_gin_index on int_array_test using gin (int_array);")
+        cur.execute(
+            "create index int_array_test_gin_index on int_array_test using gin (int_array);"
+        )
         cur.execute("select pg_table_size('int_array_test_gin_index')")
         size = cur.fetchone()
         assert size is not None
         assert isinstance(size[0], int)
         log.info(f"gin index size: {human_bytes(size[0])}")
-        assert size[0] > checkpoint_distance * 3, f"gin index is not large enough: {human_bytes(size[0])}"
+        assert (
+            size[0] > checkpoint_distance * 3
+        ), f"gin index is not large enough: {human_bytes(size[0])}"
         wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
 
     ps_http = env.pageserver.http_client()
@@ -68,10 +75,13 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
     print_layer_size_histogram(post_ingest)
 
     # since all we have are L0s, we should be getting nice L1s and images out of them now
-    ps_http.patch_tenant_config_client_side(env.initial_tenant, {
-        "compaction_threshold": 1,
-        "image_creation_threshold": 1,
-    })
+    ps_http.patch_tenant_config_client_side(
+        env.initial_tenant,
+        {
+            "compaction_threshold": 1,
+            "image_creation_threshold": 1,
+        },
+    )
 
     ps_http.timeline_compact(env.initial_tenant, env.initial_timeline, True, True)
 
@@ -86,7 +96,9 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
         post_ingest.counts[3] == 0
     ), f"there should be no layers larger than 2*checkpoint_distance ({human_bytes(2*checkpoint_distance)})"
     assert post_ingest.counts[1] == 1, "expect one smaller layer for initdb"
-    assert post_ingest.counts[0] <= 1, "expect at most one tiny layer from shutting down the endpoint"
+    assert (
+        post_ingest.counts[0] <= 1
+    ), "expect at most one tiny layer from shutting down the endpoint"
 
     # just make sure we don't have trouble splitting the layers apart
     assert post_compact.counts[3] == 0
@@ -99,8 +111,9 @@ class Histogram:
     sums: List[int]
 
 
-def histogram_historic_layers(infos: LayerMapInfo, minimum_sizes: List[Union[int, float]]) -> Histogram:
-
+def histogram_historic_layers(
+    infos: LayerMapInfo, minimum_sizes: List[Union[int, float]]
+) -> Histogram:
     def log_layer(layer: HistoricLayerInfo) -> HistoricLayerInfo:
         log.info(
             f"{layer.layer_file_name} {human_bytes(layer.layer_file_size)} ({layer.layer_file_size} bytes)"
