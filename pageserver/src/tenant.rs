@@ -3013,13 +3013,15 @@ impl Tenant {
                     let lsns_with_expired_lease = target
                         .leases
                         .iter()
-                        .filter_map(|(lsn, lease)| {
-                            if lease.is_expired() {
-                                None
-                            } else {
-                                Some(lsn.clone())
-                            }
-                        })
+                        .filter_map(
+                            |(lsn, lease)| {
+                                if lease.is_expired() {
+                                    None
+                                } else {
+                                    Some(*lsn)
+                                }
+                            },
+                        )
                         .collect::<Vec<_>>();
 
                     for lsn in lsns_with_expired_lease {
