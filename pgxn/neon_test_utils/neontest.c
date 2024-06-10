@@ -35,6 +35,7 @@ PG_MODULE_MAGIC;
 extern void _PG_init(void);
 
 PG_FUNCTION_INFO_V1(test_consume_xids);
+PG_FUNCTION_INFO_V1(test_consume_oids);
 PG_FUNCTION_INFO_V1(test_consume_cpu);
 PG_FUNCTION_INFO_V1(test_consume_memory);
 PG_FUNCTION_INFO_V1(test_release_memory);
@@ -75,8 +76,18 @@ _PG_init(void)
 #define neon_read_at_lsn neon_read_at_lsn_ptr
 
 /*
- * test_consume_xids(int4), for rapidly consuming XIDs, to test wraparound.
+ * test_consume_oids(int4), for rapidly consuming OIDs, to test wraparound.
  */
+Datum
+test_consume_oids(PG_FUNCTION_ARGS)
+{
+	int32 oid = PG_GETARG_INT32(0);
+
+	while (oid != GetNewObjectId());
+
+	PG_RETURN_VOID();
+}
+
 Datum
 test_consume_xids(PG_FUNCTION_ARGS)
 {
