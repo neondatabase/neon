@@ -102,7 +102,6 @@ use crate::metrics::{
 };
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
-use pageserver_api::key::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
@@ -2788,17 +2787,21 @@ impl Timeline {
                     crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
                 };
 
-                match self_ref
+                let calculated_size = self_ref
                     .logical_size_calculation_task(
                         initial_part_end,
                         LogicalSizeCalculationCause::Initial,
                         background_ctx,
                     )
-                    .await
-                {
-                    Ok(calculated_size) => Ok((calculated_size, metrics_guard)),
-                    Err(e) => Err(e),
-                }
+                    .await?;
+
+                self_ref
+                    .trigger_aux_file_size_computation(initial_part_end, background_ctx)
+                    .await?;
+
+                // TODO: add aux file size to logical size
+
+                Ok((calculated_size, metrics_guard))
             }
         };
 
@@ -3191,7 +3194,7 @@ impl Timeline {
 
             // Recurse into ancestor if needed
             if let Some(ancestor_timeline) = timeline.ancestor_timeline.as_ref() {
-                if is_inherited_key(key) && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
+                if key.is_inherited_key() && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
                     trace!(
                         "going into ancestor {}, cont_lsn is {}",
                         timeline.ancestor_lsn,
@@ -3880,22 +3883,25 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
+            // FIXME(auxfilesv2): support multiple metadata key partitions might need initdb support as well?
+            // This code path will not be hit during regression tests. After #7099 we have a single partition
+            // with two key ranges. If someone wants to fix initdb optimization in the future, this might need
+            // to be fixed.
+
             // For metadata, always create delta layers.
             let delta_layer = if !metadata_partition.parts.is_empty() {
                 assert_eq!(
                     metadata_partition.parts.len(),
                     1,
-                    "currently sparse keyspace should only contain a single aux file keyspace"
+                    "currently sparse keyspace should only contain a single metadata keyspace"
                 );
                 let metadata_keyspace = &metadata_partition.parts[0];
-                assert_eq!(
-                    metadata_keyspace.0.ranges.len(),
-                    1,
-                    "aux file keyspace should be a single range"
-                );
                 self.create_delta_layer(
                     &frozen_layer,
-                    Some(metadata_keyspace.0.ranges[0].clone()),
+                    Some(
+                        metadata_keyspace.0.ranges.first().unwrap().start
+                            ..metadata_keyspace.0.ranges.last().unwrap().end,
+                    ),
                     ctx,
                 )
                 .await
@@ -4262,7 +4268,7 @@ impl Timeline {
                                 // Unfortunately we cannot do this for the main fork, or for
                                 // any metadata keys, keys, as that would lead to actual data
                                 // loss.
-                                if is_rel_fsm_block_key(img_key) || is_rel_vm_block_key(img_key) {
+                                if img_key.is_rel_fsm_block_key() || img_key.is_rel_vm_block_key() {
                                     warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
                                     ZERO_PAGE.clone()
                                 } else {
@@ -4312,6 +4318,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         mode: ImageLayerCreationMode,
+        start: Key,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         assert!(!matches!(mode, ImageLayerCreationMode::Initial));
 
@@ -4320,39 +4327,43 @@ impl Timeline {
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
             .await?;
-        let (data, total_kb_retrieved, total_key_retrieved) = {
+        let (data, total_kb_retrieved, total_keys_retrieved) = {
             let mut new_data = BTreeMap::new();
             let mut total_kb_retrieved = 0;
-            let mut total_key_retrieved = 0;
+            let mut total_keys_retrieved = 0;
             for (k, v) in data {
                 let v = v.map_err(CreateImageLayersError::PageReconstructError)?;
                 total_kb_retrieved += KEY_SIZE + v.len();
-                total_key_retrieved += 1;
+                total_keys_retrieved += 1;
                 new_data.insert(k, v);
             }
-            (new_data, total_kb_retrieved / 1024, total_key_retrieved)
+            (new_data, total_kb_retrieved / 1024, total_keys_retrieved)
         };
-        let delta_file_accessed = reconstruct_state.get_delta_layers_visited();
+        let delta_files_accessed = reconstruct_state.get_delta_layers_visited();
 
-        let trigger_generation = delta_file_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
+        let trigger_generation = delta_files_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
         debug!(
-            "generate image layers for metadata keys: trigger_generation={trigger_generation}, \
-                delta_file_accessed={delta_file_accessed}, total_kb_retrieved={total_kb_retrieved}, \
-                total_key_retrieved={total_key_retrieved}"
+            trigger_generation,
+            delta_files_accessed,
+            total_kb_retrieved,
+            total_keys_retrieved,
+            "generate metadata images"
         );
+
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
             return Ok(ImageLayerCreationOutcome {
                 image: None,
                 next_start_key: img_range.end,
             });
         }
-        let has_keys = !data.is_empty();
+        let mut wrote_any_image = false;
         for (k, v) in data {
-            // Even if the value is empty (deleted), we do not delete it for now until we can ensure vectored get
-            // considers this situation properly.
-            // if v.is_empty() {
-            //     continue;
-            // }
+            if v.is_empty() {
+                // the key has been deleted, it does not need an image
+                // in metadata keyspace, an empty image == tombstone
+                continue;
+            }
+            wrote_any_image = true;
 
             // No need to handle sharding b/c metadata keys are always on the 0-th shard.
 
@@ -4360,16 +4371,26 @@ impl Timeline {
             // on the normal data path either.
             image_layer_writer.put_image(k, v, ctx).await?;
         }
-        Ok(ImageLayerCreationOutcome {
-            image: if has_keys {
-                let image_layer = image_layer_writer.finish(self, ctx).await?;
-                Some(image_layer)
-            } else {
-                tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
-                None
-            },
-            next_start_key: img_range.end,
-        })
+
+        if wrote_any_image {
+            // Normal path: we have written some data into the new image layer for this
+            // partition, so flush it to disk.
+            let image_layer = image_layer_writer.finish(self, ctx).await?;
+            Ok(ImageLayerCreationOutcome {
+                image: Some(image_layer),
+                next_start_key: img_range.end,
+            })
+        } else {
+            // Special case: the image layer may be empty if this is a sharded tenant and the
+            // partition does not cover any keys owned by this shard. In this case, to ensure
+            // we don't leave gaps between image layers, leave `start` where it is, so that the next
+            // layer we write will cover the key range that we just scanned.
+            tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
+            Ok(ImageLayerCreationOutcome {
+                image: None,
+                next_start_key: start,
+            })
+        }
     }
 
     #[tracing::instrument(skip_all, fields(%lsn, %mode))]
@@ -4425,6 +4446,12 @@ impl Timeline {
                 if mode == ImageLayerCreationMode::Initial {
                     return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
                 }
+                if mode == ImageLayerCreationMode::Try && !check_for_image_layers {
+                    // Skip compaction if there are not enough updates. Metadata compaction will do a scan and
+                    // might mess up with evictions.
+                    start = img_range.end;
+                    continue;
+                }
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
@@ -4479,6 +4506,7 @@ impl Timeline {
                         ctx,
                         img_range,
                         mode,
+                        start,
                     )
                     .await?;
                 start = next_start_key;
@@ -5448,11 +5476,12 @@ impl Timeline {
         let min_key = *deltas.first().map(|(k, _, _)| k).unwrap();
         let max_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
         let min_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
-        let max_lsn = Lsn(deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap().0 + 1);
+        let max_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
         assert!(
             max_lsn <= last_record_lsn,
             "advance last record lsn before inserting a layer, max_lsn={max_lsn}, last_record_lsn={last_record_lsn}"
         );
+        let end_lsn = Lsn(max_lsn.0 + 1);
         if let Some(check_start_lsn) = check_start_lsn {
             assert!(min_lsn >= check_start_lsn);
         }
@@ -5461,7 +5490,7 @@ impl Timeline {
             self.timeline_id,
             self.tenant_shard_id,
             min_key,
-            min_lsn..max_lsn,
+            min_lsn..end_lsn,
             ctx,
         )
         .await?;
@@ -5476,6 +5505,36 @@ impl Timeline {
         }
 
         Ok(())
+    }
+
+    /// Return all keys at the LSN in the image layers
+    #[cfg(test)]
+    pub(crate) async fn inspect_image_layers(
+        self: &Arc<Timeline>,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Bytes)>> {
+        let mut all_data = Vec::new();
+        let guard = self.layers.read().await;
+        for layer in guard.layer_map().iter_historic_layers() {
+            if !layer.is_delta() && layer.image_layer_lsn() == lsn {
+                let layer = guard.get_from_desc(&layer);
+                let mut reconstruct_data = ValuesReconstructState::default();
+                layer
+                    .get_values_reconstruct_data(
+                        KeySpace::single(Key::MIN..Key::MAX),
+                        lsn..Lsn(lsn.0 + 1),
+                        &mut reconstruct_data,
+                        ctx,
+                    )
+                    .await?;
+                for (k, v) in reconstruct_data.keys {
+                    all_data.push((k, v?.img.unwrap().1));
+                }
+            }
+        }
+        all_data.sort();
+        Ok(all_data)
     }
 }
 
@@ -5619,7 +5678,7 @@ impl<'a> TimelineWriter<'a> {
         self.tl.flush_frozen_layers();
 
         let current_size = self.write_guard.as_ref().unwrap().current_size;
-        if current_size > self.get_checkpoint_distance() {
+        if current_size >= self.get_checkpoint_distance() * 2 {
             warn!("Flushed oversized open layer with size {}", current_size)
         }
 

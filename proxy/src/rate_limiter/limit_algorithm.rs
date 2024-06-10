@@ -3,7 +3,7 @@ use parking_lot::Mutex;
 use std::{pin::pin, sync::Arc, time::Duration};
 use tokio::{
     sync::Notify,
-    time::{error::Elapsed, timeout_at, Instant},
+    time::{error::Elapsed, Instant},
 };
 
 use self::aimd::Aimd;
@@ -80,7 +80,7 @@ pub struct LimiterInner {
 }
 
 impl LimiterInner {
-    fn update(&mut self, latency: Duration, outcome: Option<Outcome>) {
+    fn update_limit(&mut self, latency: Duration, outcome: Option<Outcome>) {
         if let Some(outcome) = outcome {
             let sample = Sample {
                 latency,
@@ -92,12 +92,12 @@ impl LimiterInner {
     }
 
     fn take(&mut self, ready: &Notify) -> Option<()> {
-        if self.available > 1 {
+        if self.available >= 1 {
             self.available -= 1;
             self.in_flight += 1;
 
             // tell the next in the queue that there is a permit ready
-            if self.available > 1 {
+            if self.available >= 1 {
                 ready.notify_one();
             }
             Some(())
@@ -157,16 +157,12 @@ impl DynamicLimiter {
     }
 
     /// Try to acquire a concurrency [Token], waiting for `duration` if there are none available.
-    ///
-    /// Returns `None` if there are none available after `duration`.
     pub async fn acquire_timeout(self: &Arc<Self>, duration: Duration) -> Result<Token, Elapsed> {
-        self.acquire_deadline(Instant::now() + duration).await
+        tokio::time::timeout(duration, self.acquire()).await?
     }
 
-    /// Try to acquire a concurrency [Token], waiting until `deadline` if there are none available.
-    ///
-    /// Returns `None` if there are none available after `deadline`.
-    pub async fn acquire_deadline(self: &Arc<Self>, deadline: Instant) -> Result<Token, Elapsed> {
+    /// Try to acquire a concurrency [Token].
+    async fn acquire(self: &Arc<Self>) -> Result<Token, Elapsed> {
         if self.config.initial_limit == 0 {
             // If the rate limiter is disabled, we can always acquire a token.
             Ok(Token::disabled())
@@ -174,22 +170,16 @@ impl DynamicLimiter {
             let mut notified = pin!(self.ready.notified());
             let mut ready = notified.as_mut().enable();
             loop {
-                let mut limit = None;
                 if ready {
                     let mut inner = self.inner.lock();
                     if inner.take(&self.ready).is_some() {
                         break Ok(Token::new(self.clone()));
-                    }
-                    limit = Some(inner.limit);
-                }
-                match timeout_at(deadline, notified.as_mut()).await {
-                    Ok(()) => ready = true,
-                    Err(e) => {
-                        let limit = limit.unwrap_or_else(|| self.inner.lock().limit);
-                        tracing::info!(limit, "could not acquire token in time");
-                        break Err(e);
+                    } else {
+                        notified.set(self.ready.notified());
                     }
                 }
+                notified.as_mut().await;
+                ready = true;
             }
         }
     }
@@ -208,14 +198,14 @@ impl DynamicLimiter {
 
         let mut inner = self.inner.lock();
 
-        inner.update(start.elapsed(), outcome);
+        inner.update_limit(start.elapsed(), outcome);
+
+        inner.in_flight -= 1;
         if inner.in_flight < inner.limit {
             inner.available = inner.limit - inner.in_flight;
             // At least 1 permit is now available
             self.ready.notify_one();
         }
-
-        inner.in_flight -= 1;
     }
 
     /// The current state of the limiter.

@@ -28,6 +28,7 @@ use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode, RemotePath};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
+use utils::pausable_failpoint;
 
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{
@@ -152,6 +153,8 @@ async fn download_object<'a>(
 
                 let download = storage.download(src_path, cancel).await?;
 
+                pausable_failpoint!("before-downloading-layer-stream-pausable");
+
                 let mut buf_writer =
                     tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, destination_file);
 
@@ -198,6 +201,8 @@ async fn download_object<'a>(
                     .map_err(DownloadError::Other)?;
 
                 let mut download = storage.download(src_path, cancel).await?;
+
+                pausable_failpoint!("before-downloading-layer-stream-pausable");
 
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored() on the stream.

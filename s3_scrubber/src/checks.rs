@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
-use aws_sdk_s3::{types::ObjectIdentifier, Client};
+use aws_sdk_s3::Client;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
 use tracing::{error, info, warn};
@@ -70,7 +70,7 @@ pub(crate) fn branch_cleanup_and_check_errors(
 
     match s3_data {
         Some(s3_data) => {
-            result.garbage_keys.extend(s3_data.keys_to_remove);
+            result.garbage_keys.extend(s3_data.unknown_keys);
 
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
@@ -93,12 +93,12 @@ pub(crate) fn branch_cleanup_and_check_errors(
                     }
 
                     if index_part.metadata.disk_consistent_lsn()
-                        != index_part.get_disk_consistent_lsn()
+                        != index_part.duplicated_disk_consistent_lsn()
                     {
                         result.errors.push(format!(
                             "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
                             index_part.metadata.disk_consistent_lsn(),
-                            index_part.get_disk_consistent_lsn(),
+                            index_part.duplicated_disk_consistent_lsn(),
                         ))
                     }
 
@@ -240,7 +240,12 @@ impl TenantObjectListing {
 #[derive(Debug)]
 pub(crate) struct S3TimelineBlobData {
     pub(crate) blob_data: BlobDataParseResult,
-    pub(crate) keys_to_remove: Vec<String>,
+
+    // Index objects that were not used when loading `blob_data`, e.g. those from old generations
+    pub(crate) unused_index_keys: Vec<String>,
+
+    // Objects whose keys were not recognized at all, i.e. not layer files, not indices
+    pub(crate) unknown_keys: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -276,12 +281,12 @@ pub(crate) async fn list_timeline_blobs(
     let mut s3_layers = HashSet::new();
 
     let mut errors = Vec::new();
-    let mut keys_to_remove = Vec::new();
+    let mut unknown_keys = Vec::new();
 
     let mut timeline_dir_target = s3_root.timeline_root(&id);
     timeline_dir_target.delimiter = String::new();
 
-    let mut index_parts: Vec<ObjectIdentifier> = Vec::new();
+    let mut index_part_keys: Vec<String> = Vec::new();
     let mut initdb_archive: bool = false;
 
     let mut stream = std::pin::pin!(stream_listing(s3_client, &timeline_dir_target));
@@ -292,16 +297,16 @@ pub(crate) async fn list_timeline_blobs(
         let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
         match blob_name {
             Some(name) if name.starts_with("index_part.json") => {
-                tracing::info!("Index key {key}");
-                index_parts.push(obj)
+                tracing::debug!("Index key {key}");
+                index_part_keys.push(key.to_owned())
             }
             Some("initdb.tar.zst") => {
-                tracing::info!("initdb archive {key}");
+                tracing::debug!("initdb archive {key}");
                 initdb_archive = true;
             }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
                 Ok((new_layer, gen)) => {
-                    tracing::info!("Parsed layer key: {} {:?}", new_layer, gen);
+                    tracing::debug!("Parsed layer key: {} {:?}", new_layer, gen);
                     s3_layers.insert((new_layer, gen));
                 }
                 Err(e) => {
@@ -309,37 +314,37 @@ pub(crate) async fn list_timeline_blobs(
                     errors.push(
                         format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
                     );
-                    keys_to_remove.push(key.to_string());
+                    unknown_keys.push(key.to_string());
                 }
             },
             None => {
-                tracing::info!("Peculiar key {}", key);
+                tracing::warn!("Unknown key {}", key);
                 errors.push(format!("S3 list response got an object with odd key {key}"));
-                keys_to_remove.push(key.to_string());
+                unknown_keys.push(key.to_string());
             }
         }
     }
 
-    if index_parts.is_empty() && s3_layers.is_empty() && initdb_archive {
-        tracing::info!(
+    if index_part_keys.is_empty() && s3_layers.is_empty() && initdb_archive {
+        tracing::debug!(
             "Timeline is empty apart from initdb archive: expected post-deletion state."
         );
         return Ok(S3TimelineBlobData {
             blob_data: BlobDataParseResult::Relic,
-            keys_to_remove: Vec::new(),
+            unused_index_keys: index_part_keys,
+            unknown_keys: Vec::new(),
         });
     }
 
     // Choose the index_part with the highest generation
-    let (index_part_object, index_part_generation) = match index_parts
+    let (index_part_object, index_part_generation) = match index_part_keys
         .iter()
-        .filter_map(|k| {
-            let key = k.key();
+        .filter_map(|key| {
             // Stripping the index key to the last part, because RemotePath doesn't
             // like absolute paths, and depending on prefix_in_bucket it's possible
             // for the keys we read back to start with a slash.
             let basename = key.rsplit_once('/').unwrap().1;
-            parse_remote_index_path(RemotePath::from_string(basename).unwrap()).map(|g| (k, g))
+            parse_remote_index_path(RemotePath::from_string(basename).unwrap()).map(|g| (key, g))
         })
         .max_by_key(|i| i.1)
         .map(|(k, g)| (k.clone(), g))
@@ -347,15 +352,18 @@ pub(crate) async fn list_timeline_blobs(
         Some((key, gen)) => (Some(key), gen),
         None => {
             // Legacy/missing case: one or zero index parts, which did not have a generation
-            (index_parts.pop(), Generation::none())
+            (index_part_keys.pop(), Generation::none())
         }
     };
 
-    if index_part_object.is_none() {
-        errors.push("S3 list response got no index_part.json file".to_string());
+    match index_part_object.as_ref() {
+        Some(selected) => index_part_keys.retain(|k| k != selected),
+        None => {
+            errors.push("S3 list response got no index_part.json file".to_string());
+        }
     }
 
-    if let Some(index_part_object_key) = index_part_object.as_ref().map(|object| object.key()) {
+    if let Some(index_part_object_key) = index_part_object.as_ref() {
         let index_part_bytes = download_object_with_retries(
             s3_client,
             &timeline_dir_target.bucket_name,
@@ -372,17 +380,14 @@ pub(crate) async fn list_timeline_blobs(
                         index_part_generation,
                         s3_layers,
                     },
-                    keys_to_remove,
+                    unused_index_keys: index_part_keys,
+                    unknown_keys,
                 })
             }
             Err(index_parse_error) => errors.push(format!(
                 "index_part.json body parsing error: {index_parse_error}"
             )),
         }
-    } else {
-        errors.push(format!(
-            "Index part object {index_part_object:?} has no key"
-        ));
     }
 
     if errors.is_empty() {
@@ -393,6 +398,7 @@ pub(crate) async fn list_timeline_blobs(
 
     Ok(S3TimelineBlobData {
         blob_data: BlobDataParseResult::Incorrect(errors),
-        keys_to_remove,
+        unused_index_keys: index_part_keys,
+        unknown_keys,
     })
 }

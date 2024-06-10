@@ -3865,6 +3865,9 @@ pub(crate) mod harness {
         pub fn create_custom(
             test_name: &'static str,
             tenant_conf: TenantConf,
+            tenant_id: TenantId,
+            shard_identity: ShardIdentity,
+            generation: Generation,
         ) -> anyhow::Result<Self> {
             setup_logging();
 
@@ -3877,8 +3880,12 @@ pub(crate) mod harness {
             // OK in a test.
             let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-            let tenant_id = TenantId::generate();
-            let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+            let shard = shard_identity.shard_index();
+            let tenant_shard_id = TenantShardId {
+                tenant_id,
+                shard_number: shard.shard_number,
+                shard_count: shard.shard_count,
+            };
             fs::create_dir_all(conf.tenant_path(&tenant_shard_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_shard_id))?;
 
@@ -3896,8 +3903,8 @@ pub(crate) mod harness {
                 conf,
                 tenant_conf,
                 tenant_shard_id,
-                generation: Generation::new(0xdeadbeef),
-                shard: ShardIndex::unsharded(),
+                generation,
+                shard,
                 remote_storage,
                 remote_fs_dir,
                 deletion_queue,
@@ -3912,8 +3919,15 @@ pub(crate) mod harness {
                 compaction_period: Duration::ZERO,
                 ..TenantConf::default()
             };
-
-            Self::create_custom(test_name, tenant_conf)
+            let tenant_id = TenantId::generate();
+            let shard = ShardIdentity::unsharded();
+            Self::create_custom(
+                test_name,
+                tenant_conf,
+                tenant_id,
+                shard,
+                Generation::new(0xdeadbeef),
+            )
         }
 
         pub fn span(&self) -> tracing::Span {
@@ -3992,8 +4006,8 @@ pub(crate) mod harness {
                 let base_img = base_img.expect("Neon WAL redo requires base image").1;
                 let mut page = BytesMut::new();
                 page.extend_from_slice(&base_img);
-                for (_record_lsn, record) in records {
-                    apply_neon::apply_in_neon(&record, key, &mut page)?;
+                for (record_lsn, record) in records {
+                    apply_neon::apply_in_neon(&record, record_lsn, key, &mut page)?;
                 }
                 Ok(page.freeze())
             } else {
@@ -4037,6 +4051,7 @@ mod tests {
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use utils::bin_ser::BeSer;
+    use utils::id::TenantId;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -4936,7 +4951,13 @@ mod tests {
             ..TenantConf::default()
         };
 
-        let harness = TenantHarness::create_custom("test_get_vectored_key_gap", tenant_conf)?;
+        let harness = TenantHarness::create_custom(
+            "test_get_vectored_key_gap",
+            tenant_conf,
+            TenantId::generate(),
+            ShardIdentity::unsharded(),
+            Generation::new(0xdeadbeef),
+        )?;
         let (tenant, ctx) = harness.load().await;
 
         let mut current_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
@@ -6466,6 +6487,210 @@ mod tests {
             get_vectored_impl_wrapper(&child, base_key_nonexist, lsn, &ctx).await?,
             None
         );
+
+        Ok(())
+    }
+
+    async fn get_vectored_impl_wrapper(
+        tline: &Arc<Timeline>,
+        key: Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Option<Bytes>, GetVectoredError> {
+        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut res = tline
+            .get_vectored_impl(
+                KeySpace::single(key..key.next()),
+                lsn,
+                &mut reconstruct_state,
+                ctx,
+            )
+            .await?;
+        Ok(res.pop_last().map(|(k, v)| {
+            assert_eq!(k, key);
+            v.unwrap()
+        }))
+    }
+
+    #[tokio::test]
+    async fn test_metadata_tombstone_reads() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_tombstone_reads")?;
+        let (tenant, ctx) = harness.load().await;
+        let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
+        let key2 = Key::from_hex("620000000033333333444444445500000002").unwrap();
+        let key3 = Key::from_hex("620000000033333333444444445500000003").unwrap();
+
+        // We emulate the situation that the compaction algorithm creates an image layer that removes the tombstones
+        // Lsn 0x30 key0, key3, no key1+key2
+        // Lsn 0x20 key1+key2 tomestones
+        // Lsn 0x10 key1 in image, key2 in delta
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                // delta layers
+                vec![
+                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                ],
+                // image layers
+                vec![
+                    (Lsn(0x10), vec![(key1, test_img("metadata key 1"))]),
+                    (
+                        Lsn(0x30),
+                        vec![
+                            (key0, test_img("metadata key 0")),
+                            (key3, test_img("metadata key 3")),
+                        ],
+                    ),
+                ],
+                Lsn(0x30),
+            )
+            .await?;
+
+        let lsn = Lsn(0x30);
+        let old_lsn = Lsn(0x20);
+
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key0, lsn, &ctx).await?,
+            Some(test_img("metadata key 0"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key1, lsn, &ctx).await?,
+            None,
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key2, lsn, &ctx).await?,
+            None,
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key1, old_lsn, &ctx).await?,
+            Some(Bytes::new()),
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key2, old_lsn, &ctx).await?,
+            Some(Bytes::new()),
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key3, lsn, &ctx).await?,
+            Some(test_img("metadata key 3"))
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_tombstone_image_creation() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_tombstone_image_creation")?;
+        let (tenant, ctx) = harness.load().await;
+
+        let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
+        let key2 = Key::from_hex("620000000033333333444444445500000002").unwrap();
+        let key3 = Key::from_hex("620000000033333333444444445500000003").unwrap();
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                // delta layers
+                vec![
+                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    vec![
+                        (key0, Lsn(0x30), Value::Image(test_img("metadata key 0"))),
+                        (key3, Lsn(0x30), Value::Image(test_img("metadata key 3"))),
+                    ],
+                ],
+                // image layers
+                vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
+                Lsn(0x30),
+            )
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        tline
+            .compact(
+                &cancel,
+                {
+                    let mut flags = EnumSet::new();
+                    flags.insert(CompactFlags::ForceImageLayerCreation);
+                    flags.insert(CompactFlags::ForceRepartition);
+                    flags
+                },
+                &ctx,
+            )
+            .await?;
+
+        // Image layers are created at last_record_lsn
+        let images = tline
+            .inspect_image_layers(Lsn(0x30), &ctx)
+            .await?
+            .into_iter()
+            .filter(|(k, _)| k.is_metadata_key())
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 2); // the image layer should only contain two existing keys, tombstones should be removed.
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_tombstone_empty_image_creation() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_tombstone_image_creation")?;
+        let (tenant, ctx) = harness.load().await;
+
+        let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
+        let key2 = Key::from_hex("620000000033333333444444445500000002").unwrap();
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                // delta layers
+                vec![
+                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                ],
+                // image layers
+                vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
+                Lsn(0x30),
+            )
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        tline
+            .compact(
+                &cancel,
+                {
+                    let mut flags = EnumSet::new();
+                    flags.insert(CompactFlags::ForceImageLayerCreation);
+                    flags.insert(CompactFlags::ForceRepartition);
+                    flags
+                },
+                &ctx,
+            )
+            .await?;
+
+        // Image layers are created at last_record_lsn
+        let images = tline
+            .inspect_image_layers(Lsn(0x30), &ctx)
+            .await?
+            .into_iter()
+            .filter(|(k, _)| k.is_metadata_key())
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 0); // the image layer should not contain tombstones, or it is not created
 
         Ok(())
     }

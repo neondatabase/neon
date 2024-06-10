@@ -16,6 +16,7 @@ use crate::{
     task_mgr::{self, TaskKind},
     tenant::{
         mgr::{TenantSlot, TenantsMapRemoveResult},
+        remote_timeline_client::remote_heatmap_path,
         timeline::ShutdownMode,
     },
 };
@@ -529,6 +530,25 @@ impl DeleteTenantFlow {
                     "already running timeline deletion failed: {timeline_id}"
                 )));
             }
+        }
+
+        // Remove top-level tenant objects that don't belong to a timeline, such as heatmap
+        let heatmap_path = remote_heatmap_path(&tenant.tenant_shard_id());
+        if let Some(Err(e)) = backoff::retry(
+            || async {
+                remote_storage
+                    .delete(&heatmap_path, &task_mgr::shutdown_token())
+                    .await
+            },
+            TimeoutOrCancel::caused_by_cancel,
+            FAILED_UPLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "remove_remote_tenant_heatmap",
+            &task_mgr::shutdown_token(),
+        )
+        .await
+        {
+            tracing::warn!("Failed to delete heatmap at {heatmap_path}: {e}");
         }
 
         let timelines_path = conf.timelines_path(&tenant.tenant_shard_id);
