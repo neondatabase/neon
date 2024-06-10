@@ -5695,6 +5695,9 @@ impl<'a> TimelineWriter<'a> {
         };
 
         if state.cached_last_freeze_at < self.tl.last_freeze_at.load() {
+            // TODO(#7993): branch is needed before refactoring the many places of freezing for the
+            // possibility `state` having a "dangling" reference to an already frozen in-memory
+            // layer.
             assert!(
                 state.open_layer.end_lsn.get().is_some(),
                 "our open_layer must be outdated"
