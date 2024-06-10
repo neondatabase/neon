@@ -1436,7 +1436,7 @@ fn lsn_lease_request(configs: &[postgres::Config], cmd: &str) -> Result<()> {
     info!("lsn_lease_request: {}", cmd);
     for config in configs {
         let mut client = config.connect(NoTls)?;
-        let _ = client.simple_query(&cmd)?;
+        let _ = client.simple_query(cmd)?;
     }
     Ok(())
 }
