@@ -321,6 +321,8 @@ pub struct Timeline {
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
+    ///
+    /// The state is cleared upon freezing.
     write_lock: tokio::sync::Mutex<Option<TimelineWriterState>>,
 
     /// Used to avoid multiple `flush_loop` tasks running
@@ -5544,6 +5546,9 @@ impl Timeline {
 
 type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
 
+/// Tracking writes ingestion does to a particular in-memory layer.
+///
+/// Cleared upon freezing a layer.
 struct TimelineWriterState {
     open_layer: Arc<InMemoryLayer>,
     current_size: u64,
