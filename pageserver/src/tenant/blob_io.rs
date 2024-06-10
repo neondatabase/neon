@@ -96,6 +96,10 @@ impl<'a> BlockCursor<'a> {
     }
 }
 
+const BYTE_UNCOMPRESSED: u8 = 0x80;
+const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
+const BYTE_LZ4: u8 = BYTE_UNCOMPRESSED | 0x20;
+
 /// A wrapper of `VirtualFile` that allows users to write blobs.
 ///
 /// If a `BlobWriter` is dropped, the internal buffer will be
@@ -263,9 +267,6 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         srcbuf.slice(..).into_inner(),
                     );
                 }
-                const UNCOMPRESSED: u8 = 0x80;
-                const ZSTD: u8 = UNCOMPRESSED | 0x10;
-                const LZ4: u8 = UNCOMPRESSED | 0x20;
                 use ImageCompressionAlgorithm::*;
                 let (high_bit_mask, len_written, srcbuf) = match algorithm {
                     Some(ZstdLow | Zstd | ZstdHigh) => {
@@ -289,9 +290,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         if compressed.len() < len {
                             let compressed_len = len;
                             compressed_buf = Some(compressed);
-                            (ZSTD, compressed_len, slice.into_inner())
+                            (BYTE_ZSTD, compressed_len, slice.into_inner())
                         } else {
-                            (0x80, len, slice.into_inner())
+                            (BYTE_UNCOMPRESSED, len, slice.into_inner())
                         }
                     }
                     Some(ImageCompressionAlgorithm::LZ4) => {
@@ -300,12 +301,12 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         if compressed.len() < len {
                             let compressed_len = len;
                             compressed_buf = Some(compressed);
-                            (LZ4, compressed_len, slice.into_inner())
+                            (BYTE_LZ4, compressed_len, slice.into_inner())
                         } else {
-                            (0x80, len, slice.into_inner())
+                            (BYTE_UNCOMPRESSED, len, slice.into_inner())
                         }
                     }
-                    None => (0x80, len, srcbuf.slice(..).into_inner()),
+                    None => (BYTE_UNCOMPRESSED, len, srcbuf.slice(..).into_inner()),
                 };
                 let mut len_buf = (len_written as u32).to_be_bytes();
                 len_buf[0] |= high_bit_mask;
