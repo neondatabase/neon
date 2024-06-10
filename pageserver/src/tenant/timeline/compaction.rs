@@ -15,7 +15,6 @@ use super::{
 };
 
 use anyhow::{anyhow, Context};
-use bytes::Bytes;
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
@@ -27,7 +26,7 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
-use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc, ValueReconstructState};
+use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
 use crate::tenant::timeline::{drop_rlock, Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
@@ -960,12 +959,13 @@ impl Timeline {
     /// the GC horizon without considering retain_lsns. Then, it does a full compaction over all these delta
     /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
     /// and create delta layers with all deltas >= gc horizon.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
         _cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
+        use crate::tenant::storage_layer::ValueReconstructState;
         // Step 0: pick all delta layers + image layers below/intersect with the GC horizon.
         // The layer selection has the following properties:
         // 1. If a layer is in the selection, all layers below it are in the selection.
@@ -988,7 +988,7 @@ impl Timeline {
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
         let mut all_key_values = Vec::new();
         for layer in &layer_selection {
-            all_key_values.extend(layer.get_all(ctx).await?);
+            all_key_values.extend(layer.load_key_values(ctx).await?);
         }
         // Key small to large, LSN low to high, if the same LSN has both image and delta due to the merge of delta layers and
         // image layers, make image appear later than delta.
@@ -1036,7 +1036,7 @@ impl Timeline {
             key: Key,
             accumulated_values: &[&(Key, Lsn, crate::repository::Value)],
             horizon: Lsn,
-        ) -> anyhow::Result<(Vec<(Key, Lsn, crate::repository::Value)>, Bytes)> {
+        ) -> anyhow::Result<(Vec<(Key, Lsn, crate::repository::Value)>, bytes::Bytes)> {
             let mut base_image = None;
             let mut keys_above_horizon = Vec::new();
             let mut delta_above_base_image = Vec::new();
