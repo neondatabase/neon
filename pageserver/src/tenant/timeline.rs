@@ -322,6 +322,8 @@ pub struct Timeline {
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
+    ///
+    /// The state is cleared upon freezing.
     write_lock: tokio::sync::Mutex<Option<TimelineWriterState>>,
 
     /// Used to avoid multiple `flush_loop` tasks running
@@ -1578,7 +1580,7 @@ impl Timeline {
     // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
     // ephemeral layer bytes has been breached.
     pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
-        let Ok(_write_guard) = self.write_lock.try_lock() else {
+        let Ok(mut write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
             return;
@@ -1672,6 +1674,7 @@ impl Timeline {
                         .await;
                 }
             }
+            write_guard.take();
             self.flush_frozen_layers();
         }
     }
@@ -2036,11 +2039,11 @@ impl Timeline {
             true
         } else if distance > 0 && opened_at.elapsed() >= self.get_checkpoint_timeout() {
             info!(
-                    "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
-                    projected_lsn,
-                    layer_size,
-                    opened_at.elapsed()
-                );
+                "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
+                projected_lsn,
+                layer_size,
+                opened_at.elapsed()
+            );
 
             true
         } else {
@@ -3653,7 +3656,10 @@ impl Timeline {
         let _write_guard = if write_lock_held {
             None
         } else {
-            Some(self.write_lock.lock().await)
+            let mut g = self.write_lock.lock().await;
+            // remove the reference to an open layer
+            g.take();
+            Some(g)
         };
 
         let to_lsn = self.get_last_record_lsn();
@@ -5541,6 +5547,9 @@ impl Timeline {
 
 type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
 
+/// Tracking writes ingestion does to a particular in-memory layer.
+///
+/// Cleared upon freezing a layer.
 struct TimelineWriterState {
     open_layer: Arc<InMemoryLayer>,
     current_size: u64,
@@ -5578,12 +5587,6 @@ impl Deref for TimelineWriter<'_> {
 
     fn deref(&self) -> &Self::Target {
         self.tl
-    }
-}
-
-impl Drop for TimelineWriter<'_> {
-    fn drop(&mut self) {
-        self.write_guard.take();
     }
 }
 
@@ -5691,6 +5694,17 @@ impl<'a> TimelineWriter<'a> {
         let Some(state) = &state else {
             return OpenLayerAction::Open;
         };
+
+        if state.cached_last_freeze_at < self.tl.last_freeze_at.load() {
+            // TODO(#7993): branch is needed before refactoring the many places of freezing for the
+            // possibility `state` having a "dangling" reference to an already frozen in-memory
+            // layer.
+            assert!(
+                state.open_layer.end_lsn.get().is_some(),
+                "our open_layer must be outdated"
+            );
+            return OpenLayerAction::Open;
+        }
 
         if state.prev_lsn == Some(lsn) {
             // Rolling mid LSN is not supported by downstream code.
