@@ -75,11 +75,28 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             physical_size = client.timeline_detail(tenant_id, timeline_id)["current_physical_size"]
             log.info(f"Physical storage size {physical_size}")
 
+    max_num_of_deltas_above_image = 0
+    max_total_num_of_deltas = 0
+    for key_range in client.perf_info(tenant_id, timeline_id):
+        max_total_num_of_deltas = max(max_total_num_of_deltas, key_range["total_num_of_deltas"])
+        max_num_of_deltas_above_image = max(
+            max_num_of_deltas_above_image, key_range["num_of_deltas_above_image"]
+        )
+
     MB = 1024 * 1024
     zenbenchmark.record("logical_size", logical_size // MB, "Mb", MetricReport.LOWER_IS_BETTER)
     zenbenchmark.record("physical_size", physical_size // MB, "Mb", MetricReport.LOWER_IS_BETTER)
     zenbenchmark.record(
         "physical/logical ratio", physical_size / logical_size, "", MetricReport.LOWER_IS_BETTER
+    )
+    zenbenchmark.record(
+        "max_total_num_of_deltas", max_total_num_of_deltas, "", MetricReport.LOWER_IS_BETTER
+    )
+    zenbenchmark.record(
+        "max_num_of_deltas_above_image",
+        max_num_of_deltas_above_image,
+        "",
+        MetricReport.LOWER_IS_BETTER,
     )
 
     layer_map_path = env.repo_dir / "layer-map.json"
