@@ -9,12 +9,22 @@ use utils::lsn::Lsn;
 
 #[derive(clap::Subcommand)]
 pub(crate) enum IndexPartCmd {
-    Dump { path: Utf8PathBuf },
+    Dump {
+        path: Utf8PathBuf,
+        #[clap(long, value_enum, default_value = "all-json")]
+        what: What,
+    },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub(crate) enum What {
+    AllJson,
+    TimelineMetadataDebugString,
 }
 
 pub(crate) async fn main(cmd: &IndexPartCmd) -> anyhow::Result<()> {
     match cmd {
-        IndexPartCmd::Dump { path } => {
+        IndexPartCmd::Dump { path, what } => {
             let bytes = tokio::fs::read(path).await.context("read file")?;
             let des: IndexPart = IndexPart::from_s3_bytes(&bytes).context("deserialize")?;
             #[derive(serde::Serialize)]
@@ -24,14 +34,23 @@ pub(crate) async fn main(cmd: &IndexPartCmd) -> anyhow::Result<()> {
                 timeline_metadata: &'a TimelineMetadata,
             }
 
-            let output = Output {
-                layer_metadata: &des.layer_metadata,
-                disk_consistent_lsn: des.metadata.disk_consistent_lsn(),
-                timeline_metadata: &des.metadata,
-            };
+            match what {
+                What::AllJson => {
+                    let output = Output {
+                        layer_metadata: &des.layer_metadata,
+                        disk_consistent_lsn: des.metadata.disk_consistent_lsn(),
+                        timeline_metadata: &des.metadata,
+                    };
 
-            let output = serde_json::to_string_pretty(&output).context("serialize output")?;
-            println!("{output}");
+                    let output =
+                        serde_json::to_string_pretty(&output).context("serialize output")?;
+                    println!("{output}");
+                }
+                What::TimelineMetadataDebugString => {
+                    println!("{:#?}", des.metadata);
+                }
+            }
+
             Ok(())
         }
     }
