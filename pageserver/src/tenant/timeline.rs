@@ -3776,7 +3776,7 @@ impl Timeline {
     /// Request the flush loop to write out all frozen layers up to `to_lsn` as Delta L0 files to disk.
     /// The caller is responsible for the freezing, e.g., [`Self::freeze_inmem_layer`].
     ///
-    /// `last_record_lsn` may be higher than the highest LSN of a frozen layer: if this is the
+    /// `at_lsn` may be higher than the highest LSN of a frozen layer: if this is the
     /// case, it means no data will be written between the top of the highest frozen layer and
     /// to_lsn, e.g. because this tenant shard has ingested up to to_lsn and not written any data
     /// locally for that part of the WAL.
