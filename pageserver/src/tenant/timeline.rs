@@ -5702,22 +5702,25 @@ impl<'a> TimelineWriter<'a> {
 
         #[cfg(feature = "testing")]
         if state.cached_last_freeze_at < self.tl.last_freeze_at.load() {
-            // this check and assertion are not really needed because freeze_inmem_layer_at will
-            // always clear out the TimelineWriterState if something is frozen. we can advance
-            // last_freeze_at when there is no TimelineWriterState.
+            // this check and assertion are not really needed because
+            // LayerManager::try_freeze_in_memory_layer will always clear out the
+            // TimelineWriterState if something is frozen. however, we can advance last_freeze_at when there
+            // is no TimelineWriterState.
             assert!(
                 state.open_layer.end_lsn.get().is_some(),
                 "our open_layer must be outdated"
             );
+
+            // this would be a memory leak waiting to happen because the in-memory layer always has
+            // an index
             panic!("BUG: TimelineWriterState held on to frozen in-memory layer.");
         }
 
         if state.prev_lsn == Some(lsn) {
-            // Rolling mid LSN is not supported by downstream code.
+            // Rolling mid LSN is not supported by [downstream code].
             // Hence, only roll at LSN boundaries.
             //
-            // TODO: could we have more hints here what actually goes wrong? is it just that we
-            // assume the next layer starts from where the previous layer ends?
+            // [downstream code]: https://github.com/neondatabase/neon/pull/7993#discussion_r1633345422
             return OpenLayerAction::None;
         }
 

@@ -136,7 +136,6 @@ impl LayerManager {
 
         let froze = if let Some(open_layer) = &self.layer_map.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
-            // Does this layer need freezing?
             open_layer.freeze(end_lsn).await;
 
             // The layer is no longer open, update the layer map to reflect this.
