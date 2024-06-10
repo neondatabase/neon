@@ -1479,6 +1479,8 @@ def neon_env_builder(
     ) as builder:
         yield builder
         if builder.preserve_database_files:
+            # Propogate `preserve_database_files` to make it possible to use in other fixtures,
+            # like `test_output_dir` fixture for attaching all database files to Allure report.
             request.node.user_properties.append(("preserve_database_files", True))
 
 
@@ -4482,6 +4484,9 @@ def test_output_dir(
 
     preserve_database_files = False
     for k, v in request.node.user_properties:
+        # NB: the neon_env_builder fixture uses this fixture (test_output_dir).
+        # So, neon_env_builder's cleanup runs before here.
+        # The cleanup propagates NeonEnvBuilder.preserve_database_files into this user property.
         if k == "preserve_database_files":
             assert isinstance(v, bool)
             preserve_database_files = v
