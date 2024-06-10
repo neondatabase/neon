@@ -115,15 +115,13 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     assert cur_new.fetchall() == []
 
 
-#
-# Test that the ALL_FROZEN VM bit is cleared correctly at a HEAP_LOCK
-# record.
-#
-# This is a repro for the bug fixed in commit 66fa176cc8.
-#
 def test_vm_bit_clear_on_heap_lock_whitebox(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+    """
+    Test that the ALL_FROZEN VM bit is cleared correctly at a HEAP_LOCK record.
 
+    This is a repro for the bug fixed in commit 66fa176cc8.
+    """
+    env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
