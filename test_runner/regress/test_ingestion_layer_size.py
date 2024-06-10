@@ -113,7 +113,7 @@ def histogram_historic_layers(infos: LayerMapInfo, minimum_sizes: List[Union[int
 
 
 def histogram(sizes: Iterable[int], minimum_sizes: List[Union[int, float]]) -> Histogram:
-    assert all(minimum_sizes[i] < minimum_sizes[i + 1] for i in range(len(minimum_sizes)))
+    assert all(minimum_sizes[i] < minimum_sizes[i + 1] for i in range(len(minimum_sizes) - 1))
     buckets = list(enumerate(minimum_sizes))
     counts = [0 for _ in buckets]
     sums = [0 for _ in buckets]
