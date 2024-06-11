@@ -833,7 +833,7 @@ class NeonEnvBuilder:
     def enable_scrub_on_exit(self):
         """
         Call this if you would like the fixture to automatically run
-        s3_scrubber at the end of the test, as a bidirectional test
+        storage_scrubber at the end of the test, as a bidirectional test
         that the scrubber is working properly, and that the code within
         the test didn't produce any invalid remote state.
         """
@@ -3957,7 +3957,7 @@ class S3Scrubber:
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
 
-        base_args = [str(self.env.neon_binpath / "s3_scrubber")]
+        base_args = [str(self.env.neon_binpath / "storage_scrubber")]
         args = base_args + args
 
         (output_path, stdout, status_code) = subprocess_capture(

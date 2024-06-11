@@ -21,7 +21,7 @@
 !patches/
 !pgxn/
 !proxy/
-!s3_scrubber/
+!storage_scrubber/
 !safekeeper/
 !storage_broker/
 !storage_controller/

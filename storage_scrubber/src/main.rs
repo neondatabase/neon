@@ -1,11 +1,11 @@
 use anyhow::bail;
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
-use s3_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
-use s3_scrubber::pageserver_physical_gc::GcMode;
-use s3_scrubber::scan_pageserver_metadata::scan_metadata;
-use s3_scrubber::tenant_snapshot::SnapshotDownloader;
-use s3_scrubber::{
+use storage_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
+use storage_scrubber::pageserver_physical_gc::GcMode;
+use storage_scrubber::scan_pageserver_metadata::scan_metadata;
+use storage_scrubber::tenant_snapshot::SnapshotDownloader;
+use storage_scrubber::{
     init_logging, pageserver_physical_gc::pageserver_physical_gc,
     scan_safekeeper_metadata::scan_safekeeper_metadata, BucketConfig, ConsoleConfig, NodeKind,
     TraversingDepth,
