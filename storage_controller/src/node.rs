@@ -162,7 +162,7 @@ impl Node {
             listen_http_port,
             listen_pg_addr,
             listen_pg_port,
-            scheduling: NodeSchedulingPolicy::Filling,
+            scheduling: NodeSchedulingPolicy::Active,
             availability: NodeAvailability::Offline,
             cancel: CancellationToken::new(),
         }
