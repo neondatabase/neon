@@ -5549,6 +5549,19 @@ impl Timeline {
         all_data.sort();
         Ok(all_data)
     }
+
+    /// Get all historic layer descriptors in the layer map
+    #[cfg(test)]
+    pub(crate) async fn inspect_historic_layers(
+        self: &Arc<Timeline>,
+    ) -> anyhow::Result<Vec<super::storage_layer::PersistentLayerKey>> {
+        let mut layers = Vec::new();
+        let guard = self.layers.read().await;
+        for layer in guard.layer_map().iter_historic_layers() {
+            layers.push(layer.key());
+        }
+        Ok(layers)
+    }
 }
 
 type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);

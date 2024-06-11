@@ -226,6 +226,18 @@ impl LayerManager {
         updates.flush();
     }
 
+    /// Called when a GC-compaction is completed.
+    #[cfg(test)]
+    pub(crate) fn finish_gc_compaction(
+        &mut self,
+        compact_from: &[Layer],
+        compact_to: &[ResidentLayer],
+        metrics: &TimelineMetrics,
+    ) {
+        // We can simply reuse compact l0 logic. Use a different function name to indicate a different type of layer map modification.
+        self.finish_compact_l0(compact_from, compact_to, metrics)
+    }
+
     /// Called when compaction is completed.
     pub(crate) fn rewrite_layers(
         &mut self,

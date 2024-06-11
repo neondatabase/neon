@@ -952,6 +952,178 @@ impl Timeline {
         adaptor.flush_updates().await?;
         Ok(())
     }
+
+    /// An experimental compaction building block that combines compaction with garbage collection.
+    ///
+    /// The current implementation picks all delta + image layers that are below or intersecting with
+    /// the GC horizon without considering retain_lsns. Then, it does a full compaction over all these delta
+    /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
+    /// and create delta layers with all deltas >= gc horizon.
+    #[cfg(test)]
+    pub(crate) async fn compact_with_gc(
+        self: &Arc<Self>,
+        _cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> Result<(), CompactionError> {
+        use crate::tenant::storage_layer::ValueReconstructState;
+        // Step 0: pick all delta layers + image layers below/intersect with the GC horizon.
+        // The layer selection has the following properties:
+        // 1. If a layer is in the selection, all layers below it are in the selection.
+        // 2. Inferred from (1), for each key in the layer selection, the value can be reconstructed only with the layers in the layer selection.
+        let (layer_selection, gc_cutoff) = {
+            let guard = self.layers.read().await;
+            let layers = guard.layer_map();
+            let gc_info = self.gc_info.read().unwrap();
+            let gc_cutoff = Lsn::min(gc_info.cutoffs.horizon, gc_info.cutoffs.pitr);
+            let mut selected_layers = Vec::new();
+            // TODO: consider retain_lsns
+            drop(gc_info);
+            for desc in layers.iter_historic_layers() {
+                if desc.get_lsn_range().start <= gc_cutoff {
+                    selected_layers.push(guard.get_from_desc(&desc));
+                }
+            }
+            (selected_layers, gc_cutoff)
+        };
+        // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
+        let mut all_key_values = Vec::new();
+        for layer in &layer_selection {
+            all_key_values.extend(layer.load_key_values(ctx).await?);
+        }
+        // Key small to large, LSN low to high, if the same LSN has both image and delta due to the merge of delta layers and
+        // image layers, make image appear later than delta.
+        struct ValueWrapper<'a>(&'a crate::repository::Value);
+        impl Ord for ValueWrapper<'_> {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                use crate::repository::Value;
+                use std::cmp::Ordering;
+                match (self.0, other.0) {
+                    (Value::Image(_), Value::WalRecord(_)) => Ordering::Greater,
+                    (Value::WalRecord(_), Value::Image(_)) => Ordering::Less,
+                    _ => Ordering::Equal,
+                }
+            }
+        }
+        impl PartialOrd for ValueWrapper<'_> {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl PartialEq for ValueWrapper<'_> {
+            fn eq(&self, other: &Self) -> bool {
+                self.cmp(other) == std::cmp::Ordering::Equal
+            }
+        }
+        impl Eq for ValueWrapper<'_> {}
+        all_key_values.sort_by(|(k1, l1, v1), (k2, l2, v2)| {
+            (k1, l1, ValueWrapper(v1)).cmp(&(k2, l2, ValueWrapper(v2)))
+        });
+        let max_lsn = all_key_values
+            .iter()
+            .map(|(_, lsn, _)| lsn)
+            .max()
+            .copied()
+            .unwrap()
+            + 1;
+        // Step 2: Produce images+deltas. TODO: ensure newly-produced delta does not overlap with other deltas.
+        // Data of the same key.
+        let mut accumulated_values = Vec::new();
+        let mut last_key = all_key_values.first().unwrap().0; // TODO: assert all_key_values not empty
+
+        /// Take a list of images and deltas, produce an image at the GC horizon, and a list of deltas above the GC horizon.
+        async fn flush_accumulated_states(
+            tline: &Arc<Timeline>,
+            key: Key,
+            accumulated_values: &[&(Key, Lsn, crate::repository::Value)],
+            horizon: Lsn,
+        ) -> anyhow::Result<(Vec<(Key, Lsn, crate::repository::Value)>, bytes::Bytes)> {
+            let mut base_image = None;
+            let mut keys_above_horizon = Vec::new();
+            let mut delta_above_base_image = Vec::new();
+            // We have a list of deltas/images. We want to create image layers while collect garbages.
+            for (key, lsn, val) in accumulated_values.iter().rev() {
+                if *lsn > horizon {
+                    keys_above_horizon.push((*key, *lsn, val.clone())); // TODO: ensure one LSN corresponds to either delta or image instead of both
+                } else if *lsn <= horizon {
+                    match val {
+                        crate::repository::Value::Image(image) => {
+                            if lsn <= &horizon {
+                                base_image = Some((*lsn, image.clone()));
+                                break;
+                            }
+                        }
+                        crate::repository::Value::WalRecord(wal) => {
+                            delta_above_base_image.push((*lsn, wal.clone()));
+                        }
+                    }
+                }
+            }
+            delta_above_base_image.reverse();
+            keys_above_horizon.reverse();
+            let state = ValueReconstructState {
+                img: base_image,
+                records: delta_above_base_image,
+            };
+            let img = tline.reconstruct_value(key, horizon, state).await?;
+            Ok((keys_above_horizon, img))
+        }
+
+        let mut delta_layer_writer = DeltaLayerWriter::new(
+            self.conf,
+            self.timeline_id,
+            self.tenant_shard_id,
+            all_key_values.first().unwrap().0,
+            gc_cutoff..max_lsn, // TODO: off by one?
+            ctx,
+        )
+        .await?;
+        let mut image_layer_writer = ImageLayerWriter::new(
+            self.conf,
+            self.timeline_id,
+            self.tenant_shard_id,
+            &(all_key_values.first().unwrap().0..all_key_values.last().unwrap().0.next()),
+            gc_cutoff,
+            ctx,
+        )
+        .await?;
+
+        for item @ (key, _, _) in &all_key_values {
+            if &last_key == key {
+                accumulated_values.push(item);
+            } else {
+                let (deltas, image) =
+                    flush_accumulated_states(self, last_key, &accumulated_values, gc_cutoff)
+                        .await?;
+                image_layer_writer.put_image(last_key, image, ctx).await?;
+                for (key, lsn, val) in deltas {
+                    delta_layer_writer.put_value(key, lsn, val, ctx).await?;
+                }
+                accumulated_values.clear();
+                accumulated_values.push(item);
+                last_key = *key;
+            }
+        }
+        let (deltas, image) =
+            flush_accumulated_states(self, last_key, &accumulated_values, gc_cutoff).await?;
+        image_layer_writer.put_image(last_key, image, ctx).await?;
+        for (key, lsn, val) in deltas {
+            delta_layer_writer.put_value(key, lsn, val, ctx).await?;
+        }
+        accumulated_values.clear();
+        // TODO: split layers
+        let delta_layer = delta_layer_writer.finish(last_key, self, ctx).await?;
+        let image_layer = image_layer_writer.finish(self, ctx).await?;
+        // Step 3: Place back to the layer map.
+        {
+            let mut guard = self.layers.write().await;
+            guard.finish_gc_compaction(
+                &layer_selection,
+                &[delta_layer.clone(), image_layer.clone()],
+                &self.metrics,
+            )
+        };
+        Ok(())
+    }
 }
 
 struct TimelineAdaptor {
