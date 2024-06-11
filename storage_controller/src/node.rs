@@ -59,6 +59,10 @@ impl Node {
         self.id
     }
 
+    pub(crate) fn get_scheduling(&self) -> NodeSchedulingPolicy {
+        self.scheduling
+    }
+
     pub(crate) fn set_scheduling(&mut self, scheduling: NodeSchedulingPolicy) {
         self.scheduling = scheduling
     }
