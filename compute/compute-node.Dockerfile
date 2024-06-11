@@ -1258,20 +1258,6 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
     make -j $(getconf _NPROCESSORS_ONLN) \
         PG_CONFIG=/usr/local/pgsql/bin/pg_config \
         -C pgxn/neon_rmgr \
-        -s install && \
-    case "${PG_VERSION}" in \
-        "v14" | "v15") \
-        ;; \
-        "v16" | "v17") \
-            echo "Skipping HNSW for PostgreSQL ${PG_VERSION}" && exit 0 \
-        ;; \
-        *) \
-            echo "unexpected PostgreSQL version" && exit 1 \
-        ;; \
-        esac && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
-        -C pgxn/hnsw \
         -s install
 
 #########################################################################################
