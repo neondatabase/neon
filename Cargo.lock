@@ -5820,6 +5820,7 @@ dependencies = [
  "anyhow",
  "clap",
  "comfy-table",
+ "futures",
  "humantime",
  "hyper 0.14.26",
  "pageserver_api",
