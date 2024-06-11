@@ -6584,8 +6584,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metadata_tombstone_image_creation() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_metadata_tombstone_image_creation")?;
+    async fn test_metadata_tombstone_image_creation() {
+        let harness = TenantHarness::create("test_metadata_tombstone_image_creation").unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
@@ -6613,7 +6613,8 @@ mod tests {
                 vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
                 Lsn(0x30),
             )
-            .await?;
+            .await
+            .unwrap();
 
         let cancel = CancellationToken::new();
 
@@ -6628,23 +6629,24 @@ mod tests {
                 },
                 &ctx,
             )
-            .await?;
+            .await
+            .unwrap();
 
         // Image layers are created at last_record_lsn
         let images = tline
             .inspect_image_layers(Lsn(0x30), &ctx)
-            .await?
+            .await
+            .unwrap()
             .into_iter()
             .filter(|(k, _)| k.is_metadata_key())
             .collect::<Vec<_>>();
         assert_eq!(images.len(), 2); // the image layer should only contain two existing keys, tombstones should be removed.
-
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_metadata_tombstone_empty_image_creation() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_metadata_tombstone_empty_image_creation")?;
+    async fn test_metadata_tombstone_empty_image_creation() {
+        let harness =
+            TenantHarness::create("test_metadata_tombstone_empty_image_creation").unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
@@ -6666,7 +6668,8 @@ mod tests {
                 vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
                 Lsn(0x30),
             )
-            .await?;
+            .await
+            .unwrap();
 
         let cancel = CancellationToken::new();
 
@@ -6681,17 +6684,17 @@ mod tests {
                 },
                 &ctx,
             )
-            .await?;
+            .await
+            .unwrap();
 
         // Image layers are created at last_record_lsn
         let images = tline
             .inspect_image_layers(Lsn(0x30), &ctx)
-            .await?
+            .await
+            .unwrap()
             .into_iter()
             .filter(|(k, _)| k.is_metadata_key())
             .collect::<Vec<_>>();
         assert_eq!(images.len(), 0); // the image layer should not contain tombstones, or it is not created
-
-        Ok(())
     }
 }
