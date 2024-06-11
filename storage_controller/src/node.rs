@@ -145,6 +145,7 @@ impl Node {
             NodeSchedulingPolicy::Draining => MaySchedule::No,
             NodeSchedulingPolicy::Filling => MaySchedule::Yes(score),
             NodeSchedulingPolicy::Pause => MaySchedule::No,
+            NodeSchedulingPolicy::PauseForRestart => MaySchedule::No,
         }
     }
 
