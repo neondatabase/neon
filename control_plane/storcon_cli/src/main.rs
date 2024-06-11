@@ -881,7 +881,7 @@ async fn main() -> anyhow::Result<()> {
             let total_moves = moves.len();
 
             if dry_run == Some(true) {
-                println!("Dryrun requested. Planned {} moves:", total_moves);
+                println!("Dryrun requested. Planned {total_moves} moves:");
                 for mv in &moves {
                     println!("{}: {} -> {}", mv.tenant_shard_id, mv.from, mv.to)
                 }
