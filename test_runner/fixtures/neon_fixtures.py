@@ -3386,7 +3386,7 @@ def static_proxy(
         yield proxy
 
 
-class Endpoint(PgProtocol):
+class Endpoint(PgProtocol, LogUtils):
     """An object representing a Postgres compute endpoint managed by the control plane."""
 
     def __init__(
@@ -3452,6 +3452,7 @@ class Endpoint(PgProtocol):
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
+        self.logfile = self.endpoint_path() / "compute.log"
 
         config_lines = config_lines or []
 
