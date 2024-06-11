@@ -43,8 +43,12 @@ pub struct IndexPart {
     /// reused.
     pub(super) disk_consistent_lsn: Lsn,
 
+    // TODO: rename as "metadata" next week, keep the alias = "metadata_bytes", bump version Adding
+    // the "alias = metadata" was forgotten in #7693, so we have to use "rewrite = metadata_bytes"
+    // for backwards compatibility.
     #[serde(
-        alias = "metadata_bytes",
+        rename = "metadata_bytes",
+        alias = "metadata",
         with = "crate::tenant::metadata::modern_serde"
     )]
     pub metadata: TimelineMetadata,
