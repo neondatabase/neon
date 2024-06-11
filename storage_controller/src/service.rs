@@ -4312,7 +4312,7 @@ impl Service {
                         continue;
                     }
 
-                    if tenant_shard.intent.demote_attached(node_id) {
+                    if tenant_shard.intent.demote_attached(scheduler, node_id) {
                         tenant_shard.sequence = tenant_shard.sequence.next();
 
                         // TODO: populate a ScheduleContext including all shards in the same tenant_id (only matters
