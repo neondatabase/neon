@@ -311,6 +311,12 @@ pub(crate) struct ReconcilerWaiter {
     seq: Sequence,
 }
 
+pub(crate) enum ReconcilerStatus {
+    Done,
+    Failed,
+    InProgress,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ReconcileWaitError {
     #[error("Timeout waiting for shard {0}")]
@@ -372,6 +378,16 @@ impl ReconcilerWaiter {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn get_status(&self) -> ReconcilerStatus {
+        if self.seq_wait.would_wait_for(self.seq).is_err() {
+            ReconcilerStatus::Done
+        } else if self.error_seq_wait.would_wait_for(self.seq).is_err() {
+            ReconcilerStatus::Failed
+        } else {
+            ReconcilerStatus::InProgress
+        }
     }
 }
 

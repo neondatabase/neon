@@ -15,7 +15,8 @@ use crate::{
     reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
-        MigrateAttachment, ReconcileNeeded, ScheduleOptimization, ScheduleOptimizationAction,
+        MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
+        ScheduleOptimizationAction,
     },
 };
 use anyhow::Context;
@@ -1873,6 +1874,25 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    /// Same as [`Service::await_waiters`], but returns the waiters which are still
+    /// in progress
+    async fn kick_waiters(
+        &self,
+        waiters: Vec<ReconcilerWaiter>,
+        timeout: Duration,
+    ) -> Vec<ReconcilerWaiter> {
+        let deadline = Instant::now().checked_add(timeout).unwrap();
+        for waiter in waiters.iter() {
+            let timeout = deadline.duration_since(Instant::now());
+            let _ = waiter.wait_timeout(timeout).await;
+        }
+
+        waiters
+            .into_iter()
+            .filter(|waiter| matches!(waiter.get_status(), ReconcilerStatus::InProgress))
+            .collect::<Vec<_>>()
     }
 
     /// Part of [`Self::tenant_location_config`]: dissect an incoming location config request,
