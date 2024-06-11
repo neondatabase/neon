@@ -43,9 +43,7 @@ pub struct IndexPart {
     /// reused.
     pub(super) disk_consistent_lsn: Lsn,
 
-    // TODO: rename field as "legacy_metadata"
     #[serde(
-        rename = "legacy_metadata",
         alias = "metadata_bytes",
         with = "crate::tenant::metadata::modern_serde"
     )]
@@ -540,7 +538,7 @@ mod tests {
                 "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001 }
             },
             "disk_consistent_lsn":"0/16960E8",
-            "legacy_metadata": {
+            "metadata": {
                 "disk_consistent_lsn": "0/16960E8",
                 "prev_record_lsn": "0/1696070",
                 "ancestor_timeline": "e45a7f37d3ee2ff17dc14bf4f4e3f52e",
