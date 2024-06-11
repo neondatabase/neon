@@ -4279,6 +4279,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_lsn_leases() -> anyhow::Result<()> {
+        let (tenant, ctx) = TenantHarness::create("test_lsn_leases")?.load().await;
+        let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+
+        let timeline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                Vec::new(),
+                vec![
+                    (Lsn(0x20), vec![(key, test_img("data key 0"))]),
+                    (Lsn(0x30), vec![(key, test_img("data key 1"))]),
+                    (Lsn(0x40), vec![(key, test_img("data key 2"))]),
+                ],
+                Lsn(0x40),
+            )
+            .await?;
+
+        let _ = timeline.make_lsn_lease(Lsn(0x30), &ctx)?;
+
+        let gc_info = timeline.gc_info.read().unwrap();
+        assert!(gc_info.leases.contains_key(&Lsn(0x30)));
+        info!("GcCutOff: {:?}", gc_info.cutoffs);
+        let res = tenant
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
+            .await?;
+
+        assert_eq!(res.layers_needed_by_leases, 1);
+
+        // 1. Setup tenant and timeline
+        // 2. Make LSN lease for an LSN.
+        // 3. Create two layers:
+        //   - one can be GC-ed, one cannot be GC-ed
+        // 4. Run GC, check `GCResult`.
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
         let (tenant, ctx) =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
