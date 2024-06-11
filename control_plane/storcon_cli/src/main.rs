@@ -163,7 +163,7 @@ enum Command {
         max_shards: Option<usize>,
         // Optional: when set to true, nothing is migrated, but the plan is printed to stdout
         #[arg(long)]
-        dryrun: Option<bool>,
+        dry_run: Option<bool>,
     },
 }
 
@@ -758,7 +758,7 @@ async fn main() -> anyhow::Result<()> {
             nodes,
             concurrency,
             max_shards,
-            dryrun,
+            dry_run,
         } => {
             // Load the list of nodes, split them up into the drained and filled sets,
             // and validate that draining is possible.
@@ -880,7 +880,7 @@ async fn main() -> anyhow::Result<()> {
 
             let total_moves = moves.len();
 
-            if dryrun == Some(true) {
+            if dry_run == Some(true) {
                 println!("Dryrun requested. Planned {} moves:", total_moves);
                 for mv in &moves {
                     println!("{}: {} -> {}", mv.tenant_shard_id, mv.from, mv.to)
