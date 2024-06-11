@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
+#include "replication/logical.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "storage/procsignal.h"
@@ -269,7 +270,6 @@ LogicalSlotsMonitorMain(Datum main_arg)
 void
 _PG_init(void)
 {
-	extern void		(*LogicalFuncs_Custom_XLogReaderRoutines)(XLogReaderRoutine *xlr);
 	/*
 	 * Also load 'neon_rmgr'. This makes it unnecessary to list both 'neon'
 	 * and 'neon_rmgr' in shared_preload_libraries.

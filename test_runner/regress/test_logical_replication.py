@@ -231,17 +231,15 @@ def test_ondemand_wal_download_in_replication_slot_funcs(neon_env_builder: NeonE
     with endpoint.connect().cursor() as cur:
         cur.execute("create table wal_generator (id serial primary key, data text)")
         cur.execute(
+            "SELECT * FROM pg_create_logical_replication_slot('slotty_mcslotface', 'test_decoding')"
+        )
+        cur.execute(
             """
 INSERT INTO wal_generator (data)
 SELECT repeat('A', 1024) -- Generates a kilobyte of data per row
 FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of data
 """
         )
-        cur.execute("create table t(a int)")
-        cur.execute(
-            "SELECT * FROM pg_create_logical_replication_slot('slotty_mcslotface', 'test_decoding')"
-        )
-        cur.execute("insert into t values (1)")
 
     endpoint.stop_and_destroy()
     endpoint = env.endpoints.create_start("init")
