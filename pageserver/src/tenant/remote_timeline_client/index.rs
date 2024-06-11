@@ -39,7 +39,7 @@ pub struct IndexPart {
     pub layer_metadata: HashMap<LayerName, LayerFileMetadata>,
 
     /// Because of the trouble of eyeballing the legacy "metadata" field, we copied the
-    /// "disk_consistent_lsn" out. After version 5 this is no longer needed, but the name cannot be
+    /// "disk_consistent_lsn" out. After version 7 this is no longer needed, but the name cannot be
     /// reused.
     pub(super) disk_consistent_lsn: Lsn,
 
