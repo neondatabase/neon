@@ -426,6 +426,11 @@ pub struct Timeline {
 
     /// Indicate whether aux file v2 storage is enabled.
     pub(crate) last_aux_file_policy: AtomicAuxFilePolicy,
+
+    #[cfg(test)]
+    /// Some test cases directly place keys into the timeline without actually modifying the directory
+    /// keys (i.e., DB_DIR). Test cases will put such keyspaces here.
+    pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
 }
 
 pub struct WalReceiverInfo {
@@ -2344,6 +2349,9 @@ impl Timeline {
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
 
                 last_aux_file_policy: AtomicAuxFilePolicy::new(aux_file_policy),
+
+                #[cfg(test)]
+                extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -5561,6 +5569,13 @@ impl Timeline {
             layers.push(layer.key());
         }
         Ok(layers)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_extra_test_dense_keyspace(&self, ks: KeySpace) {
+        let mut keyspace = self.extra_test_dense_keyspace.load().as_ref().clone();
+        keyspace.merge(&ks);
+        self.extra_test_dense_keyspace.store(Arc::new(keyspace));
     }
 }
 
