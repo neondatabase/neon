@@ -1600,15 +1600,32 @@ impl Service {
         // Setting a node active unblocks any Reconcilers that might write to the location config API,
         // but those requests will not be accepted by the node until it has finished processing
         // the re-attach response.
+        //
+        // Additionally, reset the nodes scheduling policy to match the conditional update done
+        // in [`Persistence::re_attach`].
         if let Some(node) = nodes.get(&reattach_req.node_id) {
-            if !node.is_available() {
+            let reset_scheduling = matches!(
+                node.get_scheduling(),
+                NodeSchedulingPolicy::PauseForRestart
+                    | NodeSchedulingPolicy::Draining
+                    | NodeSchedulingPolicy::Filling
+            );
+
+            if !node.is_available() || reset_scheduling {
                 let mut new_nodes = (**nodes).clone();
                 if let Some(node) = new_nodes.get_mut(&reattach_req.node_id) {
-                    node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
+                    if !node.is_available() {
+                        node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
+                    }
+
+                    if reset_scheduling {
+                        node.set_scheduling(NodeSchedulingPolicy::Active);
+                    }
+
                     scheduler.node_upsert(node);
+                    let new_nodes = Arc::new(new_nodes);
+                    *nodes = new_nodes;
                 }
-                let new_nodes = Arc::new(new_nodes);
-                *nodes = new_nodes;
             }
         }
 
