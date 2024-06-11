@@ -4202,6 +4202,18 @@ impl Service {
         Ok(nodes)
     }
 
+    pub(crate) async fn get_node_status(&self, node_id: NodeId) -> Result<Node, ApiError> {
+        self.inner
+            .read()
+            .unwrap()
+            .nodes
+            .get(&node_id)
+            .cloned()
+            .ok_or(ApiError::NotFound(
+                format!("Node {node_id} not registered").into(),
+            ))
+    }
+
     pub(crate) async fn node_register(
         &self,
         register_req: NodeRegisterRequest,
@@ -4356,9 +4368,6 @@ impl Service {
 
         if let Some(scheduling) = scheduling {
             node.set_scheduling(scheduling);
-
-            // TODO: once we have a background scheduling ticker for fill/drain, kick it
-            // to wake up and start working.
         }
 
         // Update the scheduler, in case the elegibility of the node for new shards has changed
@@ -4433,7 +4442,7 @@ impl Service {
                 // TODO: in the background, we should balance work back onto this pageserver
             }
             AvailabilityTransition::Unchanged => {
-                tracing::debug!("Node {} no change during config", node_id);
+                tracing::debug!("Node {} no availability change during config", node_id);
             }
         }
 

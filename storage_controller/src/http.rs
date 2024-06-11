@@ -480,6 +480,17 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
     )
 }
 
+async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+
+    let node_status = state.service.get_node_status(node_id).await?;
+
+    json_response(StatusCode::OK, node_status)
+}
+
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -853,6 +864,9 @@ pub fn make_router(
                 handle_node_configure,
                 RequestName("control_v1_node_config"),
             )
+        })
+        .get("/control/v1/node/:node_id", |r| {
+            named_request_span(r, handle_node_status, RequestName("control_v1_node_status"))
         })
         .put("/control/v1/node/:node_id/drain", |r| {
             named_request_span(r, handle_node_drain, RequestName("control_v1_node_drain"))
