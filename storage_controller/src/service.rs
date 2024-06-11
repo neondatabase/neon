@@ -8,11 +8,12 @@ use std::{
 };
 
 use crate::{
+    background_node_operations::{self, Controller},
     compute_hook::NotifyError,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, WrappedWriteGuard},
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
-    scheduler::{ScheduleContext, ScheduleMode},
+    scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
         MigrateAttachment, ReconcileNeeded, ScheduleOptimization, ScheduleOptimizationAction,
     },
@@ -274,6 +275,8 @@ pub struct Service {
     /// by avoiding needing a &mut ref to something inside the ServiceInner.  This could be optimized to
     /// use a VecDeque instead of a channel to reduce synchronization overhead, at the cost of some code complexity.
     delayed_reconcile_tx: tokio::sync::mpsc::Sender<TenantShardId>,
+
+    background_operations_controller: std::sync::OnceLock<Controller>,
 
     // Process shutdown will fire this token
     cancel: CancellationToken,
@@ -1090,11 +1093,19 @@ impl Service {
             delayed_reconcile_tx,
             abort_tx,
             startup_complete: startup_complete.clone(),
+            background_operations_controller: Default::default(),
             cancel,
             gate: Gate::default(),
             tenant_op_locks: Default::default(),
             node_op_locks: Default::default(),
         });
+
+        let (controller, node_operations_receiver) =
+            background_node_operations::Controller::new(this.clone());
+
+        this.background_operations_controller
+            .set(controller)
+            .expect("This is the only code path that sets the controller");
 
         let result_task_this = this.clone();
         tokio::task::spawn(async move {
@@ -1164,6 +1175,19 @@ impl Service {
             async move {
                 startup_complete.wait().await;
                 this.spawn_heartbeat_driver().await;
+            }
+        });
+
+        tokio::task::spawn({
+            let this = this.clone();
+            let startup_complete = startup_complete.clone();
+            async move {
+                startup_complete.wait().await;
+                this.background_operations_controller
+                    .get()
+                    .expect("Initialized at start up")
+                    .handle_operations(node_operations_receiver)
+                    .await;
             }
         });
 
