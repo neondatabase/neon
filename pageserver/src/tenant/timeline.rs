@@ -4917,7 +4917,7 @@ impl Timeline {
             // Gets the minimum LSN that holds the valid lease.
             // Caveat: This value could be stale since we rely on refresh_gc_info to invalidate leases,
             // so there could be leases invalidated between the refresh and here.
-            let min_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
+            let min_lsn_with_valid_lease = gc_info.leases.first_key_value().map(|(lsn, _)| *lsn);
             (
                 horizon_cutoff,
                 pitr_cutoff,

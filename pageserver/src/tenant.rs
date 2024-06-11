@@ -4301,9 +4301,11 @@ mod tests {
 
         let _ = timeline.make_lsn_lease(Lsn(0x30), &ctx)?;
 
-        let gc_info = timeline.gc_info.read().unwrap();
-        assert!(gc_info.leases.contains_key(&Lsn(0x30)));
-        info!("GcCutOff: {:?}", gc_info.cutoffs);
+        {
+            let gc_info = timeline.gc_info.read().unwrap();
+            assert!(gc_info.leases.contains_key(&Lsn(0x30)));
+            info!("GcCutOff: {:?}", gc_info.cutoffs);
+        }
         let res = tenant
             .gc_iteration(
                 Some(TIMELINE_ID),
