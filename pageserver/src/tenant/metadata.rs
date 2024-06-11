@@ -6,6 +6,13 @@
 //! Instead of changing and adding versioning to this, just change [`IndexPart`] with soft json
 //! versioning.
 //!
+//! To clean up this module we need to migrate all index_part.json files to a later version.
+//! While doing this, we need to be mindful about s3 based recovery as well, so it might take
+//! however long we keep the old versions to be able to delete the old code. After that, we can
+//! remove everything else than [`TimelineMetadataBodyV2`], rename it as `TimelineMetadata` and
+//! move it to `index.rs`. Before doing all of this, we need to keep the structures for backwards
+//! compatibility.
+//!
 //! [`remote_timeline_client`]: super::remote_timeline_client
 //! [`IndexPart`]: super::remote_timeline_client::index::IndexPart
 
