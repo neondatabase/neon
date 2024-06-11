@@ -10,10 +10,6 @@
  * Temporary and unlogged tables are stored locally, by md.c. The functions
  * here just pass the calls through to corresponding md.c functions.
  *
- * Index build operations that use the buffer cache are also handled locally,
- * just like unlogged tables. Such operations must be marked by calling
- * smgr_start_unlogged_build() and friends.
- *
  * In order to know what relations are permanent and which ones are not, we
  * have added a 'smgr_relpersistence' field to SmgrRelationData, and it is set
  * by smgropen() callers, when they have the relcache entry at hand.  However,
@@ -64,6 +60,7 @@
 #include "storage/fsm_internals.h"
 #include "storage/md.h"
 #include "storage/smgr.h"
+#include "utils/rel.h"
 
 #include "pagestore_client.h"
 
@@ -100,17 +97,7 @@ const int	SmgrTrace = DEBUG5;
 
 page_server_api *page_server;
 
-/* unlogged relation build states */
-typedef enum
-{
-	UNLOGGED_BUILD_NOT_IN_PROGRESS = 0,
-	UNLOGGED_BUILD_PHASE_1,
-	UNLOGGED_BUILD_PHASE_2,
-	UNLOGGED_BUILD_NOT_PERMANENT
-} UnloggedBuildPhase;
-
-static SMgrRelation unlogged_build_rel = NULL;
-static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+const PGAlignedBlock zero_buffer;
 
 static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
 static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
@@ -1407,12 +1394,27 @@ PageIsEmptyHeapPage(char *buffer)
  * last-written LSN of the page, and WAL-log it if needed.
  */
 static void
+unlogged_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber old_relsize, BlockNumber new_relsize)
+{
+	if (new_relsize > old_relsize)
+	{
+#if PG_MAJORVERSION_NUM < 16
+		mdextend(reln, forknum, new_relsize, (char *) zero_buffer.data, true);
+#else
+		mdzeroextend(reln, forknum, old_relsize, new_relsize - old_relsize, true);
+#endif
+	}
+}
+
+
+static void
 #if PG_MAJORVERSION_NUM < 16
 neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool force)
 #else
 neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const char *buffer, bool force)
 #endif
 {
+	BlockNumber relsize;
 	XLogRecPtr	lsn = PageGetLSN((Page) buffer);
 	bool		log_page;
 
@@ -1479,6 +1481,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
 		}
+		#if 0
 		else if (PageIsEmptyHeapPage((Page) buffer))
 		{
 			ereport(SmgrTrace,
@@ -1487,34 +1490,95 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
 		}
+		#endif
 		else if (forknum != FSM_FORKNUM && forknum != VISIBILITYMAP_FORKNUM)
 		{
-			/*
-			 * Its a bad sign if there is a page with zero LSN in the buffer
-			 * cache in a standby, too. However, PANICing seems like a cure
-			 * worse than the disease, as the damage has likely already been
-			 * done in the primary. So in a standby, make this an assertion,
-			 * and in a release build just LOG the error and soldier on. We
-			 * update the last-written LSN of the page with a conservative
-			 * value in that case, which is the last replayed LSN.
-			 */
-			ereport(RecoveryInProgress() ? LOG : PANIC,
-					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
+			if (start_unlogged_build(InfoFromSMgrRel(reln), forknum, blocknum, &relsize))
+			{
+				mdcreate(reln, forknum, true);
+				if (relsize != 0)
+					unlogged_extend(reln, forknum, 0, relsize);
+				elog(SmgrTrace, "neon_wallog_page: start unlogged %u/%u/%u.%u blk %u, relsize %u",
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forknum, blocknum, relsize);
+			}
+			else
+				elog(SmgrTrace, "neon_wallog_page: continue unlogged %u/%u/%u.%u blk %u, relsize %u",
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forknum, blocknum, relsize);
+
+			if (blocknum >= relsize)
+			{
+				unlogged_extend(reln, forknum, relsize, blocknum+1);
+			}
+			mdwrite(reln, forknum, blocknum, buffer, true);
+			resume_unlogged_build();
+
+			ereport(SmgrTrace,
+					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is saved locally.",
 							blocknum,
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
-			Assert(false);
-
 			lsn = GetXLogReplayRecPtr(NULL); /* in standby mode, soldier on */
 		}
 	}
-	else
+	else if (lsn < FirstNormalUnloggedLSN)
 	{
+		if (start_unlogged_build(InfoFromSMgrRel(reln),forknum, blocknum, &relsize))
+		{
+			mdcreate(reln, forknum, true);
+			if (relsize != 0)
+				unlogged_extend(reln, forknum, 0, relsize);
+			elog(SmgrTrace, "neon_wallog_page: start unlogged %u/%u/%u.%u blk %u, relsize %u, LSN %X",
+				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+				 forknum, blocknum, relsize, (unsigned)lsn);
+		}
+		else
+			elog(SmgrTrace, "neon_wallog_page: continue unlogged %u/%u/%u.%u blk %u, relsize %u, LSN %X",
+				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+				 forknum, blocknum, relsize, (unsigned)lsn);
+		if (blocknum >= relsize)
+		{
+			unlogged_extend(reln, forknum, relsize, blocknum+1);
+		}
+		mdwrite(reln, forknum, blocknum, buffer, true);
+		resume_unlogged_build();
+
 		ereport(SmgrTrace,
-				(errmsg(NEON_TAG "Evicting page %u of relation %u/%u/%u.%u with lsn=%X/%X",
+				(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is saved locally.",
 						blocknum,
 						RelFileInfoFmt(InfoFromSMgrRel(reln)),
-						forknum, LSN_FORMAT_ARGS(lsn))));
+						forknum)));
+	}
+	else
+	{
+		if (is_unlogged_build_extend(InfoFromSMgrRel(reln), forknum, blocknum, &relsize))
+		{
+			elog(SmgrTrace, "neon_wallog_page: unlogged extend %u/%u/%u.%u blk %u, relsize %u",
+				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+				 forknum, blocknum, relsize);
+			if (blocknum >= relsize)
+			{
+				unlogged_extend(reln, forknum, relsize, blocknum+1);
+			}
+			mdwrite(reln, forknum, blocknum, buffer, true);
+			ereport(SmgrTrace,
+					(errmsg(NEON_TAG "Page %u with LSN=%X/%X of relation %u/%u/%u.%u is saved locally.",
+							blocknum,
+							LSN_FORMAT_ARGS(lsn),
+							RelFileInfoFmt(InfoFromSMgrRel(reln)),
+							forknum)));
+		}
+		else
+		{
+			ereport(SmgrTrace,
+					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is already wal-logged at lsn=%X/%X",
+						blocknum,
+						RelFileInfoFmt(InfoFromSMgrRel(reln)),
+						forknum, LSN_FORMAT_ARGS(lsn)
+					)));
+		}
+		resume_unlogged_build();
 	}
 
 	/*
@@ -1523,6 +1587,27 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 	 */
 	SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
 }
+
+/*
+ * Check if unlogged build is in progress for specified relation
+ * and stop it if so. It is used as callback for log_newpage_range( function
+ * which is called at the end of unlogged build.
+ */
+static void
+neon_log_newpage_range_callback(Relation rel, ForkNumber forknum)
+{
+	SMgrRelation smgr = RelationGetSmgr(rel);
+	if (stop_unlogged_build(InfoFromSMgrRel(smgr), forknum))
+	{
+		mdclose(smgr, forknum);
+		/* use isRedo == true, so that we drop it immediately */
+		mdunlink(InfoBFromSMgrRel(smgr), forknum, true);
+		resume_unlogged_build(); /* doesn't actually resume build, just release lock */
+	}
+}
+
+
+
 
 /*
  *	neon_init() -- Initialize private state
@@ -1558,6 +1643,8 @@ neon_init(void)
 
 	old_redo_read_buffer_filter = redo_read_buffer_filter;
 	redo_read_buffer_filter = neon_redo_read_buffer_filter;
+
+	log_newpage_range_callback = neon_log_newpage_range_callback;
 
 #ifdef DEBUG_COMPARE_LOCAL
 	mdinit();
@@ -2021,7 +2108,7 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 						   &reln->smgr_cached_nblocks[forkNum]);
 	}
 	else
-		set_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0);
+		set_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0, NULL);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2081,6 +2168,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 #endif
 {
 	XLogRecPtr	lsn;
+	BlockNumber old_relsize;
 	BlockNumber n_blocks = 0;
 
 	switch (reln->smgr_relpersistence)
@@ -2132,15 +2220,20 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		neon_wallog_page(reln, forkNum, n_blocks++, buffer, true);
 
 	neon_wallog_page(reln, forkNum, blkno, buffer, false);
-	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1);
+
+	if (set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1, &old_relsize))
+	{
+		unlogged_extend(reln, forkNum, old_relsize, blkno + 1);
+		resume_unlogged_build();
+	}
+	else /* Do not store pages during unlogedbuild in LFC two avoid double local storage consumption */
+		lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
 
 	lsn = PageGetLSN((Page) buffer);
 	neon_log(SmgrTrace, "smgrextend called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
-
-	lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2167,9 +2260,10 @@ void
 neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 				int nblocks, bool skipFsync)
 {
-	const PGAlignedBlock buffer = {0};
-	int			remblocks = nblocks;
+	BlockNumber old_relsize;
+	BlockNumber	remblocks = nblocks;
 	XLogRecPtr	lsn = 0;
+	bool unlogged = false;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2218,8 +2312,29 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	if (!XLogInsertAllowed())
 		return;
 
-	/* ensure we have enough xlog buffers to log max-sized records */
-	XLogEnsureRecordSpace(Min(remblocks, (XLR_MAX_BLOCK_ID - 1)), 0);
+	if (set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum + nblocks, &old_relsize))
+	{
+		unlogged_extend(reln, forkNum, old_relsize, blocknum + nblocks);
+		resume_unlogged_build();
+		unlogged = true;
+	}
+
+	if (forkNum != MAIN_FORKNUM) /* no need to wal-log zero pages except VM/FSM forks  */
+	{
+		/* ensure we have enough xlog buffers to log max-sized records */
+		XLogEnsureRecordSpace(Min(remblocks, (XLR_MAX_BLOCK_ID - 1)), 0);
+	}
+	else
+	{
+		/*
+		 * smgr_extend is often called with an all-zeroes page, so
+		 * lsn==InvalidXLogRecPtr. An smgr_write() call will come for the buffer
+		 * later, after it has been initialized with the real page contents, and
+		 * it is eventually evicted from the buffer cache. But we need a valid LSN
+		 * to the relation metadata update now.
+		 */
+		lsn = GetXLogInsertRecPtr();
+	}
 
 	/*
 	 * Iterate over all the pages. They are collected into batches of
@@ -2230,17 +2345,20 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	{
 		int			count = Min(remblocks, XLR_MAX_BLOCK_ID);
 
-		XLogBeginInsert();
+		if (forkNum != MAIN_FORKNUM) /* no need to wal-log zero pages except VM/FSM forks  */
+		{
+			XLogBeginInsert();
 
-		for (int i = 0; i < count; i++)
-			XLogRegisterBlock(i, &InfoFromSMgrRel(reln), forkNum, blocknum + i,
-							  (char *) buffer.data, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+			for (int i = 0; i < count; i++)
+				XLogRegisterBlock(i, &InfoFromSMgrRel(reln), forkNum, blocknum + i,
+								  (char *) zero_buffer.data, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
 
-		lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
-
+			lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
+		}
 		for (int i = 0; i < count; i++)
 		{
-			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+			if (!unlogged) /* Do not store pages during unlogedbuild in LFC two avoid double local storage consumption */
+				lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, zero_buffer.data);
 			SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forkNum,
 									  blocknum + i);
 		}
@@ -2252,7 +2370,6 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	Assert(lsn != 0);
 
 	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forkNum);
-	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum);
 }
 #endif
 
@@ -2519,6 +2636,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 #endif
 {
 	neon_request_lsns request_lsns;
+	BlockNumber relsize;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2537,15 +2655,33 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	/* Try to read from local file cache */
-	if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
+	if (is_unlogged_build(InfoFromSMgrRel(reln), forkNum, &relsize))
 	{
-		return;
+		if (blkno >= relsize)
+		{
+			elog(SmgrTrace, "Get empty local page %d of relation %u/%u/%u.%u",
+				 blkno, RelFileInfoFmt(InfoFromSMgrRel(reln)), forkNum);
+			memset(buffer, 0, BLCKSZ);
+		}
+		else
+		{
+			elog(SmgrTrace, "Read local page %d of relation %u/%u/%u.%u",
+				 blkno, RelFileInfoFmt(InfoFromSMgrRel(reln)), forkNum);
+			mdread(reln, forkNum, blkno, buffer);
+		}
+		resume_unlogged_build();
 	}
+	else
+	{
+		/* Try to read from local file cache */
+		if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
+		{
+			return;
+		}
 
-	request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno);
-	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
-
+		request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno);
+		neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
+	}
 #ifdef DEBUG_COMPARE_LOCAL
 	if (forkNum == MAIN_FORKNUM && IS_LOCAL_REL(reln))
 	{
@@ -2655,24 +2791,36 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *bu
 neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const void *buffer, bool skipFsync)
 #endif
 {
+	BlockNumber relsize;
 	XLogRecPtr	lsn;
+	bool unlogged = false;
 
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			/* This is a bit tricky. Check if the relation exists locally */
-			if (mdexists(reln, forknum))
+			if (is_unlogged_build_extend(InfoFromSMgrRel(reln), forknum, blocknum, &relsize))
 			{
-				/* It exists locally. Guess it's unlogged then. */
+				if (blocknum >= relsize)
+				{
+					unlogged_extend(reln, forknum, relsize, blocknum+1);
+				}
+				unlogged = true;
+				elog(SmgrTrace, "neon_write: extend %u/%u/%u.%u blk %u, relsize %u",
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forknum, blocknum, relsize);
+			} else {
+				unlogged = mdexists(reln, forknum);
+			}
+			if (unlogged)
+			{
+				elog(SmgrTrace, "neon_write: mdwrite %u/%u/%u.%u blk %u",
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forknum, blocknum);
 				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
-
-				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
-				 */
+			}
+			resume_unlogged_build();
+			if (unlogged)
+			{
 				return;
 			}
 			break;
@@ -2864,7 +3012,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	set_cached_relsize(InfoFromSMgrRel(reln), forknum, nblocks);
+	set_cached_relsize(InfoFromSMgrRel(reln), forknum, nblocks, NULL);
 
 	/*
 	 * Truncating a relation drops all its buffers from the buffer cache
@@ -2920,6 +3068,13 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
+			if (stop_unlogged_build(InfoFromSMgrRel(reln), forknum))
+			{
+				mdclose(reln, forknum);
+				/* use isRedo == true, so that we drop it immediately */
+				mdunlink(InfoBFromSMgrRel(reln), forknum, true);
+				resume_unlogged_build(); /* doesn't actually resume build, just release lock */
+			}
 			break;
 
 		case RELPERSISTENCE_TEMP:
@@ -2937,150 +3092,6 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 	if (IS_LOCAL_REL(reln))
 		mdimmedsync(reln, forknum);
 #endif
-}
-
-/*
- * neon_start_unlogged_build() -- Starting build operation on a rel.
- *
- * Some indexes are built in two phases, by first populating the table with
- * regular inserts, using the shared buffer cache but skipping WAL-logging,
- * and WAL-logging the whole relation after it's done. Neon relies on the
- * WAL to reconstruct pages, so we cannot use the page server in the
- * first phase when the changes are not logged.
- */
-static void
-neon_start_unlogged_build(SMgrRelation reln)
-{
-	/*
-	 * Currently, there can be only one unlogged relation build operation in
-	 * progress at a time. That's enough for the current usage.
-	 */
-	if (unlogged_build_phase != UNLOGGED_BUILD_NOT_IN_PROGRESS)
-		neon_log(ERROR, "unlogged relation build is already in progress");
-	Assert(unlogged_build_rel == NULL);
-
-	ereport(SmgrTrace,
-			(errmsg(NEON_TAG "starting unlogged build of relation %u/%u/%u",
-					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
-
-	switch (reln->smgr_relpersistence)
-	{
-		case 0:
-			neon_log(ERROR, "cannot call smgr_start_unlogged_build() on rel with unknown persistence");
-			break;
-
-		case RELPERSISTENCE_PERMANENT:
-			break;
-
-		case RELPERSISTENCE_TEMP:
-		case RELPERSISTENCE_UNLOGGED:
-			unlogged_build_rel = reln;
-			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
-			return;
-
-		default:
-			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
-	}
-
-	if (smgrnblocks(reln, MAIN_FORKNUM) != 0)
-		neon_log(ERROR, "cannot perform unlogged index build, index is not empty ");
-
-	unlogged_build_rel = reln;
-	unlogged_build_phase = UNLOGGED_BUILD_PHASE_1;
-
-	/* Make the relation look like it's unlogged */
-	reln->smgr_relpersistence = RELPERSISTENCE_UNLOGGED;
-
-	/*
-	 * Create the local file. In a parallel build, the leader is expected to
-	 * call this first and do it.
-	 *
-	 * FIXME: should we pass isRedo true to create the tablespace dir if it
-	 * doesn't exist? Is it needed?
-	 */
-	if (!IsParallelWorker())
-		mdcreate(reln, MAIN_FORKNUM, false);
-}
-
-/*
- * neon_finish_unlogged_build_phase_1()
- *
- * Call this after you have finished populating a relation in unlogged mode,
- * before you start WAL-logging it.
- */
-static void
-neon_finish_unlogged_build_phase_1(SMgrRelation reln)
-{
-	Assert(unlogged_build_rel == reln);
-
-	ereport(SmgrTrace,
-			(errmsg(NEON_TAG "finishing phase 1 of unlogged build of relation %u/%u/%u",
-					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
-
-	if (unlogged_build_phase == UNLOGGED_BUILD_NOT_PERMANENT)
-		return;
-
-	Assert(unlogged_build_phase == UNLOGGED_BUILD_PHASE_1);
-	Assert(reln->smgr_relpersistence == RELPERSISTENCE_UNLOGGED);
-
-	/*
-	 * In a parallel build, (only) the leader process performs the 2nd
-	 * phase.
-	 */
-	if (IsParallelWorker())
-	{
-		unlogged_build_rel = NULL;
-		unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
-	}
-	else
-		unlogged_build_phase = UNLOGGED_BUILD_PHASE_2;
-}
-
-/*
- * neon_end_unlogged_build() -- Finish an unlogged rel build.
- *
- * Call this after you have finished WAL-logging an relation that was
- * first populated without WAL-logging.
- *
- * This removes the local copy of the rel, since it's now been fully
- * WAL-logged and is present in the page server.
- */
-static void
-neon_end_unlogged_build(SMgrRelation reln)
-{
-	NRelFileInfoBackend rinfob = InfoBFromSMgrRel(reln);
-
-	Assert(unlogged_build_rel == reln);
-
-	ereport(SmgrTrace,
-			(errmsg(NEON_TAG "ending unlogged build of relation %u/%u/%u",
-					RelFileInfoFmt(InfoFromNInfoB(rinfob)))));
-
-	if (unlogged_build_phase != UNLOGGED_BUILD_NOT_PERMANENT)
-	{
-		Assert(unlogged_build_phase == UNLOGGED_BUILD_PHASE_2);
-		Assert(reln->smgr_relpersistence == RELPERSISTENCE_UNLOGGED);
-
-		/* Make the relation look permanent again */
-		reln->smgr_relpersistence = RELPERSISTENCE_PERMANENT;
-
-		/* Remove local copy */
-		rinfob = InfoBFromSMgrRel(reln);
-		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
-		{
-			neon_log(SmgrTrace, "forgetting cached relsize for %u/%u/%u.%u",
-				 RelFileInfoFmt(InfoFromNInfoB(rinfob)),
-				 forknum);
-
-			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
-			mdclose(reln, forknum);
-			/* use isRedo == true, so that we drop it immediately */
-			mdunlink(rinfob, forknum, true);
-		}
-	}
-
-	unlogged_build_rel = NULL;
-	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 }
 
 #define STRPREFIX(str, prefix) (strncmp(str, prefix, strlen(prefix)) == 0)
@@ -3176,40 +3187,6 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	return n_blocks;
 }
 
-static void
-AtEOXact_neon(XactEvent event, void *arg)
-{
-	switch (event)
-	{
-		case XACT_EVENT_ABORT:
-		case XACT_EVENT_PARALLEL_ABORT:
-
-			/*
-			 * Forget about any build we might have had in progress. The local
-			 * file will be unlinked by smgrDoPendingDeletes()
-			 */
-			unlogged_build_rel = NULL;
-			unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
-			break;
-
-		case XACT_EVENT_COMMIT:
-		case XACT_EVENT_PARALLEL_COMMIT:
-		case XACT_EVENT_PREPARE:
-		case XACT_EVENT_PRE_COMMIT:
-		case XACT_EVENT_PARALLEL_PRE_COMMIT:
-		case XACT_EVENT_PRE_PREPARE:
-			if (unlogged_build_phase != UNLOGGED_BUILD_NOT_IN_PROGRESS)
-			{
-				unlogged_build_rel = NULL;
-				unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 (errmsg(NEON_TAG "unlogged index build was not properly finished"))));
-			}
-			break;
-	}
-}
-
 static const struct f_smgr neon_smgr =
 {
 	.smgr_init = neon_init,
@@ -3231,10 +3208,6 @@ static const struct f_smgr neon_smgr =
 	.smgr_truncate = neon_truncate,
 	.smgr_immedsync = neon_immedsync,
 
-	.smgr_start_unlogged_build = neon_start_unlogged_build,
-	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
-	.smgr_end_unlogged_build = neon_end_unlogged_build,
-
 	.smgr_read_slru_segment = neon_read_slru_segment,
 };
 
@@ -3252,8 +3225,6 @@ smgr_neon(BackendId backend, NRelFileInfo rinfo)
 void
 smgr_init_neon(void)
 {
-	RegisterXactCallback(AtEOXact_neon, NULL);
-
 	smgr_init_standard();
 	neon_init();
 }
@@ -3304,7 +3275,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 
 		relsize = Max(nbresponse->n_blocks, blkno + 1);
 
-		set_cached_relsize(rinfo, forknum, relsize);
+		set_cached_relsize(rinfo, forknum, relsize, NULL);
 		SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
 
 		neon_log(SmgrTrace, "Set length to %d", relsize);
