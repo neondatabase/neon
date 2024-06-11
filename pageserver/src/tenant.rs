@@ -6644,7 +6644,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metadata_tombstone_empty_image_creation() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_metadata_tombstone_image_creation")?;
+        let harness = TenantHarness::create("test_metadata_tombstone_empty_image_creation")?;
         let (tenant, ctx) = harness.load().await;
 
         let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
