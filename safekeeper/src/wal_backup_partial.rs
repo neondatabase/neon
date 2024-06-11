@@ -27,11 +27,7 @@ use tracing::{debug, error, info, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
-    metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
-    safekeeper::Term,
-    timeline::FullAccessTimeline,
-    wal_backup::{self, remote_timeline_path},
-    SafeKeeperConf,
+    metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS}, safekeeper::Term, timeline::FullAccessTimeline, timeline_manager::StateSnapshot, wal_backup::{self, remote_timeline_path}, SafeKeeperConf
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -270,8 +266,26 @@ impl PartialBackup {
     }
 }
 
+/// Check if everything is uploaded and partial backup task doesn't need to run.
+pub fn needs_uploading(state: &StateSnapshot, uploaded: &Option<PartialRemoteSegment>) -> bool {
+    match uploaded {
+        Some(uploaded) => {
+            uploaded.status != UploadStatus::Uploaded
+                || uploaded.flush_lsn != state.flush_lsn
+                || uploaded.commit_lsn != state.commit_lsn
+                || uploaded.term != state.term
+        }
+        None => true,
+    }
+}
+
+/// Main task for partial backup. It waits for the flush_lsn to change and then uploads the
+/// partial segment to the remote storage. It also does garbage collection of old segments.
+/// 
+/// When there is nothing more to do and the last segment was successfully uploaded, the task
+/// returns PartialRemoteSegment, to signal readiness for offloading the timeline.
 #[instrument(name = "Partial backup", skip_all, fields(ttid = %tli.ttid))]
-pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
+pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) -> Option<PartialRemoteSegment> {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
 
@@ -285,7 +299,7 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
         Ok(path) => path,
         Err(e) => {
             error!("failed to create remote path: {:?}", e);
-            return;
+            return None;
         }
     };
 
@@ -320,19 +334,13 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
         // wait until we have something to upload
         let uploaded_segment = backup.state.uploaded_segment();
         if let Some(seg) = &uploaded_segment {
-            // if we already uploaded something, wait until we have something new
-            while flush_lsn_rx.borrow().lsn == seg.flush_lsn
+            // check if uploaded segment matches the current state
+            if flush_lsn_rx.borrow().lsn == seg.flush_lsn
                 && *commit_lsn_rx.borrow() == seg.commit_lsn
                 && flush_lsn_rx.borrow().term == seg.term
             {
-                tokio::select! {
-                    _ = backup.tli.cancel.cancelled() => {
-                        info!("timeline canceled");
-                        return;
-                    }
-                    _ = commit_lsn_rx.changed() => {}
-                    _ = flush_lsn_rx.changed() => {}
-                }
+                // we have nothing to do, the last segment is already uploaded
+                return Some(seg.clone());
             }
         }
 
@@ -341,7 +349,7 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
             tokio::select! {
                 _ = backup.tli.cancel.cancelled() => {
                     info!("timeline canceled");
-                    return;
+                    return None;
                 }
                 _ = flush_lsn_rx.changed() => {}
             }
@@ -358,7 +366,7 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
             tokio::select! {
                 _ = backup.tli.cancel.cancelled() => {
                     info!("timeline canceled");
-                    return;
+                    return None;
                 }
                 _ = commit_lsn_rx.changed() => {}
                 _ = flush_lsn_rx.changed() => {

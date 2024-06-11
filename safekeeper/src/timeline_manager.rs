@@ -14,15 +14,7 @@ use tracing::{info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
 
 use crate::{
-    control_file::Storage,
-    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
-    recovery::recovery_main,
-    remove_wal::calc_horizon_lsn,
-    send_wal::WalSenders,
-    timeline::{PeerInfo, ReadGuardSharedState, Timeline},
-    timelines_set::{TimelineSetGuard, TimelinesSet},
-    wal_backup::{self, WalBackupTaskHandle},
-    wal_backup_partial, SafeKeeperConf,
+    control_file::Storage, metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL}, recovery::recovery_main, remove_wal::calc_horizon_lsn, safekeeper::Term, send_wal::WalSenders, timeline::{PeerInfo, ReadGuardSharedState, Timeline}, timelines_set::{TimelineSetGuard, TimelinesSet}, wal_backup::{self, WalBackupTaskHandle}, wal_backup_partial::{self, PartialRemoteSegment}, SafeKeeperConf
 };
 
 pub struct StateSnapshot {
@@ -35,6 +27,10 @@ pub struct StateSnapshot {
     pub cfile_peer_horizon_lsn: Lsn,
     pub cfile_remote_consistent_lsn: Lsn,
     pub cfile_backup_lsn: Lsn,
+
+    // latest state
+    pub flush_lsn: Lsn,
+    pub term: Term,
 
     // misc
     pub cfile_last_persist_at: Instant,
@@ -53,6 +49,8 @@ impl StateSnapshot {
             cfile_peer_horizon_lsn: read_guard.sk.state.peer_horizon_lsn,
             cfile_remote_consistent_lsn: read_guard.sk.state.remote_consistent_lsn,
             cfile_backup_lsn: read_guard.sk.state.backup_lsn,
+            flush_lsn: crate::wal_storage::Storage::flush_lsn(&read_guard.sk.wal_store),
+            term: read_guard.sk.state.acceptor_state.term,
             cfile_last_persist_at: read_guard.sk.state.pers.last_persist_at(),
             inmem_flush_pending: Self::has_unflushed_inmem_state(&read_guard),
             wal_removal_on_hold: read_guard.wal_removal_on_hold,
@@ -108,8 +106,11 @@ pub async fn main_task(
     // list of background tasks
     let mut backup_task: Option<WalBackupTaskHandle> = None;
     let mut recovery_task: Option<JoinHandle<()>> = None;
-    let mut partial_backup_task: Option<JoinHandle<()>> = None;
     let mut wal_removal_task: Option<JoinHandle<anyhow::Result<u64>>> = None;
+
+    // partial backup task
+    let mut partial_backup_task: Option<JoinHandle<Option<PartialRemoteSegment>>> = None;
+    let mut partial_backup_uploaded: Option<PartialRemoteSegment> = None;
 
     // Start recovery task which always runs on the timeline.
     if conf.peer_recovery_enabled {
@@ -119,21 +120,6 @@ pub async fn main_task(
             }
             Err(e) => {
                 warn!("failed to start recovery task: {:?}", e);
-            }
-        }
-    }
-
-    // Start partial backup task which always runs on the timeline.
-    if conf.is_wal_backup_enabled() && conf.partial_backup_enabled {
-        match tli.full_access_guard().await {
-            Ok(tli) => {
-                partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
-                    tli,
-                    conf.clone(),
-                )));
-            }
-            Err(e) => {
-                warn!("failed to start partial backup task: {:?}", e);
             }
         }
     }
@@ -175,6 +161,15 @@ pub async fn main_task(
         )
         .await;
 
+        update_partial_backup(
+            &conf,
+            &tli,
+            &state_snapshot,
+            &mut partial_backup_task,
+            &mut partial_backup_uploaded,
+        )
+        .await;
+
         // wait until something changes. tx channels are stored under Arc, so they will not be
         // dropped until the manager task is finished.
         tokio::select! {
@@ -211,6 +206,25 @@ pub async fn main_task(
                 // WAL removal task finished
                 wal_removal_task = None;
                 update_wal_removal_end(res, &tli, &mut last_removed_segno);
+            }
+            res = async {
+                if let Some(task) = &mut partial_backup_task {
+                    task.await
+                } else {
+                    futures::future::pending().await
+                }
+            } => {
+                // partial backup task finished
+                partial_backup_task = None;
+
+                match res {
+                    Ok(new_upload_state) => {
+                        partial_backup_uploaded = new_upload_state;
+                    }
+                    Err(e) => {
+                        warn!("partial backup task panicked: {:?}", e);
+                    }
+                }
             }
         }
     };
@@ -383,4 +397,40 @@ fn update_wal_removal_end(
     // update the state in Arc<Timeline>
     tli.last_removed_segno
         .store(new_last_removed_segno, std::sync::atomic::Ordering::Relaxed);
+}
+
+async fn update_partial_backup(
+    conf: &SafeKeeperConf,
+    tli: &Arc<Timeline>,
+    state: &StateSnapshot,
+    partial_backup_task: &mut Option<JoinHandle<Option<PartialRemoteSegment>>>,
+    partial_backup_uploaded: &mut Option<PartialRemoteSegment>,
+) {
+    // check if partial backup is enabled and should be started
+    if !conf.is_wal_backup_enabled() || !conf.partial_backup_enabled {
+        return;
+    }
+
+    if partial_backup_task.is_some() {
+        // partial backup is already running
+        return;
+    }
+
+    if !wal_backup_partial::needs_uploading(&state, &partial_backup_uploaded) {
+        // nothing to upload
+        return;
+    }
+
+    // Get FullAccessTimeline and start partial backup task.
+    match tli.full_access_guard().await {
+        Ok(tli) => {
+            *partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
+                tli,
+                conf.clone(),
+            )));
+        }
+        Err(e) => {
+            warn!("failed to start partial backup task: {:?}", e);
+        }
+    }
 }
