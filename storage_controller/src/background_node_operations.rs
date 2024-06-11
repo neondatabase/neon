@@ -109,12 +109,88 @@ impl Controller {
         }
     }
 
-    fn handle_drain(&self, _drain: Drain) {
-        todo!("A later commit implements this stub");
+    fn handle_drain(&self, drain: Drain) {
+        let node_id = drain.node_id;
+
+        let cancel = CancellationToken::new();
+
+        let (_holder, waiter) = utils::completion::channel();
+
+        let handle = tokio::task::spawn({
+            let service = self.service.clone();
+            let ongoing = self.ongoing.clone();
+            let cancel = cancel.clone();
+
+            async move {
+                scopeguard::defer! {
+                    let removed = ongoing.0.write().unwrap().remove(&drain.node_id);
+                    if let Some(Operation::Drain(removed_drain)) = removed.map(|h| h.operation) {
+                        assert_eq!(removed_drain.node_id, drain.node_id, "We always remove the same operation");
+                    } else {
+                        panic!("We always remove the same operation")
+                    }
+                }
+
+                waiter.wait().await;
+                service.drain_node(drain.node_id, cancel).await
+            }
+        });
+
+        let replaced = self.ongoing.0.write().unwrap().insert(
+            node_id,
+            OperationHandler {
+                operation: Operation::Drain(drain),
+                cancel,
+                handle,
+            },
+        );
+
+        assert!(
+            replaced.is_none(),
+            "The channel size is 1 and we checked before enqueing"
+        );
     }
 
-    fn handle_fill(&self, _fill: Fill) {
-        todo!("A later commit implements this stub")
+    fn handle_fill(&self, fill: Fill) {
+        let node_id = fill.node_id;
+
+        let cancel = CancellationToken::new();
+
+        let (_holder, waiter) = utils::completion::channel();
+
+        let handle = tokio::task::spawn({
+            let service = self.service.clone();
+            let ongoing = self.ongoing.clone();
+            let cancel = cancel.clone();
+
+            async move {
+                scopeguard::defer! {
+                    let removed = ongoing.0.write().unwrap().remove(&fill.node_id);
+                    if let Some(Operation::Fill(removed_fill)) = removed.map(|h| h.operation) {
+                        assert_eq!(removed_fill.node_id, fill.node_id, "We always remove the same operation");
+                    } else {
+                        panic!("We always remove the same operation")
+                    }
+                }
+
+                waiter.wait().await;
+                service.fill_node(fill.node_id, cancel).await
+            }
+        });
+
+        let replaced = self.ongoing.0.write().unwrap().insert(
+            node_id,
+            OperationHandler {
+                operation: Operation::Fill(fill),
+                cancel,
+                handle,
+            },
+        );
+
+        assert!(
+            replaced.is_none(),
+            "The channel size is 1 and we checked before enqueing"
+        );
     }
 }
 

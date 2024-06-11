@@ -300,6 +300,19 @@ impl From<ReconcileWaitError> for ApiError {
     }
 }
 
+impl From<OperationError> for ApiError {
+    fn from(value: OperationError) -> Self {
+        match value {
+            OperationError::PreconditionFailed(err) => ApiError::PreconditionFailed(err.into()),
+            OperationError::NodeStateChanged(err) => {
+                ApiError::InternalServerError(anyhow::anyhow!(err))
+            }
+            OperationError::ShuttingDown => ApiError::ShuttingDown,
+            OperationError::Cancelled => ApiError::Conflict("Operation was cancelled".into()),
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 enum TenantCreateOrUpdate {
     Create(TenantCreateRequest),
@@ -4408,6 +4421,110 @@ impl Service {
         }
 
         locked.nodes = new_nodes;
+
+        Ok(())
+    }
+
+    pub(crate) async fn start_node_drain(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let (node_available, node_policy, schedulable_nodes_count) = {
+            let locked = self.inner.read().unwrap();
+            let nodes = &locked.nodes;
+            let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
+                anyhow::anyhow!("Node {} not registered", node_id).into(),
+            ))?;
+            let schedulable_nodes_count = nodes
+                .iter()
+                .filter(|(_, n)| matches!(n.may_schedule(), MaySchedule::Yes(_)))
+                .count();
+
+            (
+                node.is_available(),
+                node.get_scheduling(),
+                schedulable_nodes_count,
+            )
+        };
+
+        if !node_available {
+            return Err(ApiError::ResourceUnavailable(
+                format!("Node {node_id} is currently unavailable").into(),
+            ));
+        }
+
+        if schedulable_nodes_count == 0 {
+            return Err(ApiError::PreconditionFailed(
+                "No other schedulable nodes to drain to".into(),
+            ));
+        }
+
+        match node_policy {
+            NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Pause => {
+                self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Draining))
+                    .await?;
+                let controller = self
+                    .background_operations_controller
+                    .get()
+                    .expect("Initialized at start up");
+                controller.drain_node(node_id)?;
+            }
+            NodeSchedulingPolicy::Draining => {
+                return Err(ApiError::Conflict(format!(
+                    "Node {node_id} has drain in progress"
+                )));
+            }
+            policy => {
+                return Err(ApiError::PreconditionFailed(
+                    format!("Node {node_id} cannot be drained due to {policy:?} policy").into(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn start_node_fill(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let (node_available, node_policy, total_nodes_count) = {
+            let locked = self.inner.read().unwrap();
+            let nodes = &locked.nodes;
+            let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
+                anyhow::anyhow!("Node {} not registered", node_id).into(),
+            ))?;
+
+            (node.is_available(), node.get_scheduling(), nodes.len())
+        };
+
+        if !node_available {
+            return Err(ApiError::ResourceUnavailable(
+                format!("Node {node_id} is currently unavailable").into(),
+            ));
+        }
+
+        if total_nodes_count <= 1 {
+            return Err(ApiError::PreconditionFailed(
+                "No other nodes to fill from".into(),
+            ));
+        }
+
+        match node_policy {
+            NodeSchedulingPolicy::Active => {
+                self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Filling))
+                    .await?;
+                let controller = self
+                    .background_operations_controller
+                    .get()
+                    .expect("Initialized at start up");
+                controller.fill_node(node_id)?;
+            }
+            NodeSchedulingPolicy::Filling => {
+                return Err(ApiError::Conflict(format!(
+                    "Node {node_id} has fill in progress"
+                )));
+            }
+            policy => {
+                return Err(ApiError::PreconditionFailed(
+                    format!("Node {node_id} cannot be filled due to {policy:?} policy").into(),
+                ));
+            }
+        }
 
         Ok(())
     }
