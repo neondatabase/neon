@@ -4041,6 +4041,7 @@ mod tests {
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
+    use crate::walrecord::NeonWalRecord;
     use crate::DEFAULT_PG_VERSION;
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
@@ -6701,7 +6702,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_simple_bottom_most_compaction() -> anyhow::Result<()> {
+    async fn test_simple_bottom_most_compaction_images() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_bottom_most_compaction")?;
         let (tenant, ctx) = harness.load().await;
 
@@ -6853,6 +6854,79 @@ mod tests {
                     is_delta: true
                 }
             ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_neon_test_record() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_neon_test_record")?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::Test {
+                    append: ",0x20".to_string(),
+                    clear: false,
+                }),
+            ),
+            (
+                get_key(1),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::Test {
+                    append: ",0x30".to_string(),
+                    clear: false,
+                }),
+            ),
+            (get_key(2), Lsn(0x10), Value::Image("0x10".into())),
+            (
+                get_key(2),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::Test {
+                    append: ",0x20".to_string(),
+                    clear: false,
+                }),
+            ),
+            (
+                get_key(2),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::Test {
+                    append: ",0x30".to_string(),
+                    clear: false,
+                }),
+            ),
+        ];
+        let image1 = vec![(get_key(1), "0x10".into())];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![delta1],              // delta layers
+                vec![(Lsn(0x10), image1)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+
+        assert_eq!(
+            tline.get(get_key(1), Lsn(0x50), &ctx).await?,
+            Bytes::from_static(b"0x10,0x20,0x30")
+        );
+        assert_eq!(
+            tline.get(get_key(2), Lsn(0x50), &ctx).await?,
+            Bytes::from_static(b"0x10,0x20,0x30")
         );
 
         Ok(())

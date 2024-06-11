@@ -244,6 +244,14 @@ pub(crate) fn apply_in_neon(
             let mut writer = page.writer();
             dir.ser_into(&mut writer)?;
         }
+        #[cfg(test)]
+        NeonWalRecord::Test { append, clear } => {
+            if *clear {
+                page.clear();
+            } else {
+                page.put_slice(append.as_bytes());
+            }
+        }
     }
     Ok(())
 }

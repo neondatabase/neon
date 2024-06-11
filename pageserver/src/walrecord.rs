@@ -49,6 +49,10 @@ pub enum NeonWalRecord {
         file_path: String,
         content: Option<Bytes>,
     },
+
+    #[cfg(test)]
+    /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
+    Test { append: String, clear: bool },
 }
 
 impl NeonWalRecord {
@@ -58,7 +62,8 @@ impl NeonWalRecord {
         // If you change this function, you'll also need to change ValueBytes::will_init
         match self {
             NeonWalRecord::Postgres { will_init, rec: _ } => *will_init,
-
+            #[cfg(test)]
+            NeonWalRecord::Test { clear, .. } => *clear,
             // None of the special neon record types currently initialize the page
             _ => false,
         }
