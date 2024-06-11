@@ -11,7 +11,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    S3Scrubber,
+    StorageScrubber,
     StorageControllerApiException,
     last_flush_lsn_upload,
     tenant_get_shards,
@@ -128,7 +128,7 @@ def test_sharding_smoke(
 
     # Check the scrubber isn't confused by sharded content, then disable
     # it during teardown because we'll have deleted by then
-    S3Scrubber(neon_env_builder).scan_metadata()
+    StorageScrubber(neon_env_builder).scan_metadata()
     neon_env_builder.scrub_on_exit = False
 
     env.storage_controller.pageserver_api().tenant_delete(tenant_id)

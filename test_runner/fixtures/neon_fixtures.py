@@ -948,7 +948,7 @@ class NeonEnvBuilder:
 
             if self.scrub_on_exit:
                 try:
-                    S3Scrubber(self).scan_metadata()
+                    StorageScrubber(self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -3937,7 +3937,7 @@ class Safekeeper(LogUtils):
         wait_until(20, 0.5, paused)
 
 
-class S3Scrubber:
+class StorageScrubber:
     def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
         self.env = env
         self.log_dir = log_dir or env.test_output_dir
