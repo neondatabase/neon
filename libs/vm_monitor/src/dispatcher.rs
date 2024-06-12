@@ -12,7 +12,7 @@ use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::protocol::{
     OutboundMsg, ProtocolRange, ProtocolResponse, ProtocolVersion, PROTOCOL_MAX_VERSION,
@@ -118,7 +118,15 @@ impl Dispatcher {
     /// serialize the wrong thing and send it, since `self.sink.send` will take
     /// any string.
     pub async fn send(&mut self, message: OutboundMsg) -> anyhow::Result<()> {
-        info!(?message, "sending message");
+        match &message.inner {
+            crate::protocol::OutboundMsgKind::HealthCheck { .. } => {
+                debug!(?message, "sending message");
+            }
+            _ => {
+                info!(?message, "sending message");
+            }
+        }
+        
         let json = serde_json::to_string(&message).context("failed to serialize message")?;
         self.sink
             .send(Message::Text(json))
