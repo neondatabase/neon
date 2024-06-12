@@ -29,9 +29,7 @@ use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
-use crate::tenant::disk_btree::{
-    DiskBtreeBuilder, DiskBtreeError, DiskBtreeReader, VisitDirection,
-};
+use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
     LayerAccessStats, ValueReconstructResult, ValueReconstructState,
 };
@@ -45,20 +43,17 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
-use futures::Stream;
 use hex;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
-use pageserver_compaction::interface::CompactionKey;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -695,7 +690,11 @@ impl ImageLayerInner {
         }
     }
 
-    async fn iter<'a, 'ctx>(&'a self, ctx: &'ctx RequestContext) -> ImageLayerIterator<'a, 'ctx> {
+    #[allow(dead_code)]
+    pub(crate) fn iter<'a, 'ctx>(
+        &'a self,
+        ctx: &'ctx RequestContext,
+    ) -> ImageLayerIterator<'a, 'ctx> {
         ImageLayerIterator {
             image_layer: self,
             ctx,
@@ -703,6 +702,7 @@ impl ImageLayerInner {
             key_values_batch: Vec::new(),
             next_idx_in_batch: 0,
             is_end: false,
+            batch_size: 1024, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
         }
     }
 }
@@ -966,6 +966,7 @@ pub struct ImageLayerIterator<'a, 'ctx> {
     key_values_batch: Vec<(Key, Lsn, Value)>,
     next_idx_in_batch: usize,
     is_end: bool,
+    batch_size: usize,
 }
 
 impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
@@ -985,7 +986,7 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
         let mut search_key = [0; KEY_SIZE];
         self.next_batch_start_key
             .write_to_byte_slice(&mut search_key);
-        let mut read_planner = VectoredReadPlanner::new(1024 * 8192); // TODO: avoid hard-coded constant
+        let mut read_planner = VectoredReadPlanner::new(self.batch_size * 8192); // TODO: avoid hard-coded constant for image size
         let mut cnt = 0;
         let mut range_end_handled = false;
         // TODO: dedup with vectored read?
@@ -994,6 +995,11 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
                 &search_key,
                 VisitDirection::Forwards,
                 |raw_key, offset| {
+                    if cnt >= self.batch_size {
+                        read_planner.handle_range_end(offset);
+                        range_end_handled = true;
+                        return false;
+                    }
                     read_planner.handle(
                         Key::from_slice(&raw_key[..KEY_SIZE]),
                         self.image_layer.lsn,
@@ -1001,14 +1007,7 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
                         BlobFlag::None,
                     );
                     cnt += 1;
-                    // read at most 1024 keys, TODO: avoid hardcoded constants
-                    if cnt > 1024 {
-                        read_planner.handle_range_end(offset);
-                        range_end_handled = true;
-                        false
-                    } else {
-                        true
-                    }
+                    true
                 },
                 self.ctx,
             )
@@ -1042,7 +1041,8 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
         Ok(())
     }
 
-    async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
+    #[allow(dead_code)]
+    pub async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
         if self.is_end {
             return Ok(None);
         }
@@ -1061,9 +1061,10 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
 
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use bytes::Bytes;
+    use itertools::Itertools;
     use pageserver_api::{
         key::Key,
         shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
@@ -1075,11 +1076,18 @@ mod test {
     };
 
     use crate::{
-        tenant::{config::TenantConf, harness::TenantHarness},
+        context::RequestContext,
+        repository::Value,
+        tenant::{
+            config::TenantConf,
+            harness::{TenantHarness, TIMELINE_ID},
+            storage_layer::ResidentLayer,
+            Tenant, Timeline,
+        },
         DEFAULT_PG_VERSION,
     };
 
-    use super::ImageLayerWriter;
+    use super::{ImageLayerIterator, ImageLayerWriter};
 
     #[tokio::test]
     async fn image_layer_rewrite() {
@@ -1248,6 +1256,91 @@ mod test {
                 }
                 _ => unreachable!(),
             }
+        }
+    }
+
+    async fn produce_image_layer(
+        tenant: &Tenant,
+        tline: &Arc<Timeline>,
+        mut images: Vec<(Key, Bytes)>,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
+        images.sort();
+        let (key_start, _) = images.first().unwrap();
+        let (key_last, _) = images.last().unwrap();
+        let key_end = key_last.next();
+        let key_range = *key_start..key_end;
+        let mut writer = ImageLayerWriter::new(
+            &tenant.conf,
+            tline.timeline_id,
+            tenant.tenant_shard_id,
+            &key_range,
+            lsn,
+            &ctx,
+        )
+        .await?;
+
+        for (key, img) in images {
+            writer.put_image(key, img, ctx).await?;
+        }
+        let img_layer = writer.finish(tline, ctx).await?;
+
+        Ok::<_, anyhow::Error>(img_layer)
+    }
+
+    async fn assert_img_iter_equal(
+        img_iter: &mut ImageLayerIterator<'_, '_>,
+        expect: &[(Key, Bytes)],
+        expect_lsn: Lsn,
+    ) {
+        let mut expect_iter = expect.into_iter();
+        loop {
+            let o1 = img_iter.next().await.unwrap();
+            let o2 = expect_iter.next();
+            assert_eq!(o1.is_some(), o2.is_some());
+            if o1.is_none() && o2.is_none() {
+                break;
+            }
+            let (k1, l1, v1) = o1.unwrap();
+            let Value::Image(i1) = v1 else {
+                panic!("expect Value::Image")
+            };
+            let (k2, i2) = o2.unwrap();
+            assert_eq!(&k1, k2);
+            assert_eq!(l1, expect_lsn);
+            assert_eq!(&i1, i2);
+        }
+    }
+
+    #[tokio::test]
+    async fn image_layer_iterator() {
+        let harness = TenantHarness::create("image_layer_iterator").unwrap();
+        let (tenant, ctx) = harness.load().await;
+
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        fn get_key(id: u32) -> Key {
+            let mut key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+        let test_imgs = (0..1000)
+            .map(|idx| (get_key(idx), Bytes::from(format!("img{idx:05}"))))
+            .collect_vec();
+        let resident_layer =
+            produce_image_layer(&tenant, &tline, test_imgs.clone(), Lsn(0x10), &ctx)
+                .await
+                .unwrap();
+        let img_layer = resident_layer.as_image(&ctx).await.unwrap();
+        for batch_size in [1, 2, 4, 8] {
+            println!("running with batch_size={batch_size}");
+            let mut iter = img_layer.iter(&ctx);
+            iter.batch_size = batch_size;
+            assert_img_iter_equal(&mut iter, &test_imgs, Lsn(0x10)).await;
         }
     }
 }

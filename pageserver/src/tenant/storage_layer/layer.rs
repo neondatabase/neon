@@ -1915,6 +1915,18 @@ impl ResidentLayer {
             Image(_) => Err(anyhow::anyhow!("image layer")),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn as_image(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<&image_layer::ImageLayerInner> {
+        use LayerKind::*;
+        match self.downloaded.get(&self.owner.0, ctx).await? {
+            Image(ref d) => Ok(d),
+            Delta(_) => Err(anyhow::anyhow!("delta layer")),
+        }
+    }
 }
 
 impl AsLayerDesc for ResidentLayer {
