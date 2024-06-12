@@ -15,13 +15,14 @@ use tracing::{info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
 
 use crate::{
-    control_file::Storage,
+    control_file::{FileStorage, Storage},
     metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
     safekeeper::Term,
     send_wal::WalSenders,
-    timeline::{PeerInfo, ReadGuardSharedState, Timeline},
+    state::TimelineState,
+    timeline::{PeerInfo, ReadGuardSharedState, StateSK, Timeline},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
     wal_backup_partial::{self, PartialRemoteSegment},
@@ -53,24 +54,24 @@ pub struct StateSnapshot {
 impl StateSnapshot {
     /// Create a new snapshot of the timeline state.
     fn new(read_guard: ReadGuardSharedState, heartbeat_timeout: Duration) -> Self {
+        let state = read_guard.sk.state();
         Self {
-            commit_lsn: read_guard.sk.state.inmem.commit_lsn,
-            backup_lsn: read_guard.sk.state.inmem.backup_lsn,
-            remote_consistent_lsn: read_guard.sk.state.inmem.remote_consistent_lsn,
-            cfile_peer_horizon_lsn: read_guard.sk.state.peer_horizon_lsn,
-            cfile_remote_consistent_lsn: read_guard.sk.state.remote_consistent_lsn,
-            cfile_backup_lsn: read_guard.sk.state.backup_lsn,
-            flush_lsn: crate::wal_storage::Storage::flush_lsn(&read_guard.sk.wal_store),
-            term: read_guard.sk.state.acceptor_state.term,
-            cfile_last_persist_at: read_guard.sk.state.pers.last_persist_at(),
-            inmem_flush_pending: Self::has_unflushed_inmem_state(&read_guard),
+            commit_lsn: state.inmem.commit_lsn,
+            backup_lsn: state.inmem.backup_lsn,
+            remote_consistent_lsn: state.inmem.remote_consistent_lsn,
+            cfile_peer_horizon_lsn: state.peer_horizon_lsn,
+            cfile_remote_consistent_lsn: state.remote_consistent_lsn,
+            cfile_backup_lsn: state.backup_lsn,
+            flush_lsn: read_guard.sk.flush_lsn(),
+            term: state.acceptor_state.term,
+            cfile_last_persist_at: state.pers.last_persist_at(),
+            inmem_flush_pending: Self::has_unflushed_inmem_state(&state),
             wal_removal_on_hold: read_guard.wal_removal_on_hold,
             peers: read_guard.get_peers(heartbeat_timeout),
         }
     }
 
-    fn has_unflushed_inmem_state(read_guard: &ReadGuardSharedState) -> bool {
-        let state = &read_guard.sk.state;
+    fn has_unflushed_inmem_state(state: &TimelineState<FileStorage>) -> bool {
         state.inmem.commit_lsn > state.commit_lsn
             || state.inmem.backup_lsn > state.backup_lsn
             || state.inmem.peer_horizon_lsn > state.peer_horizon_lsn
@@ -449,7 +450,7 @@ async fn update_control_file_save(
         let mut write_guard = tli.write_shared_state().await;
         // this can be done in the background because it blocks manager task, but flush() should
         // be fast enough not to be a problem now
-        if let Err(e) = write_guard.sk.state.flush().await {
+        if let Err(e) = write_guard.sk.state_mut().flush().await {
             warn!("failed to save control file: {:?}", e);
         }
 
@@ -491,10 +492,17 @@ async fn update_wal_removal(
 
     if removal_horizon_segno > last_removed_segno {
         // we need to remove WAL
-        let remover = crate::wal_storage::Storage::remove_up_to(
-            &tli.read_shared_state().await.sk.wal_store,
-            removal_horizon_segno,
-        );
+        let remover = match tli.read_shared_state().await.sk {
+            StateSK::Loaded(ref sk) => {
+                crate::wal_storage::Storage::remove_up_to(&sk.wal_store, removal_horizon_segno)
+            }
+            StateSK::Offloaded(_) => {
+                // we can't remove WAL if it's not loaded
+                // TODO: log warning?
+                return;
+            }
+        };
+
         *wal_removal_task = Some(tokio::spawn(
             async move {
                 remover.await?;

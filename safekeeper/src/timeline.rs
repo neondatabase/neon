@@ -31,13 +31,13 @@ use crate::safekeeper::{
     INVALID_TERM,
 };
 use crate::send_wal::WalSenders;
-use crate::state::{TimelineMemState, TimelinePersistentState};
+use crate::state::{TimelineMemState, TimelinePersistentState, TimelineState};
 use crate::timeline_manager::ManagerCtl;
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self};
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
-use crate::metrics::FullTimelineInfo;
+use crate::metrics::{FullTimelineInfo, WalStorageMetrics};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
 use crate::{debug_dump, timeline_manager, wal_storage};
 use crate::{GlobalTimelines, SafeKeeperConf};
@@ -134,7 +134,7 @@ impl<'a> DerefMut for WriteGuardSharedState<'a> {
 impl<'a> Drop for WriteGuardSharedState<'a> {
     fn drop(&mut self) {
         let term_flush_lsn = TermLsn::from((self.guard.sk.get_term(), self.guard.sk.flush_lsn()));
-        let commit_lsn = self.guard.sk.state.inmem.commit_lsn;
+        let commit_lsn = self.guard.sk.state().inmem.commit_lsn;
 
         let _ = self.tli.term_flush_lsn_watch_tx.send_if_modified(|old| {
             if *old != term_flush_lsn {
@@ -163,10 +163,96 @@ impl<'a> Drop for WriteGuardSharedState<'a> {
     }
 }
 
+pub enum StateSK {
+    Loaded(SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>),
+    Offloaded(TimelineState<control_file::FileStorage>),
+}
+
+impl StateSK {
+    pub fn flush_lsn(&self) -> Lsn {
+        match self {
+            StateSK::Loaded(sk) => sk.wal_store.flush_lsn(),
+            StateSK::Offloaded(_) => todo!(),
+        }
+    }
+
+    pub fn state(&self) -> &TimelineState<control_file::FileStorage> {
+        match self {
+            StateSK::Loaded(sk) => &sk.state,
+            StateSK::Offloaded(ref s) => s,
+        }
+    }
+
+    pub fn state_mut(&mut self) -> &mut TimelineState<control_file::FileStorage> {
+        match self {
+            StateSK::Loaded(sk) => &mut sk.state,
+            StateSK::Offloaded(ref mut s) => s,
+        }
+    }
+
+    pub fn get_term(&self) -> Term {
+        self.state().acceptor_state.term
+    }
+
+    pub fn get_last_log_term(&self) -> Term {
+        self.state()
+            .acceptor_state
+            .get_last_log_term(self.flush_lsn())
+    }
+
+    fn close_wal_store(&mut self) {
+        if let StateSK::Loaded(sk) = self {
+            sk.wal_store.close();
+        }
+    }
+
+    pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
+        match self {
+            StateSK::Loaded(sk) => sk.record_safekeeper_info(sk_info).await,
+            StateSK::Offloaded(_) => todo!(),
+        }
+    }
+
+    pub fn term_start_lsn(&self) -> Lsn {
+        match self {
+            StateSK::Loaded(sk) => sk.term_start_lsn,
+            StateSK::Offloaded(_) => Lsn(0),
+        }
+    }
+
+    pub fn wal_storage_metrics(&self) -> WalStorageMetrics {
+        match self {
+            StateSK::Loaded(sk) => sk.wal_store.get_metrics(),
+            StateSK::Offloaded(_) => WalStorageMetrics::default(),
+        }
+    }
+
+    pub fn wal_storage_internal_state(&self) -> (Lsn, Lsn, Lsn, bool) {
+        match self {
+            StateSK::Loaded(sk) => sk.wal_store.internal_state(),
+            StateSK::Offloaded(_) => {
+                let flush_lsn = self.flush_lsn();
+                (flush_lsn, flush_lsn, flush_lsn, false)
+            }
+        }
+    }
+
+    pub fn safekeeper(
+        &mut self,
+    ) -> &mut SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage> {
+        match self {
+            StateSK::Loaded(sk) => sk,
+            StateSK::Offloaded(_) => {
+                panic!("safekeeper is offloaded, cannot be used")
+            }
+        }
+    }
+}
+
 /// Shared state associated with database instance
 pub struct SharedState {
     /// Safekeeper object
-    pub(crate) sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
+    pub(crate) sk: StateSK,
     /// In memory list containing state of peers sent in latest messages from them.
     pub(crate) peers_info: PeersInfo,
     // True value hinders old WAL removal; this is used by snapshotting. We
@@ -207,7 +293,7 @@ impl SharedState {
         let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
 
         Ok(Self {
-            sk,
+            sk: StateSK::Loaded(sk),
             peers_info: PeersInfo(vec![]),
             wal_removal_on_hold: false,
         })
@@ -225,14 +311,14 @@ impl SharedState {
             wal_storage::PhysicalStorage::new(ttid, timeline_dir, conf, &control_store)?;
 
         Ok(Self {
-            sk: SafeKeeper::new(control_store, wal_store, conf.my_id)?,
+            sk: StateSK::Loaded(SafeKeeper::new(control_store, wal_store, conf.my_id)?),
             peers_info: PeersInfo(vec![]),
             wal_removal_on_hold: false,
         })
     }
 
     pub(crate) fn get_wal_seg_size(&self) -> usize {
-        self.sk.state.server.wal_seg_size as usize
+        self.sk.state().server.wal_seg_size as usize
     }
 
     fn get_safekeeper_info(
@@ -247,20 +333,20 @@ impl SharedState {
                 tenant_id: ttid.tenant_id.as_ref().to_owned(),
                 timeline_id: ttid.timeline_id.as_ref().to_owned(),
             }),
-            term: self.sk.state.acceptor_state.term,
+            term: self.sk.state().acceptor_state.term,
             last_log_term: self.sk.get_last_log_term(),
             flush_lsn: self.sk.flush_lsn().0,
             // note: this value is not flushed to control file yet and can be lost
-            commit_lsn: self.sk.state.inmem.commit_lsn.0,
-            remote_consistent_lsn: self.sk.state.inmem.remote_consistent_lsn.0,
-            peer_horizon_lsn: self.sk.state.inmem.peer_horizon_lsn.0,
+            commit_lsn: self.sk.state().inmem.commit_lsn.0,
+            remote_consistent_lsn: self.sk.state().inmem.remote_consistent_lsn.0,
+            peer_horizon_lsn: self.sk.state().inmem.peer_horizon_lsn.0,
             safekeeper_connstr: conf
                 .advertise_pg_addr
                 .to_owned()
                 .unwrap_or(conf.listen_pg_addr.clone()),
             http_connstr: conf.listen_http_addr.to_owned(),
-            backup_lsn: self.sk.state.inmem.backup_lsn.0,
-            local_start_lsn: self.sk.state.local_start_lsn.0,
+            backup_lsn: self.sk.state().inmem.backup_lsn.0,
+            local_start_lsn: self.sk.state().local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),
             standby_horizon: standby_apply_lsn.0,
         }
@@ -354,7 +440,7 @@ impl Timeline {
 
         let shared_state = SharedState::restore(conf, &ttid)?;
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
-            watch::channel(shared_state.sk.state.commit_lsn);
+            watch::channel(shared_state.sk.state().commit_lsn);
         let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) = watch::channel(TermLsn::from((
             shared_state.sk.get_term(),
             shared_state.sk.flush_lsn(),
@@ -446,7 +532,7 @@ impl Timeline {
         fs::create_dir_all(&self.timeline_dir).await?;
 
         // Write timeline to disk and start background tasks.
-        if let Err(e) = shared_state.sk.state.flush().await {
+        if let Err(e) = shared_state.sk.state_mut().flush().await {
             // Bootstrap failed, cancel timeline and remove timeline directory.
             self.cancel(shared_state);
 
@@ -515,7 +601,7 @@ impl Timeline {
         self.cancel.cancel();
         // Close associated FDs. Nobody will be able to touch timeline data once
         // it is cancelled, so WAL storage won't be opened again.
-        shared_state.sk.wal_store.close();
+        shared_state.sk.close_wal_store();
     }
 
     /// Returns if timeline is cancelled.
@@ -555,12 +641,15 @@ impl Timeline {
     /// Returns state of the timeline.
     pub async fn get_state(&self) -> (TimelineMemState, TimelinePersistentState) {
         let state = self.read_shared_state().await;
-        (state.sk.state.inmem.clone(), state.sk.state.clone())
+        (
+            state.sk.state().inmem.clone(),
+            TimelinePersistentState::clone(state.sk.state()),
+        )
     }
 
     /// Returns latest backup_lsn.
     pub async fn get_wal_backup_lsn(&self) -> Lsn {
-        self.read_shared_state().await.sk.state.inmem.backup_lsn
+        self.read_shared_state().await.sk.state().inmem.backup_lsn
     }
 
     /// Sets backup_lsn to the given value.
@@ -570,7 +659,7 @@ impl Timeline {
         }
 
         let mut state = self.write_shared_state().await;
-        state.sk.state.inmem.backup_lsn = max(state.sk.state.inmem.backup_lsn, backup_lsn);
+        state.sk.state_mut().inmem.backup_lsn = max(state.sk.state().inmem.backup_lsn, backup_lsn);
         // we should check whether to shut down offloader, but this will be done
         // soon by peer communication anyway.
         Ok(())
@@ -612,7 +701,7 @@ impl Timeline {
 
     /// Returns flush_lsn.
     pub async fn get_flush_lsn(&self) -> Lsn {
-        self.read_shared_state().await.sk.wal_store.flush_lsn()
+        self.read_shared_state().await.sk.flush_lsn()
     }
 
     /// Gather timeline data for metrics.
@@ -631,11 +720,11 @@ impl Timeline {
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
-            epoch_start_lsn: state.sk.term_start_lsn,
-            mem_state: state.sk.state.inmem.clone(),
-            persisted_state: state.sk.state.clone(),
-            flush_lsn: state.sk.wal_store.flush_lsn(),
-            wal_storage: state.sk.wal_store.get_metrics(),
+            epoch_start_lsn: state.sk.term_start_lsn(),
+            mem_state: state.sk.state().inmem.clone(),
+            persisted_state: TimelinePersistentState::clone(state.sk.state()),
+            flush_lsn: state.sk.flush_lsn(),
+            wal_storage: state.sk.wal_storage_metrics(),
         })
     }
 
@@ -644,7 +733,7 @@ impl Timeline {
         let state = self.read_shared_state().await;
 
         let (write_lsn, write_record_lsn, flush_lsn, file_open) =
-            state.sk.wal_store.internal_state();
+            state.sk.wal_storage_internal_state();
 
         debug_dump::Memory {
             is_cancelled: self.is_cancelled(),
@@ -654,8 +743,8 @@ impl Timeline {
             active: self.broker_active.load(Ordering::Relaxed),
             num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
-            epoch_start_lsn: state.sk.term_start_lsn,
-            mem_state: state.sk.state.inmem.clone(),
+            epoch_start_lsn: state.sk.term_start_lsn(),
+            mem_state: state.sk.state().inmem.clone(),
             write_lsn,
             write_record_lsn,
             flush_lsn,
@@ -669,11 +758,15 @@ impl Timeline {
         f: impl FnOnce(&mut TimelinePersistentState) -> Result<T>,
     ) -> Result<T> {
         let mut state = self.write_shared_state().await;
-        let mut persistent_state = state.sk.state.start_change();
+        let mut persistent_state = state.sk.state_mut().start_change();
         // If f returns error, we abort the change and don't persist anything.
         let res = f(&mut persistent_state)?;
         // If persisting fails, we abort the change and return error.
-        state.sk.state.finish_change(&persistent_state).await?;
+        state
+            .sk
+            .state_mut()
+            .finish_change(&persistent_state)
+            .await?;
         Ok(res)
     }
 
@@ -721,8 +814,8 @@ impl FullAccessTimeline {
         }
         let shared_state = self.read_shared_state().await;
         if self.walreceivers.get_num() == 0 {
-            return shared_state.sk.state.inmem.commit_lsn == Lsn(0) || // no data at all yet
-            reported_remote_consistent_lsn >= shared_state.sk.state.inmem.commit_lsn;
+            return shared_state.sk.state().inmem.commit_lsn == Lsn(0) || // no data at all yet
+            reported_remote_consistent_lsn >= shared_state.sk.state().inmem.commit_lsn;
         }
         false
     }
@@ -730,11 +823,11 @@ impl FullAccessTimeline {
     /// Ensure that current term is t, erroring otherwise, and lock the state.
     pub async fn acquire_term(&self, t: Term) -> Result<ReadGuardSharedState> {
         let ss = self.read_shared_state().await;
-        if ss.sk.state.acceptor_state.term != t {
+        if ss.sk.state().acceptor_state.term != t {
             bail!(
                 "failed to acquire term {}, current term {}",
                 t,
-                ss.sk.state.acceptor_state.term
+                ss.sk.state().acceptor_state.term
             );
         }
         Ok(ss)
@@ -752,7 +845,7 @@ impl FullAccessTimeline {
         let mut rmsg: Option<AcceptorProposerMessage>;
         {
             let mut shared_state = self.write_shared_state().await;
-            rmsg = shared_state.sk.process_msg(msg).await?;
+            rmsg = shared_state.sk.safekeeper().process_msg(msg).await?;
 
             // if this is AppendResponse, fill in proper hot standby feedback.
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
@@ -782,8 +875,10 @@ impl FullAccessTimeline {
     /// Update in memory remote consistent lsn.
     pub async fn update_remote_consistent_lsn(&self, candidate: Lsn) {
         let mut shared_state = self.write_shared_state().await;
-        shared_state.sk.state.inmem.remote_consistent_lsn =
-            max(shared_state.sk.state.inmem.remote_consistent_lsn, candidate);
+        shared_state.sk.state_mut().inmem.remote_consistent_lsn = max(
+            shared_state.sk.state().inmem.remote_consistent_lsn,
+            candidate,
+        );
     }
 }
 

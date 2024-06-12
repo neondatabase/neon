@@ -306,7 +306,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     tli.write_shared_state()
         .await
         .sk
-        .state
+        .state_mut()
         .flush()
         .await
         .map_err(ApiError::InternalServerError)?;
