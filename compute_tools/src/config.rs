@@ -131,11 +131,13 @@ pub fn write_postgres_conf(
     Ok(())
 }
 
-pub fn with_compute_ctl_tmp_override(
+pub fn with_compute_ctl_tmp_override<F>(
     pgdata_path: &Path,
     options: &str,
-    exec: fn() -> Result<()>,
-) -> Result<()> {
+    exec: F,
+) -> Result<()> 
+    where F: FnOnce() -> Result<()>
+{
     let path = pgdata_path.join("compute_ctl_temp_override.conf");
     let mut file = File::create(path)?;
     write!(file, "{}", options)?;
