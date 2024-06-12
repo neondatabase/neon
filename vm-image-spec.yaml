@@ -304,7 +304,9 @@ files:
           - slot_name
         values: [restart_lsn]
         query: |
-          select slot_name, (restart_lsn - '0/0')::FLOAT8 from pg_replication_slots where slot_type = 'logical';
+          select slot_name, (restart_lsn - '0/0')::FLOAT8 as restart_lsn
+          from pg_replication_slots
+          where slot_type = 'logical';
 
       - metric_name: retained_wal
         type: gauge
