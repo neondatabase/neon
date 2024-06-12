@@ -134,7 +134,7 @@ impl CgroupWatcher {
 
                     skipped = 0;
 
-                    last_logged_memusage = history_log_buf.last().unwrap().clone();
+                    last_logged_memusage = *history_log_buf.last().unwrap();
                 } else {
                     skipped += 1;
                 }
@@ -264,7 +264,7 @@ impl MemoryStatus {
             diff = other.non_reclaimable - self.non_reclaimable;
         }
 
-        return diff < margin && diff < 128 * 1024 * 1024;
+        diff < margin && diff < 128 * 1024 * 1024
     }
 }
 
