@@ -3016,9 +3016,9 @@ impl Tenant {
                         .filter_map(
                             |(lsn, lease)| {
                                 if lease.is_expired() {
-                                    None
-                                } else {
                                     Some(*lsn)
+                                } else {
+                                    None
                                 }
                             },
                         )
@@ -4282,7 +4282,7 @@ mod tests {
     async fn test_lsn_leases() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_lsn_leases")?.load().await;
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
-
+        let end_lsn = Lsn(0x50);
         let timeline = tenant
             .create_test_timeline_with_layers(
                 TIMELINE_ID,
@@ -4295,17 +4295,16 @@ mod tests {
                     (Lsn(0x30), vec![(key, test_img("data key 1"))]),
                     (Lsn(0x40), vec![(key, test_img("data key 2"))]),
                 ],
-                Lsn(0x40),
+                end_lsn,
             )
             .await?;
 
-        let _ = timeline.make_lsn_lease(Lsn(0x30), &ctx)?;
+        let _ = timeline.make_lsn_lease(Lsn(0x20), &ctx)?;
 
-        {
-            let gc_info = timeline.gc_info.read().unwrap();
-            assert!(gc_info.leases.contains_key(&Lsn(0x30)));
-            info!("GcCutOff: {:?}", gc_info.cutoffs);
-        }
+        // Force set disk consistent lsn so we can get the cutoff at `end_lsn`.
+
+        timeline.force_set_disk_consistent_lsn(end_lsn);
+
         let res = tenant
             .gc_iteration(
                 Some(TIMELINE_ID),
@@ -4316,13 +4315,13 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(res.layers_needed_by_leases, 1);
+        // Keeping everything <= Lsn(0x20) b/c leases: {0/10, 0/20};
+        assert_eq!(res.layers_needed_by_leases, 2);
+        // Keeping 0/40 b/c it is the latest layer.
+        assert_eq!(res.layers_not_updated, 1);
+        // Removed 0/30.
+        assert_eq!(res.layers_removed, 1);
 
-        // 1. Setup tenant and timeline
-        // 2. Make LSN lease for an LSN.
-        // 3. Create two layers:
-        //   - one can be GC-ed, one cannot be GC-ed
-        // 4. Run GC, check `GCResult`.
         Ok(())
     }
 
