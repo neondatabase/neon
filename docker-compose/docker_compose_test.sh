@@ -15,7 +15,6 @@ set -eux -o pipefail
 
 COMPOSE_FILE='docker-compose.yml'
 cd $(dirname $0)
-docker compose --profile test-extensions -f $COMPOSE_FILE 
 COMPUTE_CONTAINER_NAME=docker-compose-compute-1
 TEST_CONTAINER_NAME=docker-compose-neon-test-extensions-1
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
