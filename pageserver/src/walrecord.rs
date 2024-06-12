@@ -50,8 +50,8 @@ pub enum NeonWalRecord {
         content: Option<Bytes>,
     },
 
-    #[cfg(test)]
     /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
+    #[cfg(test)]
     Test {
         /// Append a string to the image.
         append: String,
