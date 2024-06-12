@@ -3831,6 +3831,8 @@ pub(crate) mod harness {
                     tenant_conf.image_layer_creation_check_threshold,
                 ),
                 switch_aux_file_policy: Some(tenant_conf.switch_aux_file_policy),
+                #[cfg(feature = "testing")]
+                test_vm_bit_debug_logging: Some(tenant_conf.test_vm_bit_debug_logging),
             }
         }
     }

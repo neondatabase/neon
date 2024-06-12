@@ -383,6 +383,12 @@ impl PageServerNode {
                 .map(|x| x.parse::<AuxFilePolicy>())
                 .transpose()
                 .context("Failed to parse 'switch_aux_file_policy'")?,
+            #[cfg(feature = "testing")]
+            test_vm_bit_debug_logging: settings
+                .remove("test_vm_bit_debug_logging")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'test_vm_bit_debug_logging' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -506,6 +512,12 @@ impl PageServerNode {
                     .map(|x| x.parse::<AuxFilePolicy>())
                     .transpose()
                     .context("Failed to parse 'switch_aux_file_policy'")?,
+                #[cfg(feature = "testing")]
+                test_vm_bit_debug_logging: settings
+                    .remove("test_vm_bit_debug_logging")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'test_vm_bit_debug_logging' as bool")?,
             }
         };
 

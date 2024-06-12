@@ -322,6 +322,8 @@ pub struct TenantConfig {
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
+    #[cfg(feature = "testing")]
+    pub test_vm_bit_debug_logging: Option<bool>,
 }
 
 /// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`
