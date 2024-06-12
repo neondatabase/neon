@@ -299,21 +299,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}-${{ hashFiles('Dockerfile.build-tools') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
         uses: actions/cache@v4
         with:
           path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}-${{ hashFiles('Dockerfile.build-tools') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
         uses: actions/cache@v4
         with:
           path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}-${{ hashFiles('Dockerfile.build-tools') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
@@ -858,6 +858,26 @@ jobs:
           cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
           tags: |
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
+      
+      - name: Build neon extensions test image
+        if: matrix.version == 'v16'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            PG_VERSION=${{ matrix.version }}
+            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile.compute-node
+          target: neon-pg-ext-test
+          cache-from: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
+          cache-to: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
+          tags: |
+            neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
@@ -901,6 +921,13 @@ jobs:
           docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
                                              neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
                                              neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
+
+      - name: Create multi-arch neon-test-extensions image
+        if: matrix.version == 'v16'
+        run: |
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
 
       - name: Create multi-arch compute-tools image
         if: matrix.version == 'v16'
@@ -1020,7 +1047,7 @@ jobs:
             exit 1
           fi
 
-      - name: Verify docker-compose example
+      - name: Verify docker-compose example and test extensions
         timeout-minutes: 20
         run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
 

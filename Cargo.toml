@@ -13,7 +13,7 @@ members = [
     "safekeeper",
     "storage_broker",
     "storage_controller",
-    "s3_scrubber",
+    "storage_scrubber",
     "workspace_hack",
     "trace",
     "libs/compute_api",

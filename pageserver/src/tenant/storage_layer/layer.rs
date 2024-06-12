@@ -388,6 +388,23 @@ impl Layer {
             })
     }
 
+    /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
+    #[cfg(test)]
+    pub(crate) async fn load_key_values(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
+        let layer = self
+            .0
+            .get_or_maybe_download(true, Some(ctx))
+            .await
+            .map_err(|err| match err {
+                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                other => GetVectoredError::Other(anyhow::anyhow!(other)),
+            })?;
+        layer.load_key_values(&self.0, ctx).await
+    }
+
     /// Download the layer if evicted.
     ///
     /// Will not error when the layer is already downloaded.
@@ -1754,6 +1771,20 @@ impl DownloadedLayer {
                 i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
                     .await
             }
+        }
+    }
+
+    #[cfg(test)]
+    async fn load_key_values(
+        &self,
+        owner: &Arc<LayerInner>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
+        use LayerKind::*;
+
+        match self.get(owner, ctx).await? {
+            Delta(d) => d.load_key_values(ctx).await,
+            Image(i) => i.load_key_values(ctx).await,
         }
     }
 

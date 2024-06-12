@@ -78,17 +78,16 @@ pub(crate) fn branch_cleanup_and_check_errors(
                     index_part_generation: _index_part_generation,
                     s3_layers: _s3_layers,
                 } => {
-                    if !IndexPart::KNOWN_VERSIONS.contains(&index_part.get_version()) {
-                        result.errors.push(format!(
-                            "index_part.json version: {}",
-                            index_part.get_version()
-                        ))
+                    if !IndexPart::KNOWN_VERSIONS.contains(&index_part.version()) {
+                        result
+                            .errors
+                            .push(format!("index_part.json version: {}", index_part.version()))
                     }
 
-                    if &index_part.get_version() != IndexPart::KNOWN_VERSIONS.last().unwrap() {
+                    if &index_part.version() != IndexPart::KNOWN_VERSIONS.last().unwrap() {
                         result.warnings.push(format!(
                             "index_part.json version is not latest: {}",
-                            index_part.get_version()
+                            index_part.version()
                         ))
                     }
 

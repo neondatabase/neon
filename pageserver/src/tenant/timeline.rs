@@ -322,6 +322,8 @@ pub struct Timeline {
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
+    ///
+    /// The state is cleared upon freezing.
     write_lock: tokio::sync::Mutex<Option<TimelineWriterState>>,
 
     /// Used to avoid multiple `flush_loop` tasks running
@@ -1569,7 +1571,15 @@ impl Timeline {
     // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
     // polluting the span hierarchy.
     pub(crate) async fn freeze_and_flush0(&self) -> Result<(), FlushLayerError> {
-        let to_lsn = self.freeze_inmem_layer(false).await;
+        let to_lsn = {
+            // Freeze the current open in-memory layer. It will be written to disk on next
+            // iteration.
+            let mut g = self.write_lock.lock().await;
+
+            let to_lsn = self.get_last_record_lsn();
+            self.freeze_inmem_layer_at(to_lsn, &mut g).await;
+            to_lsn
+        };
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
 
@@ -1578,7 +1588,7 @@ impl Timeline {
     // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
     // ephemeral layer bytes has been breached.
     pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
-        let Ok(_write_guard) = self.write_lock.try_lock() else {
+        let Ok(mut write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
             return;
@@ -1655,24 +1665,35 @@ impl Timeline {
             self.last_freeze_at.load(),
             open_layer.get_opened_at(),
         ) {
-            match open_layer.info() {
+            let at_lsn = match open_layer.info() {
                 InMemoryLayerInfo::Frozen { lsn_start, lsn_end } => {
                     // We may reach this point if the layer was already frozen by not yet flushed: flushing
                     // happens asynchronously in the background.
                     tracing::debug!(
                         "Not freezing open layer, it's already frozen ({lsn_start}..{lsn_end})"
                     );
+                    None
                 }
                 InMemoryLayerInfo::Open { .. } => {
                     // Upgrade to a write lock and freeze the layer
                     drop(layers_guard);
                     let mut layers_guard = self.layers.write().await;
-                    layers_guard
-                        .try_freeze_in_memory_layer(current_lsn, &self.last_freeze_at)
+                    let froze = layers_guard
+                        .try_freeze_in_memory_layer(
+                            current_lsn,
+                            &self.last_freeze_at,
+                            &mut write_guard,
+                        )
                         .await;
+                    Some(current_lsn).filter(|_| froze)
+                }
+            };
+            if let Some(lsn) = at_lsn {
+                let res: Result<u64, _> = self.flush_frozen_layers(lsn);
+                if let Err(e) = res {
+                    tracing::info!("failed to flush frozen layer after background freeze: {e:#}");
                 }
             }
-            self.flush_frozen_layers();
         }
     }
 
@@ -2036,11 +2057,11 @@ impl Timeline {
             true
         } else if distance > 0 && opened_at.elapsed() >= self.get_checkpoint_timeout() {
             info!(
-                    "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
-                    projected_lsn,
-                    layer_size,
-                    opened_at.elapsed()
-                );
+                "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
+                projected_lsn,
+                layer_size,
+                opened_at.elapsed()
+            );
 
             true
         } else {
@@ -2381,7 +2402,7 @@ impl Timeline {
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
-                assert!(matches!(*flush_loop_state, FlushLoopState::Running{ ..}));
+                assert!(matches!(*flush_loop_state, FlushLoopState::Running{..}));
                 *flush_loop_state  = FlushLoopState::Exited;
                 Ok(())
             }
@@ -3644,28 +3665,21 @@ impl Timeline {
         self.last_record_lsn.advance(new_lsn);
     }
 
-    /// Whether there was a layer to freeze or not, return the value of get_last_record_lsn
-    /// before we attempted the freeze: this guarantees that ingested data is frozen up to this lsn (inclusive).
-    async fn freeze_inmem_layer(&self, write_lock_held: bool) -> Lsn {
-        // Freeze the current open in-memory layer. It will be written to disk on next
-        // iteration.
-
-        let _write_guard = if write_lock_held {
-            None
-        } else {
-            Some(self.write_lock.lock().await)
+    async fn freeze_inmem_layer_at(
+        &self,
+        at: Lsn,
+        write_lock: &mut tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
+    ) {
+        let frozen = {
+            let mut guard = self.layers.write().await;
+            guard
+                .try_freeze_in_memory_layer(at, &self.last_freeze_at, write_lock)
+                .await
         };
-
-        let to_lsn = self.get_last_record_lsn();
-        self.freeze_inmem_layer_at(to_lsn).await;
-        to_lsn
-    }
-
-    async fn freeze_inmem_layer_at(&self, at: Lsn) {
-        let mut guard = self.layers.write().await;
-        guard
-            .try_freeze_in_memory_layer(at, &self.last_freeze_at)
-            .await;
+        if frozen {
+            let now = Instant::now();
+            *(self.last_freeze_ts.write().unwrap()) = now;
+        }
     }
 
     /// Layer flusher task's main loop.
@@ -3759,18 +3773,14 @@ impl Timeline {
         }
     }
 
-    /// Request the flush loop to write out all frozen layers up to `to_lsn` as Delta L0 files to disk.
-    /// The caller is responsible for the freezing, e.g., [`Self::freeze_inmem_layer`].
+    /// Request the flush loop to write out all frozen layers up to `at_lsn` as Delta L0 files to disk.
+    /// The caller is responsible for the freezing, e.g., [`Self::freeze_inmem_layer_at`].
     ///
-    /// `last_record_lsn` may be higher than the highest LSN of a frozen layer: if this is the case,
-    /// it means no data will be written between the top of the highest frozen layer and to_lsn,
-    /// e.g. because this tenant shard has ingested up to to_lsn and not written any data locally for that part of the WAL.
-    async fn flush_frozen_layers_and_wait(
-        &self,
-        last_record_lsn: Lsn,
-    ) -> Result<(), FlushLayerError> {
-        let mut rx = self.layer_flush_done_tx.subscribe();
-
+    /// `at_lsn` may be higher than the highest LSN of a frozen layer: if this is the
+    /// case, it means no data will be written between the top of the highest frozen layer and
+    /// to_lsn, e.g. because this tenant shard has ingested up to to_lsn and not written any data
+    /// locally for that part of the WAL.
+    fn flush_frozen_layers(&self, at_lsn: Lsn) -> Result<u64, FlushLayerError> {
         // Increment the flush cycle counter and wake up the flush task.
         // Remember the new value, so that when we listen for the flush
         // to finish, we know when the flush that we initiated has
@@ -3785,13 +3795,18 @@ impl Timeline {
         self.layer_flush_start_tx.send_modify(|(counter, lsn)| {
             my_flush_request = *counter + 1;
             *counter = my_flush_request;
-            *lsn = std::cmp::max(last_record_lsn, *lsn);
+            *lsn = std::cmp::max(at_lsn, *lsn);
         });
 
+        Ok(my_flush_request)
+    }
+
+    async fn wait_flush_completion(&self, request: u64) -> Result<(), FlushLayerError> {
+        let mut rx = self.layer_flush_done_tx.subscribe();
         loop {
             {
                 let (last_result_counter, last_result) = &*rx.borrow();
-                if *last_result_counter >= my_flush_request {
+                if *last_result_counter >= request {
                     if let Err(err) = last_result {
                         // We already logged the original error in
                         // flush_loop. We cannot propagate it to the caller
@@ -3818,12 +3833,9 @@ impl Timeline {
         }
     }
 
-    fn flush_frozen_layers(&self) {
-        self.layer_flush_start_tx.send_modify(|(counter, lsn)| {
-            *counter += 1;
-
-            *lsn = std::cmp::max(*lsn, Lsn(self.last_freeze_at.load().0 - 1));
-        });
+    async fn flush_frozen_layers_and_wait(&self, at_lsn: Lsn) -> Result<(), FlushLayerError> {
+        let token = self.flush_frozen_layers(at_lsn)?;
+        self.wait_flush_completion(token).await
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
@@ -5537,10 +5549,26 @@ impl Timeline {
         all_data.sort();
         Ok(all_data)
     }
+
+    /// Get all historic layer descriptors in the layer map
+    #[cfg(test)]
+    pub(crate) async fn inspect_historic_layers(
+        self: &Arc<Timeline>,
+    ) -> anyhow::Result<Vec<super::storage_layer::PersistentLayerKey>> {
+        let mut layers = Vec::new();
+        let guard = self.layers.read().await;
+        for layer in guard.layer_map().iter_historic_layers() {
+            layers.push(layer.key());
+        }
+        Ok(layers)
+    }
 }
 
 type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
 
+/// Tracking writes ingestion does to a particular in-memory layer.
+///
+/// Cleared upon freezing a layer.
 struct TimelineWriterState {
     open_layer: Arc<InMemoryLayer>,
     current_size: u64,
@@ -5578,12 +5606,6 @@ impl Deref for TimelineWriter<'_> {
 
     fn deref(&self) -> &Self::Target {
         self.tl
-    }
-}
-
-impl Drop for TimelineWriter<'_> {
-    fn drop(&mut self) {
-        self.write_guard.take();
     }
 }
 
@@ -5669,16 +5691,15 @@ impl<'a> TimelineWriter<'a> {
     }
 
     async fn roll_layer(&mut self, freeze_at: Lsn) -> anyhow::Result<()> {
-        assert!(self.write_guard.is_some());
-
-        self.tl.freeze_inmem_layer_at(freeze_at).await;
-
-        let now = Instant::now();
-        *(self.last_freeze_ts.write().unwrap()) = now;
-
-        self.tl.flush_frozen_layers();
-
         let current_size = self.write_guard.as_ref().unwrap().current_size;
+
+        // self.write_guard will be taken by the freezing
+        self.tl
+            .freeze_inmem_layer_at(freeze_at, &mut self.write_guard)
+            .await;
+
+        self.tl.flush_frozen_layers(freeze_at)?;
+
         if current_size >= self.get_checkpoint_distance() * 2 {
             warn!("Flushed oversized open layer with size {}", current_size)
         }
@@ -5692,9 +5713,27 @@ impl<'a> TimelineWriter<'a> {
             return OpenLayerAction::Open;
         };
 
+        #[cfg(feature = "testing")]
+        if state.cached_last_freeze_at < self.tl.last_freeze_at.load() {
+            // this check and assertion are not really needed because
+            // LayerManager::try_freeze_in_memory_layer will always clear out the
+            // TimelineWriterState if something is frozen. however, we can advance last_freeze_at when there
+            // is no TimelineWriterState.
+            assert!(
+                state.open_layer.end_lsn.get().is_some(),
+                "our open_layer must be outdated"
+            );
+
+            // this would be a memory leak waiting to happen because the in-memory layer always has
+            // an index
+            panic!("BUG: TimelineWriterState held on to frozen in-memory layer.");
+        }
+
         if state.prev_lsn == Some(lsn) {
-            // Rolling mid LSN is not supported by downstream code.
+            // Rolling mid LSN is not supported by [downstream code].
             // Hence, only roll at LSN boundaries.
+            //
+            // [downstream code]: https://github.com/neondatabase/neon/pull/7993#discussion_r1633345422
             return OpenLayerAction::None;
         }
 
