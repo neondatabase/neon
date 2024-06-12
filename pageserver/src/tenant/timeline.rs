@@ -427,9 +427,12 @@ pub struct Timeline {
     /// Indicate whether aux file v2 storage is enabled.
     pub(crate) last_aux_file_policy: AtomicAuxFilePolicy,
 
-    #[cfg(test)]
     /// Some test cases directly place keys into the timeline without actually modifying the directory
-    /// keys (i.e., DB_DIR). Test cases will put such keyspaces here.
+    /// keys (i.e., DB_DIR). The test cases creating such keys will put the keyspaces here, so that
+    /// these keys won't get garbage-collected during compaction/GC. This field only modifies the dense
+    /// keyspace return value of `collect_keyspace`. For sparse keyspaces, use AUX keys for testing, and
+    /// in the future, add `extra_test_sparse_keyspace` if necessary.
+    #[cfg(test)]
     pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
 }
 

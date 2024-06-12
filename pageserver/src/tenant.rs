@@ -6227,6 +6227,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        assert_eq!(base_key.field1, AUX_KEY_PREFIX); // in case someone accidentally changed the prefix...
         let mut test_key = base_key;
         let mut lsn = Lsn(0x10);
 
