@@ -6703,7 +6703,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_images() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_simple_bottom_most_compaction")?;
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction_images")?;
         let (tenant, ctx) = harness.load().await;
 
         fn get_key(id: u32) -> Key {
@@ -6875,35 +6875,35 @@ mod tests {
             (
                 get_key(1),
                 Lsn(0x20),
-                Value::WalRecord(NeonWalRecord::Test {
-                    append: ",0x20".to_string(),
-                    clear: false,
-                }),
+                Value::WalRecord(NeonWalRecord::wal_append(",0x20")),
             ),
             (
                 get_key(1),
                 Lsn(0x30),
-                Value::WalRecord(NeonWalRecord::Test {
-                    append: ",0x30".to_string(),
-                    clear: false,
-                }),
+                Value::WalRecord(NeonWalRecord::wal_append(",0x30")),
             ),
             (get_key(2), Lsn(0x10), Value::Image("0x10".into())),
             (
                 get_key(2),
                 Lsn(0x20),
-                Value::WalRecord(NeonWalRecord::Test {
-                    append: ",0x20".to_string(),
-                    clear: false,
-                }),
+                Value::WalRecord(NeonWalRecord::wal_append(",0x20")),
             ),
             (
                 get_key(2),
                 Lsn(0x30),
-                Value::WalRecord(NeonWalRecord::Test {
-                    append: ",0x30".to_string(),
-                    clear: false,
-                }),
+                Value::WalRecord(NeonWalRecord::wal_append(",0x30")),
+            ),
+            (get_key(3), Lsn(0x10), Value::Image("0x10".into())),
+            (
+                get_key(3),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_clear()),
+            ),
+            (get_key(4), Lsn(0x10), Value::Image("0x10".into())),
+            (
+                get_key(4),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_init()),
             ),
         ];
         let image1 = vec![(get_key(1), "0x10".into())];
@@ -6928,6 +6928,8 @@ mod tests {
             tline.get(get_key(2), Lsn(0x50), &ctx).await?,
             Bytes::from_static(b"0x10,0x20,0x30")
         );
+        // assert_eq!(tline.get(get_key(3), Lsn(0x50), &ctx).await?, Bytes::new());
+        // assert_eq!(tline.get(get_key(4), Lsn(0x50), &ctx).await?, Bytes::new());
 
         Ok(())
     }

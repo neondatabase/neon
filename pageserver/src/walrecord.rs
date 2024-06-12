@@ -52,7 +52,16 @@ pub enum NeonWalRecord {
 
     #[cfg(test)]
     /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
-    Test { append: String, clear: bool },
+    Test {
+        /// Append a string to the image.
+        append: String,
+        /// Clear the image before appending.
+        clear: bool,
+        /// Treat this record as an init record. `clear` should be set to true if this field is set
+        /// to true. This record does not need the history WALs to reconstruct. See [`NeonWalRecord::will_init`] and
+        /// its references in `timeline.rs`.
+        will_init: bool,
+    },
 }
 
 impl NeonWalRecord {
@@ -63,9 +72,36 @@ impl NeonWalRecord {
         match self {
             NeonWalRecord::Postgres { will_init, rec: _ } => *will_init,
             #[cfg(test)]
-            NeonWalRecord::Test { clear, .. } => *clear,
+            NeonWalRecord::Test { will_init, .. } => *will_init,
             // None of the special neon record types currently initialize the page
             _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wal_append(s: impl AsRef<str>) -> Self {
+        Self::Test {
+            append: s.as_ref().to_string(),
+            clear: false,
+            will_init: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wal_clear() -> Self {
+        Self::Test {
+            append: "".to_string(),
+            clear: true,
+            will_init: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wal_init() -> Self {
+        Self::Test {
+            append: "".to_string(),
+            clear: true,
+            will_init: true,
         }
     }
 }

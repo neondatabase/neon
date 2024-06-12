@@ -245,12 +245,18 @@ pub(crate) fn apply_in_neon(
             dir.ser_into(&mut writer)?;
         }
         #[cfg(test)]
-        NeonWalRecord::Test { append, clear } => {
+        NeonWalRecord::Test {
+            append,
+            clear,
+            will_init,
+        } => {
+            if *will_init {
+                assert!(*clear, "init record must be clear to ensure correctness");
+            }
             if *clear {
                 page.clear();
-            } else {
-                page.put_slice(append.as_bytes());
             }
+            page.put_slice(append.as_bytes());
         }
     }
     Ok(())
