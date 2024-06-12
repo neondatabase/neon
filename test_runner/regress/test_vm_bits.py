@@ -292,6 +292,18 @@ def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
     # already truncated away.
     #
     # ERROR: could not access status of transaction 1027
+
+    # the select() below fails occassionally at get_impl="vectored" validation
+
+    env.pageserver.stop()
+    env.pageserver.start()
+    time.sleep(2)
+    env.pageserver.http_client().patch_tenant_config_client_side(tenant_id, {"test_vm_bit_debug_logging": True}, {})
+    endpoint.stop(mode="immediate")
+    endpoint.start()
+    pg_conn = endpoint.connect()
+    cur = pg_conn.cursor()
+    # cur.execute("select clear_buffer_cache()")
     cur.execute("select xmin, xmax, * from vmtest_lock where id = 40000 for update")
     tup = cur.fetchall()
     log.info(f"tuple = {tup}")
