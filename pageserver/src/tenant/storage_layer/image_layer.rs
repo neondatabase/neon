@@ -1336,7 +1336,7 @@ mod test {
                 .await
                 .unwrap();
         let img_layer = resident_layer.as_image(&ctx).await.unwrap();
-        for batch_size in [1, 2, 4, 8] {
+        for batch_size in [1, 2, 4, 8, 3, 7, 13] {
             println!("running with batch_size={batch_size}");
             let mut iter = img_layer.iter(&ctx);
             iter.batch_size = batch_size;
