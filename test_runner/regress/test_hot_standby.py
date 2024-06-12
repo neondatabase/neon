@@ -300,7 +300,7 @@ def test_replica_query_race(neon_simple_env: NeonEnv):
             p_cur.execute("CREATE TABLE test AS SELECT 0 AS counter")
 
     standby_ep = env.endpoints.new_replica_start(origin=primary_ep, endpoint_id="standby")
-    time.sleep(1)
+    wait_replica_caughtup(primary_ep, standby_ep)
 
     # In primary, run a lot of UPDATEs on a single page
     finished = False
