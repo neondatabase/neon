@@ -35,10 +35,6 @@ from performance.pageserver.util import (
 @pytest.mark.timeout(
     10000
 )  # TODO: this value is just "a really high number"; have this per instance type
-@pytest.mark.skipif(
-    os.getenv("CI", "false") == "true",
-    reason="The test if flaky on CI: https://github.com/neondatabase/neon/issues/6724",
-)
 def test_pageserver_max_throughput_getpage_at_latest_lsn(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
