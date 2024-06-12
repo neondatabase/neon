@@ -377,6 +377,9 @@ pub struct TenantConf {
     /// There is a `last_aux_file_policy` flag which gets persisted in `index_part.json` once the first aux
     /// file is written.
     pub switch_aux_file_policy: AuxFilePolicy,
+
+    #[cfg(feature = "testing")]
+    pub test_vm_bit_debug_logging: bool,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -476,6 +479,11 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
+
+    #[cfg(feature = "testing")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub test_vm_bit_debug_logging: Option<bool>,
 }
 
 impl TenantConfOpt {
@@ -538,6 +546,10 @@ impl TenantConfOpt {
             switch_aux_file_policy: self
                 .switch_aux_file_policy
                 .unwrap_or(global_conf.switch_aux_file_policy),
+            #[cfg(feature = "testing")]
+            test_vm_bit_debug_logging: self
+                .test_vm_bit_debug_logging
+                .unwrap_or(global_conf.test_vm_bit_debug_logging),
         }
     }
 }
@@ -582,6 +594,8 @@ impl Default for TenantConf {
             timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
             switch_aux_file_policy: AuxFilePolicy::default_tenant_config(),
+            #[cfg(feature = "testing")]
+            test_vm_bit_debug_logging: false,
         }
     }
 }
@@ -657,6 +671,8 @@ impl From<TenantConfOpt> for models::TenantConfig {
             timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
             switch_aux_file_policy: value.switch_aux_file_policy,
+            #[cfg(feature = "testing")]
+            test_vm_bit_debug_logging: value.test_vm_bit_debug_logging,
         }
     }
 }

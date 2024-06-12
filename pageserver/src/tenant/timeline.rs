@@ -924,16 +924,59 @@ impl Timeline {
                 let mut reconstruct_state = ValuesReconstructState::new();
 
                 // Only add the cached image to the reconstruct state when it exists.
+                let cached_page_img_lsn = cached_page_img.as_ref().map(|(lsn, _)| *lsn);
                 if cached_page_img.is_some() {
                     let mut key_state = VectoredValueReconstructState::default();
                     key_state.img = cached_page_img;
                     reconstruct_state.keys.insert(key, Ok(key_state));
                 }
 
+                let debug_log = {
+                    #[cfg(feature = "testing")]
+                    {
+                        self.get_test_vm_bit_debug_logging()
+                    }
+                    #[cfg(not(feature = "testing"))]
+                    {
+                        false
+                    }
+                };
+
+                if debug_log {
+                    tracing::info!(%key, %lsn, ?cached_page_img_lsn, "debug-logging page reconstruction");
+                }
+
+                if debug_log {
+                    tracing::info!(
+                        location = "before vectored get",
+                        "debug-logging page reconstruction"
+                    );
+                    self.layers
+                        .read()
+                        .await
+                        .layer_map()
+                        .dump(false, ctx)
+                        .await
+                        .unwrap();
+                }
+
                 let vectored_res = self
                     .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
                     .await;
 
+                if debug_log {
+                    tracing::info!(
+                        location = "before validation",
+                        "debug-logging page reconstruction"
+                    );
+                    self.layers
+                        .read()
+                        .await
+                        .layer_map()
+                        .dump(false, ctx)
+                        .await
+                        .unwrap();
+                }
                 if self.conf.validate_vectored_get {
                     self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
                         .await;
@@ -2196,6 +2239,15 @@ impl Timeline {
             .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
     }
 
+    #[cfg(feature = "testing")]
+    fn get_test_vm_bit_debug_logging(&self) -> bool {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .test_vm_bit_debug_logging
+            .unwrap_or(self.conf.default_tenant_conf.test_vm_bit_debug_logging)
+    }
+
     fn get_image_layer_creation_check_threshold(&self) -> u8 {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2211,6 +2263,10 @@ impl Timeline {
     pub(super) fn tenant_conf_updated(&self, new_conf: &TenantConfOpt) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
+        #[cfg(feature = "testing")]
+        {
+            info!(?new_conf.test_vm_bit_debug_logging, "updating tenant conf");
+        }
 
         // The threshold is embedded in the metric. So, we need to update it.
         {
