@@ -322,14 +322,15 @@ files:
         help: 'Whether or not the replication slot wal_status is lost'
         key_labels:
           - slot_name
-        values: [wal_status_is_lost]
+        values: [wal_is_lost]
         query: |
           SELECT slot_name,
           CASE
             WHEN wal_status = 'lost' THEN 1
             ELSE 0
-          END AS wal_status_is_lost
+          END AS wal_is_lost
           FROM pg_replication_slots;
+
   - filename: neon_collector_autoscaling.yml
     content: |
       collector_name: neon_collector_autoscaling
