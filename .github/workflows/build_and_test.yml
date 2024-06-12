@@ -447,6 +447,7 @@ jobs:
         with:
           build_type: ${{ matrix.build_type }}
           test_selection: regress
+          extra_params: -k test_vm_bit_clear_on_heap_lock_blackbox
           needs_postgres_source: true
           run_with_real_s3: true
           real_s3_bucket: neon-github-ci-tests
@@ -858,7 +859,7 @@ jobs:
           cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
           tags: |
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
-      
+
       - name: Build neon extensions test image
         if: matrix.version == 'v16'
         uses: docker/build-push-action@v5

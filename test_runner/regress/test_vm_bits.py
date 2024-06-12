@@ -1,6 +1,7 @@
 import time
 from contextlib import closing
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, fork_at_current_lsn
 from fixtures.utils import query_scalar
@@ -193,6 +194,7 @@ def test_vm_bit_clear_on_heap_lock_whitebox(neon_env_builder: NeonEnvBuilder):
     assert vm_page_at_pageserver == vm_page_in_cache
 
 
+@pytest.mark.repeat(10)
 def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
     """
     The previous test is enough to verify the bug that was fixed in
