@@ -134,7 +134,7 @@ impl CgroupWatcher {
 
                     skipped = 0;
 
-                    last_logged_memusage = history_log_buf.last().unwrap().cloned();
+                    last_logged_memusage = history_log_buf.last().unwrap().clone();
                 } else {
                     skipped += 1;
                 }
