@@ -29,6 +29,7 @@ def test_oid_overflow(neon_env_builder: NeonEnvBuilder):
     oid = cur.fetchall()[0][0]
     log.info(f"t1.relfilenode={oid}")
 
+    cur.execute("set statement_timeout=0")
     cur.execute(f"select test_consume_oids({oid-1})")
     cur.execute("VACUUM FULL t2")
 
