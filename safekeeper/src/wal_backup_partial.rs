@@ -27,7 +27,12 @@ use tracing::{debug, error, info, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
-    metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS}, safekeeper::Term, timeline::FullAccessTimeline, timeline_manager::StateSnapshot, wal_backup::{self, remote_timeline_path}, SafeKeeperConf
+    metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
+    safekeeper::Term,
+    timeline::FullAccessTimeline,
+    timeline_manager::StateSnapshot,
+    wal_backup::{self, remote_timeline_path},
+    SafeKeeperConf,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -281,11 +286,14 @@ pub fn needs_uploading(state: &StateSnapshot, uploaded: &Option<PartialRemoteSeg
 
 /// Main task for partial backup. It waits for the flush_lsn to change and then uploads the
 /// partial segment to the remote storage. It also does garbage collection of old segments.
-/// 
+///
 /// When there is nothing more to do and the last segment was successfully uploaded, the task
 /// returns PartialRemoteSegment, to signal readiness for offloading the timeline.
 #[instrument(name = "Partial backup", skip_all, fields(ttid = %tli.ttid))]
-pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) -> Option<PartialRemoteSegment> {
+pub async fn main_task(
+    tli: FullAccessTimeline,
+    conf: SafeKeeperConf,
+) -> Option<PartialRemoteSegment> {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
 

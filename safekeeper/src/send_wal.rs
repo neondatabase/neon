@@ -458,7 +458,8 @@ impl SafekeeperPostgresHandler {
 
         let mut sender = WalSender {
             pgb,
-            tli: tli.clone(),
+            // should succeed since we're already holding another guard
+            tli: tli.full_access_guard().await?,
             appname,
             start_pos,
             end_pos,

@@ -269,11 +269,11 @@ impl SafekeeperPostgresHandler {
                     .get_walreceivers()
                     .pageserver_feedback_tx
                     .subscribe();
-            *tli = Some(timeline.clone());
+            *tli = Some(timeline.full_access_guard().await?);
 
             tokio::select! {
                 // todo: add read|write .context to these errors
-                r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline.clone(), next_msg) => r,
+                r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline, next_msg) => r,
                 r = network_write(pgb, reply_rx, pageserver_feedback_rx) => r,
             }
         } else {

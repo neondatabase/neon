@@ -205,7 +205,12 @@ async fn recovery_main_loop(tli: FullAccessTimeline, conf: SafeKeeperConf) {
                     "starting recovery from donor {}: {}",
                     donor.sk_id, recovery_needed_info
                 );
-                match recover(tli.clone(), donor, &conf).await {
+                let res = tli.full_access_guard().await;
+                if let Err(e) = res {
+                    warn!("failed to obtain guard: {}", e);
+                    continue;
+                }
+                match recover(res.unwrap(), donor, &conf).await {
                     // Note: 'write_wal rewrites WAL written before' error is
                     // expected here and might happen if compute and recovery
                     // concurrently write the same data. Eventually compute
@@ -364,10 +369,10 @@ async fn recovery_stream(
     // As in normal walreceiver, do networking and writing to disk in parallel.
     let (msg_tx, msg_rx) = channel(MSG_QUEUE_SIZE);
     let (reply_tx, reply_rx) = channel(REPLY_QUEUE_SIZE);
-    let wa = WalAcceptor::spawn(tli.clone(), msg_rx, reply_tx, None);
+    let wa = WalAcceptor::spawn(tli.full_access_guard().await?, msg_rx, reply_tx, None);
 
     let res = tokio::select! {
-        r = network_io(physical_stream, msg_tx, donor.clone(), tli.clone(), conf.clone()) => r,
+        r = network_io(physical_stream, msg_tx, donor.clone(), tli, conf.clone()) => r,
         r = read_replies(reply_rx, donor.term) => r.map(|()| None),
     };
 

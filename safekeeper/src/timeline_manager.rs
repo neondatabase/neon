@@ -4,6 +4,7 @@
 //! It also can manage some reactive state, like should the timeline be active for broker pushes or not.
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -14,7 +15,17 @@ use tracing::{info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
 
 use crate::{
-    control_file::Storage, metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL}, recovery::recovery_main, remove_wal::calc_horizon_lsn, safekeeper::Term, send_wal::WalSenders, timeline::{PeerInfo, ReadGuardSharedState, Timeline}, timelines_set::{TimelineSetGuard, TimelinesSet}, wal_backup::{self, WalBackupTaskHandle}, wal_backup_partial::{self, PartialRemoteSegment}, SafeKeeperConf
+    control_file::Storage,
+    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
+    recovery::recovery_main,
+    remove_wal::calc_horizon_lsn,
+    safekeeper::Term,
+    send_wal::WalSenders,
+    timeline::{PeerInfo, ReadGuardSharedState, Timeline},
+    timelines_set::{TimelineSetGuard, TimelinesSet},
+    wal_backup::{self, WalBackupTaskHandle},
+    wal_backup_partial::{self, PartialRemoteSegment},
+    SafeKeeperConf,
 };
 
 pub struct StateSnapshot {
@@ -74,6 +85,90 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 /// How often to save the control file if the is no other activity.
 const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
 
+pub enum ManagerCtlMessage {
+    /// Request to get a guard for FullAccessTimeline, with WAL files available locally.
+    GuardRequest(tokio::sync::oneshot::Sender<AccessGuard>),
+    /// Request to drop the guard.
+    GuardDrop(u64),
+}
+
+impl std::fmt::Debug for ManagerCtlMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ManagerCtlMessage::GuardRequest(_) => write!(f, "GuardRequest"),
+            ManagerCtlMessage::GuardDrop(id) => write!(f, "GuardDrop({})", id),
+        }
+    }
+}
+
+pub struct ManagerCtl {
+    manager_ch: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
+
+    // this is used to initialize manager, it will be moved out in bootstrap().
+    init_manager_rx:
+        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>>>,
+}
+
+impl Default for ManagerCtl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ManagerCtl {
+    pub fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            manager_ch: tx,
+            init_manager_rx: std::sync::Mutex::new(Some(rx)),
+        }
+    }
+
+    /// Issue a new guard and wait for manager to prepare the timeline.
+    pub async fn full_access_guard(&self) -> anyhow::Result<AccessGuard> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.manager_ch.send(ManagerCtlMessage::GuardRequest(tx))?;
+
+        // wait for the manager to respond with the guard
+        rx.await
+            .map_err(|e| anyhow::anyhow!("failed to wait for manager guard: {:?}", e))
+    }
+
+    /// Must be called exactly once to bootstrap the manager.
+    pub fn bootstrap_manager(
+        &self,
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
+        tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
+    ) {
+        let rx = self
+            .init_manager_rx
+            .lock()
+            .expect("mutex init_manager_rx poisoned")
+            .take()
+            .expect("manager already bootstrapped");
+
+        (rx, self.manager_ch.clone())
+    }
+}
+
+pub struct AccessGuard {
+    manager_ch: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
+    guard_id: u64,
+}
+
+impl Drop for AccessGuard {
+    fn drop(&mut self) {
+        // notify the manager that the guard is dropped
+        let res = self
+            .manager_ch
+            .send(ManagerCtlMessage::GuardDrop(self.guard_id));
+        if let Err(e) = res {
+            warn!("failed to send GuardDrop message: {:?}", e);
+        }
+    }
+}
+
 /// This task gets spawned alongside each timeline and is responsible for managing the timeline's
 /// background tasks.
 /// Be careful, this task is not respawned on panic, so it should not panic.
@@ -82,6 +177,8 @@ pub async fn main_task(
     tli: Arc<Timeline>,
     conf: SafeKeeperConf,
     broker_active_set: Arc<TimelinesSet>,
+    mut manager_rx: tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
+    manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
 ) {
     scopeguard::defer! {
         if tli.is_cancelled() {
@@ -111,6 +208,10 @@ pub async fn main_task(
     // partial backup task
     let mut partial_backup_task: Option<JoinHandle<Option<PartialRemoteSegment>>> = None;
     let mut partial_backup_uploaded: Option<PartialRemoteSegment> = None;
+
+    // active FullAccessTimeline guards
+    let mut next_guard_id: u64 = 0;
+    let mut guard_ids: HashSet<u64> = HashSet::new();
 
     // Start recovery task which always runs on the timeline.
     if conf.peer_recovery_enabled {
@@ -223,6 +324,35 @@ pub async fn main_task(
                     }
                     Err(e) => {
                         warn!("partial backup task panicked: {:?}", e);
+                    }
+                }
+            }
+
+            res = manager_rx.recv() => {
+                info!("received manager message: {:?}", res);
+                match res {
+                    Some(ManagerCtlMessage::GuardRequest(tx)) => {
+                        let guard_id = next_guard_id;
+                        next_guard_id += 1;
+                        guard_ids.insert(guard_id);
+
+                        info!("issued a new guard {}", guard_id);
+
+                        let guard = AccessGuard {
+                            manager_ch: manager_tx.clone(),
+                            guard_id,
+                        };
+                        if tx.send(guard).is_err() {
+                            warn!("failed to reply with a guard {}", guard_id);
+                        }
+                    }
+                    Some(ManagerCtlMessage::GuardDrop(guard_id)) => {
+                        info!("dropping guard {}", guard_id);
+                        assert!(guard_ids.remove(&guard_id));
+                    }
+                    None => {
+                        // can't happen, we're holding the sender
+                        unreachable!();
                     }
                 }
             }
@@ -416,7 +546,7 @@ async fn update_partial_backup(
         return;
     }
 
-    if !wal_backup_partial::needs_uploading(&state, &partial_backup_uploaded) {
+    if !wal_backup_partial::needs_uploading(state, partial_backup_uploaded) {
         // nothing to upload
         return;
     }

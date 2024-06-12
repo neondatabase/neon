@@ -32,6 +32,7 @@ use crate::safekeeper::{
 };
 use crate::send_wal::WalSenders;
 use crate::state::{TimelineMemState, TimelinePersistentState};
+use crate::timeline_manager::ManagerCtl;
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self};
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
@@ -335,6 +336,7 @@ pub struct Timeline {
     walsenders: Arc<WalSenders>,
     walreceivers: Arc<WalReceivers>,
     timeline_dir: Utf8PathBuf,
+    manager_ctl: ManagerCtl,
 
     /// Delete/cancel will trigger this, background tasks should drop out as soon as it fires
     pub(crate) cancel: CancellationToken,
@@ -373,6 +375,7 @@ impl Timeline {
             walreceivers,
             cancel: CancellationToken::default(),
             timeline_dir: get_timeline_dir(conf, &ttid),
+            manager_ctl: ManagerCtl::new(),
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
@@ -409,6 +412,7 @@ impl Timeline {
             walreceivers,
             cancel: CancellationToken::default(),
             timeline_dir: get_timeline_dir(conf, &ttid),
+            manager_ctl: ManagerCtl::new(),
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
@@ -465,12 +469,16 @@ impl Timeline {
         conf: &SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
     ) {
+        let (rx, tx) = self.manager_ctl.bootstrap_manager();
+
         // Start manager task which will monitor timeline state and update
         // background tasks.
         tokio::spawn(timeline_manager::main_task(
             self.clone(),
             conf.clone(),
             broker_active_set,
+            rx,
+            tx,
         ));
     }
 
@@ -670,22 +678,27 @@ impl Timeline {
     }
 
     /// Get the timeline guard for reading/writing WAL files.
-    /// TODO: if WAL files are not present on disk (evicted), they will be
+    /// TODO(TODO): if WAL files are not present on disk (evicted), they will be
     /// downloaded from S3. Also there will logic for preventing eviction
     /// while someone is holding FullAccessTimeline guard.
     pub async fn full_access_guard(self: &Arc<Self>) -> Result<FullAccessTimeline> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
-        Ok(FullAccessTimeline { tli: self.clone() })
+
+        let _guard = self.manager_ctl.full_access_guard().await?;
+        Ok(FullAccessTimeline {
+            tli: self.clone(),
+            _guard,
+        })
     }
 }
 
 /// This is a guard that allows to read/write disk timeline state.
 /// All tasks that are using the disk should use this guard.
-#[derive(Clone)]
 pub struct FullAccessTimeline {
     pub tli: Arc<Timeline>,
+    _guard: timeline_manager::AccessGuard,
 }
 
 impl Deref for FullAccessTimeline {
