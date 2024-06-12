@@ -330,7 +330,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
         info!("request succeeded, processing the body");
         return Ok(response.json().await?);
     }
-    let s = response.text().await?;
+    let s = response.bytes().await?;
     // Log plaintext to be able to detect, whether there are some cases not covered by the error struct.
     info!("response_error plaintext: {:?}", s);
 
