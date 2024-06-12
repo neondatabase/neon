@@ -786,18 +786,15 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Drain requested for node which doesn't exist.")
             }
 
-            let can_fill = node_to_fill_descs
-                .iter()
-                .filter(|desc| {
-                    matches!(desc.availability, NodeAvailabilityWrapper::Active)
-                        && matches!(
-                            desc.scheduling,
-                            NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Filling
-                        )
-                })
-                .any(|_| true);
+            node_to_fill_descs.retain(|desc| {
+                matches!(desc.availability, NodeAvailabilityWrapper::Active)
+                    && matches!(
+                        desc.scheduling,
+                        NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Filling
+                    )
+            });
 
-            if !can_fill {
+            if node_to_fill_descs.is_empty() {
                 anyhow::bail!("There are no nodes to drain to")
             }
 
