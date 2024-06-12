@@ -181,9 +181,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::MissingKey(e) => {
                 ApiError::InternalServerError(anyhow::anyhow!("{e}"))
             }
-            PageReconstructError::Cancelled => {
-                ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
-            }
+            PageReconstructError::Cancelled => ApiError::Cancelled,
             PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
@@ -1073,7 +1071,7 @@ async fn tenant_delete_handler(
 
     let state = get_state(&request);
 
-    state
+    let status = state
         .tenant_manager
         .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
         .instrument(info_span!("tenant_delete_handler",
@@ -1082,7 +1080,14 @@ async fn tenant_delete_handler(
         ))
         .await?;
 
-    json_response(StatusCode::ACCEPTED, ())
+    // Callers use 404 as success for deletions, for historical reasons.
+    if status == StatusCode::NOT_FOUND {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Deletion complete").into(),
+        ));
+    }
+
+    json_response(status, ())
 }
 
 /// HTTP endpoint to query the current tenant_size of a tenant.
@@ -2424,6 +2429,25 @@ async fn list_aux_files(
     json_response(StatusCode::OK, files)
 }
 
+async fn perf_info(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let result = timeline.perf_info().await;
+
+    json_response(StatusCode::OK, result)
+}
+
 async fn ingest_aux_files(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -2851,5 +2875,9 @@ pub fn make_router(
             |r| testing_api_handler("list_aux_files", r, list_aux_files),
         )
         .post("/v1/top_tenants", |r| api_handler(r, post_top_tenants))
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/perf_info",
+            |r| testing_api_handler("perf_info", r, perf_info),
+        )
         .any(handler_404))
 }

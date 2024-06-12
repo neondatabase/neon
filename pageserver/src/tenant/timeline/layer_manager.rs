@@ -1,4 +1,5 @@
 use anyhow::{bail, ensure, Context, Result};
+use itertools::Itertools;
 use pageserver_api::shard::TenantShardId;
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
@@ -19,6 +20,8 @@ use crate::{
         },
     },
 };
+
+use super::TimelineWriterState;
 
 /// Provides semantic APIs to manipulate the layer map.
 #[derive(Default)]
@@ -119,18 +122,20 @@ impl LayerManager {
         Ok(layer)
     }
 
-    /// Called from `freeze_inmem_layer`, returns true if successfully frozen.
-    pub(crate) async fn try_freeze_in_memory_layer(
+    /// Tries to freeze an open layer and also manages clearing the TimelineWriterState.
+    ///
+    /// Returns true if anything was frozen.
+    pub(super) async fn try_freeze_in_memory_layer(
         &mut self,
         lsn: Lsn,
         last_freeze_at: &AtomicLsn,
-    ) {
+        write_lock: &mut tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
+    ) -> bool {
         let Lsn(last_record_lsn) = lsn;
         let end_lsn = Lsn(last_record_lsn + 1);
 
-        if let Some(open_layer) = &self.layer_map.open_layer {
+        let froze = if let Some(open_layer) = &self.layer_map.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
-            // Does this layer need freezing?
             open_layer.freeze(end_lsn).await;
 
             // The layer is no longer open, update the layer map to reflect this.
@@ -138,11 +143,25 @@ impl LayerManager {
             self.layer_map.frozen_layers.push_back(open_layer_rc);
             self.layer_map.open_layer = None;
             self.layer_map.next_open_layer_at = Some(end_lsn);
-        }
+
+            true
+        } else {
+            false
+        };
 
         // Even if there was no layer to freeze, advance last_freeze_at to last_record_lsn+1: this
         // accounts for regions in the LSN range where we might have ingested no data due to sharding.
         last_freeze_at.store(end_lsn);
+
+        // the writer state must no longer have a reference to the frozen layer
+        let taken = write_lock.take();
+        assert_eq!(
+            froze,
+            taken.is_some(),
+            "should only had frozen a layer when TimelineWriterState existed"
+        );
+
+        froze
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.
@@ -205,6 +224,18 @@ impl LayerManager {
             Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
+    }
+
+    /// Called when a GC-compaction is completed.
+    #[cfg(test)]
+    pub(crate) fn finish_gc_compaction(
+        &mut self,
+        compact_from: &[Layer],
+        compact_to: &[ResidentLayer],
+        metrics: &TimelineMetrics,
+    ) {
+        // We can simply reuse compact l0 logic. Use a different function name to indicate a different type of layer map modification.
+        self.finish_compact_l0(compact_from, compact_to, metrics)
     }
 
     /// Called when compaction is completed.
@@ -307,6 +338,10 @@ impl LayerManager {
 
     pub(crate) fn contains(&self, layer: &Layer) -> bool {
         self.layer_fmgr.contains(layer)
+    }
+
+    pub(crate) fn all_persistent_layers(&self) -> Vec<PersistentLayerKey> {
+        self.layer_fmgr.0.keys().cloned().collect_vec()
     }
 }
 

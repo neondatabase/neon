@@ -10,7 +10,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    S3Scrubber,
+    StorageScrubber,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -54,9 +54,26 @@ def test_tenant_delete_smoke(
 
     # first try to delete non existing tenant
     tenant_id = TenantId.generate()
-    env.pageserver.allowed_errors.append(f".*NotFound: tenant {tenant_id}.*")
-    with pytest.raises(PageserverApiException, match=f"NotFound: tenant {tenant_id}"):
-        ps_http.tenant_delete(tenant_id=tenant_id)
+    env.pageserver.allowed_errors.append(".*NotFound.*")
+    env.pageserver.allowed_errors.append(".*simulated failure.*")
+
+    # Check that deleting a non-existent tenant gives the expected result: this is a loop because we
+    # may need to retry on some remote storage errors injected by the test harness
+    while True:
+        try:
+            ps_http.tenant_delete(tenant_id=tenant_id)
+        except PageserverApiException as e:
+            if e.status_code == 500:
+                # This test uses failure injection, which can produce 500s as the pageserver expects
+                # the object store to always be available, and the ListObjects during deletion is generally
+                # an infallible operation
+                assert "simulated failure of remote operation" in e.message
+            elif e.status_code == 404:
+                # This is our expected result: trying to erase a non-existent tenant gives us 404
+                assert "NotFound" in e.message
+                break
+            else:
+                raise
 
     env.neon_cli.create_tenant(
         tenant_id=tenant_id,
@@ -690,7 +707,7 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
 
     remote_storage_kind = RemoteStorageKind.MOCK_S3
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-    scrubber = S3Scrubber(neon_env_builder)
+    scrubber = StorageScrubber(neon_env_builder)
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
     ps_http = env.pageserver.http_client()
