@@ -1101,6 +1101,8 @@ jobs:
                                                  $repo/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
             done
           done
+          docker buildx imagetools create -t neondatabase/neon-test-extensions:latest \
+                                             neondatabase/neon-test-extensions:${{ needs.tag.outputs.build-tag }}
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]
