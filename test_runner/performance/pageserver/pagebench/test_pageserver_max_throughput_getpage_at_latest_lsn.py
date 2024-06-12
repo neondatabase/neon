@@ -86,6 +86,14 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
         n_tenants,
         setup_wrapper,
     )
+
+    env.pageserver.allowed_errors.append(
+        # https://github.com/neondatabase/neon/issues/6925
+        # https://github.com/neondatabase/neon/issues/6390
+        # https://github.com/neondatabase/neon/issues/6724
+        r".*query handler for.*pagestream.*failed: unexpected message: CopyFail during COPY.*"
+    )
+
     run_benchmark_max_throughput_latest_lsn(env, pg_bin, record, duration)
 
 

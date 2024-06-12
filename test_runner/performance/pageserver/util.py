@@ -52,12 +52,4 @@ def setup_pageserver_with_tenants(
     env = neon_env_builder.build_and_use_snapshot(name, doit)
     env.start()
     ensure_pageserver_ready_for_benchmarking(env, n_tenants)
-
-    env.pageserver.allowed_errors.append(
-        # https://github.com/neondatabase/neon/issues/6925
-        # https://github.com/neondatabase/neon/issues/6390
-        # https://github.com/neondatabase/neon/issues/6724
-        r".*query handler for.*pagestream.*failed: unexpected message: CopyFail during COPY.*"
-    )
-
     return env
