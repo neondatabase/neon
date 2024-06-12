@@ -24,8 +24,12 @@
 #include "walproposer.h"
 
 static NeonWALReader *wal_reader = NULL;
+
+struct WalSnd;
+extern struct WalSnd *MyWalSnd;
 extern XLogRecPtr WalSndWaitForWal(XLogRecPtr loc);
 extern bool GetDonorShmem(XLogRecPtr *donor_lsn);
+extern XLogRecPtr GetXLogReplayRecPtr(TimeLineID *replayTLI);
 
 static XLogRecPtr
 NeonWALReadWaitForWAL(XLogRecPtr loc)
@@ -36,7 +40,28 @@ NeonWALReadWaitForWAL(XLogRecPtr loc)
 		CHECK_FOR_INTERRUPTS();
 	}
 
-	return WalSndWaitForWal(loc);
+	// Walsender sends keepalives and stuff, so better use its normal wait
+	if (MyWalSnd != NULL)
+		return WalSndWaitForWal(loc);
+
+	for (;;)
+	{
+		XLogRecPtr flush_ptr;
+		if (!RecoveryInProgress())
+#if PG_VERSION_NUM >= 150000
+			flush_ptr = GetFlushRecPtr(NULL);
+#else
+			flush_ptr = GetFlushRecPtr();
+#endif
+		else
+			flush_ptr = GetXLogReplayRecPtr(NULL);
+
+		if (loc <= flush_ptr)
+			return flush_ptr;
+
+		CHECK_FOR_INTERRUPTS();
+		pg_usleep(1000);
+	}
 }
 
 static int
