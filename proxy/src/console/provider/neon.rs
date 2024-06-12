@@ -328,6 +328,13 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
         info!("request succeeded, processing the body");
         return Ok(response.json().await?);
     }
+    info!("response_error: {:?}", response);
+    let s = response.text().await?;
+    info!("response_error: {:?}", s);
+    return Err(ApiError::Console {
+        status,
+        text: s.into(),
+    });
 
     // Don't throw an error here because it's not as important
     // as the fact that the request itself has failed.
