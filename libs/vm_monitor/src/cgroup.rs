@@ -86,6 +86,8 @@ impl CgroupWatcher {
         // buffer for samples that will be logged. once full, it remains so.
         let history_log_len = self.config.memory_history_log_interval;
         let mut history_log_buf = vec![MemoryStatus::zeroed(); history_log_len];
+        let mut last_logged_memusage = MemoryStatus::zeroed();
+        let mut skipped = 0;
 
         for t in 0_u64.. {
             ticker.tick().await;
@@ -115,12 +117,27 @@ impl CgroupWatcher {
             // equal to the logging interval, we can just log the entire buffer every time we set
             // the last entry, which also means that for this log line, we can ignore that it's a
             // ring buffer (because all the entries are in order of increasing time).
+            //
+            // We skip logging the data if data hasn't meaningfully changed in a while, unless
+            // we've already ignored too many (=history_log_len) previous iterations.
             if i == history_log_len - 1 {
-                info!(
-                    history = ?MemoryStatus::debug_slice(&history_log_buf),
-                    summary = ?summary,
-                    "Recent cgroup memory statistics history"
-                );
+                if skipped > history_log_len ||
+                    !history_log_buf.iter().all(|usage| {
+                        last_logged_memusage.status_is_close_similar(usage)
+                    })
+                {
+                    info!(
+                        history = ?MemoryStatus::debug_slice(&history_log_buf),
+                        summary = ?summary,
+                        "Recent cgroup memory statistics history"
+                    );
+
+                    skipped = 0;
+
+                    last_logged_memusage = history_log_buf.last().unwrap().cloned();
+                } else {
+                    skipped += 1;
+                }
             }
 
             updates
@@ -231,6 +248,23 @@ impl MemoryStatus {
         }
 
         DS(slice)
+    }
+
+    /// Check if the other memory status is a close or similar result.
+    /// Returns true if the larger value is not larger than the smaller value
+    /// by 1/8 of the smaller value, and within 128MiB.
+    fn status_is_close_similar(&self, other: &MemoryStatus) -> bool {
+        let margin;
+        let diff;
+        if self.non_reclaimable >= other.non_reclaimable {
+            margin = other.non_reclaimable / 8;
+            diff = self.non_reclaimable - other.non_reclaimable;
+        } else {
+            margin = self.non_reclaimable / 8;
+            diff = other.non_reclaimable - self.non_reclaimable;
+        }
+
+        return diff < margin && diff < 128 * 1024 * 1024;
     }
 }
 
