@@ -92,12 +92,6 @@ impl LimiterInner {
     }
 
     fn take(&mut self, ready: &Notify) -> Option<()> {
-        tracing::info!(
-            "available: {}, in_flight: {}, limit: {}",
-            self.available,
-            self.in_flight,
-            self.limit
-        );
         if self.available >= 1 {
             self.available -= 1;
             self.in_flight += 1;

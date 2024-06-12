@@ -28,8 +28,6 @@ pub struct Aimd {
 impl LimitAlgorithm for Aimd {
     fn update(&self, old_limit: usize, sample: Sample) -> usize {
         use Outcome::*;
-        tracing::info!(old_limit, "updating limit");
-        tracing::info!(sample.in_flight, "in flight");
         match sample.outcome {
             Success => {
                 let utilisation = sample.in_flight as f32 / old_limit as f32;
