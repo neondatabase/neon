@@ -10,7 +10,9 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex, RwLock};
 use std::thread;
+use std::time;
 use std::time::Instant;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -1414,29 +1416,49 @@ fn start_lsn_lease_for_static(compute_state: &ComputeState) {
 
     let cmd = format!("lease lsn {} {} {} ", spec.tenant_id, spec.timeline_id, lsn);
 
-    let lsn_lease_interval = spec.spec.lsn_lease_interval;
-    thread::spawn(move || lsn_lease_loop(lsn_lease_interval, configs, cmd));
+    thread::spawn(move || lsn_lease_loop(configs, cmd));
 }
 
-fn lsn_lease_loop(interval_secs: u64, configs: Vec<postgres::Config>, cmd: String) {
+fn lsn_lease_loop(configs: Vec<postgres::Config>, cmd: String) {
     loop {
         match lsn_lease_request(&configs, &cmd) {
-            Ok(_) => {
-                thread::sleep(tokio::time::Duration::from_secs(interval_secs));
+            Ok(valid_until) => {
+                let now = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_millis();
+
+                let sleep_duration_millis = valid_until - now - 60_000;
+
+                let sleep_duration = time::Duration::from_millis(sleep_duration_millis as u64);
+
+                info!(
+                    "lsn_lease_request succeeded, sleeping for {} seconds",
+                    sleep_duration.as_secs()
+                );
+                thread::sleep(sleep_duration);
             }
             Err(e) => {
                 error!("lsn_lease_request failed: {:#}", e);
-                thread::sleep(tokio::time::Duration::from_secs(10));
+                thread::sleep(time::Duration::from_secs(10));
             }
         }
     }
 }
 
-fn lsn_lease_request(configs: &[postgres::Config], cmd: &str) -> Result<()> {
+fn lsn_lease_request(configs: &[postgres::Config], cmd: &str) -> Result<u128> {
     info!("lsn_lease_request: {}", cmd);
-    for config in configs {
-        let mut client = config.connect(NoTls)?;
-        let _ = client.simple_query(cmd)?;
-    }
-    Ok(())
+    let valid_until = configs
+        .iter()
+        .map(|config| {
+            let mut client = config.connect(NoTls)?;
+            let msg = client.query_one(cmd, &[])?;
+            let bytes: &[u8] = msg.try_get("valid_until")?;
+            Ok(u128::from_be_bytes(bytes.try_into()?))
+        })
+        .collect::<Result<Vec<u128>>>()?
+        .into_iter()
+        .min()
+        .unwrap();
+    Ok(valid_until)
 }

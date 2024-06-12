@@ -46,7 +46,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use compute_api::spec::default_lsn_lease_interval;
 use compute_api::spec::Database;
 use compute_api::spec::PgIdent;
 use compute_api::spec::RemoteExtSpec;
@@ -594,7 +593,6 @@ impl Endpoint {
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
             primary_is_running: None,
-            lsn_lease_interval: default_lsn_lease_interval(),
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
