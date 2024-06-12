@@ -126,7 +126,7 @@ impl Dispatcher {
                 info!(?message, "sending message");
             }
         }
-        
+
         let json = serde_json::to_string(&message).context("failed to serialize message")?;
         self.sink
             .send(Message::Text(json))

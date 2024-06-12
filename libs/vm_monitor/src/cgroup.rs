@@ -121,10 +121,10 @@ impl CgroupWatcher {
             // We skip logging the data if data hasn't meaningfully changed in a while, unless
             // we've already ignored too many (=history_log_len) previous iterations.
             if i == history_log_len - 1 {
-                if skipped > history_log_len ||
-                    !history_log_buf.iter().all(|usage| {
-                        last_logged_memusage.status_is_close_similar(usage)
-                    })
+                if skipped > history_log_len
+                    || !history_log_buf
+                        .iter()
+                        .all(|usage| last_logged_memusage.status_is_close_similar(usage))
                 {
                     info!(
                         history = ?MemoryStatus::debug_slice(&history_log_buf),
