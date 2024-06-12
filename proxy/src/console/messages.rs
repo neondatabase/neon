@@ -98,7 +98,7 @@ impl ShouldRetry for ConsoleError {
         if let Some(retry_info) = self
             .status
             .as_ref()
-            .map_or(None, |s| s.details.retry_info.as_ref())
+            .and_then(|s| s.details.retry_info.as_ref())
         {
             retry_info.retry_delay_ms > 0
         } else {

@@ -64,7 +64,7 @@ pub mod errors {
             use ApiError::*;
             match self {
                 // To minimize risks, only select errors are forwarded to users.
-                Console(c) => c.get_user_facing_message().into(),
+                Console(c) => c.get_user_facing_message(),
                 _ => REQUEST_FAILED.to_owned(),
             }
         }
