@@ -159,12 +159,12 @@ services:
       context: ./compute_wrapper/
       args:
         - REPOSITORY=${REPOSITORY:-neondatabase}
-        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-14}
+        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-16}
         - TAG=${TAG:-latest}
         - http_proxy=$http_proxy
         - https_proxy=$https_proxy
     environment:
-      - PG_VERSION=${PG_VERSION:-14}
+      - PG_VERSION=${PG_VERSION:-16}
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:

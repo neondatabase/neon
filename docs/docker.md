@@ -34,12 +34,12 @@ You can see a [docker compose](https://docs.docker.com/compose/) example to crea
 1. create containers
 
 You can specify version of neon cluster using following environment values.
-- PG_VERSION: postgres version for compute (default is 14)
+- PG_VERSION: postgres version for compute (default is 16)
 - TAG: the tag version of [docker image](https://registry.hub.docker.com/r/neondatabase/neon/tags) (default is latest), which is tagged in [CI test](/.github/workflows/build_and_test.yml)
 ```
 $ cd docker-compose/
 $ docker-compose down   # remove the containers if exists
-$ PG_VERSION=15 TAG=2937 docker-compose up --build -d  # You can specify the postgres and image version
+$ PG_VERSION=16 TAG=2937 docker-compose up --build -d  # You can specify the postgres and image version
 Creating network "dockercompose_default" with the default driver
 Creating docker-compose_storage_broker_1       ... done
 (...omit...)
