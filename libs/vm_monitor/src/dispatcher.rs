@@ -14,6 +14,7 @@ use futures::{
 };
 use tracing::{debug, info};
 
+use crate::protocol::OutboundMsgKind::HealthCheck;
 use crate::protocol::{
     OutboundMsg, ProtocolRange, ProtocolResponse, ProtocolVersion, PROTOCOL_MAX_VERSION,
     PROTOCOL_MIN_VERSION,
@@ -118,13 +119,10 @@ impl Dispatcher {
     /// serialize the wrong thing and send it, since `self.sink.send` will take
     /// any string.
     pub async fn send(&mut self, message: OutboundMsg) -> anyhow::Result<()> {
-        match &message.inner {
-            crate::protocol::OutboundMsgKind::HealthCheck { .. } => {
-                debug!(?message, "sending message");
-            }
-            _ => {
-                info!(?message, "sending message");
-            }
+        if matches!(&message.inner, HealthCheck { .. }) {
+            debug!(?message, "sending message");
+        } else {
+            info!(?message, "sending message");
         }
 
         let json = serde_json::to_string(&message).context("failed to serialize message")?;

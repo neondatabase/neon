@@ -491,13 +491,10 @@ impl Runner {
                                     },
                                 };
 
-                                match &message.inner {
-                                    InboundMsgKind::HealthCheck{ .. } => {
-                                        debug!(?msg, "received message");
-                                    }
-                                    _ => {
-                                        info!(?msg, "received message");
-                                    }
+                                if matches!(&message.inner, InboundMsgKind::HealthCheck { .. }) {
+                                    debug!(?msg, "received message");
+                                } else {
+                                    info!(?msg, "received message");
                                 }
 
                                 let out = match self.process_message(message.clone()).await {
