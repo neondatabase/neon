@@ -194,6 +194,7 @@ services:
       - compute
 
   neon-test-extensions:
+    profiles: ["test-extensions"]
     image: ${REPOSITORY:-neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-16}:${TAG:-latest}
     entrypoint:
       - "/bin/bash"
