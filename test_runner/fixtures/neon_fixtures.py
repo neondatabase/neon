@@ -3897,11 +3897,13 @@ class Safekeeper(LogUtils):
         segments.sort()
         return segments
 
-    def checkpoint_up_to(self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn):
+    def checkpoint_up_to(
+        self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn, wait_wal_removal=True
+    ):
         """
         Assuming pageserver(s) uploaded to s3 up to `lsn`,
         1) wait for remote_consistent_lsn and wal_backup_lsn on safekeeper to reach it.
-        2) checkpoint timeline on safekeeper, which should remove WAL before this LSN.
+        2) checkpoint timeline on safekeeper, which should remove WAL before this LSN; optionally wait for that.
         """
         cli = self.http_client()
 
@@ -3925,7 +3927,8 @@ class Safekeeper(LogUtils):
         # pageserver to this safekeeper
         wait_until(30, 1, are_lsns_advanced)
         cli.checkpoint(tenant_id, timeline_id)
-        wait_until(30, 1, are_segments_removed)
+        if wait_wal_removal:
+            wait_until(30, 1, are_segments_removed)
 
     def wait_until_paused(self, failpoint: str):
         msg = f"at failpoint {failpoint}"
