@@ -14,6 +14,7 @@ use std::time;
 use std::time::Instant;
 use std::time::SystemTime;
 
+use anyhow::bail;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
@@ -21,6 +22,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use nix::unistd::Pid;
 use postgres::error::SqlState;
+use postgres::SimpleQueryMessage;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
@@ -1452,9 +1454,20 @@ fn lsn_lease_request(configs: &[postgres::Config], cmd: &str) -> Result<u128> {
         .iter()
         .map(|config| {
             let mut client = config.connect(NoTls)?;
-            let msg = client.query_one(cmd, &[])?;
-            let bytes: &[u8] = msg.try_get("valid_until")?;
-            Ok(u128::from_be_bytes(bytes.try_into()?))
+            let res = client.simple_query(cmd)?;
+            let msg = match res.get(0) {
+                Some(msg) => msg,
+                None => bail!("empty response"),
+            };
+            let row = match msg {
+                SimpleQueryMessage::Row(row) => row,
+                _ => bail!("error parsing lsn lease response"),
+            };
+            let valid_until_str = match row.get("valid_until") {
+                Some(valid_until) => valid_until,
+                None => bail!("valid_until not found"),
+            };
+            Ok(u128::from_str(valid_until_str)?)
         })
         .collect::<Result<Vec<u128>>>()?
         .into_iter()
