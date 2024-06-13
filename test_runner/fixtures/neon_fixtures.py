@@ -3847,7 +3847,15 @@ class Safekeeper(LogUtils):
                 assert isinstance(res, dict)
                 return res
 
-    def http_client(self, auth_token: Optional[str] = None) -> SafekeeperHttpClient:
+    def http_client(
+        self, auth_token: Optional[str] = None, gen_sk_wide_token: bool = True
+    ) -> SafekeeperHttpClient:
+        """
+        When auth_token is None but gen_sk_wide is True creates safekeeper wide
+        token, which is a reasonable default.
+        """
+        if auth_token is None and gen_sk_wide_token:
+            auth_token = self.env.auth_keys.generate_safekeeper_token()
         is_testing_enabled = '"testing"' in self.env.get_binary_version("safekeeper")
         return SafekeeperHttpClient(
             port=self.port.http, auth_token=auth_token, is_testing_enabled=is_testing_enabled
@@ -4450,6 +4458,7 @@ def wait_for_last_flush_lsn(
     tenant: TenantId,
     timeline: TimelineId,
     pageserver_id: Optional[int] = None,
+    auth_token: Optional[str] = None,
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
 
@@ -4463,7 +4472,7 @@ def wait_for_last_flush_lsn(
             f"wait_for_last_flush_lsn: waiting for {last_flush_lsn} on shard {tenant_shard_id} on pageserver {pageserver.id})"
         )
         waited = wait_for_last_record_lsn(
-            pageserver.http_client(), tenant_shard_id, timeline, last_flush_lsn
+            pageserver.http_client(auth_token=auth_token), tenant_shard_id, timeline, last_flush_lsn
         )
 
         assert waited >= last_flush_lsn
@@ -4559,6 +4568,7 @@ def last_flush_lsn_upload(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     pageserver_id: Optional[int] = None,
+    auth_token: Optional[str] = None,
 ) -> Lsn:
     """
     Wait for pageserver to catch to the latest flush LSN of given endpoint,
@@ -4566,11 +4576,11 @@ def last_flush_lsn_upload(
     reaching flush LSN).
     """
     last_flush_lsn = wait_for_last_flush_lsn(
-        env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver_id
+        env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver_id, auth_token=auth_token
     )
     shards = tenant_get_shards(env, tenant_id, pageserver_id)
     for tenant_shard_id, pageserver in shards:
-        ps_http = pageserver.http_client()
+        ps_http = pageserver.http_client(auth_token=auth_token)
         wait_for_last_record_lsn(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
         # force a checkpoint to trigger upload
         ps_http.timeline_checkpoint(tenant_shard_id, timeline_id)

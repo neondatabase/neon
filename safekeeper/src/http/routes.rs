@@ -195,8 +195,9 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let data: pull_timeline::Request = json_request(&mut request).await?;
+    let conf = get_conf(&request);
 
-    let resp = pull_timeline::handle_request(data)
+    let resp = pull_timeline::handle_request(data, conf.sk_auth_token.clone())
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)

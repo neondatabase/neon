@@ -27,7 +27,10 @@ use tracing::{error, info, instrument};
 use crate::{
     control_file::{self, CONTROL_FILE_NAME},
     debug_dump,
-    http::routes::TimelineStatus,
+    http::{
+        client::{self, Client},
+        routes::TimelineStatus,
+    },
     safekeeper::Term,
     timeline::{get_tenant_dir, get_timeline_dir, FullAccessTimeline, Timeline, TimelineError},
     wal_storage::{self, open_wal_file, Storage},
@@ -36,6 +39,7 @@ use crate::{
 use utils::{
     crashsafe::{durable_rename, fsync_async_opt},
     id::{TenantId, TenantTimelineId, TimelineId},
+    logging::SecretString,
     lsn::Lsn,
     pausable_failpoint,
 };
@@ -163,6 +167,11 @@ impl FullAccessTimeline {
 
         // We need to stream since the oldest segment someone (s3 or pageserver)
         // still needs. This duplicates calc_horizon_lsn logic.
+        //
+        // We know that WAL wasn't removed up to this point because it cannot be
+        // removed further than `backup_lsn`. Since we're holding shared_state
+        // lock and setting `wal_removal_on_hold` later, it guarantees that WAL
+        // won't be removed until we're done.
         let from_lsn = min(
             shared_state.sk.state.remote_consistent_lsn,
             shared_state.sk.state.backup_lsn,
@@ -255,7 +264,10 @@ pub struct DebugDumpResponse {
 }
 
 /// Find the most advanced safekeeper and pull timeline from it.
-pub async fn handle_request(request: Request) -> Result<Response> {
+pub async fn handle_request(
+    request: Request,
+    sk_auth_token: Option<SecretString>,
+) -> Result<Response> {
     let existing_tli = GlobalTimelines::get(TenantTimelineId::new(
         request.tenant_id,
         request.timeline_id,
@@ -264,26 +276,22 @@ pub async fn handle_request(request: Request) -> Result<Response> {
         bail!("Timeline {} already exists", request.timeline_id);
     }
 
-    let client = reqwest::Client::new();
     let http_hosts = request.http_hosts.clone();
 
-    // Send request to /v1/tenant/:tenant_id/timeline/:timeline_id
-    let responses = futures::future::join_all(http_hosts.iter().map(|url| {
-        let url = format!(
-            "{}/v1/tenant/{}/timeline/{}",
-            url, request.tenant_id, request.timeline_id
-        );
-        client.get(url).send()
-    }))
-    .await;
+    // Figure out statuses of potential donors.
+    let responses: Vec<Result<TimelineStatus, client::Error>> =
+        futures::future::join_all(http_hosts.iter().map(|url| async {
+            let cclient = Client::new(url.clone(), sk_auth_token.clone());
+            let info = cclient
+                .timeline_status(request.tenant_id, request.timeline_id)
+                .await?;
+            Ok(info)
+        }))
+        .await;
 
     let mut statuses = Vec::new();
     for (i, response) in responses.into_iter().enumerate() {
-        let response = response.context(format!("fetching status from {}", http_hosts[i]))?;
-        response
-            .error_for_status_ref()
-            .context(format!("checking status from {}", http_hosts[i]))?;
-        let status: crate::http::routes::TimelineStatus = response.json().await?;
+        let status = response.context(format!("fetching status from {}", http_hosts[i]))?;
         statuses.push((status, i));
     }
 
@@ -303,10 +311,14 @@ pub async fn handle_request(request: Request) -> Result<Response> {
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    pull_timeline(status, safekeeper_host).await
+    pull_timeline(status, safekeeper_host, sk_auth_token).await
 }
 
-async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response> {
+async fn pull_timeline(
+    status: TimelineStatus,
+    host: String,
+    sk_auth_token: Option<SecretString>,
+) -> Result<Response> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
         "pulling timeline {} from safekeeper {}, commit_lsn={}, flush_lsn={}, term={}, epoch={}",
@@ -322,17 +334,11 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     let (_tmp_dir, tli_dir_path) = create_temp_timeline_dir(conf, ttid).await?;
 
-    let client = reqwest::Client::new();
-
+    let client = Client::new(host.clone(), sk_auth_token.clone());
     // Request stream with basebackup archive.
     let bb_resp = client
-        .get(format!(
-            "{}/v1/tenant/{}/timeline/{}/snapshot",
-            host, status.tenant_id, status.timeline_id
-        ))
-        .send()
+        .snapshot(status.tenant_id, status.timeline_id)
         .await?;
-    bb_resp.error_for_status_ref()?;
 
     // Make Stream of Bytes from it...
     let bb_stream = bb_resp.bytes_stream().map_err(std::io::Error::other);
