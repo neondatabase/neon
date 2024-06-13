@@ -1816,7 +1816,6 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 # 4) Do some write, verify integrity with timeline_digest.
 # Expected to fail while holding off WAL gc plus fetching commit_lsn WAL
 # segment is not implemented.
-@pytest.mark.xfail
 def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
@@ -1850,12 +1849,15 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     lsn = last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
     assert lsn > Lsn("0/2000000")
     # Checkpoint timeline beyond lsn.
-    src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn)
+    src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn, wait_wal_removal=False)
     first_segment_p = src_sk.timeline_dir(tenant_id, timeline_id) / "000000010000000000000001"
     log.info(f"first segment exist={os.path.exists(first_segment_p)}")
 
     src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "off"))
     pt_handle.join()
+
+    # after pull_timeline is finished WAL should be removed on donor
+    src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn, wait_wal_removal=True)
 
     timeline_start_lsn = src_sk.get_timeline_start_lsn(tenant_id, timeline_id)
     dst_flush_lsn = dst_sk.get_flush_lsn(tenant_id, timeline_id)

@@ -15,6 +15,7 @@ use tokio::{
     fs::{File, OpenOptions},
     io::AsyncWrite,
     sync::mpsc,
+    task,
 };
 use tokio_tar::{Archive, Builder};
 use tokio_util::{
@@ -66,7 +67,11 @@ pub struct SnapshotContext {
 
 impl Drop for SnapshotContext {
     fn drop(&mut self) {
-        // todo: spawn task removing WAL gc hold off
+        let tli = self.tli.clone();
+        task::spawn(async move {
+            let mut shared_state = tli.write_shared_state().await;
+            shared_state.wal_removal_on_hold = false;
+        });
     }
 }
 
@@ -150,7 +155,7 @@ impl FullAccessTimeline {
         &self,
         ar: &mut tokio_tar::Builder<W>,
     ) -> Result<SnapshotContext> {
-        let shared_state = self.read_shared_state().await;
+        let mut shared_state = self.write_shared_state().await;
 
         let cf_path = self.get_timeline_dir().join(CONTROL_FILE_NAME);
         let mut cf = File::open(cf_path).await?;
@@ -183,7 +188,14 @@ impl FullAccessTimeline {
             );
         }
 
-        // TODO: set WAL hold off.
+        // Prevent WAL removal while we're streaming data.
+        //
+        // Since this a flag, not a counter just bail out if already set; we
+        // shouldn't need concurrent snapshotting.
+        if shared_state.wal_removal_on_hold {
+            bail!("wal_removal_on_hold is already true");
+        }
+        shared_state.wal_removal_on_hold = true;
 
         let bctx = SnapshotContext {
             from_segno,
