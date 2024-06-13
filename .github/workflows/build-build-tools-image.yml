@@ -55,7 +55,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
       # The default value is ~/.docker
