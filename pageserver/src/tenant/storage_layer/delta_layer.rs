@@ -822,6 +822,7 @@ impl DeltaLayerInner {
                     if entry_lsn < lsn_range.start {
                         return false;
                     }
+                    assert!(entry_lsn <= search_key.lsn(), "certain because of how backwards visit direction works");
                     offsets.push((entry_lsn, blob_ref.pos()));
 
                     !blob_ref.will_init()
