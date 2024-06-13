@@ -374,7 +374,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         http_cli_other = env.safekeepers[0].http_client(
             auth_token=env.auth_keys.generate_tenant_token(TenantId.generate())
         )
-        http_cli_noauth = env.safekeepers[0].http_client()
+        http_cli_noauth = env.safekeepers[0].http_client(gen_sk_wide_token=False)
 
     # Pretend WAL is offloaded to s3.
     if auth_enabled:
@@ -830,7 +830,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             auth_token=env.auth_keys.generate_tenant_token(TenantId.generate())
         )
         wa_http_cli_bad.check_status()
-        wa_http_cli_noauth = wa.http_client()
+        wa_http_cli_noauth = wa.http_client(gen_sk_wide_token=False)
         wa_http_cli_noauth.check_status()
 
         # debug endpoint requires safekeeper scope
@@ -964,7 +964,7 @@ def test_sk_auth(neon_env_builder: NeonEnvBuilder):
 
     # By default, neon_local enables auth on all services if auth is configured,
     # so http must require the token.
-    sk_http_cli_noauth = sk.http_client()
+    sk_http_cli_noauth = sk.http_client(gen_sk_wide_token=False)
     sk_http_cli_auth = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
     with pytest.raises(sk_http_cli_noauth.HTTPError, match="Forbidden|Unauthorized"):
         sk_http_cli_noauth.timeline_status(tenant_id, timeline_id)
@@ -1640,7 +1640,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         sk_http_other = sk.http_client(
             auth_token=env.auth_keys.generate_tenant_token(tenant_id_other)
         )
-        sk_http_noauth = sk.http_client()
+        sk_http_noauth = sk.http_client(gen_sk_wide_token=False)
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_1)).is_dir()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_2)).is_dir()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).is_dir()
@@ -1723,7 +1723,10 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             cur.execute("INSERT INTO t (key) VALUES (123)")
 
 
+# Basic pull_timeline test.
 def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
+
     def execute_payload(endpoint: Endpoint):
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
@@ -1739,7 +1742,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 
     def show_statuses(safekeepers: List[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
         for sk in safekeepers:
-            http_cli = sk.http_client()
+            http_cli = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
             try:
                 status = http_cli.timeline_status(tenant_id, timeline_id)
                 log.info(f"Safekeeper {sk.id} status: {status}")
@@ -1769,7 +1772,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 
     res = (
         env.safekeepers[3]
-        .http_client()
+        .http_client(auth_token=env.auth_keys.generate_safekeeper_token())
         .pull_timeline(
             {
                 "tenant_id": str(tenant_id),
@@ -1817,6 +1820,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 # Expected to fail while holding off WAL gc plus fetching commit_lsn WAL
 # segment is not implemented.
 def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     env = neon_env_builder.init_start()
@@ -1846,7 +1850,13 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
 
     # ensure segment exists
     endpoint.safe_psql("insert into t select generate_series(1, 180000), 'papaya'")
-    lsn = last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+    lsn = last_flush_lsn_upload(
+        env,
+        endpoint,
+        tenant_id,
+        timeline_id,
+        auth_token=env.auth_keys.generate_tenant_token(tenant_id),
+    )
     assert lsn > Lsn("0/2000000")
     # Checkpoint timeline beyond lsn.
     src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn, wait_wal_removal=False)
@@ -1886,6 +1896,7 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
 #
 # Expected to fail while term check is not implemented.
 def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     env = neon_env_builder.init_start()
