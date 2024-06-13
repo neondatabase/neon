@@ -3,25 +3,22 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import TYPE_CHECKING
 
 import psycopg2
 import psycopg2.extras
 import pytest
-from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import PgBin
 from fixtures.pg_version import PgVersion
 
-from performance.neon_api import (
-    neon_create_endpoint,
-    neon_create_project,
-    neon_delete_project,
-    neon_get_connection_uri,
-    neon_suspend_endpoint,
-    neon_wait_for_operation_to_finish,
-)
+if TYPE_CHECKING:
+    from typing import Any, List, Optional
+
+    from fixtures.benchmark_fixture import NeonBenchmarker
+    from fixtures.neon_api import NeonAPI
+    from fixtures.neon_fixtures import PgBin
 
 
 # Granularity of ~0.5 sec
@@ -42,34 +39,29 @@ def measure_replication_lag(master, replica):
 @pytest.mark.timeout(2 * 60 * 60)
 def test_ro_replica_lag(
     pg_bin: PgBin,
-    neon_api_key: str,
-    neon_api_base_url: str,
+    neon_api: NeonAPI,
     pg_version: PgVersion,
     zenbenchmark: NeonBenchmarker,
 ):
     test_duration_min = 60
     sync_interval_min = 6
 
-    project = neon_create_project(neon_api_key, neon_api_base_url, pg_version)
+    project = neon_api.create_project(pg_version)
     project_id = project["project"]["id"]
-    neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
+    neon_api.wait_for_operation_to_finish(project_id)
     should_delete = True
     try:
         branch_id = project["branch"]["id"]
         master_connstr = project["connection_uris"][0]["connection_uri"]
 
-        replica = neon_create_endpoint(
-            neon_api_key,
-            neon_api_base_url,
+        replica = neon_api.create_endpoint(
             project_id,
             branch_id,
             endpoint_type="read_only",
         )
-        neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
+        neon_api.wait_for_operation_to_finish(project_id)
 
-        replica_connstr = neon_get_connection_uri(
-            neon_api_key,
-            neon_api_base_url,
+        replica_connstr = neon_api.get_connection_uri(
             project_id,
             endpoint_id=replica["endpoint"]["id"],
         )["uri"]
@@ -102,7 +94,7 @@ def test_ro_replica_lag(
         should_delete = False
     finally:
         if should_delete:
-            neon_delete_project(neon_api_key, neon_api_base_url, project_id)
+            neon_api.delete_project(project_id)
 
 
 def report_pgbench_aggregate_intervals(
@@ -145,8 +137,7 @@ def report_pgbench_aggregate_intervals(
 def test_replication_start_stop(
     pg_bin: PgBin,
     test_output_dir: Path,
-    neon_api_key: str,
-    neon_api_base_url: str,
+    neon_api: NeonAPI,
     pg_version: PgVersion,
     zenbenchmark: NeonBenchmarker,
 ):
@@ -162,9 +153,9 @@ def test_replication_start_stop(
     configuration_test_time_sec = 10 * 60
     should_delete = True
 
-    project = neon_create_project(neon_api_key, neon_api_base_url, pg_version)
+    project = neon_api.create_project(pg_version)
     project_id = project["project"]["id"]
-    neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
+    neon_api.wait_for_operation_to_finish(project_id)
     try:
         branch_id = project["branch"]["id"]
         master_connstr = project["connection_uris"][0]["connection_uri"]
@@ -172,20 +163,16 @@ def test_replication_start_stop(
         replicas = []
         for _ in range(num_replicas):
             replicas.append(
-                neon_create_endpoint(
-                    neon_api_key,
-                    neon_api_base_url,
+                neon_api.create_endpoint(
                     project_id,
                     branch_id,
                     endpoint_type="read_only",
                 )
             )
-            neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
+            neon_api.wait_for_operation_to_finish(project_id)
 
         replica_connstr = [
-            neon_get_connection_uri(
-                neon_api_key,
-                neon_api_base_url,
+            neon_api.get_connection_uri(
                 project_id,
                 endpoint_id=replicas[i]["endpoint"]["id"],
             )["uri"]
@@ -221,14 +208,14 @@ def test_replication_start_stop(
                 master_connstr,
             ]
         )
-        replica_pgbench: List[Optional[subprocess.Popen[Any]]] = [None for i in range(num_replicas)]
+        replica_pgbench: List[Optional[subprocess.Popen[Any]]] = [None for _ in range(num_replicas)]
 
         # Use the bits of iconfig to tell us which configuration we are on. For example
         # a iconfig of 2 is 10 in binary, indicating replica 0 is suspended and replica 1 is
         # alive.
         for iconfig in range((1 << num_replicas) - 1, -1, -1):
 
-            def replica_enabled(ireplica, iconfig=iconfig):
+            def replica_enabled(ireplica, iconfig: int = iconfig):
                 return bool((iconfig >> 1) & 1)
 
             # Change configuration
@@ -255,19 +242,17 @@ def test_replication_start_stop(
                     conn_replica[ireplica] = None
                     cur_replica[ireplica] = None
 
-                    neon_suspend_endpoint(
-                        neon_api_key,
-                        neon_api_base_url,
+                    neon_api.suspend_endpoint(
                         project_id,
                         replicas[ireplica]["endpoint"]["id"],
                     )
-                    neon_wait_for_operation_to_finish(neon_api_key, neon_api_base_url, project_id)
+                    neon_api.wait_for_operation_to_finish(project_id)
             time.sleep(configuration_test_time_sec)
 
             for ireplica in range(num_replicas):
                 conn = conn_replica[ireplica]
                 if conn is None:
-                    conn = psycopg2.connect(replica_connstr[i])
+                    conn = psycopg2.connect(replica_connstr[ireplica])
                     conn_replica[ireplica] = conn
                     cur_replica[ireplica] = conn.cursor()
 
@@ -283,6 +268,6 @@ def test_replication_start_stop(
         should_delete = False
     finally:
         if should_delete:
-            neon_delete_project(neon_api_key, neon_api_base_url, project_id)
+            neon_api.delete_project(project_id)
             # Only report results if we didn't error out
             report_pgbench_aggregate_intervals(test_output_dir, prefix, zenbenchmark)

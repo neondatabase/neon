@@ -85,7 +85,9 @@ from fixtures.utils import (
     subprocess_capture,
     wait_until,
 )
-from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
+from fixtures.utils import AuxFileStore as AuxFileStore
+
+from .neon_api import NeonAPI
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -195,7 +197,12 @@ def neon_api_key() -> str:
 
 @pytest.fixture(scope="session")
 def neon_api_base_url() -> str:
-    return os.getenv("NEON_API_BASE_URL", "https://console-stage.neon.build/api/v2").strip("/")
+    return os.getenv("NEON_API_BASE_URL", "https://console-stage.neon.build/api/v2")
+
+
+@pytest.fixture(scope="session")
+def neon_api(neon_api_key: str, neon_api_base_url: str) -> NeonAPI:
+    return NeonAPI(neon_api_key, neon_api_base_url)
 
 
 def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "function"]:
