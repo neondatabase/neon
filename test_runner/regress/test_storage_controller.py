@@ -133,6 +133,9 @@ def test_storage_controller_smoke(
 
     wait_until(10, 1, lambda: node_evacuated(env.pageservers[0].id))
 
+    # Let all the reconciliations after marking the node offline complete
+    env.storage_controller.reconcile_until_idle()
+
     # Marking pageserver active should not migrate anything to it
     # immediately
     env.storage_controller.node_configure(env.pageservers[0].id, {"availability": "Active"})
