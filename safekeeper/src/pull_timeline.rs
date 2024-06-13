@@ -11,12 +11,13 @@ use tracing::info;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
+    pausable_failpoint,
 };
 
 use crate::{
     control_file, debug_dump,
     http::routes::TimelineStatus,
-    timeline::{Timeline, TimelineError},
+    timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError},
     wal_storage::{self, Storage},
     GlobalTimelines, SafeKeeperConf,
 };
@@ -162,6 +163,8 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     filenames.remove(control_file_index);
     filenames.insert(0, "safekeeper.control".to_string());
 
+    pausable_failpoint!("sk-pull-timeline-after-list-pausable");
+
     info!(
         "downloading {} files from safekeeper {}",
         filenames.len(),
@@ -183,6 +186,13 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
         let mut file = tokio::fs::File::create(&file_path).await?;
         let mut response = client.get(&http_url).send().await?;
+        if response.status() != reqwest::StatusCode::OK {
+            bail!(
+                "pulling file {} failed: status is {}",
+                filename,
+                response.status()
+            );
+        }
         while let Some(chunk) = response.chunk().await? {
             file.write_all(&chunk).await?;
             file.flush().await?;
@@ -273,13 +283,13 @@ pub async fn load_temp_timeline(
     }
 
     // Move timeline dir to the correct location
-    let timeline_path = conf.timeline_dir(&ttid);
+    let timeline_path = get_timeline_dir(conf, &ttid);
 
     info!(
         "moving timeline {} from {} to {}",
         ttid, tmp_path, timeline_path
     );
-    tokio::fs::create_dir_all(conf.tenant_dir(&ttid.tenant_id)).await?;
+    tokio::fs::create_dir_all(get_tenant_dir(conf, &ttid.tenant_id)).await?;
     tokio::fs::rename(tmp_path, &timeline_path).await?;
 
     let tli = GlobalTimelines::load_timeline(&guard, ttid)

@@ -86,6 +86,8 @@ impl ShouldRetry for compute::ConnectionError {
         match self {
             compute::ConnectionError::Postgres(err) => err.should_retry_database_address(),
             compute::ConnectionError::CouldNotConnect(err) => err.should_retry_database_address(),
+            // the cache entry was not checked for validity
+            compute::ConnectionError::TooManyConnectionAttempts(_) => false,
             _ => true,
         }
     }

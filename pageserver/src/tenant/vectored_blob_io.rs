@@ -23,6 +23,7 @@ use pageserver_api::key::Key;
 use utils::lsn::Lsn;
 use utils::vec_map::VecMap;
 
+use crate::context::RequestContext;
 use crate::virtual_file::VirtualFile;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -285,6 +286,7 @@ impl<'a> VectoredBlobReader<'a> {
         &self,
         read: &VectoredRead,
         buf: BytesMut,
+        ctx: &RequestContext,
     ) -> Result<VectoredBlobsBuf, std::io::Error> {
         assert!(read.size() > 0);
         assert!(
@@ -295,7 +297,7 @@ impl<'a> VectoredBlobReader<'a> {
         );
         let buf = self
             .file
-            .read_exact_at_n(buf, read.start, read.size())
+            .read_exact_at_n(buf, read.start, read.size(), ctx)
             .await?;
 
         let blobs_at = read.blobs_at.as_slice();

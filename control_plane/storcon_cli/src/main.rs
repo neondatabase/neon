@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use clap::{Parser, Subcommand};
@@ -7,8 +8,9 @@ use pageserver_api::{
         TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
-        LocationConfigSecondary, ShardParameters, TenantConfig, TenantConfigRequest,
-        TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
+        EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
+        ShardParameters, TenantConfig, TenantConfigRequest, TenantCreateRequest,
+        TenantShardSplitRequest, TenantShardSplitResponse,
     },
     shard::{ShardStripeSize, TenantShardId},
 };
@@ -124,6 +126,44 @@ enum Command {
     TenantWarmup {
         #[arg(long)]
         tenant_id: TenantId,
+    },
+    /// Uncleanly drop a tenant from the storage controller: this doesn't delete anything from pageservers. Appropriate
+    /// if you e.g. used `tenant-warmup` by mistake on a tenant ID that doesn't really exist, or is in some other region.
+    TenantDrop {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        unclean: bool,
+    },
+    NodeDrop {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        unclean: bool,
+    },
+    TenantSetTimeBasedEviction {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        period: humantime::Duration,
+        #[arg(long)]
+        threshold: humantime::Duration,
+    },
+    // Drain a set of specified pageservers by moving the primary attachments to pageservers
+    // outside of the specified set.
+    Drain {
+        // Set of pageserver node ids to drain.
+        #[arg(long)]
+        nodes: Vec<NodeId>,
+        // Optional: migration concurrency (default is 8)
+        #[arg(long)]
+        concurrency: Option<usize>,
+        // Optional: maximum number of shards to migrate
+        #[arg(long)]
+        max_shards: Option<usize>,
+        // Optional: when set to true, nothing is migrated, but the plan is printed to stdout
+        #[arg(long)]
+        dry_run: Option<bool>,
     },
 }
 
@@ -673,6 +713,234 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Command::TenantDrop { tenant_id, unclean } => {
+            if !unclean {
+                anyhow::bail!("This command is not a tenant deletion, and uncleanly drops all controller state for the tenant.  If you know what you're doing, add `--unclean` to proceed.")
+            }
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::POST,
+                    format!("debug/v1/tenant/{tenant_id}/drop"),
+                    None,
+                )
+                .await?;
+        }
+        Command::NodeDrop { node_id, unclean } => {
+            if !unclean {
+                anyhow::bail!("This command is not a clean node decommission, and uncleanly drops all controller state for the node, without checking if any tenants still refer to it.  If you know what you're doing, add `--unclean` to proceed.")
+            }
+            storcon_client
+                .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
+                .await?;
+        }
+        Command::TenantSetTimeBasedEviction {
+            tenant_id,
+            period,
+            threshold,
+        } => {
+            vps_client
+                .tenant_config(&TenantConfigRequest {
+                    tenant_id,
+                    config: TenantConfig {
+                        eviction_policy: Some(EvictionPolicy::LayerAccessThreshold(
+                            EvictionPolicyLayerAccessThreshold {
+                                period: period.into(),
+                                threshold: threshold.into(),
+                            },
+                        )),
+                        ..Default::default()
+                    },
+                })
+                .await?;
+        }
+        Command::Drain {
+            nodes,
+            concurrency,
+            max_shards,
+            dry_run,
+        } => {
+            // Load the list of nodes, split them up into the drained and filled sets,
+            // and validate that draining is possible.
+            let node_descs = storcon_client
+                .dispatch::<(), Vec<NodeDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/node".to_string(),
+                    None,
+                )
+                .await?;
+
+            let mut node_to_drain_descs = Vec::new();
+            let mut node_to_fill_descs = Vec::new();
+
+            for desc in node_descs {
+                let to_drain = nodes.iter().any(|id| *id == desc.id);
+                if to_drain {
+                    node_to_drain_descs.push(desc);
+                } else {
+                    node_to_fill_descs.push(desc);
+                }
+            }
+
+            if nodes.len() != node_to_drain_descs.len() {
+                anyhow::bail!("Drain requested for node which doesn't exist.")
+            }
+
+            node_to_fill_descs.retain(|desc| {
+                matches!(desc.availability, NodeAvailabilityWrapper::Active)
+                    && matches!(
+                        desc.scheduling,
+                        NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Filling
+                    )
+            });
+
+            if node_to_fill_descs.is_empty() {
+                anyhow::bail!("There are no nodes to drain to")
+            }
+
+            // Set the node scheduling policy to draining for the nodes which
+            // we plan to drain.
+            for node_desc in node_to_drain_descs.iter() {
+                let req = NodeConfigureRequest {
+                    node_id: node_desc.id,
+                    availability: None,
+                    scheduling: Some(NodeSchedulingPolicy::Draining),
+                };
+
+                storcon_client
+                    .dispatch::<_, ()>(
+                        Method::PUT,
+                        format!("control/v1/node/{}/config", node_desc.id),
+                        Some(req),
+                    )
+                    .await?;
+            }
+
+            // Perform the drain: move each tenant shard scheduled on a node to
+            // be drained to a node which is being filled. A simple round robin
+            // strategy is used to pick the new node.
+            let tenants = storcon_client
+                .dispatch::<(), Vec<TenantDescribeResponse>>(
+                    Method::GET,
+                    "control/v1/tenant".to_string(),
+                    None,
+                )
+                .await?;
+
+            let mut selected_node_idx = 0;
+
+            struct DrainMove {
+                tenant_shard_id: TenantShardId,
+                from: NodeId,
+                to: NodeId,
+            }
+
+            let mut moves: Vec<DrainMove> = Vec::new();
+
+            let shards = tenants
+                .into_iter()
+                .flat_map(|tenant| tenant.shards.into_iter());
+            for shard in shards {
+                if let Some(max_shards) = max_shards {
+                    if moves.len() >= max_shards {
+                        println!(
+                            "Stop planning shard moves since the requested maximum was reached"
+                        );
+                        break;
+                    }
+                }
+
+                let should_migrate = {
+                    if let Some(attached_to) = shard.node_attached {
+                        node_to_drain_descs
+                            .iter()
+                            .map(|desc| desc.id)
+                            .any(|id| id == attached_to)
+                    } else {
+                        false
+                    }
+                };
+
+                if !should_migrate {
+                    continue;
+                }
+
+                moves.push(DrainMove {
+                    tenant_shard_id: shard.tenant_shard_id,
+                    from: shard
+                        .node_attached
+                        .expect("We only migrate attached tenant shards"),
+                    to: node_to_fill_descs[selected_node_idx].id,
+                });
+                selected_node_idx = (selected_node_idx + 1) % node_to_fill_descs.len();
+            }
+
+            let total_moves = moves.len();
+
+            if dry_run == Some(true) {
+                println!("Dryrun requested. Planned {total_moves} moves:");
+                for mv in &moves {
+                    println!("{}: {} -> {}", mv.tenant_shard_id, mv.from, mv.to)
+                }
+
+                return Ok(());
+            }
+
+            const DEFAULT_MIGRATE_CONCURRENCY: usize = 8;
+            let mut stream = futures::stream::iter(moves)
+                .map(|mv| {
+                    let client = Client::new(cli.api.clone(), cli.jwt.clone());
+                    async move {
+                        client
+                            .dispatch::<TenantShardMigrateRequest, TenantShardMigrateResponse>(
+                                Method::PUT,
+                                format!("control/v1/tenant/{}/migrate", mv.tenant_shard_id),
+                                Some(TenantShardMigrateRequest {
+                                    tenant_shard_id: mv.tenant_shard_id,
+                                    node_id: mv.to,
+                                }),
+                            )
+                            .await
+                            .map_err(|e| (mv.tenant_shard_id, mv.from, mv.to, e))
+                    }
+                })
+                .buffered(concurrency.unwrap_or(DEFAULT_MIGRATE_CONCURRENCY));
+
+            let mut success = 0;
+            let mut failure = 0;
+
+            while let Some(res) = stream.next().await {
+                match res {
+                    Ok(_) => {
+                        success += 1;
+                    }
+                    Err((tenant_shard_id, from, to, error)) => {
+                        failure += 1;
+                        println!(
+                            "Failed to migrate {} from node {} to node {}: {}",
+                            tenant_shard_id, from, to, error
+                        );
+                    }
+                }
+
+                if (success + failure) % 20 == 0 {
+                    println!(
+                        "Processed {}/{} shards: {} succeeded, {} failed",
+                        success + failure,
+                        total_moves,
+                        success,
+                        failure
+                    );
+                }
+            }
+
+            println!(
+                "Processed {}/{} shards: {} succeeded, {} failed",
+                success + failure,
+                total_moves,
+                success,
+                failure
+            );
         }
     }
 

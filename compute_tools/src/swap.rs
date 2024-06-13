@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{anyhow, Context};
 use tracing::warn;
 
@@ -17,17 +19,24 @@ pub fn resize_swap(size_bytes: u64) -> anyhow::Result<()> {
         .arg(size_bytes.to_string())
         .spawn();
 
-    if matches!(&child_result, Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
-        warn!("ignoring \"not found\" error from resize-swap to avoid swapoff while compute is running");
-        return Ok(());
-    }
-
     child_result
         .context("spawn() failed")
         .and_then(|mut child| child.wait().context("wait() failed"))
         .and_then(|status| match status.success() {
             true => Ok(()),
-            false => Err(anyhow!("process exited with {status}")),
+            false => {
+                // The command failed. Maybe it was because the resize-swap file doesn't exist?
+                // The --once flag causes it to delete itself on success so we don't disable swap
+                // while postgres is running; maybe this is fine.
+                match Path::new(RESIZE_SWAP_BIN).try_exists() {
+                    Err(_) | Ok(true) => Err(anyhow!("process exited with {status}")),
+                    // The path doesn't exist; we're actually ok 
+                    Ok(false) => {
+                        warn!("ignoring \"not found\" error from resize-swap to avoid swapoff while compute is running");
+                        Ok(())
+                    },
+                }
+            }
         })
         // wrap any prior error with the overall context that we couldn't run the command
         .with_context(|| {

@@ -3,6 +3,7 @@
 //! Main entry point for the Page Server executable.
 
 use std::env::{var, VarError};
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, ops::ControlFlow, str::FromStr};
@@ -151,37 +152,34 @@ fn initialize_config(
     workdir: &Utf8Path,
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
     let init = arg_matches.get_flag("init");
-    let update_config = init || arg_matches.get_flag("update-config");
 
-    let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
-        if init {
-            anyhow::bail!(
-                "Config file '{cfg_file_path}' already exists, cannot init it, use --update-config to update it",
-            );
+    let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
+        Ok(mut f) => {
+            if init {
+                anyhow::bail!("config file already exists: {cfg_file_path}");
+            }
+            let md = f.metadata().context("stat config file")?;
+            if md.is_file() {
+                let mut s = String::new();
+                f.read_to_string(&mut s).context("read config file")?;
+                Some(s.parse().context("parse config file toml")?)
+            } else {
+                anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
+            }
         }
-        // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
-            .with_context(|| format!("Failed to read pageserver config at '{cfg_file_path}'"))?;
-        (
-            cfg_file_contents
-                .parse::<toml_edit::Document>()
-                .with_context(|| {
-                    format!("Failed to parse '{cfg_file_path}' as pageserver config")
-                })?,
-            true,
-        )
-    } else if cfg_file_path.exists() {
-        anyhow::bail!("Config file '{cfg_file_path}' exists but is not a regular file");
-    } else {
-        // We're initializing the tenant, so there's no config file yet
-        (
-            DEFAULT_CONFIG_FILE
-                .parse::<toml_edit::Document>()
-                .context("could not parse built-in config file")?,
-            false,
-        )
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
+        }
     };
 
+    let mut effective_config = file_contents.unwrap_or_else(|| {
+        DEFAULT_CONFIG_FILE
+            .parse()
+            .expect("unit tests ensure this works")
+    });
+
+    // Patch with overrides from the command line
     if let Some(values) = arg_matches.get_many::<String>("config-override") {
         for option_line in values {
             let doc = toml_edit::Document::from_str(option_line).with_context(|| {
@@ -189,22 +187,21 @@ fn initialize_config(
             })?;
 
             for (key, item) in doc.iter() {
-                if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
-                    anyhow::bail!("Pageserver config file exists at '{cfg_file_path}' and has node id already, it cannot be overridden");
-                }
-                toml.insert(key, item.clone());
+                effective_config.insert(key, item.clone());
             }
         }
     }
 
-    debug!("Resulting toml: {toml}");
-    let conf = PageServerConf::parse_and_validate(&toml, workdir)
+    debug!("Resulting toml: {effective_config}");
+
+    // Construct the runtime representation
+    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
-    if update_config {
+    if init {
         info!("Writing pageserver config to '{cfg_file_path}'");
 
-        std::fs::write(cfg_file_path, toml.to_string())
+        std::fs::write(cfg_file_path, effective_config.to_string())
             .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
         info!("Config successfully written to '{cfg_file_path}'")
     }
@@ -287,7 +284,6 @@ fn start_pageserver(
     ))
     .unwrap();
     pageserver::preinitialize_metrics();
-    pageserver::metrics::wal_redo::set_process_kind_metric(conf.walredo_process_kind);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
@@ -519,16 +515,12 @@ fn start_pageserver(
         }
     });
 
-    let secondary_controller = if let Some(remote_storage) = &remote_storage {
-        secondary::spawn_tasks(
-            tenant_manager.clone(),
-            remote_storage.clone(),
-            background_jobs_barrier.clone(),
-            shutdown_pageserver.clone(),
-        )
-    } else {
-        secondary::null_controller()
-    };
+    let secondary_controller = secondary::spawn_tasks(
+        tenant_manager.clone(),
+        remote_storage.clone(),
+        background_jobs_barrier.clone(),
+        shutdown_pageserver.clone(),
+    );
 
     // shared state between the disk-usage backed eviction background task and the http endpoint
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
@@ -536,15 +528,13 @@ fn start_pageserver(
     // been configured.
     let disk_usage_eviction_state: Arc<disk_usage_eviction_task::State> = Arc::default();
 
-    if let Some(remote_storage) = &remote_storage {
-        launch_disk_usage_global_eviction_task(
-            conf,
-            remote_storage.clone(),
-            disk_usage_eviction_state.clone(),
-            tenant_manager.clone(),
-            background_jobs_barrier.clone(),
-        )?;
-    }
+    launch_disk_usage_global_eviction_task(
+        conf,
+        remote_storage.clone(),
+        disk_usage_eviction_state.clone(),
+        tenant_manager.clone(),
+        background_jobs_barrier.clone(),
+    )?;
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.
@@ -657,17 +647,20 @@ fn start_pageserver(
             None,
             "libpq endpoint listener",
             true,
-            async move {
-                page_service::libpq_listener_main(
-                    conf,
-                    broker_client,
-                    pg_auth,
-                    pageserver_listener,
-                    conf.pg_auth_type,
-                    libpq_ctx,
-                    task_mgr::shutdown_token(),
-                )
-                .await
+            {
+                let tenant_manager = tenant_manager.clone();
+                async move {
+                    page_service::libpq_listener_main(
+                        tenant_manager,
+                        broker_client,
+                        pg_auth,
+                        pageserver_listener,
+                        conf.pg_auth_type,
+                        libpq_ctx,
+                        task_mgr::shutdown_token(),
+                    )
+                    .await
+                }
             },
         );
     }
@@ -696,14 +689,7 @@ fn start_pageserver(
             // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
             // The plan is to change that over time.
             shutdown_pageserver.take();
-            let bg_remote_storage = remote_storage.clone();
-            let bg_deletion_queue = deletion_queue.clone();
-            pageserver::shutdown_pageserver(
-                &tenant_manager,
-                bg_remote_storage.map(|_| bg_deletion_queue),
-                0,
-            )
-            .await;
+            pageserver::shutdown_pageserver(&tenant_manager, deletion_queue.clone(), 0).await;
             unreachable!()
         })
     }
@@ -711,12 +697,11 @@ fn start_pageserver(
 
 fn create_remote_storage_client(
     conf: &'static PageServerConf,
-) -> anyhow::Result<Option<GenericRemoteStorage>> {
+) -> anyhow::Result<GenericRemoteStorage> {
     let config = if let Some(config) = &conf.remote_storage_config {
         config
     } else {
-        tracing::warn!("no remote storage configured, this is a deprecated configuration");
-        return Ok(None);
+        anyhow::bail!("no remote storage configured, this is a deprecated configuration");
     };
 
     // Create the client
@@ -736,7 +721,7 @@ fn create_remote_storage_client(
             GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
     }
 
-    Ok(Some(remote_storage))
+    Ok(remote_storage)
 }
 
 fn cli() -> Command {
@@ -758,17 +743,12 @@ fn cli() -> Command {
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
             Arg::new("config-override")
+                .long("config-override")
                 .short('c')
                 .num_args(1)
                 .action(ArgAction::Append)
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there). \
                 Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
-        )
-        .arg(
-            Arg::new("update-config")
-                .long("update-config")
-                .action(ArgAction::SetTrue)
-                .help("Update the config file when started"),
         )
         .arg(
             Arg::new("enabled-features")

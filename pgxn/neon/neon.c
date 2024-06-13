@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
+#include "replication/logical.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "storage/procsignal.h"
@@ -34,6 +35,7 @@
 #include "walproposer.h"
 #include "pagestore_client.h"
 #include "control_plane_connector.h"
+#include "walsender_hooks.h"
 
 PG_MODULE_MAGIC;
 void		_PG_init(void);
@@ -265,7 +267,6 @@ LogicalSlotsMonitorMain(Datum main_arg)
 	}
 }
 
-
 void
 _PG_init(void)
 {
@@ -279,6 +280,8 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
+        WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitLogicalReplicationMonitor();
 

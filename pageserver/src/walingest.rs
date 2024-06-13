@@ -234,6 +234,7 @@ impl WalIngest {
                         modification,
                         &parsed_xact,
                         info == pg_constants::XLOG_XACT_COMMIT,
+                        decoded.origin_id,
                         ctx,
                     )
                     .await?;
@@ -246,6 +247,7 @@ impl WalIngest {
                         modification,
                         &parsed_xact,
                         info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
+                        decoded.origin_id,
                         ctx,
                     )
                     .await?;
@@ -373,6 +375,18 @@ impl WalIngest {
                 if info == pg_constants::XLOG_RUNNING_XACTS {
                     let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
                     self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
+                }
+            }
+            pg_constants::RM_REPLORIGIN_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                if info == pg_constants::XLOG_REPLORIGIN_SET {
+                    let xlrec = crate::walrecord::XlReploriginSet::decode(&mut buf);
+                    modification
+                        .set_replorigin(xlrec.node_id, xlrec.remote_lsn)
+                        .await?
+                } else if info == pg_constants::XLOG_REPLORIGIN_DROP {
+                    let xlrec = crate::walrecord::XlReploriginDrop::decode(&mut buf);
+                    modification.drop_replorigin(xlrec.node_id).await?
                 }
             }
             _x => {
@@ -1178,6 +1192,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         parsed: &XlXactParsedRecord,
         is_commit: bool,
+        origin_id: u16,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Record update of CLOG pages
@@ -1242,6 +1257,11 @@ impl WalIngest {
                     self.put_rel_drop(modification, rel, ctx).await?;
                 }
             }
+        }
+        if origin_id != 0 {
+            modification
+                .set_replorigin(origin_id, parsed.origin_lsn)
+                .await?;
         }
         Ok(())
     }

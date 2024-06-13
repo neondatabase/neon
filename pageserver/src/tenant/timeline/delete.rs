@@ -7,7 +7,7 @@ use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
 use tracing::{error, info, instrument, Instrument};
-use utils::{crashsafe, fs_ext, id::TimelineId};
+use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
 
 use crate::{
     config::PageServerConf,
@@ -26,19 +26,21 @@ use super::{Timeline, TimelineResources};
 /// during attach or pageserver restart.
 /// See comment in persist_index_part_with_deleted_flag.
 async fn set_deleted_in_remote_index(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
-    if let Some(remote_client) = timeline.remote_client.as_ref() {
-        match remote_client.persist_index_part_with_deleted_flag().await {
-            // If we (now, or already) marked it successfully as deleted, we can proceed
-            Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
-            // Bail out otherwise
-            //
-            // AlreadyInProgress shouldn't happen, because the 'delete_lock' prevents
-            // two tasks from performing the deletion at the same time. The first task
-            // that starts deletion should run it to completion.
-            Err(e @ PersistIndexPartWithDeletedFlagError::AlreadyInProgress(_))
-            | Err(e @ PersistIndexPartWithDeletedFlagError::Other(_)) => {
-                return Err(DeleteTimelineError::Other(anyhow::anyhow!(e)));
-            }
+    match timeline
+        .remote_client
+        .persist_index_part_with_deleted_flag()
+        .await
+    {
+        // If we (now, or already) marked it successfully as deleted, we can proceed
+        Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
+        // Bail out otherwise
+        //
+        // AlreadyInProgress shouldn't happen, because the 'delete_lock' prevents
+        // two tasks from performing the deletion at the same time. The first task
+        // that starts deletion should run it to completion.
+        Err(e @ PersistIndexPartWithDeletedFlagError::AlreadyInProgress(_))
+        | Err(e @ PersistIndexPartWithDeletedFlagError::Other(_)) => {
+            return Err(DeleteTimelineError::Other(anyhow::anyhow!(e)));
         }
     }
     Ok(())
@@ -117,11 +119,11 @@ pub(super) async fn delete_local_timeline_directory(
 
 /// Removes remote layers and an index file after them.
 async fn delete_remote_layers_and_index(timeline: &Timeline) -> anyhow::Result<()> {
-    if let Some(remote_client) = &timeline.remote_client {
-        remote_client.delete_all().await.context("delete_all")?
-    };
-
-    Ok(())
+    timeline
+        .remote_client
+        .delete_all()
+        .await
+        .context("delete_all")
 }
 
 // This function removs remaining traces of a timeline on disk.
@@ -260,7 +262,7 @@ impl DeleteTimelineFlow {
         tenant: Arc<Tenant>,
         timeline_id: TimelineId,
         local_metadata: &TimelineMetadata,
-        remote_client: Option<RemoteTimelineClient>,
+        remote_client: RemoteTimelineClient,
         deletion_queue_client: DeletionQueueClient,
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
@@ -278,6 +280,8 @@ impl DeleteTimelineFlow {
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
+                // Aux file policy is not needed for deletion, assuming deletion does not read aux keyspace
+                None,
             )
             .context("create_timeline_struct")?;
 
@@ -421,6 +425,10 @@ impl DeleteTimelineFlow {
 
     pub(crate) fn is_finished(&self) -> bool {
         matches!(self, Self::Finished)
+    }
+
+    pub(crate) fn is_not_started(&self) -> bool {
+        matches!(self, Self::NotStarted)
     }
 }
 

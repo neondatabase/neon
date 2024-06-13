@@ -240,7 +240,7 @@ impl<'a> ShardedRange<'a> {
     /// pages that would not actually be stored on this node.
     ///
     /// Don't use this function in code that works with physical entities like layer files.
-    fn raw_size(range: &Range<Key>) -> u32 {
+    pub fn raw_size(range: &Range<Key>) -> u32 {
         if is_contiguous_range(range) {
             contiguous_range_len(range)
         } else {
@@ -307,7 +307,7 @@ impl KeySpace {
     }
 
     /// Merge another keyspace into the current one.
-    /// Note: the keyspaces must not ovelap (enforced via assertions)
+    /// Note: the keyspaces must not overlap (enforced via assertions). To merge overlapping key ranges, use `KeySpaceRandomAccum`.
     pub fn merge(&mut self, other: &KeySpace) {
         let all_ranges = self
             .ranges

@@ -66,10 +66,11 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
     ".*task iteration took longer than the configured period.*",
     # these can happen anytime we do compactions from background task and shutdown pageserver
-    r".*ERROR.*ancestor timeline \S+ is being stopped",
+    ".*could not compact.*cancelled.*",
     # this is expected given our collaborative shutdown approach for the UploadQueue
     ".*Compaction failed.*, retrying in .*: Other\\(queue is in state Stopped.*",
     ".*Compaction failed.*, retrying in .*: ShuttingDown",
+    ".*Compaction failed.*, retrying in .*: Other\\(timeline shutting down.*",
     # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
     ".*Error processing HTTP request: NotFound: Timeline .* was not found",
     ".*took more than expected to complete.*",
@@ -88,7 +89,13 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Flushed oversized open layer with size.*",
     # During teardown, we stop the storage controller before the pageservers, so pageservers
     # can experience connection errors doing background deletion queue work.
-    ".*WARN deletion backend: calling control plane generation validation API failed.*Connection refused.*",
+    ".*WARN deletion backend: calling control plane generation validation API failed.*error sending request.*",
+    # Can happen when the test shuts down the storage controller while it is calling the utilization API
+    ".*WARN.*path=/v1/utilization .*request was dropped before completing",
+    # Can happen during shutdown
+    ".*scheduling deletion on drop failed: queue is in state Stopped.*",
+    # Can happen during shutdown
+    ".*ignoring failure to find gc cutoffs: timeline shutting down.*",
 )
 
 
@@ -129,9 +136,10 @@ if __name__ == "__main__":
         "-i",
         "--input",
         type=argparse.FileType("r"),
-        default=sys.stdin,
-        help="Pageserver logs file. Reads from stdin if no file is provided.",
+        help="Pageserver logs file. Use '-' for stdin.",
+        required=True,
     )
+
     args = parser.parse_args()
     errors = _check_allowed_errors(args.input)
 

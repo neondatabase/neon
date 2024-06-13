@@ -9,11 +9,11 @@ from typing import List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
 from fixtures.pageserver.utils import wait_for_last_record_lsn
-from fixtures.types import Lsn
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
@@ -140,10 +140,14 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
 
     # start without gc so we can time compaction with less noise; use shorter
     # period for compaction so it starts earlier
+    def patch_default_tenant_config(config):
+        tenant_config = config.get("tenant_config", {})
+        tenant_config["compaction_period"] = "3s"
+        tenant_config["gc_period"] = "0s"
+        config["tenant_config"] = tenant_config
+
+    env.pageserver.edit_config_toml(patch_default_tenant_config)
     env.pageserver.start(
-        overrides=(
-            "--pageserver-config-override=tenant_config={ compaction_period = '3s', gc_period = '0s' }",
-        ),
         # this does print more than we want, but the number should be comparable between runs
         extra_env_vars={
             "RUST_LOG": f"[compaction_loop{{tenant_id={env.initial_tenant}}}]=debug,info"

@@ -9,10 +9,10 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{BlockNumber, TimestampTz};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
-use postgres_ffi::{XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
+use postgres_ffi::{RepOriginId, XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
 use serde::{Deserialize, Serialize};
 use tracing::*;
-use utils::bin_ser::DeserializeError;
+use utils::{bin_ser::DeserializeError, lsn::Lsn};
 
 /// Each update to a page is represented by a NeonWalRecord. It can be a wrapper
 /// around a PostgreSQL WAL record, or a custom neon-specific "record".
@@ -116,6 +116,7 @@ pub struct DecodedWALRecord {
 
     pub blocks: Vec<DecodedBkpBlock>,
     pub main_data_offset: usize,
+    pub origin_id: u16,
 }
 
 #[repr(C)]
@@ -573,6 +574,7 @@ pub struct XlXactParsedRecord {
     pub subxacts: Vec<TransactionId>,
 
     pub xnodes: Vec<RelFileNode>,
+    pub origin_lsn: Lsn,
 }
 
 impl XlXactParsedRecord {
@@ -651,6 +653,11 @@ impl XlXactParsedRecord {
             debug!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE xid {}", xid);
         }
 
+        let origin_lsn = if xinfo & pg_constants::XACT_XINFO_HAS_ORIGIN != 0 {
+            Lsn(buf.get_u64_le())
+        } else {
+            Lsn::INVALID
+        };
         XlXactParsedRecord {
             xid,
             info,
@@ -660,6 +667,7 @@ impl XlXactParsedRecord {
             ts_id,
             subxacts,
             xnodes,
+            origin_lsn,
         }
     }
 }
@@ -810,6 +818,36 @@ impl XlRunningXacts {
     }
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlReploriginDrop {
+    pub node_id: RepOriginId,
+}
+
+impl XlReploriginDrop {
+    pub fn decode(buf: &mut Bytes) -> XlReploriginDrop {
+        XlReploriginDrop {
+            node_id: buf.get_u16_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlReploriginSet {
+    pub remote_lsn: Lsn,
+    pub node_id: RepOriginId,
+}
+
+impl XlReploriginSet {
+    pub fn decode(buf: &mut Bytes) -> XlReploriginSet {
+        XlReploriginSet {
+            remote_lsn: Lsn(buf.get_u64_le()),
+            node_id: buf.get_u16_le(),
+        }
+    }
+}
+
 /// Main routine to decode a WAL record and figure out which blocks are modified
 //
 // See xlogrecord.h for details
@@ -844,6 +882,7 @@ pub fn decode_wal_record(
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
     let mut got_rnode = false;
+    let mut origin_id: u16 = 0;
 
     let mut buf = record.clone();
 
@@ -891,7 +930,7 @@ pub fn decode_wal_record(
 
             pg_constants::XLR_BLOCK_ID_ORIGIN => {
                 // RepOriginId is uint16
-                buf.advance(2);
+                origin_id = buf.get_u16_le();
             }
 
             pg_constants::XLR_BLOCK_ID_TOPLEVEL_XID => {
@@ -1088,6 +1127,7 @@ pub fn decode_wal_record(
     decoded.xl_info = xlogrec.xl_info;
     decoded.xl_rmid = xlogrec.xl_rmid;
     decoded.record = record;
+    decoded.origin_id = origin_id;
     decoded.main_data_offset = main_data_offset;
 
     Ok(())

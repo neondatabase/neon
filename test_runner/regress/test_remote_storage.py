@@ -1,6 +1,3 @@
-# It's possible to run any regular test with the local fs remote storage via
-# env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
-
 import os
 import queue
 import shutil
@@ -9,11 +6,13 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
@@ -27,7 +26,6 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     available_remote_storages,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     assert_eq,
     assert_ge,
@@ -832,8 +830,9 @@ def test_compaction_waits_for_upload(
     assert len(upload_stuck_layers) > 0
 
     for name in upload_stuck_layers:
-        path = env.pageserver.timeline_dir(tenant_id, timeline_id) / name
-        assert path.exists(), "while uploads are stuck the layers should be present on disk"
+        assert env.pageserver.layer_exists(
+            tenant_id, timeline_id, parse_layer_file_name(name)
+        ), "while uploads are stuck the layers should be present on disk"
 
     # now this will do the L0 => L1 compaction and want to remove
     # upload_stuck_layers and the original initdb L0
@@ -841,8 +840,9 @@ def test_compaction_waits_for_upload(
 
     # as uploads are paused, the upload_stuck_layers should still be with us
     for name in upload_stuck_layers:
-        path = env.pageserver.timeline_dir(tenant_id, timeline_id) / name
-        assert path.exists(), "uploads are stuck still over compaction"
+        assert env.pageserver.layer_exists(
+            tenant_id, timeline_id, parse_layer_file_name(name)
+        ), "uploads are stuck still over compaction"
 
     compacted_layers = client.layer_map_info(tenant_id, timeline_id).historic_by_name()
     overlap = compacted_layers.intersection(upload_stuck_layers)
@@ -876,9 +876,8 @@ def test_compaction_waits_for_upload(
     wait_until(10, 1, until_layer_deletes_completed)
 
     for name in upload_stuck_layers:
-        path = env.pageserver.timeline_dir(tenant_id, timeline_id) / name
-        assert (
-            not path.exists()
+        assert not env.pageserver.layer_exists(
+            tenant_id, timeline_id, parse_layer_file_name(name)
         ), "l0 should now be removed because of L0 => L1 compaction and completed uploads"
 
     # We should not have hit the error handling path in uploads where a uploaded file is gone

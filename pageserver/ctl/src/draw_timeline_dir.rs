@@ -28,6 +28,8 @@
 //! # From an `index_part.json` in S3
 //! (jq -r '.layer_metadata | keys[]' | cargo  run -p pagectl draw-timeline ) < index_part.json-00000016 > out.svg
 //!
+//! # enrich with lines for gc_cutoff and a child branch point
+//! cat <(jq -r '.historic_layers[] | .layer_file_name' < layers.json) <(echo -e 'gc_cutoff:0000001CE3FE32C9\nbranch:0000001DE3FE32C9') | cargo run --bin pagectl draw-timeline >| out.svg
 //! ```
 //!
 //! ## Viewing
@@ -48,9 +50,8 @@
 //! ```
 //!
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use pageserver::repository::Key;
-use pageserver::METADATA_FILE_NAME;
 use std::cmp::Ordering;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
@@ -81,6 +82,11 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     let split: Vec<&str> = name.split("__").collect();
     let keys: Vec<&str> = split[0].split('-').collect();
     let mut lsns: Vec<&str> = split[1].split('-').collect();
+
+    if lsns.last().expect("should").len() == 8 {
+        lsns.pop();
+    }
+
     if lsns.len() == 1 {
         lsns.push(lsns[0]);
     }
@@ -88,6 +94,33 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     let keys = Key::from_hex(keys[0]).unwrap()..Key::from_hex(keys[1]).unwrap();
     let lsns = Lsn::from_hex(lsns[0]).unwrap()..Lsn::from_hex(lsns[1]).unwrap();
     (keys, lsns)
+}
+
+#[derive(Clone, Copy)]
+enum LineKind {
+    GcCutoff,
+    Branch,
+}
+
+impl From<LineKind> for Fill {
+    fn from(value: LineKind) -> Self {
+        match value {
+            LineKind::GcCutoff => Fill::Color(rgb(255, 0, 0)),
+            LineKind::Branch => Fill::Color(rgb(0, 255, 0)),
+        }
+    }
+}
+
+impl FromStr for LineKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::prelude::v1::Result<Self, Self::Err> {
+        Ok(match s {
+            "gc_cutoff" => LineKind::GcCutoff,
+            "branch" => LineKind::Branch,
+            _ => anyhow::bail!("unsupported linekind: {s}"),
+        })
+    }
 }
 
 pub fn main() -> Result<()> {
@@ -99,15 +132,32 @@ pub fn main() -> Result<()> {
     }
     let mut files: Vec<Layer> = vec![];
     let stdin = io::stdin();
-    for line in stdin.lock().lines() {
+
+    let mut lines: Vec<(Lsn, LineKind)> = vec![];
+
+    for (lineno, line) in stdin.lock().lines().enumerate() {
+        let lineno = lineno + 1;
+
         let line = line.unwrap();
+        if let Some((kind, lsn)) = line.split_once(':') {
+            let (kind, lsn) = LineKind::from_str(kind)
+                .context("parse kind")
+                .and_then(|kind| {
+                    if lsn.contains('/') {
+                        Lsn::from_str(lsn)
+                    } else {
+                        Lsn::from_hex(lsn)
+                    }
+                    .map(|lsn| (kind, lsn))
+                    .context("parse lsn")
+                })
+                .with_context(|| format!("parse {line:?} on {lineno}"))?;
+            lines.push((lsn, kind));
+            continue;
+        }
         let line = PathBuf::from_str(&line).unwrap();
         let filename = line.file_name().unwrap();
         let filename = filename.to_str().unwrap();
-        if filename == METADATA_FILE_NAME {
-            // Don't try and parse "metadata" like a key-lsn range
-            continue;
-        }
         let (key_range, lsn_range) = parse_filename(filename);
         files.push(Layer {
             filename: filename.to_owned(),
@@ -117,8 +167,9 @@ pub fn main() -> Result<()> {
     }
 
     // Collect all coordinates
-    let mut keys: Vec<Key> = vec![];
-    let mut lsns: Vec<Lsn> = vec![];
+    let mut keys: Vec<Key> = Vec::with_capacity(files.len());
+    let mut lsns: Vec<Lsn> = Vec::with_capacity(files.len() + lines.len());
+
     for Layer {
         key_range: keyr,
         lsn_range: lsnr,
@@ -130,6 +181,8 @@ pub fn main() -> Result<()> {
         lsns.push(lsnr.start);
         lsns.push(lsnr.end);
     }
+
+    lsns.extend(lines.iter().map(|(lsn, _)| *lsn));
 
     // Analyze
     let key_map = build_coordinate_compression_map(keys);
@@ -144,10 +197,13 @@ pub fn main() -> Result<()> {
     println!(
         "{}",
         BeginSvg {
-            w: key_map.len() as f32,
+            w: (key_map.len() + 10) as f32,
             h: stretch * lsn_map.len() as f32
         }
     );
+
+    let xmargin = 0.05; // Height-dependent margin to disambiguate overlapping deltas
+
     for Layer {
         filename,
         key_range: keyr,
@@ -169,7 +225,6 @@ pub fn main() -> Result<()> {
         let mut lsn_diff = (lsn_end - lsn_start) as f32;
         let mut fill = Fill::None;
         let mut ymargin = 0.05 * lsn_diff; // Height-dependent margin to disambiguate overlapping deltas
-        let xmargin = 0.05; // Height-dependent margin to disambiguate overlapping deltas
         let mut lsn_offset = 0.0;
 
         // Fill in and thicken rectangle if it's an
@@ -189,7 +244,7 @@ pub fn main() -> Result<()> {
         println!(
             "    {}",
             rectangle(
-                key_start as f32 + stretch * xmargin,
+                5.0 + key_start as f32 + stretch * xmargin,
                 stretch * (lsn_max as f32 - (lsn_end as f32 - ymargin - lsn_offset)),
                 key_diff as f32 - stretch * 2.0 * xmargin,
                 stretch * (lsn_diff - 2.0 * ymargin)
@@ -200,6 +255,26 @@ pub fn main() -> Result<()> {
             .comment(filename)
         );
     }
+
+    for (lsn, kind) in lines {
+        let lsn_start = *lsn_map.get(&lsn).unwrap();
+        let lsn_end = lsn_start;
+        let stretch = 2.0;
+        let lsn_diff = 0.3;
+        let lsn_offset = -lsn_diff / 2.0;
+        let ymargin = 0.05;
+        println!(
+            "{}",
+            rectangle(
+                0.0f32 + stretch * xmargin,
+                stretch * (lsn_map.len() as f32 - (lsn_end as f32 - ymargin - lsn_offset)),
+                (key_map.len() + 10) as f32,
+                stretch * (lsn_diff - 2.0 * ymargin)
+            )
+            .fill(kind)
+        );
+    }
+
     println!("{}", EndSvg);
 
     eprintln!("num_images: {}", num_images);

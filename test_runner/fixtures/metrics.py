@@ -142,6 +142,7 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_resident_physical_size",
     "pageserver_io_operations_bytes_total",
     "pageserver_last_record_lsn",
+    "pageserver_standby_horizon",
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",
     "pageserver_smgr_query_seconds_sum",
@@ -149,6 +150,7 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_storage_operations_seconds_sum_total",
     "pageserver_evictions_total",
     "pageserver_evictions_with_low_residence_duration_total",
+    "pageserver_aux_file_estimated_size",
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     # "pageserver_directory_entries_count", -- only used if above a certain threshold
     # "pageserver_broken_tenants_count" -- used only for broken

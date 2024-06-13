@@ -9,37 +9,42 @@
 use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::metrics::WAL_INGEST;
-use crate::repository::*;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
+use crate::{aux_file, repository::*};
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use itertools::Itertools;
 use pageserver_api::key::{
-    dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
-    rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
+    relmap_file_key, repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{Oid, TimestampTz, TransactionId};
+use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
+use utils::pausable_failpoint;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
-const MAX_AUX_FILE_DELTAS: usize = 1024;
+/// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
+pub const MAX_AUX_FILE_DELTAS: usize = 1024;
+
+/// Max number of aux-file-related delta layers. The compaction will create a new image layer once this threshold is reached.
+pub const MAX_AUX_FILE_V2_DELTAS: usize = 64;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -74,11 +79,19 @@ pub enum LsnForTimestamp {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CalculateLogicalSizeError {
+pub(crate) enum CalculateLogicalSizeError {
     #[error("cancelled")]
     Cancelled,
+
+    /// Something went wrong while reading the metadata we use to calculate logical size
+    /// Note that cancellation variants of `PageReconstructError` are transformed to [`Self::Cancelled`]
+    /// in the `From` implementation for this variant.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    PageRead(PageReconstructError),
+
+    /// Something went wrong deserializing metadata that we read to calculate logical size
+    #[error("decode error: {0}")]
+    Decode(#[from] DeserializeError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,10 +116,8 @@ impl From<PageReconstructError> for CollectKeySpaceError {
 impl From<PageReconstructError> for CalculateLogicalSizeError {
     fn from(pre: PageReconstructError) -> Self {
         match pre {
-            PageReconstructError::AncestorStopping(_) | PageReconstructError::Cancelled => {
-                Self::Cancelled
-            }
-            _ => Self::Other(pre.into()),
+            PageReconstructError::Cancelled => Self::Cancelled,
+            _ => Self::PageRead(pre),
         }
     }
 }
@@ -399,6 +410,8 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
+        pausable_failpoint!("find-lsn-for-timestamp-pausable");
+
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         // We use this method to figure out the branching LSN for the new branch, but the
         // GC cutoff could be before the branching point and we cannot create a new branch
@@ -414,6 +427,7 @@ impl Timeline {
 
         let mut found_smaller = false;
         let mut found_larger = false;
+
         while low < high {
             if cancel.is_cancelled() {
                 return Err(PageReconstructError::Cancelled);
@@ -670,7 +684,7 @@ impl Timeline {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
 
-    pub(crate) async fn list_aux_files(
+    async fn list_aux_files_v1(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -688,6 +702,101 @@ impl Timeline {
         }
     }
 
+    async fn list_aux_files_v2(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        let kv = self
+            .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
+            .await
+            .context("scan")?;
+        let mut result = HashMap::new();
+        let mut sz = 0;
+        for (_, v) in kv {
+            let v = v.context("get value")?;
+            let v = aux_file::decode_file_value_bytes(&v).context("value decode")?;
+            for (fname, content) in v {
+                sz += fname.len();
+                sz += content.len();
+                result.insert(fname, content);
+            }
+        }
+        self.aux_file_size_estimator.on_initial(sz);
+        Ok(result)
+    }
+
+    pub(crate) async fn trigger_aux_file_size_computation(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), PageReconstructError> {
+        let current_policy = self.last_aux_file_policy.load();
+        if let Some(AuxFilePolicy::V2) | Some(AuxFilePolicy::CrossValidation) = current_policy {
+            self.list_aux_files_v2(lsn, ctx).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn list_aux_files(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        let current_policy = self.last_aux_file_policy.load();
+        match current_policy {
+            Some(AuxFilePolicy::V1) | None => self.list_aux_files_v1(lsn, ctx).await,
+            Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
+            Some(AuxFilePolicy::CrossValidation) => {
+                let v1_result = self.list_aux_files_v1(lsn, ctx).await;
+                let v2_result = self.list_aux_files_v2(lsn, ctx).await;
+                match (v1_result, v2_result) {
+                    (Ok(v1), Ok(v2)) => {
+                        if v1 != v2 {
+                            tracing::error!(
+                                "unmatched aux file v1 v2 result:\nv1 {v1:?}\nv2 {v2:?}"
+                            );
+                            return Err(PageReconstructError::Other(anyhow::anyhow!(
+                                "unmatched aux file v1 v2 result"
+                            )));
+                        }
+                        Ok(v1)
+                    }
+                    (Ok(_), Err(v2)) => {
+                        tracing::error!("aux file v1 returns Ok while aux file v2 returns an err");
+                        Err(v2)
+                    }
+                    (Err(v1), Ok(_)) => {
+                        tracing::error!("aux file v2 returns Ok while aux file v1 returns an err");
+                        Err(v1)
+                    }
+                    (Err(_), Err(v2)) => Err(v2),
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn get_replorigins(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
+        let kv = self
+            .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
+            .await
+            .context("scan")?;
+        let mut result = HashMap::new();
+        for (k, v) in kv {
+            let v = v.context("get value")?;
+            let origin_id = k.field6 as RepOriginId;
+            let origin_lsn = Lsn::des(&v).unwrap();
+            if origin_lsn != Lsn::INVALID {
+                result.insert(origin_id, origin_lsn);
+            }
+        }
+        Ok(result)
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///
@@ -697,7 +806,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn get_current_logical_size_non_incremental(
+    pub(crate) async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -706,7 +815,7 @@ impl Timeline {
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
+        let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
@@ -810,10 +919,20 @@ impl Timeline {
             result.add_key(AUX_FILES_KEY);
         }
 
+        #[cfg(test)]
+        {
+            let guard = self.extra_test_dense_keyspace.load();
+            for kr in &guard.ranges {
+                result.add_range(kr.clone());
+            }
+        }
+
         Ok((
             result.to_keyspace(),
             /* AUX sparse key space */
-            SparseKeySpace(KeySpace::single(Key::metadata_aux_key_range())),
+            SparseKeySpace(KeySpace {
+                ranges: vec![repl_origin_key_range(), Key::metadata_aux_key_range()],
+            }),
         ))
     }
 
@@ -1080,6 +1199,20 @@ impl<'a> DatadirModification<'a> {
 
         self.put(twophase_file_key(xid), Value::Image(img));
         Ok(())
+    }
+
+    pub async fn set_replorigin(
+        &mut self,
+        origin_id: RepOriginId,
+        origin_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let key = repl_origin_key(origin_id);
+        self.put(key, Value::Image(origin_lsn.ser().unwrap().into()));
+        Ok(())
+    }
+
+    pub async fn drop_replorigin(&mut self, origin_id: RepOriginId) -> anyhow::Result<()> {
+        self.set_replorigin(origin_id, Lsn::INVALID).await
     }
 
     pub fn put_control_file(&mut self, img: Bytes) -> anyhow::Result<()> {
@@ -1389,6 +1522,9 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
+        if let AuxFilePolicy::V2 = self.tline.get_switch_aux_file_policy() {
+            return Ok(());
+        }
         let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
             files: HashMap::new(),
         })?;
@@ -1404,89 +1540,175 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let file_path = path.to_string();
-        let content = if content.is_empty() {
-            None
-        } else {
-            Some(Bytes::copy_from_slice(content))
+        let switch_policy = self.tline.get_switch_aux_file_policy();
+
+        let policy = {
+            let current_policy = self.tline.last_aux_file_policy.load();
+            // Allowed switch path:
+            // * no aux files -> v1/v2/cross-validation
+            // * cross-validation->v2
+
+            let current_policy = if current_policy.is_none() {
+                // This path will only be hit once per tenant: we will decide the final policy in this code block.
+                // The next call to `put_file` will always have `last_aux_file_policy != None`.
+                let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
+                let aux_files_key_v1 = self.tline.list_aux_files_v1(lsn, ctx).await?;
+                if aux_files_key_v1.is_empty() {
+                    None
+                } else {
+                    self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
+                    Some(AuxFilePolicy::V1)
+                }
+            } else {
+                current_policy
+            };
+
+            if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
+                self.tline.do_switch_aux_policy(switch_policy)?;
+                info!(current=?current_policy, next=?switch_policy, "switching aux file policy");
+                switch_policy
+            } else {
+                // This branch handles non-valid migration path, and the case that switch_policy == current_policy.
+                // And actually, because the migration path always allow unspecified -> *, this unwrap_or will never be hit.
+                current_policy.unwrap_or(AuxFilePolicy::default_tenant_config())
+            }
         };
 
-        let n_files;
-        let mut aux_files = self.tline.aux_files.lock().await;
-        if let Some(mut dir) = aux_files.dir.take() {
-            // We already updated aux files in `self`: emit a delta and update our latest value.
-            dir.upsert(file_path.clone(), content.clone());
-            n_files = dir.files.len();
-            if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
-                self.put(
-                    AUX_FILES_KEY,
-                    Value::Image(Bytes::from(
-                        AuxFilesDirectory::ser(&dir).context("serialize")?,
-                    )),
-                );
-                aux_files.n_deltas = 0;
+        if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
+            let key = aux_file::encode_aux_file_key(path);
+            // retrieve the key from the engine
+            let old_val = match self.get(key, ctx).await {
+                Ok(val) => Some(val),
+                Err(PageReconstructError::MissingKey(_)) => None,
+                Err(e) => return Err(e.into()),
+            };
+            let files: Vec<(&str, &[u8])> = if let Some(ref old_val) = old_val {
+                aux_file::decode_file_value(old_val)?
             } else {
-                self.put(
-                    AUX_FILES_KEY,
-                    Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
-                );
-                aux_files.n_deltas += 1;
-            }
-            aux_files.dir = Some(dir);
-        } else {
-            // Check if the AUX_FILES_KEY is initialized
-            match self.get(AUX_FILES_KEY, ctx).await {
-                Ok(dir_bytes) => {
-                    let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
-                    // Key is already set, we may append a delta
-                    self.put(
-                        AUX_FILES_KEY,
-                        Value::WalRecord(NeonWalRecord::AuxFile {
-                            file_path: file_path.clone(),
-                            content: content.clone(),
-                        }),
+                Vec::new()
+            };
+            let mut other_files = Vec::with_capacity(files.len());
+            let mut modifying_file = None;
+            for file @ (p, content) in files {
+                if path == p {
+                    assert!(
+                        modifying_file.is_none(),
+                        "duplicated entries found for {}",
+                        path
                     );
-                    dir.upsert(file_path, content);
-                    n_files = dir.files.len();
-                    aux_files.dir = Some(dir);
+                    modifying_file = Some(content);
+                } else {
+                    other_files.push(file);
                 }
-                Err(
-                    e @ (PageReconstructError::AncestorStopping(_)
-                    | PageReconstructError::Cancelled
-                    | PageReconstructError::AncestorLsnTimeout(_)),
-                ) => {
-                    // Important that we do not interpret a shutdown error as "not found" and thereby
-                    // reset the map.
-                    return Err(e.into());
+            }
+            let mut new_files = other_files;
+            match (modifying_file, content.is_empty()) {
+                (Some(old_content), false) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_update(old_content.len(), content.len());
+                    new_files.push((path, content));
                 }
-                // Note: we added missing key error variant in https://github.com/neondatabase/neon/pull/7393 but
-                // the original code assumes all other errors are missing keys. Therefore, we keep the code path
-                // the same for now, though in theory, we should only match the `MissingKey` variant.
-                Err(
-                    PageReconstructError::Other(_)
-                    | PageReconstructError::WalRedo(_)
-                    | PageReconstructError::MissingKey { .. },
-                ) => {
-                    // Key is missing, we must insert an image as the basis for subsequent deltas.
+                (Some(old_content), true) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_remove(old_content.len());
+                    // not adding the file key to the final `new_files` vec.
+                }
+                (None, false) => {
+                    self.tline.aux_file_size_estimator.on_add(content.len());
+                    new_files.push((path, content));
+                }
+                (None, true) => warn!("removing non-existing aux file: {}", path),
+            }
+            let new_val = aux_file::encode_file_value(&new_files)?;
+            self.put(key, Value::Image(new_val.into()));
+        }
 
-                    let mut dir = AuxFilesDirectory {
-                        files: HashMap::new(),
-                    };
-                    dir.upsert(file_path, content);
+        if let AuxFilePolicy::V1 | AuxFilePolicy::CrossValidation = policy {
+            let file_path = path.to_string();
+            let content = if content.is_empty() {
+                None
+            } else {
+                Some(Bytes::copy_from_slice(content))
+            };
+
+            let n_files;
+            let mut aux_files = self.tline.aux_files.lock().await;
+            if let Some(mut dir) = aux_files.dir.take() {
+                // We already updated aux files in `self`: emit a delta and update our latest value.
+                dir.upsert(file_path.clone(), content.clone());
+                n_files = dir.files.len();
+                if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
                     self.put(
                         AUX_FILES_KEY,
                         Value::Image(Bytes::from(
                             AuxFilesDirectory::ser(&dir).context("serialize")?,
                         )),
                     );
-                    n_files = 1;
-                    aux_files.dir = Some(dir);
+                    aux_files.n_deltas = 0;
+                } else {
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                    );
+                    aux_files.n_deltas += 1;
+                }
+                aux_files.dir = Some(dir);
+            } else {
+                // Check if the AUX_FILES_KEY is initialized
+                match self.get(AUX_FILES_KEY, ctx).await {
+                    Ok(dir_bytes) => {
+                        let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
+                        // Key is already set, we may append a delta
+                        self.put(
+                            AUX_FILES_KEY,
+                            Value::WalRecord(NeonWalRecord::AuxFile {
+                                file_path: file_path.clone(),
+                                content: content.clone(),
+                            }),
+                        );
+                        dir.upsert(file_path, content);
+                        n_files = dir.files.len();
+                        aux_files.dir = Some(dir);
+                    }
+                    Err(
+                        e @ (PageReconstructError::Cancelled
+                        | PageReconstructError::AncestorLsnTimeout(_)),
+                    ) => {
+                        // Important that we do not interpret a shutdown error as "not found" and thereby
+                        // reset the map.
+                        return Err(e.into());
+                    }
+                    // Note: we added missing key error variant in https://github.com/neondatabase/neon/pull/7393 but
+                    // the original code assumes all other errors are missing keys. Therefore, we keep the code path
+                    // the same for now, though in theory, we should only match the `MissingKey` variant.
+                    Err(
+                        PageReconstructError::Other(_)
+                        | PageReconstructError::WalRedo(_)
+                        | PageReconstructError::MissingKey { .. },
+                    ) => {
+                        // Key is missing, we must insert an image as the basis for subsequent deltas.
+
+                        let mut dir = AuxFilesDirectory {
+                            files: HashMap::new(),
+                        };
+                        dir.upsert(file_path, content);
+                        self.put(
+                            AUX_FILES_KEY,
+                            Value::Image(Bytes::from(
+                                AuxFilesDirectory::ser(&dir).context("serialize")?,
+                            )),
+                        );
+                        n_files = 1;
+                        aux_files.dir = Some(dir);
+                    }
                 }
             }
-        }
 
-        self.pending_directory_entries
-            .push((DirectoryKind::AuxFiles, n_files));
+            self.pending_directory_entries
+                .push((DirectoryKind::AuxFiles, n_files));
+        }
 
         Ok(())
     }
@@ -1523,7 +1745,7 @@ impl<'a> DatadirModification<'a> {
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
             for (lsn, value) in values {
-                if is_rel_block_key(&key) || is_slru_block_key(key) {
+                if key.is_rel_block_key() || key.is_slru_block_key() {
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
                     writer.put(key, lsn, &value, ctx).await?;
@@ -1558,8 +1780,6 @@ impl<'a> DatadirModification<'a> {
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut writer = self.tline.writer().await;
 
-        let timer = WAL_INGEST.time_spent_on_ingest.start_timer();
-
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
@@ -1578,7 +1798,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         if !self.pending_deletions.is_empty() {
-            writer.delete_batch(&self.pending_deletions).await?;
+            writer.delete_batch(&self.pending_deletions, ctx).await?;
             self.pending_deletions.clear();
         }
 
@@ -1598,8 +1818,6 @@ impl<'a> DatadirModification<'a> {
         for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
             writer.update_directory_entries_count(kind, count as u64);
         }
-
-        timer.observe_duration();
 
         Ok(())
     }
@@ -1634,6 +1852,12 @@ impl<'a> DatadirModification<'a> {
         }
         let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
         self.tline.get(key, lsn, ctx).await
+    }
+
+    /// Only used during unit tests, force putting a key into the modification.
+    #[cfg(test)]
+    pub(crate) fn put_for_test(&mut self, key: Key, val: Value) {
+        self.put(key, val);
     }
 
     fn put(&mut self, key: Key, val: Value) {

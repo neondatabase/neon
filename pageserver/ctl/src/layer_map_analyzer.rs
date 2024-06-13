@@ -100,7 +100,7 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
 async fn get_holes(path: &Utf8Path, max_holes: usize, ctx: &RequestContext) -> Result<Vec<Hole>> {
-    let file = VirtualFile::open(path).await?;
+    let file = VirtualFile::open(path, ctx).await?;
     let file_id = page_cache::next_file_id();
     let block_reader = FileBlockReader::new(&file, file_id);
     let summary_blk = block_reader.read_blk(0, ctx).await?;

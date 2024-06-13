@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 use once_cell::sync::OnceCell;
+use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
@@ -46,6 +47,7 @@ pub struct RequestMonitoring {
     pub(crate) auth_method: Option<AuthMethod>,
     success: bool,
     pub(crate) cold_start_info: ColdStartInfo,
+    pg_options: Option<StartupMessageParams>,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -102,6 +104,7 @@ impl RequestMonitoring {
             success: false,
             rejected: None,
             cold_start_info: ColdStartInfo::Unknown,
+            pg_options: None,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             disconnect_sender: LOG_CHAN_DISCONNECT.get().and_then(|tx| tx.upgrade()),
@@ -132,6 +135,18 @@ impl RequestMonitoring {
         self.latency_timer.cold_start_info(info);
     }
 
+    pub fn set_db_options(&mut self, options: StartupMessageParams) {
+        self.set_application(options.get("application_name").map(SmolStr::from));
+        if let Some(user) = options.get("user") {
+            self.set_user(user.into());
+        }
+        if let Some(dbname) = options.get("database") {
+            self.set_dbname(dbname.into());
+        }
+
+        self.pg_options = Some(options);
+    }
+
     pub fn set_project(&mut self, x: MetricsAuxInfo) {
         if self.endpoint_id.is_none() {
             self.set_endpoint_id(x.endpoint_id.as_str().into())
@@ -155,8 +170,10 @@ impl RequestMonitoring {
         }
     }
 
-    pub fn set_application(&mut self, app: Option<SmolStr>) {
-        self.application = app.or_else(|| self.application.clone());
+    fn set_application(&mut self, app: Option<SmolStr>) {
+        if let Some(app) = app {
+            self.application = Some(app);
+        }
     }
 
     pub fn set_dbname(&mut self, dbname: DbName) {

@@ -1,12 +1,15 @@
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.types import Lsn
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
+from requests.exceptions import ReadTimeout
 
 
 #
@@ -108,6 +111,52 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         assert Lsn(result["lsn"]) >= last_flush_lsn
 
 
+def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
+    """
+    Test if cancelled pageserver get_lsn_by_timestamp request is correctly handled.
+    Added as an effort to improve error handling and avoid full anyhow backtrace.
+    """
+
+    env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request was dropped before completing.*",
+            ".*Cancelled request finished with an error: Cancelled",
+        ]
+    )
+
+    client = env.pageserver.http_client()
+    failpoint = "find-lsn-for-timestamp-pausable"
+    client.configure_failpoints((failpoint, "pause"))
+
+    with ThreadPoolExecutor(max_workers=1) as exec:
+        # Request get_lsn_by_timestamp, hit the pausable failpoint
+        failing = exec.submit(
+            client.timeline_get_lsn_by_timestamp,
+            env.initial_tenant,
+            env.initial_timeline,
+            datetime.now(),
+            timeout=2,
+        )
+
+        _, offset = wait_until(
+            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+        )
+
+        with pytest.raises(ReadTimeout):
+            failing.result()
+
+        client.configure_failpoints((failpoint, "off"))
+
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(
+                "Cancelled request finished with an error: Cancelled$", offset
+            ),
+        )
+
+
 # Test pageserver get_timestamp_of_lsn API
 def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
     key_not_found_error = r".*could not find data for key.*"
@@ -119,11 +168,11 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
 
     cur = endpoint_main.connect().cursor()
     # Create table, and insert rows, each in a separate transaction
-    # Disable synchronous_commit to make this initialization go faster.
+    # Enable synchronous commit as we are timing sensitive
     #
     # Each row contains current insert LSN and the current timestamp, when
     # the row was inserted.
-    cur.execute("SET synchronous_commit=off")
+    cur.execute("SET synchronous_commit=on")
     cur.execute("CREATE TABLE foo (x integer)")
     tbl = []
     for i in range(1000):
@@ -132,7 +181,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
         after_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=timezone.utc)
         after_lsn = query_scalar(cur, "SELECT pg_current_wal_lsn()")
         tbl.append([i, after_timestamp, after_lsn])
-        time.sleep(0.005)
+        time.sleep(0.02)
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions

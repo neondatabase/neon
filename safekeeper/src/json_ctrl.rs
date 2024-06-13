@@ -6,8 +6,6 @@
 //! modifications in tests.
 //!
 
-use std::sync::Arc;
-
 use anyhow::Context;
 use bytes::Bytes;
 use postgres_backend::QueryError;
@@ -23,7 +21,7 @@ use crate::safekeeper::{
 };
 use crate::safekeeper::{Term, TermHistory, TermLsn};
 use crate::state::TimelinePersistentState;
-use crate::timeline::Timeline;
+use crate::timeline::FullAccessTimeline;
 use crate::GlobalTimelines;
 use postgres_backend::PostgresBackend;
 use postgres_ffi::encode_logical_message;
@@ -104,8 +102,8 @@ pub async fn handle_json_ctrl<IO: AsyncRead + AsyncWrite + Unpin>(
 async fn prepare_safekeeper(
     ttid: TenantTimelineId,
     pg_version: u32,
-) -> anyhow::Result<Arc<Timeline>> {
-    GlobalTimelines::create(
+) -> anyhow::Result<FullAccessTimeline> {
+    let tli = GlobalTimelines::create(
         ttid,
         ServerInfo {
             pg_version,
@@ -115,10 +113,16 @@ async fn prepare_safekeeper(
         Lsn::INVALID,
         Lsn::INVALID,
     )
-    .await
+    .await?;
+
+    tli.full_access_guard().await
 }
 
-async fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> anyhow::Result<()> {
+async fn send_proposer_elected(
+    tli: &FullAccessTimeline,
+    term: Term,
+    lsn: Lsn,
+) -> anyhow::Result<()> {
     // add new term to existing history
     let history = tli.get_state().await.1.acceptor_state.term_history;
     let history = history.up_to(lsn.checked_sub(1u64).unwrap());
@@ -147,7 +151,7 @@ pub struct InsertedWAL {
 /// Extend local WAL with new LogicalMessage record. To do that,
 /// create AppendRequest with new WAL and pass it to safekeeper.
 pub async fn append_logical_message(
-    tli: &Arc<Timeline>,
+    tli: &FullAccessTimeline,
     msg: &AppendLogicalMessage,
 ) -> anyhow::Result<InsertedWAL> {
     let wal_data = encode_logical_message(&msg.lm_prefix, &msg.lm_message);
@@ -165,7 +169,7 @@ pub async fn append_logical_message(
     let append_request = ProposerAcceptorMessage::AppendRequest(AppendRequest {
         h: AppendRequestHeader {
             term: msg.term,
-            epoch_start_lsn: begin_lsn,
+            term_start_lsn: begin_lsn,
             begin_lsn,
             end_lsn,
             commit_lsn,

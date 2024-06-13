@@ -52,7 +52,7 @@ pub struct InMemoryLayer {
 
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is `None`.
-    end_lsn: OnceLock<Lsn>,
+    pub(crate) end_lsn: OnceLock<Lsn>,
 
     /// Used for traversal path. Cached representation of the in-memory layer before frozen.
     local_path_str: Arc<str>,
@@ -473,10 +473,11 @@ impl InMemoryLayer {
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
+        ctx: &RequestContext,
     ) -> Result<InMemoryLayer> {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
-        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id).await?;
+        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, ctx).await?;
         let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {
@@ -642,6 +643,7 @@ impl InMemoryLayer {
             self.tenant_shard_id,
             Key::MIN,
             self.start_lsn..end_lsn,
+            ctx,
         )
         .await?;
 

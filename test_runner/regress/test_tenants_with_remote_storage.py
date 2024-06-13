@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from typing import List, Tuple
 
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -18,6 +19,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     last_flush_lsn_upload,
 )
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
@@ -27,7 +29,6 @@ from fixtures.remote_storage import (
     LocalFsStorage,
     RemoteStorageKind,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
 
 
@@ -246,7 +247,10 @@ def test_tenant_redownloads_truncated_file_on_startup(
 
     # ensure the same size is found from the index_part.json
     index_part = env.pageserver_remote_storage.index_content(tenant_id, timeline_id)
-    assert index_part["layer_metadata"][path.name]["file_size"] == expected_size
+    assert (
+        index_part["layer_metadata"][parse_layer_file_name(path.name).to_str()]["file_size"]
+        == expected_size
+    )
 
     ## Start the pageserver. It will notice that the file size doesn't match, and
     ## rename away the local file. It will be re-downloaded when it's needed.
@@ -276,7 +280,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
 
     # the remote side of local_layer_truncated
     remote_layer_path = env.pageserver_remote_storage.remote_layer_path(
-        tenant_id, timeline_id, path.name
+        tenant_id, timeline_id, parse_layer_file_name(path.name).to_str()
     )
 
     # if the upload ever was ongoing, this check would be racy, but at least one

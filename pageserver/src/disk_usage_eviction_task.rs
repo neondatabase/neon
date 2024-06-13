@@ -64,7 +64,7 @@ use crate::{
         mgr::TenantManager,
         remote_timeline_client::LayerFileMetadata,
         secondary::SecondaryTenant,
-        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerFileName},
+        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName},
     },
 };
 
@@ -534,13 +534,12 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                     });
                 }
                 EvictionLayer::Secondary(layer) => {
-                    let file_size = layer.metadata.file_size();
-                    let tenant_manager = tenant_manager.clone();
+                    let file_size = layer.metadata.file_size;
 
                     js.spawn(async move {
                         layer
                             .secondary_tenant
-                            .evict_layer(tenant_manager.get_conf(), layer.timeline_id, layer.name)
+                            .evict_layer(layer.timeline_id, layer.name)
                             .await;
                         Ok(file_size)
                     });
@@ -599,7 +598,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 pub(crate) struct EvictionSecondaryLayer {
     pub(crate) secondary_tenant: Arc<SecondaryTenant>,
     pub(crate) timeline_id: TimelineId,
-    pub(crate) name: LayerFileName,
+    pub(crate) name: LayerName,
     pub(crate) metadata: LayerFileMetadata,
 }
 
@@ -632,9 +631,9 @@ impl EvictionLayer {
         }
     }
 
-    pub(crate) fn get_name(&self) -> LayerFileName {
+    pub(crate) fn get_name(&self) -> LayerName {
         match self {
-            Self::Attached(l) => l.layer_desc().filename(),
+            Self::Attached(l) => l.layer_desc().layer_name(),
             Self::Secondary(sl) => sl.name.clone(),
         }
     }
@@ -642,7 +641,7 @@ impl EvictionLayer {
     pub(crate) fn get_file_size(&self) -> u64 {
         match self {
             Self::Attached(l) => l.layer_desc().file_size,
-            Self::Secondary(sl) => sl.metadata.file_size(),
+            Self::Secondary(sl) => sl.metadata.file_size,
         }
     }
 }

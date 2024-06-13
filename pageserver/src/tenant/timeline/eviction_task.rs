@@ -23,7 +23,7 @@ use std::{
 use pageserver_api::models::{EvictionPolicy, EvictionPolicyLayerAccessThreshold};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
+use tracing::{debug, info, info_span, instrument, warn, Instrument};
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -210,11 +210,6 @@ impl Timeline {
         // We don't want to hold the layer map lock during eviction.
 
         // So, we just need to deal with this.
-
-        if self.remote_client.is_none() {
-            error!("no remote storage configured, cannot evict layers");
-            return ControlFlow::Continue(());
-        }
 
         let mut js = tokio::task::JoinSet::new();
         {

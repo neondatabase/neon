@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Tuple
 
 import pytest
-import toml
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -17,8 +17,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import wait_until
+from fixtures.utils import human_bytes, wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
 
@@ -45,17 +44,16 @@ def test_min_resident_size_override_handling(
         ps_http.set_tenant_config(tenant_id, {})
         assert_config(tenant_id, None, default_tenant_conf_value)
 
-    env.pageserver.stop()
     if config_level_override is not None:
-        env.pageserver.start(
-            overrides=(
-                "--pageserver-config-override=tenant_config={ min_resident_size_override =  "
-                + str(config_level_override)
-                + " }",
-            )
-        )
-    else:
-        env.pageserver.start()
+
+        def set_min_resident_size(config):
+            tenant_config = config.get("tenant_config", {})
+            tenant_config["min_resident_size_override"] = config_level_override
+            config["tenant_config"] = tenant_config
+
+        env.pageserver.edit_config_toml(set_min_resident_size)
+    env.pageserver.stop()
+    env.pageserver.start()
 
     tenant_id, _ = env.neon_cli.create_tenant()
     assert_overrides(tenant_id, config_level_override)
@@ -164,33 +162,31 @@ class EvictionEnv:
         usage eviction task is unknown; it might need to run one more iteration
         before assertions can be made.
         """
-        disk_usage_config = {
-            "period": period,
-            "max_usage_pct": max_usage_pct,
-            "min_avail_bytes": min_avail_bytes,
-            "mock_statvfs": mock_behavior,
-            "eviction_order": eviction_order.config(),
-        }
-
-        enc = toml.TomlEncoder()
 
         # these can sometimes happen during startup before any tenants have been
         # loaded, so nothing can be evicted, we just wait for next iteration which
         # is able to evict.
         pageserver.allowed_errors.append(".*WARN.* disk usage still high.*")
 
-        pageserver.start(
-            overrides=(
-                "--pageserver-config-override=disk_usage_based_eviction="
-                + enc.dump_inline_table(disk_usage_config).replace("\n", " "),
+        pageserver.patch_config_toml_nonrecursive(
+            {
+                "disk_usage_based_eviction": {
+                    "period": period,
+                    "max_usage_pct": max_usage_pct,
+                    "min_avail_bytes": min_avail_bytes,
+                    "mock_statvfs": mock_behavior,
+                    "eviction_order": eviction_order.config(),
+                },
                 # Disk usage based eviction runs as a background task.
                 # But pageserver startup delays launch of background tasks for some time, to prioritize initial logical size calculations during startup.
                 # But, initial logical size calculation may not be triggered if safekeepers don't publish new broker messages.
                 # But, we only have a 10-second-timeout in this test.
                 # So, disable the delay for this test.
-                "--pageserver-config-override=background_task_maximum_delay='0s'",
-            ),
+                "background_task_maximum_delay": "0s",
+            }
         )
+
+        pageserver.start()
 
         # we now do initial logical size calculation on startup, which on debug builds can fight with disk usage based eviction
         for tenant_id, timeline_id in self.timelines:
@@ -220,19 +216,6 @@ def count_layers_per_tenant(
             ret[tenant_id] += 1
 
     return dict(ret)
-
-
-def human_bytes(amt: float) -> str:
-    suffixes = ["", "Ki", "Mi", "Gi"]
-
-    last = suffixes[-1]
-
-    for name in suffixes:
-        if amt < 1024 or name == last:
-            return f"{int(round(amt))} {name}B"
-        amt = amt / 1024
-
-    raise RuntimeError("unreachable")
 
 
 def _eviction_env(
@@ -298,7 +281,7 @@ def pgbench_init_tenant(
             "gc_period": "0s",
             "compaction_period": "0s",
             "checkpoint_distance": f"{layer_size}",
-            "image_creation_threshold": "100",
+            "image_creation_threshold": "999999",
             "compaction_target_size": f"{layer_size}",
         }
     )
@@ -627,15 +610,16 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
             ratio = count_now / original_count
             abs_diff = abs(ratio - expected_ratio)
             assert original_count > count_now
-            log.info(
-                f"tenant {tenant_id} layer count {original_count} -> {count_now}, ratio: {ratio}, expecting {abs_diff} < 0.1"
-            )
 
+            expectation = 0.06
+            log.info(
+                f"tenant {tenant_id} layer count {original_count} -> {count_now}, ratio: {ratio}, expecting {abs_diff} < {expectation}"
+            )
             # in this test case both relative_spare and relative_equal produce
             # the same outcomes; this must be a quantization effect of similar
             # sizes (-s4 and -s6) and small (5MB) layer size.
             # for pg15 and pg16 the absdiff is < 0.01, for pg14 it is closer to 0.02
-            assert abs_diff < 0.05
+            assert abs_diff < expectation
 
 
 @pytest.mark.parametrize(
@@ -671,11 +655,10 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
         finish_tenant_creation(env, tenant_id, timeline_id, min_expected_layers)
 
     tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
-    (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, False)
+    (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, True)
 
-    # cut 10 percent
     response = env.pageserver.http_client().disk_usage_eviction_run(
-        {"evict_bytes": total_on_disk // 10, "eviction_order": order.config()}
+        {"evict_bytes": total_on_disk // 5, "eviction_order": order.config()}
     )
     log.info(f"{response}")
 

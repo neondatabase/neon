@@ -13,7 +13,7 @@ use crate::{
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::EndpointRateLimiter,
-    scram, EndpointCacheKey, Normalize,
+    scram, EndpointCacheKey,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
@@ -26,7 +26,7 @@ pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
     pub locks: &'static ApiLocks<EndpointCacheKey>,
-    pub endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    pub wake_compute_endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     jwt: String,
 }
 
@@ -36,7 +36,7 @@ impl Api {
         endpoint: http::Endpoint,
         caches: &'static ApiCaches,
         locks: &'static ApiLocks<EndpointCacheKey>,
-        endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+        wake_compute_endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> Self {
         let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
             Ok(v) => v,
@@ -46,7 +46,7 @@ impl Api {
             endpoint,
             caches,
             locks,
-            endpoint_rate_limiter,
+            wake_compute_endpoint_rate_limiter,
             jwt,
         }
     }
@@ -281,14 +281,6 @@ impl super::Api for Api {
             return Ok(cached);
         }
 
-        // check rate limit
-        if !self
-            .endpoint_rate_limiter
-            .check(user_info.endpoint.normalize().into(), 1)
-        {
-            return Err(WakeComputeError::TooManyConnections);
-        }
-
         let permit = self.locks.get_permit(&key).await?;
 
         // after getting back a permit - it's possible the cache was filled
@@ -301,7 +293,16 @@ impl super::Api for Api {
             }
         }
 
-        let mut node = self.do_wake_compute(ctx, user_info).await?;
+        // check rate limit
+        if !self
+            .wake_compute_endpoint_rate_limiter
+            .check(user_info.endpoint.normalize_intern(), 1)
+        {
+            info!(key = &*key, "found cached compute node info");
+            return Err(WakeComputeError::TooManyConnections);
+        }
+
+        let mut node = permit.release_result(self.do_wake_compute(ctx, user_info).await)?;
         ctx.set_project(node.aux.clone());
         let cold_start_info = node.aux.cold_start_info;
         info!("woken up a compute node");

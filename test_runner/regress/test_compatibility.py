@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -7,6 +8,7 @@ from typing import List, Optional
 
 import pytest
 import toml
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -21,7 +23,6 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
@@ -233,18 +234,38 @@ def test_forward_compatibility(
         neon_env_builder.pageserver_validate_vectored_get = None
 
         neon_env_builder.num_safekeepers = 3
-        neon_local_binpath = neon_env_builder.neon_binpath
+
+        # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
+        # But always use the current version's neon_local binary.
+        # This is because we want to test the compatibility of the data format, not the compatibility of the neon_local CLI.
+        neon_env_builder.neon_binpath = compatibility_neon_bin
+        neon_env_builder.pg_distrib_dir = compatibility_postgres_distrib_dir
+        neon_env_builder.neon_local_binpath = neon_env_builder.neon_local_binpath
+
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
-            neon_binpath=compatibility_neon_bin,
-            pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
 
-        # Use current neon_local even though we're using old binaries for
-        # everything else: our test code is written for latest CLI args.
-        env.neon_local_binpath = neon_local_binpath
+        # not using env.pageserver.version because it was initialized before
+        prev_pageserver_version_str = env.get_binary_version("pageserver")
+        prev_pageserver_version_match = re.search(
+            "Neon page server git-env:(.*) failpoints: (.*), features: (.*)",
+            prev_pageserver_version_str,
+        )
+        if prev_pageserver_version_match is not None:
+            prev_pageserver_version = prev_pageserver_version_match.group(1)
+        else:
+            raise AssertionError(
+                "cannot find git hash in the version string: " + prev_pageserver_version_str
+            )
+
+        # does not include logs from previous runs
+        assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
 
         neon_env_builder.start()
+
+        # ensure the specified pageserver is running
+        assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)
 
         check_neon_works(
             env,
@@ -252,6 +273,7 @@ def test_forward_compatibility(
             sql_dump_path=compatibility_snapshot_dir / "dump.sql",
             repo_dir=env.repo_dir,
         )
+
     except Exception:
         if breaking_changes_allowed:
             pytest.xfail(

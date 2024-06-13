@@ -20,7 +20,10 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     endpoint = env.endpoints.create_start("main")
     pageserver_http = env.pageserver.http_client()
 
-    assert pageserver_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"})
+        == 1
+    )
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -55,7 +58,10 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     env.pageserver.start()
 
     # We reloaded our tenant
-    assert pageserver_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"})
+        == 1
+    )
 
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
@@ -156,11 +162,6 @@ def test_pageserver_chaos(
         neon_env_builder.num_pageservers = shard_count
 
     env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
-
-    # these can happen, if we shutdown at a good time. to be fixed as part of #5172.
-    message = ".*duplicated L1 layer layer=.*"
-    for ps in env.pageservers:
-        ps.allowed_errors.append(message)
 
     # Use a tiny checkpoint distance, to create a lot of layers quickly.
     # That allows us to stress the compaction and layer flushing logic more.

@@ -12,13 +12,14 @@ use crate::{
     compute,
     config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
     context::RequestMonitoring,
+    error::ReportableError,
     intern::ProjectIdInt,
     metrics::ApiLockMetrics,
+    rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token},
     scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
 use std::{hash::Hash, sync::Arc, time::Duration};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tracing::info;
 
@@ -29,6 +30,8 @@ pub mod errors {
         proxy::retry::ShouldRetry,
     };
     use thiserror::Error;
+
+    use super::ApiLockError;
 
     /// A go-to error message which doesn't leak any detail.
     const REQUEST_FAILED: &str = "Console request failed";
@@ -76,7 +79,7 @@ pub mod errors {
                     }
                     http::StatusCode::LOCKED | http::StatusCode::UNPROCESSABLE_ENTITY => {
                         // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
-                        format!("{REQUEST_FAILED}: endpoint is temporary unavailable. check your quotas and/or contact our support")
+                        format!("{REQUEST_FAILED}: endpoint is temporarily unavailable. Check your quotas and/or contact our support.")
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 },
@@ -211,25 +214,14 @@ pub mod errors {
         #[error("Too many connections attempts")]
         TooManyConnections,
 
-        #[error("Timeout waiting to acquire wake compute lock")]
-        TimeoutError,
+        #[error("error acquiring resource permit: {0}")]
+        TooManyConnectionAttempts(#[from] ApiLockError),
     }
 
     // This allows more useful interactions than `#[from]`.
     impl<E: Into<ApiError>> From<E> for WakeComputeError {
         fn from(e: E) -> Self {
             Self::ApiError(e.into())
-        }
-    }
-
-    impl From<tokio::sync::AcquireError> for WakeComputeError {
-        fn from(_: tokio::sync::AcquireError) -> Self {
-            WakeComputeError::TimeoutError
-        }
-    }
-    impl From<tokio::time::error::Elapsed> for WakeComputeError {
-        fn from(_: tokio::time::error::Elapsed) -> Self {
-            WakeComputeError::TimeoutError
         }
     }
 
@@ -245,7 +237,9 @@ pub mod errors {
 
                 TooManyConnections => self.to_string(),
 
-                TimeoutError => "timeout while acquiring the compute resource lock".to_owned(),
+                TooManyConnectionAttempts(_) => {
+                    "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
+                }
             }
         }
     }
@@ -256,7 +250,7 @@ pub mod errors {
                 WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
                 WakeComputeError::ApiError(e) => e.get_error_kind(),
                 WakeComputeError::TooManyConnections => crate::error::ErrorKind::RateLimit,
-                WakeComputeError::TimeoutError => crate::error::ErrorKind::ServiceRateLimit,
+                WakeComputeError::TooManyConnectionAttempts(e) => e.get_error_kind(),
             }
         }
     }
@@ -449,17 +443,31 @@ impl ApiCaches {
 /// Various caches for [`console`](super).
 pub struct ApiLocks<K> {
     name: &'static str,
-    node_locks: DashMap<K, Arc<Semaphore>>,
-    permits: usize,
+    node_locks: DashMap<K, Arc<DynamicLimiter>>,
+    config: RateLimiterConfig,
     timeout: Duration,
     epoch: std::time::Duration,
     metrics: &'static ApiLockMetrics,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ApiLockError {
+    #[error("timeout acquiring resource permit")]
+    TimeoutError(#[from] tokio::time::error::Elapsed),
+}
+
+impl ReportableError for ApiLockError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        match self {
+            ApiLockError::TimeoutError(_) => crate::error::ErrorKind::RateLimit,
+        }
+    }
+}
+
 impl<K: Hash + Eq + Clone> ApiLocks<K> {
     pub fn new(
         name: &'static str,
-        permits: usize,
+        config: RateLimiterConfig,
         shards: usize,
         timeout: Duration,
         epoch: std::time::Duration,
@@ -468,16 +476,18 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         Ok(Self {
             name,
             node_locks: DashMap::with_shard_amount(shards),
-            permits,
+            config,
             timeout,
             epoch,
             metrics,
         })
     }
 
-    pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, errors::WakeComputeError> {
-        if self.permits == 0 {
-            return Ok(WakeComputePermit { permit: None });
+    pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
+        if self.config.initial_limit == 0 {
+            return Ok(WakeComputePermit {
+                permit: Token::disabled(),
+            });
         }
         let now = Instant::now();
         let semaphore = {
@@ -489,24 +499,22 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
                     .entry(key.clone())
                     .or_insert_with(|| {
                         self.metrics.semaphores_registered.inc();
-                        Arc::new(Semaphore::new(self.permits))
+                        DynamicLimiter::new(self.config)
                     })
                     .clone()
             }
         };
-        let permit = tokio::time::timeout_at(now + self.timeout, semaphore.acquire_owned()).await;
+        let permit = semaphore.acquire_timeout(self.timeout).await;
 
         self.metrics
             .semaphore_acquire_seconds
             .observe(now.elapsed().as_secs_f64());
 
-        Ok(WakeComputePermit {
-            permit: Some(permit??),
-        })
+        Ok(WakeComputePermit { permit: permit? })
     }
 
     pub async fn garbage_collect_worker(&self) {
-        if self.permits == 0 {
+        if self.config.initial_limit == 0 {
             return;
         }
         let mut interval =
@@ -536,12 +544,21 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
 }
 
 pub struct WakeComputePermit {
-    // None if the lock is disabled
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Token,
 }
 
 impl WakeComputePermit {
     pub fn should_check_cache(&self) -> bool {
-        self.permit.is_some()
+        !self.permit.is_disabled()
+    }
+    pub fn release(self, outcome: Outcome) {
+        self.permit.release(outcome)
+    }
+    pub fn release_result<T, E>(self, res: Result<T, E>) -> Result<T, E> {
+        match res {
+            Ok(_) => self.release(Outcome::Success),
+            Err(_) => self.release(Outcome::Overload),
+        }
+        res
     }
 }

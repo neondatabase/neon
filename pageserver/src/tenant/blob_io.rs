@@ -238,9 +238,12 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         io_buf,
                         Err(Error::new(
                             ErrorKind::Other,
-                            format!("blob too large ({} bytes)", len),
+                            format!("blob too large ({len} bytes)"),
                         )),
                     );
+                }
+                if len > 0x0fff_ffff {
+                    tracing::warn!("writing blob above future limit ({len} bytes)");
                 }
                 let mut len_buf = (len as u32).to_be_bytes();
                 len_buf[0] |= 0x80;
@@ -299,7 +302,7 @@ mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = VirtualFile::create(pathbuf.as_path()).await?;
+            let file = VirtualFile::create(pathbuf.as_path(), &ctx).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let (_, res) = wtr.write_blob(blob.clone(), &ctx).await;
@@ -314,7 +317,7 @@ mod tests {
             wtr.flush_buffer(&ctx).await?;
         }
 
-        let file = VirtualFile::open(pathbuf.as_path()).await?;
+        let file = VirtualFile::open(pathbuf.as_path(), &ctx).await?;
         let rdr = BlockReaderRef::VirtualFile(&file);
         let rdr = BlockCursor::new(rdr);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {

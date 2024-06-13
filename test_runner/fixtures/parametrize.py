@@ -1,10 +1,12 @@
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import pytest
+import toml
 from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
+from fixtures.utils import AuxFileStore
 
 """
 Dynamically parametrize tests by different parameters
@@ -31,6 +33,25 @@ def pageserver_virtual_file_io_engine() -> Optional[str]:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE")
 
 
+@pytest.fixture(scope="function", autouse=True)
+def pageserver_aux_file_policy() -> Optional[AuxFileStore]:
+    return None
+
+
+def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+    toml_table = os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
+    if toml_table is None:
+        return None
+    v = toml.loads(toml_table)
+    assert isinstance(v, dict)
+    return v
+
+
+@pytest.fixture(scope="function", autouse=True)
+def pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+    return get_pageserver_default_tenant_config_compaction_algorithm()
+
+
 def pytest_generate_tests(metafunc: Metafunc):
     if (bt := os.getenv("BUILD_TYPE")) is None:
         build_types = ["debug", "release"]
@@ -53,6 +74,16 @@ def pytest_generate_tests(metafunc: Metafunc):
         "tokio-epoll-uring",
     ):
         metafunc.parametrize("pageserver_virtual_file_io_engine", [io_engine])
+
+    # Same hack for pageserver_default_tenant_config_compaction_algorithm
+    if (
+        explicit_default := get_pageserver_default_tenant_config_compaction_algorithm()
+    ) is not None:
+        metafunc.parametrize(
+            "pageserver_default_tenant_config_compaction_algorithm",
+            [explicit_default],
+            ids=[explicit_default["kind"]],
+        )
 
     # For performance tests, parametrize also by platform
     if (

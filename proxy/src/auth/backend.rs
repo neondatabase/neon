@@ -13,7 +13,7 @@ use tokio_postgres::config::AuthKeys;
 use tracing::{info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
-use crate::auth::validate_password_and_exchange;
+use crate::auth::{validate_password_and_exchange, AuthError};
 use crate::cache::Cached;
 use crate::console::errors::GetAuthInfoError;
 use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
@@ -23,7 +23,7 @@ use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
-use crate::rate_limiter::{BucketRateLimiter, RateBucketInfo};
+use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter, RateBucketInfo};
 use crate::stream::Stream;
 use crate::{
     auth::{self, ComputeUserInfoMaybeEndpoint},
@@ -35,7 +35,7 @@ use crate::{
     },
     stream, url,
 };
-use crate::{scram, EndpointCacheKey, EndpointId, Normalize, RoleName};
+use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -280,6 +280,7 @@ async fn auth_quirks(
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> auth::Result<ComputeCredentials> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
@@ -304,6 +305,10 @@ async fn auth_quirks(
     // check allowed list
     if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
         return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr));
+    }
+
+    if !endpoint_rate_limiter.check(info.endpoint.clone().into(), 1) {
+        return Err(AuthError::too_many_connections());
     }
     let cached_secret = match maybe_secret {
         Some(secret) => secret,
@@ -360,7 +365,10 @@ async fn authenticate_with_secret(
     config: &'static AuthenticationConfig,
 ) -> auth::Result<ComputeCredentials> {
     if let Some(password) = unauthenticated_password {
-        let auth_outcome = validate_password_and_exchange(&password, secret).await?;
+        let ep = EndpointIdInt::from(&info.endpoint);
+
+        let auth_outcome =
+            validate_password_and_exchange(&config.thread_pool, ep, &password, secret).await?;
         let keys = match auth_outcome {
             crate::sasl::Outcome::Success(key) => key,
             crate::sasl::Outcome::Failure(reason) => {
@@ -381,7 +389,7 @@ async fn authenticate_with_secret(
     // Currently, we use it for websocket connections (latency).
     if allow_cleartext {
         ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
-        return hacks::authenticate_cleartext(ctx, info, client, secret).await;
+        return hacks::authenticate_cleartext(ctx, info, client, secret, config).await;
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
@@ -417,6 +425,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
+        endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> auth::Result<BackendType<'a, ComputeCredentials, NodeInfo>> {
         use BackendType::*;
 
@@ -428,8 +437,16 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
                     "performing authentication using the console"
                 );
 
-                let credentials =
-                    auth_quirks(ctx, &*api, user_info, client, allow_cleartext, config).await?;
+                let credentials = auth_quirks(
+                    ctx,
+                    &*api,
+                    user_info,
+                    client,
+                    allow_cleartext,
+                    config,
+                    endpoint_rate_limiter,
+                )
+                .await?;
                 BackendType::Console(api, credentials)
             }
             // NOTE: this auth backend doesn't use client credentials.
@@ -539,8 +556,8 @@ mod tests {
         },
         context::RequestMonitoring,
         proxy::NeonOptions,
-        rate_limiter::RateBucketInfo,
-        scram::ServerSecret,
+        rate_limiter::{EndpointRateLimiter, RateBucketInfo},
+        scram::{threadpool::ThreadPool, ServerSecret},
         stream::{PqStream, Stream},
     };
 
@@ -582,6 +599,7 @@ mod tests {
     }
 
     static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
+        thread_pool: ThreadPool::new(1),
         scram_protocol_timeout: std::time::Duration::from_secs(5),
         rate_limiter_enabled: true,
         rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
@@ -699,10 +717,20 @@ mod tests {
                 _ => panic!("wrong message"),
             }
         });
+        let endpoint_rate_limiter =
+            Arc::new(EndpointRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET));
 
-        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, false, &CONFIG)
-            .await
-            .unwrap();
+        let _creds = auth_quirks(
+            &mut ctx,
+            &api,
+            user_info,
+            &mut stream,
+            false,
+            &CONFIG,
+            endpoint_rate_limiter,
+        )
+        .await
+        .unwrap();
 
         handle.await.unwrap();
     }
@@ -739,10 +767,20 @@ mod tests {
             frontend::password_message(b"my-secret-password", &mut write).unwrap();
             client.write_all(&write).await.unwrap();
         });
+        let endpoint_rate_limiter =
+            Arc::new(EndpointRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET));
 
-        let _creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, &CONFIG)
-            .await
-            .unwrap();
+        let _creds = auth_quirks(
+            &mut ctx,
+            &api,
+            user_info,
+            &mut stream,
+            true,
+            &CONFIG,
+            endpoint_rate_limiter,
+        )
+        .await
+        .unwrap();
 
         handle.await.unwrap();
     }
@@ -780,9 +818,20 @@ mod tests {
             client.write_all(&write).await.unwrap();
         });
 
-        let creds = auth_quirks(&mut ctx, &api, user_info, &mut stream, true, &CONFIG)
-            .await
-            .unwrap();
+        let endpoint_rate_limiter =
+            Arc::new(EndpointRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET));
+
+        let creds = auth_quirks(
+            &mut ctx,
+            &api,
+            user_info,
+            &mut stream,
+            true,
+            &CONFIG,
+            endpoint_rate_limiter,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(creds.info.endpoint, "my-endpoint");
 

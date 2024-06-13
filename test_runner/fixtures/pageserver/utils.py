@@ -8,10 +8,10 @@ from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
 
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 
 
@@ -313,7 +313,7 @@ def assert_prefix_empty(
             # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-5322/6207777020/index.html#suites/3556ed71f2d69272a7014df6dcb02317/53b5c368b5a68865
             # this seems like a mock_s3 issue
             log.warning(
-                f"contrading ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}, assuming this means KeyCount=0"
+                f"contradicting ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}, assuming this means KeyCount=0"
             )
             keys = 0
         elif keys != 0 and len(objects) == 0:

@@ -32,10 +32,10 @@ use pageserver_api::{
         TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
         UtilizationScore,
     },
-    models::{SecondaryProgress, TenantConfigRequest},
+    models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
 use reqwest::StatusCode;
-use tracing::instrument;
+use tracing::{instrument, Instrument};
 
 use crate::pageserver_client::PageserverClient;
 use pageserver_api::{
@@ -222,6 +222,10 @@ pub struct Config {
 
     /// How many Reconcilers may be spawned concurrently
     pub reconciler_concurrency: usize,
+
+    /// How large must a shard grow in bytes before we split it?
+    /// None disables auto-splitting.
+    pub split_threshold: Option<u64>,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -699,7 +703,7 @@ impl Service {
     /// e.g. a tenant create/attach/migrate must eventually be retried: this task is responsible
     /// for those retries.
     #[instrument(skip_all)]
-    async fn background_reconcile(&self) {
+    async fn background_reconcile(self: &Arc<Self>) {
         self.startup_complete.clone().wait().await;
 
         const BACKGROUND_RECONCILE_PERIOD: Duration = Duration::from_secs(20);
@@ -711,7 +715,11 @@ impl Service {
                 let reconciles_spawned = self.reconcile_all();
                 if reconciles_spawned == 0 {
                     // Run optimizer only when we didn't find any other work to do
-                    self.optimize_all().await;
+                    let optimizations = self.optimize_all().await;
+                    if optimizations == 0 {
+                        // Run new splits only when no optimizations are pending
+                        self.autosplit_tenants().await;
+                    }
                 }
             }
               _ = self.cancel.cancelled() => return
@@ -2368,61 +2376,80 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
-        self.ensure_attached_wait(tenant_id).await?;
-
-        // TODO: refactor into helper
-        let targets = {
-            let locked = self.inner.read().unwrap();
-            let mut targets = Vec::new();
-
+        // Detach all shards
+        let (detach_waiters, shard_ids, node) = {
+            let mut shard_ids = Vec::new();
+            let mut detach_waiters = Vec::new();
+            let mut locked = self.inner.write().unwrap();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
             for (tenant_shard_id, shard) in
-                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+                tenants.range_mut(TenantShardId::tenant_range(tenant_id))
             {
-                let node_id = shard.intent.get_attached().ok_or_else(|| {
-                    ApiError::InternalServerError(anyhow::anyhow!("Shard not scheduled"))
-                })?;
-                let node = locked
-                    .nodes
-                    .get(&node_id)
-                    .expect("Pageservers may not be deleted while referenced");
+                shard_ids.push(*tenant_shard_id);
 
-                targets.push((*tenant_shard_id, node.clone()));
+                // Update the tenant's intent to remove all attachments
+                shard.policy = PlacementPolicy::Detached;
+                shard
+                    .schedule(scheduler, &mut ScheduleContext::default())
+                    .expect("De-scheduling is infallible");
+                debug_assert!(shard.intent.get_attached().is_none());
+                debug_assert!(shard.intent.get_secondary().is_empty());
+
+                if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
+                    detach_waiters.push(waiter);
+                }
             }
-            targets
+
+            // Pick an arbitrary node to use for remote deletions (does not have to be where the tenant
+            // was attached, just has to be able to see the S3 content)
+            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
+            let node = nodes
+                .get(&node_id)
+                .expect("Pageservers may not be deleted while lock is active");
+            (detach_waiters, shard_ids, node.clone())
         };
 
-        // Phase 1: delete on the pageservers
-        let mut any_pending = false;
-        for (tenant_shard_id, node) in targets {
-            let client = PageserverClient::new(
-                node.get_id(),
-                node.base_url(),
-                self.config.jwt_token.as_deref(),
-            );
-            // TODO: this, like many other places, requires proper retry handling for 503, timeout: those should not
-            // surface immediately as an error to our caller.
-            let status = client.tenant_delete(tenant_shard_id).await.map_err(|e| {
-                ApiError::InternalServerError(anyhow::anyhow!(
-                    "Error deleting shard {tenant_shard_id} on node {node}: {e}",
-                ))
-            })?;
-            tracing::info!(
-                "Shard {tenant_shard_id} on node {node}, delete returned {}",
-                status
-            );
-            if status == StatusCode::ACCEPTED {
-                any_pending = true;
-            }
+        if let Err(e) = self.await_waiters(detach_waiters, RECONCILE_TIMEOUT).await {
+            // Failing to detach shouldn't hold up deletion, e.g. if a node is offline we should be able
+            // to use some other node to run the remote deletion.
+            tracing::warn!("Failed to detach some locations: {e}");
         }
 
-        if any_pending {
-            // Caller should call us again later.  When we eventually see 404s from
-            // all the shards, we may proceed to delete our records of the tenant.
-            tracing::info!(
-                "Tenant {} has some shards pending deletion, returning 202",
-                tenant_id
-            );
-            return Ok(StatusCode::ACCEPTED);
+        let locations = shard_ids
+            .into_iter()
+            .map(|s| (s, node.clone()))
+            .collect::<Vec<_>>();
+        let results = self.tenant_for_shards_api(
+            locations,
+            |tenant_shard_id, client| async move { client.tenant_delete(tenant_shard_id).await },
+            1,
+            3,
+            RECONCILE_TIMEOUT,
+            &self.cancel,
+        )
+        .await;
+        for result in results {
+            match result {
+                Ok(StatusCode::ACCEPTED) => {
+                    // This could happen if we failed detach above, and hit a pageserver where the tenant
+                    // is still attached: it will accept the deletion in the background
+                    tracing::warn!(
+                        "Unexpectedly still attached on {}, client should retry",
+                        node
+                    );
+                    return Ok(StatusCode::ACCEPTED);
+                }
+                Ok(_) => {}
+                Err(mgmt_api::Error::Cancelled) => {
+                    return Err(ApiError::ShuttingDown);
+                }
+                Err(e) => {
+                    // This is unexpected: remote deletion should be infallible, unless the object store
+                    // at large is unavailable.
+                    tracing::error!("Error deleting via node {}: {e}", node);
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
+                }
+            }
         }
 
         // Fall through: deletion of the tenant on pageservers is complete, we may proceed to drop
@@ -4286,7 +4313,7 @@ impl Service {
                         continue;
                     }
 
-                    if tenant_shard.intent.demote_attached(node_id) {
+                    if tenant_shard.intent.demote_attached(scheduler, node_id) {
                         tenant_shard.sequence = tenant_shard.sequence.next();
 
                         // TODO: populate a ScheduleContext including all shards in the same tenant_id (only matters
@@ -4746,7 +4773,7 @@ impl Service {
                     // them in an optimization
                     const DOWNLOAD_FRESHNESS_THRESHOLD: u64 = 10 * 1024 * 1024 * 1024;
 
-                    if progress.bytes_total == 0
+                    if progress.heatmap_mtime.is_none()
                         || progress.bytes_total < DOWNLOAD_FRESHNESS_THRESHOLD
                             && progress.bytes_downloaded != progress.bytes_total
                         || progress.bytes_total - progress.bytes_downloaded
@@ -4765,6 +4792,104 @@ impl Service {
         }
 
         validated_work
+    }
+
+    /// Look for shards which are oversized and in need of splitting
+    async fn autosplit_tenants(self: &Arc<Self>) {
+        let Some(split_threshold) = self.config.split_threshold else {
+            // Auto-splitting is disabled
+            return;
+        };
+
+        let nodes = self.inner.read().unwrap().nodes.clone();
+
+        const SPLIT_TO_MAX: ShardCount = ShardCount::new(8);
+
+        let mut top_n = Vec::new();
+
+        // Call into each node to look for big tenants
+        let top_n_request = TopTenantShardsRequest {
+            // We currently split based on logical size, for simplicity: logical size is a signal of
+            // the user's intent to run a large database, whereas physical/resident size can be symptoms
+            // of compaction issues.  Eventually we should switch to using resident size to bound the
+            // disk space impact of one shard.
+            order_by: models::TenantSorting::MaxLogicalSize,
+            limit: 10,
+            where_shards_lt: Some(SPLIT_TO_MAX),
+            where_gt: Some(split_threshold),
+        };
+        for node in nodes.values() {
+            let request_ref = &top_n_request;
+            match node
+                .with_client_retries(
+                    |client| async move {
+                        let request = request_ref.clone();
+                        client.top_tenant_shards(request.clone()).await
+                    },
+                    &self.config.jwt_token,
+                    3,
+                    3,
+                    Duration::from_secs(5),
+                    &self.cancel,
+                )
+                .await
+            {
+                Some(Ok(node_top_n)) => {
+                    top_n.extend(node_top_n.shards.into_iter());
+                }
+                Some(Err(mgmt_api::Error::Cancelled)) => {
+                    continue;
+                }
+                Some(Err(e)) => {
+                    tracing::warn!("Failed to fetch top N tenants from {node}: {e}");
+                    continue;
+                }
+                None => {
+                    // Node is shutting down
+                    continue;
+                }
+            };
+        }
+
+        // Pick the biggest tenant to split first
+        top_n.sort_by_key(|i| i.resident_size);
+        let Some(split_candidate) = top_n.into_iter().next() else {
+            tracing::debug!("No split-elegible shards found");
+            return;
+        };
+
+        // We spawn a task to run this, so it's exactly like some external API client requesting it.  We don't
+        // want to block the background reconcile loop on this.
+        tracing::info!("Auto-splitting tenant for size threshold {split_threshold}: current size {split_candidate:?}");
+
+        let this = self.clone();
+        tokio::spawn(
+            async move {
+                match this
+                    .tenant_shard_split(
+                        split_candidate.id.tenant_id,
+                        TenantShardSplitRequest {
+                            // Always split to the max number of shards: this avoids stepping through
+                            // intervening shard counts and encountering the overrhead of a split+cleanup
+                            // each time as a tenant grows, and is not too expensive because our max shard
+                            // count is relatively low anyway.
+                            // This policy will be adjusted in future once we support higher shard count.
+                            new_shard_count: SPLIT_TO_MAX.literal(),
+                            new_stripe_size: Some(ShardParameters::DEFAULT_STRIPE_SIZE),
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!("Successful auto-split");
+                    }
+                    Err(e) => {
+                        tracing::error!("Auto-split failed: {e}");
+                    }
+                }
+            }
+            .instrument(tracing::info_span!("auto_split", tenant_id=%split_candidate.id.tenant_id)),
+        );
     }
 
     /// Useful for tests: run whatever work a background [`Self::reconcile_all`] would have done, but

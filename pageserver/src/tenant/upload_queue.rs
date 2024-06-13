@@ -1,4 +1,4 @@
-use super::storage_layer::LayerFileName;
+use super::storage_layer::LayerName;
 use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
@@ -43,28 +43,25 @@ pub(crate) struct UploadQueueInitialized {
     /// Counter to assign task IDs
     pub(crate) task_counter: u64,
 
-    /// All layer files stored in the remote storage, taking into account all
-    /// in-progress and queued operations
-    pub(crate) latest_files: HashMap<LayerFileName, LayerFileMetadata>,
+    /// The next uploaded index_part.json; assumed to be dirty.
+    ///
+    /// Should not be read, directly except for layer file updates. Instead you should add a
+    /// projected field.
+    pub(crate) dirty: IndexPart,
+
+    /// The latest remote persisted IndexPart.
+    ///
+    /// Each completed metadata upload will update this. The second item is the task_id which last
+    /// updated the value, used to ensure we never store an older value over a newer one.
+    pub(crate) clean: (IndexPart, Option<u64>),
 
     /// How many file uploads or deletions been scheduled, since the
     /// last (scheduling of) metadata index upload?
     pub(crate) latest_files_changes_since_metadata_upload_scheduled: u64,
 
-    /// Metadata stored in the remote storage, taking into account all
-    /// in-progress and queued operations.
-    /// DANGER: do not return to outside world, e.g., safekeepers.
-    pub(crate) latest_metadata: TimelineMetadata,
-
-    /// `disk_consistent_lsn` from the last metadata file that was successfully
-    /// uploaded. `Lsn(0)` if nothing was uploaded yet.
-    /// Unlike `latest_files` or `latest_metadata`, this value is never ahead.
-    /// Safekeeper can rely on it to make decisions for WAL storage.
-    ///
-    /// visible_remote_consistent_lsn is only updated after our generation has been validated with
+    /// The Lsn is only updated after our generation has been validated with
     /// the control plane (unlesss a timeline's generation is None, in which case
     /// we skip validation)
-    pub(crate) projected_remote_consistent_lsn: Option<Lsn>,
     pub(crate) visible_remote_consistent_lsn: Arc<AtomicLsn>,
 
     // Breakdown of different kinds of tasks currently in-progress
@@ -89,7 +86,7 @@ pub(crate) struct UploadQueueInitialized {
     /// Putting this behind a testing feature to catch problems in tests, but assuming we could have a
     /// bug causing leaks, then it's better to not leave this enabled for production builds.
     #[cfg(feature = "testing")]
-    pub(crate) dangling_files: HashMap<LayerFileName, Generation>,
+    pub(crate) dangling_files: HashMap<LayerName, Generation>,
 
     /// Set to true when we have inserted the `UploadOp::Shutdown` into the `inprogress_tasks`.
     pub(crate) shutting_down: bool,
@@ -110,7 +107,8 @@ impl UploadQueueInitialized {
     }
 
     pub(super) fn get_last_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
-        self.projected_remote_consistent_lsn
+        let lsn = self.clean.0.metadata.disk_consistent_lsn();
+        self.clean.1.map(|_| lsn)
     }
 }
 
@@ -166,12 +164,12 @@ impl UploadQueue {
 
         info!("initializing upload queue for empty remote");
 
+        let index_part = IndexPart::empty(metadata.clone());
+
         let state = UploadQueueInitialized {
-            // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
-            latest_files: HashMap::new(),
+            dirty: index_part.clone(),
+            clean: (index_part, None),
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            latest_metadata: metadata.clone(),
-            projected_remote_consistent_lsn: None,
             visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
             // what follows are boring default initializations
             task_counter: 0,
@@ -201,24 +199,15 @@ impl UploadQueue {
             }
         }
 
-        let mut files = HashMap::with_capacity(index_part.layer_metadata.len());
-        for (layer_name, layer_metadata) in &index_part.layer_metadata {
-            files.insert(
-                layer_name.to_owned(),
-                LayerFileMetadata::from(layer_metadata),
-            );
-        }
-
         info!(
             "initializing upload queue with remote index_part.disk_consistent_lsn: {}",
             index_part.metadata.disk_consistent_lsn()
         );
 
         let state = UploadQueueInitialized {
-            latest_files: files,
+            dirty: index_part.clone(),
+            clean: (index_part.clone(), None),
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            latest_metadata: index_part.metadata.clone(),
-            projected_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
             visible_remote_consistent_lsn: Arc::new(
                 index_part.metadata.disk_consistent_lsn().into(),
             ),
@@ -281,7 +270,7 @@ pub(crate) struct UploadTask {
 /// for timeline deletion, which skips this queue and goes directly to DeletionQueue.
 #[derive(Debug)]
 pub(crate) struct Delete {
-    pub(crate) layers: Vec<(LayerFileName, LayerFileMetadata)>,
+    pub(crate) layers: Vec<(LayerName, LayerFileMetadata)>,
 }
 
 #[derive(Debug)]
@@ -289,13 +278,16 @@ pub(crate) enum UploadOp {
     /// Upload a layer file
     UploadLayer(ResidentLayer, LayerFileMetadata),
 
-    /// Upload the metadata file
-    UploadMetadata(IndexPart, Lsn),
+    /// Upload a index_part.json file
+    UploadMetadata {
+        /// The next [`UploadQueueInitialized::clean`] after this upload succeeds.
+        uploaded: Box<IndexPart>,
+    },
 
     /// Delete layer files
     Delete(Delete),
 
-    /// Barrier. When the barrier operation is reached,
+    /// Barrier. When the barrier operation is reached, the channel is closed.
     Barrier(tokio::sync::watch::Sender<()>),
 
     /// Shutdown; upon encountering this operation no new operations will be spawned, otherwise
@@ -310,13 +302,15 @@ impl std::fmt::Display for UploadOp {
                 write!(
                     f,
                     "UploadLayer({}, size={:?}, gen={:?})",
-                    layer,
-                    metadata.file_size(),
-                    metadata.generation
+                    layer, metadata.file_size, metadata.generation
                 )
             }
-            UploadOp::UploadMetadata(_, lsn) => {
-                write!(f, "UploadMetadata(lsn: {})", lsn)
+            UploadOp::UploadMetadata { uploaded, .. } => {
+                write!(
+                    f,
+                    "UploadMetadata(lsn: {})",
+                    uploaded.metadata.disk_consistent_lsn()
+                )
             }
             UploadOp::Delete(delete) => {
                 write!(f, "Delete({} layers)", delete.layers.len())

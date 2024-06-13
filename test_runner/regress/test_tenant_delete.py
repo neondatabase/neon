@@ -5,11 +5,12 @@ import shutil
 from threading import Thread
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    S3Scrubber,
+    StorageScrubber,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -26,7 +27,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
 from requests.exceptions import ReadTimeout
 
@@ -54,9 +54,26 @@ def test_tenant_delete_smoke(
 
     # first try to delete non existing tenant
     tenant_id = TenantId.generate()
-    env.pageserver.allowed_errors.append(f".*NotFound: tenant {tenant_id}.*")
-    with pytest.raises(PageserverApiException, match=f"NotFound: tenant {tenant_id}"):
-        ps_http.tenant_delete(tenant_id=tenant_id)
+    env.pageserver.allowed_errors.append(".*NotFound.*")
+    env.pageserver.allowed_errors.append(".*simulated failure.*")
+
+    # Check that deleting a non-existent tenant gives the expected result: this is a loop because we
+    # may need to retry on some remote storage errors injected by the test harness
+    while True:
+        try:
+            ps_http.tenant_delete(tenant_id=tenant_id)
+        except PageserverApiException as e:
+            if e.status_code == 500:
+                # This test uses failure injection, which can produce 500s as the pageserver expects
+                # the object store to always be available, and the ListObjects during deletion is generally
+                # an infallible operation
+                assert "simulated failure of remote operation" in e.message
+            elif e.status_code == 404:
+                # This is our expected result: trying to erase a non-existent tenant gives us 404
+                assert "NotFound" in e.message
+                break
+            else:
+                raise
 
     env.neon_cli.create_tenant(
         tenant_id=tenant_id,
@@ -64,7 +81,7 @@ def test_tenant_delete_smoke(
     )
 
     # Default tenant and the one we created
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 2
 
     # create two timelines one being the parent of another
     parent = None
@@ -88,11 +105,14 @@ def test_tenant_delete_smoke(
 
         parent = timeline
 
+    # Upload a heatmap so that we exercise deletion of that too
+    ps_http.tenant_heatmap_upload(tenant_id)
+
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 2
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
 
     tenant_path = env.pageserver.tenant_dir(tenant_id)
     assert not tenant_path.exists()
@@ -108,7 +128,7 @@ def test_tenant_delete_smoke(
     )
 
     # Deletion updates the tenant count: the one default tenant remains
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
 
 
 class Check(enum.Enum):
@@ -532,7 +552,9 @@ def test_tenant_delete_concurrent(
 
         # The TenantSlot is still present while the original request is hung before
         # final removal
-        assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+        assert (
+            ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
+        )
 
         # Permit the original request to run to success
         ps_http.configure_failpoints((BEFORE_REMOVE_FAILPOINT, "off"))
@@ -556,7 +578,8 @@ def test_tenant_delete_concurrent(
     )
 
     # Zero tenants remain (we deleted the default tenant)
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "inprogress"}) == 0
 
 
 def test_tenant_delete_races_timeline_creation(
@@ -673,7 +696,7 @@ def test_tenant_delete_races_timeline_creation(
     )
 
     # Zero tenants remain (we deleted the default tenant)
-    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0
 
 
 def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
@@ -684,7 +707,7 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
 
     remote_storage_kind = RemoteStorageKind.MOCK_S3
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-    scrubber = S3Scrubber(neon_env_builder)
+    scrubber = StorageScrubber(neon_env_builder)
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
     ps_http = env.pageserver.http_client()

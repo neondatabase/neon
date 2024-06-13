@@ -14,6 +14,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use crate::helpers::PAGE_SZ;
 use crate::helpers::{merge_delta_keys, overlaps_with};
 
 use crate::interface;
@@ -379,8 +380,8 @@ impl interface::CompactionLayer<Key> for MockLayer {
     }
     fn file_size(&self) -> u64 {
         match self {
-            MockLayer::Delta(this) => this.file_size(),
-            MockLayer::Image(this) => this.file_size(),
+            MockLayer::Delta(this) => this.file_size,
+            MockLayer::Image(this) => this.file_size,
         }
     }
     fn short_id(&self) -> String {
@@ -509,7 +510,7 @@ impl interface::CompactionJobExecutor for MockTimeline {
         let new_layer = Arc::new(MockImageLayer {
             key_range: key_range.clone(),
             lsn_range: lsn..lsn,
-            file_size: accum_size * 8192,
+            file_size: accum_size * PAGE_SZ,
             deleted: Mutex::new(false),
         });
         info!(

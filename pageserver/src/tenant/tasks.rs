@@ -2,6 +2,7 @@
 //! such as compaction and GC
 
 use std::ops::ControlFlow;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,12 +10,14 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
+use crate::tenant::config::defaults::DEFAULT_COMPACTION_PERIOD;
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
+use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{backoff, completion};
+use utils::{backoff, completion, pausable_failpoint};
 
 static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
     once_cell::sync::Lazy::new(|| {
@@ -38,12 +41,13 @@ static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore
         tokio::sync::Semaphore::new(permits)
     });
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, strum_macros::IntoStaticStr)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, strum_macros::IntoStaticStr, enum_map::Enum)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum BackgroundLoopKind {
     Compaction,
     Gc,
     Eviction,
+    IngestHouseKeeping,
     ConsumptionMetricsCollectMetrics,
     ConsumptionMetricsSyntheticSizeWorker,
     InitialLogicalSizeCalculation,
@@ -53,19 +57,25 @@ pub(crate) enum BackgroundLoopKind {
 
 impl BackgroundLoopKind {
     fn as_static_str(&self) -> &'static str {
-        let s: &'static str = self.into();
-        s
+        self.into()
     }
 }
+
+static PERMIT_GAUGES: once_cell::sync::Lazy<
+    enum_map::EnumMap<BackgroundLoopKind, metrics::IntCounterPair>,
+> = once_cell::sync::Lazy::new(|| {
+    enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+        let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+        crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE.with_label_values(&[kind.into()])
+    }))
+});
 
 /// Cancellation safe.
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
 ) -> tokio::sync::SemaphorePermit<'static> {
-    let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE
-        .with_label_values(&[loop_kind.as_static_str()])
-        .guard();
+    let _guard = PERMIT_GAUGES[loop_kind].guard();
 
     pausable_failpoint!(
         "initial-size-calculation-permit-pause",
@@ -127,6 +137,30 @@ pub fn start_background_loops(
                 };
                 gc_loop(tenant, cancel)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
+                    .await;
+                Ok(())
+            }
+        },
+    );
+
+    task_mgr::spawn(
+        BACKGROUND_RUNTIME.handle(),
+        TaskKind::IngestHousekeeping,
+        Some(tenant_shard_id),
+        None,
+        &format!("ingest housekeeping for tenant {tenant_shard_id}"),
+        false,
+        {
+            let tenant = Arc::clone(tenant);
+            let background_jobs_can_start = background_jobs_can_start.cloned();
+            async move {
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()) },
+                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                };
+                ingest_housekeeping_loop(tenant, cancel)
+                    .instrument(info_span!("ingest_housekeeping_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
                 Ok(())
             }
@@ -346,21 +380,28 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 let res = tenant
                     .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &cancel, &ctx)
                     .await;
-                if let Err(e) = res {
-                    let wait_duration = backoff::exponential_backoff_duration_seconds(
-                        error_run_count + 1,
-                        1.0,
-                        MAX_BACKOFF_SECS,
-                    );
-                    error_run_count += 1;
-                    let wait_duration = Duration::from_secs_f64(wait_duration);
-                    error!(
+                match res {
+                    Ok(_) => {
+                        error_run_count = 0;
+                        period
+                    }
+                    Err(crate::tenant::GcError::TenantCancelled) => {
+                        return;
+                    }
+                    Err(e) => {
+                        let wait_duration = backoff::exponential_backoff_duration_seconds(
+                            error_run_count + 1,
+                            1.0,
+                            MAX_BACKOFF_SECS,
+                        );
+                        error_run_count += 1;
+                        let wait_duration = Duration::from_secs_f64(wait_duration);
+
+                        error!(
                         "Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
                     );
-                    wait_duration
-                } else {
-                    error_run_count = 0;
-                    period
+                        wait_duration
+                    }
                 }
             };
 
@@ -373,6 +414,61 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             {
                 break;
             }
+        }
+    }
+    .await;
+    TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
+}
+
+async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
+    TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
+    async {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    return;
+                },
+                tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
+                    ControlFlow::Break(()) => return,
+                    ControlFlow::Continue(()) => (),
+                },
+            }
+
+            // We run ingest housekeeping with the same frequency as compaction: it is not worth
+            // having a distinct setting.  But we don't run it in the same task, because compaction
+            // blocks on acquiring the background job semaphore.
+            let period = tenant.get_compaction_period();
+
+            // If compaction period is set to zero (to disable it), then we will use a reasonable default
+            let period = if period == Duration::ZERO {
+                humantime::Duration::from_str(DEFAULT_COMPACTION_PERIOD)
+                    .unwrap()
+                    .into()
+            } else {
+                period
+            };
+
+            // Jitter the period by +/- 5%
+            let period =
+                rand::thread_rng().gen_range((period * (95)) / 100..(period * (105)) / 100);
+
+            // Always sleep first: we do not need to do ingest housekeeping early in the lifetime of
+            // a tenant, since it won't have started writing any ephemeral files yet.
+            if tokio::time::timeout(period, cancel.cancelled())
+                .await
+                .is_ok()
+            {
+                break;
+            }
+
+            let started_at = Instant::now();
+            tenant.ingest_housekeeping().await;
+
+            warn_when_period_overrun(
+                started_at.elapsed(),
+                period,
+                BackgroundLoopKind::IngestHouseKeeping,
+            );
         }
     }
     .await;
@@ -420,8 +516,6 @@ pub(crate) async fn random_init_delay(
     period: Duration,
     cancel: &CancellationToken,
 ) -> Result<(), Cancelled> {
-    use rand::Rng;
-
     if period == Duration::ZERO {
         return Ok(());
     }
