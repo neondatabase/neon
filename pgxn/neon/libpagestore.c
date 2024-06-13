@@ -623,7 +623,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		shard->delay_us = MIN_RECONNECT_INTERVAL_USEC;
 
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connected");
-		neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
+		neon_shard_log(shard_no, DEBUG1, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
 		return true;
 	default:
 		neon_shard_log(shard_no, ERROR, "libpagestore: invalid connection state %d", shard->state);
@@ -725,7 +725,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	/* If the connection was lost for some reason, reconnect */
 	if (shard->state == PS_Connected && PQstatus(shard->conn) == CONNECTION_BAD)
 	{
-		neon_shard_log(shard_no, LOG, "pageserver_send disconnect bad connection");
+		neon_shard_log(shard_no, LOG, "pageserver_send disconnect: bad connection");
 		pageserver_disconnect(shard_no);
 		pageserver_conn = NULL;
 	}
@@ -826,7 +826,7 @@ pageserver_receive(shardno_t shard_no)
 		}
 		PG_CATCH();
 		{
-			neon_shard_log(shard_no, LOG, "pageserver_receive: disconnect due malformatted response");
+			neon_shard_log(shard_no, LOG, "pageserver_receive disconnect: malformatted response");
 			pageserver_disconnect(shard_no);
 			PG_RE_THROW();
 		}
@@ -879,7 +879,7 @@ pageserver_flush(shardno_t shard_no)
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 			pageserver_disconnect(shard_no);
-			neon_shard_log(shard_no, LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
+			neon_shard_log(shard_no, LOG, "pageserver_flush disconnect: failed to flush page requests: %s", msg);
 			pfree(msg);
 			return false;
 		}
@@ -1069,7 +1069,7 @@ pg_init_libpagestore(void)
 	 */
 	neon_auth_token = getenv("NEON_AUTH_TOKEN");
 	if (neon_auth_token)
-		neon_log(LOG, "using storage auth token from NEON_AUTH_TOKEN environment variable");
+		neon_log(DEBUG1, "using storage auth token from NEON_AUTH_TOKEN environment variable");
 
 	if (page_server_connstring && page_server_connstring[0])
 	{
