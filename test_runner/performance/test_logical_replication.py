@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 from typing import TYPE_CHECKING
 
@@ -7,6 +9,7 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
+from fixtures.neon_api import connection_parameters_to_env
 from fixtures.neon_fixtures import logical_replication_sync
 
 if TYPE_CHECKING:
@@ -92,6 +95,12 @@ def test_subscriber_lag(
         neon_api.wait_for_operation_to_finish(sub_project_id)
         should_delete_sub = True
         try:
+            pub_env = connection_parameters_to_env(
+                pub_project["connection_uris"][0]["connection_parameters"]
+            )
+            sub_env = connection_parameters_to_env(
+                sub_project["connection_uris"][0]["connection_parameters"]
+            )
             pub_connstr = pub_project["connection_uris"][0]["connection_uri"]
             sub_connstr = sub_project["connection_uris"][0]["connection_uri"]
 
@@ -118,11 +127,12 @@ def test_subscriber_lag(
             )
 
             pub_workload = pg_bin.run_nonblocking(
-                ["pgbench", "-c10", "-T1000", "-Mprepared", pub_connstr]
+                ["pgbench", "-c10", "-T1000", "-Mprepared"], env=pub_env
             )
             try:
                 sub_workload = pg_bin.run_nonblocking(
-                    ["pgbench", "-c10", "-T1000", "-S", sub_connstr]
+                    ["pgbench", "-c10", "-T1000", "-S"],
+                    env=sub_env,
                 )
                 try:
                     start = time.time()

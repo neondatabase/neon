@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import csv
 import os
 import subprocess
@@ -11,6 +13,7 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
+from fixtures.neon_api import connection_parameters_to_env
 from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
@@ -53,12 +56,17 @@ def test_ro_replica_lag(
     try:
         branch_id = project["branch"]["id"]
         master_connstr = project["connection_uris"][0]["connection_uri"]
+        master_env = connection_parameters_to_env(
+            project["connection_uris"][0]["connection_parameters"]
+        )
 
         replica = neon_api.create_endpoint(
             project_id,
             branch_id,
             endpoint_type="read_only",
         )
+        replica_env = master_env
+        replica_env["PGHOST"] = replica["endpoint"]["host"]
         neon_api.wait_for_operation_to_finish(project_id)
 
         replica_connstr = neon_api.get_connection_uri(
@@ -66,18 +74,20 @@ def test_ro_replica_lag(
             endpoint_id=replica["endpoint"]["id"],
         )["uri"]
 
-        pg_bin.run_capture(["pgbench", "-i", "-s100", master_connstr])
+        pg_bin.run_capture(["pgbench", "-i", "-s100"], env=master_env)
         conn_master = psycopg2.connect(master_connstr)
         cur_master = conn_master.cursor()
         conn_replica = psycopg2.connect(replica_connstr)
         cur_replica = conn_replica.cursor()
 
         master_workload = pg_bin.run_nonblocking(
-            ["pgbench", "-c10", "-T1000", "-Mprepared", master_connstr]
+            ["pgbench", "-c10", "-T1000", "-Mprepared"],
+            env=master_env,
         )
         try:
             replica_workload = pg_bin.run_nonblocking(
-                ["pgbench", "-c10", "-T1000", "-S", replica_connstr]
+                ["pgbench", "-c10", "-T1000", "-S"],
+                env=replica_env,
             )
             try:
                 start = time.time()
@@ -159,6 +169,9 @@ def test_replication_start_stop(
     try:
         branch_id = project["branch"]["id"]
         master_connstr = project["connection_uris"][0]["connection_uri"]
+        master_env = connection_parameters_to_env(
+            project["connection_uris"][0]["connection_parameters"]
+        )
 
         replicas = []
         for _ in range(num_replicas):
@@ -178,8 +191,11 @@ def test_replication_start_stop(
             )["uri"]
             for i in range(num_replicas)
         ]
+        replica_env = [master_env for i in range(num_replicas)]
+        for i in range(num_replicas):
+            replica_env[i]["PGHOST"] = replicas[i]["endpoint"]["host"]
 
-        pg_bin.run_capture(["pgbench", "-i", "-s10", master_connstr])
+        pg_bin.run_capture(["pgbench", "-i", "-s10"], env=master_env)
         conn_master = psycopg2.connect(master_connstr)
         cur_master = conn_master.cursor()
 
@@ -205,8 +221,8 @@ def test_replication_start_stop(
                 "--log",
                 f"--log-prefix={test_output_dir}/{prefix}_master",
                 f"--aggregate-interval={configuration_test_time_sec}",
-                master_connstr,
-            ]
+            ],
+            env=master_env,
         )
         replica_pgbench: List[Optional[subprocess.Popen[Any]]] = [None for _ in range(num_replicas)]
 
@@ -230,8 +246,8 @@ def test_replication_start_stop(
                             "--log",
                             f"--log-prefix={test_output_dir}/{prefix}_replica_{ireplica}",
                             f"--aggregate-interval={configuration_test_time_sec}",
-                            replica_connstr[ireplica],
-                        ]
+                        ],
+                        env=replica_env[ireplica],
                     )
                 elif not replica_enabled(ireplica) and replica_pgbench[ireplica] is not None:
                     pgb = replica_pgbench[ireplica]

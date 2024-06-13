@@ -6,9 +6,18 @@ from typing import TYPE_CHECKING, cast
 import requests
 
 if TYPE_CHECKING:
-    from typing import Any, Literal, Optional, Union
+    from typing import Any, Dict, Literal, Optional, Union
 
     from fixtures.pg_version import PgVersion
+
+
+def connection_parameters_to_env(params: Dict[str, str]) -> Dict[str, str]:
+    return {
+        "PGHOST": params["host"],
+        "PGDATABASE": params["database"],
+        "PGUSER": params["role"],
+        "PGPASSWORD": params["password"],
+    }
 
 
 class NeonAPI:
@@ -32,8 +41,8 @@ class NeonAPI:
         branch_name: Optional[str] = None,
         branch_role_name: Optional[str] = None,
         branch_database_name: Optional[str] = None,
-    ) -> dict[str, Any]:
-        data: dict[str, Any] = {
+    ) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
             "project": {
                 "branch": {},
             },
@@ -61,12 +70,12 @@ class NeonAPI:
 
         assert resp.status_code == 201
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
     def delete_project(
         self,
         project_id: str,
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         resp = self.__request(
             "DELETE",
             f"/projects/{project_id}",
@@ -78,13 +87,13 @@ class NeonAPI:
 
         assert resp.status_code == 200
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
     def start_endpoint(
         self,
         project_id: str,
         endpoint_id: str,
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/endpoints/{endpoint_id}/start",
@@ -95,13 +104,13 @@ class NeonAPI:
 
         assert resp.status_code == 200
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
     def suspend_endpoint(
         self,
         project_id: str,
         endpoint_id: str,
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/endpoints/{endpoint_id}/suspend",
@@ -112,13 +121,13 @@ class NeonAPI:
 
         assert resp.status_code == 200
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
     def restart_endpoint(
         self,
         project_id: str,
         endpoint_id: str,
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/endpoints/{endpoint_id}/restart",
@@ -129,15 +138,15 @@ class NeonAPI:
 
         assert resp.status_code == 200
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
     def create_endpoint(
         self,
         project_id: str,
         branch_id: str,
         endpoint_type: Literal["read_write", "read_only"],
-    ) -> dict[str, Any]:
-        data: dict[str, Any] = {
+    ) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
             "endpoint": {
                 "branch_id": branch_id,
             },
@@ -157,7 +166,7 @@ class NeonAPI:
 
         assert resp.status_code == 201
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
     def get_connection_uri(
         self,
@@ -167,7 +176,7 @@ class NeonAPI:
         database_name: str = "neondb",
         role_name: str = "neondb_owner",
         pooled: bool = True,
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/connection_uri",
@@ -185,9 +194,9 @@ class NeonAPI:
 
         assert resp.status_code == 200
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
-    def get_branches(self, project_id: str) -> dict[str, Any]:
+    def get_branches(self, project_id: str) -> Dict[str, Any]:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/branches",
@@ -198,9 +207,9 @@ class NeonAPI:
 
         assert resp.status_code == 200
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
-    def get_endpoints(self, project_id: str) -> dict[str, Any]:
+    def get_endpoints(self, project_id: str) -> Dict[str, Any]:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/endpoints",
@@ -211,9 +220,9 @@ class NeonAPI:
 
         assert resp.status_code == 200
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
-    def get_operations(self, project_id: str) -> dict[str, Any]:
+    def get_operations(self, project_id: str) -> Dict[str, Any]:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/operations",
@@ -225,7 +234,7 @@ class NeonAPI:
 
         assert resp.status_code == 200
 
-        return cast("dict[str, Any]", resp.json())
+        return cast("Dict[str, Any]", resp.json())
 
     def wait_for_operation_to_finish(self, project_id: str):
         has_running = True
