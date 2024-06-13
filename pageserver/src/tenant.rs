@@ -21,6 +21,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::LsnLease;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::WalRedoManagerStatus;
@@ -3007,27 +3008,9 @@ impl Tenant {
             {
                 let mut target = timeline.gc_info.write().unwrap();
 
-                // FIXME(yuchen): Maybe we can move this before taking `gc_cs`?
-                {
-                    // Collect expired leases
-                    let lsns_with_expired_lease = target
-                        .leases
-                        .iter()
-                        .filter_map(
-                            |(lsn, lease)| {
-                                if lease.is_expired() {
-                                    Some(*lsn)
-                                } else {
-                                    None
-                                }
-                            },
-                        )
-                        .collect::<Vec<_>>();
-
-                    for lsn in lsns_with_expired_lease {
-                        target.leases.remove(&lsn);
-                    }
-                }
+                target
+                    .leases
+                    .retain(|_, lease| !LsnLease::is_expired(lease));
 
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
