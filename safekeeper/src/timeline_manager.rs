@@ -21,8 +21,8 @@ use crate::{
     remove_wal::calc_horizon_lsn,
     safekeeper::Term,
     send_wal::WalSenders,
-    state::TimelineState,
-    timeline::{PeerInfo, ReadGuardSharedState, StateSK, Timeline},
+    state::{EvictionState, TimelineState},
+    timeline::{FullAccessTimeline, PeerInfo, ReadGuardSharedState, StateSK, Timeline},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
     wal_backup_partial::{self, PartialRemoteSegment},
@@ -49,6 +49,7 @@ pub struct StateSnapshot {
     pub inmem_flush_pending: bool,
     pub wal_removal_on_hold: bool,
     pub peers: Vec<PeerInfo>,
+    pub eviction: EvictionState,
 }
 
 impl StateSnapshot {
@@ -68,6 +69,7 @@ impl StateSnapshot {
             inmem_flush_pending: Self::has_unflushed_inmem_state(state),
             wal_removal_on_hold: read_guard.wal_removal_on_hold,
             peers: read_guard.get_peers(heartbeat_timeout),
+            eviction: state.eviction_state,
         }
     }
 
@@ -215,15 +217,11 @@ pub async fn main_task(
     let mut guard_ids: HashSet<u64> = HashSet::new();
 
     // Start recovery task which always runs on the timeline.
+    // TODO: don't start it for evicted timelines
     if conf.peer_recovery_enabled {
-        match tli.full_access_guard().await {
-            Ok(tli) => {
-                recovery_task = Some(tokio::spawn(recovery_main(tli, conf.clone())));
-            }
-            Err(e) => {
-                warn!("failed to start recovery task: {:?}", e);
-            }
-        }
+        let guard = create_guard(&mut next_guard_id, &mut guard_ids, &manager_tx);
+        let tli = FullAccessTimeline::new(tli.clone(), guard);
+        recovery_task = Some(tokio::spawn(recovery_main(tli, conf.clone())));
     }
 
     let last_state = 'outer: loop {
@@ -242,7 +240,7 @@ pub async fn main_task(
         )
         .await;
 
-        let _is_active = update_is_active(
+        let is_active = update_is_active(
             is_wal_backup_required,
             num_computes,
             &state_snapshot,
@@ -269,8 +267,24 @@ pub async fn main_task(
             &state_snapshot,
             &mut partial_backup_task,
             &mut partial_backup_uploaded,
+            &mut next_guard_id,
+            &mut guard_ids,
+            &manager_tx,
         )
         .await;
+
+        let ready_for_eviction = backup_task.is_none()
+            && recovery_task.is_none()
+            && wal_removal_task.is_none()
+            && partial_backup_task.is_none()
+            && partial_backup_uploaded.is_some()
+            && guard_ids.is_empty()
+            && !is_active
+            && !wal_backup_partial::needs_uploading(&state_snapshot, &partial_backup_uploaded);
+
+        if ready_for_eviction {
+            info!("timeline is ready for eviction");
+        }
 
         // wait until something changes. tx channels are stored under Arc, so they will not be
         // dropped until the manager task is finished.
@@ -333,16 +347,9 @@ pub async fn main_task(
                 info!("received manager message: {:?}", res);
                 match res {
                     Some(ManagerCtlMessage::GuardRequest(tx)) => {
-                        let guard_id = next_guard_id;
-                        next_guard_id += 1;
-                        guard_ids.insert(guard_id);
-
-                        info!("issued a new guard {}", guard_id);
-
-                        let guard = AccessGuard {
-                            manager_ch: manager_tx.clone(),
-                            guard_id,
-                        };
+                        // TODO: un-evict the timeline if it's evicted
+                        let guard = create_guard(&mut next_guard_id, &mut guard_ids, &manager_tx);
+                        let guard_id = guard.guard_id;
                         if tx.send(guard).is_err() {
                             warn!("failed to reply with a guard {}", guard_id);
                         }
@@ -383,6 +390,23 @@ pub async fn main_task(
     if let Some(wal_removal_task) = wal_removal_task {
         let res = wal_removal_task.await;
         update_wal_removal_end(res, &tli, &mut last_removed_segno);
+    }
+}
+
+fn create_guard(
+    next_guard_id: &mut u64,
+    guard_ids: &mut HashSet<u64>,
+    manager_tx: &tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
+) -> AccessGuard {
+    let guard_id = *next_guard_id;
+    *next_guard_id += 1;
+    guard_ids.insert(guard_id);
+
+    info!("issued a new guard {}", guard_id);
+
+    AccessGuard {
+        manager_ch: manager_tx.clone(),
+        guard_id,
     }
 }
 
@@ -543,6 +567,9 @@ async fn update_partial_backup(
     state: &StateSnapshot,
     partial_backup_task: &mut Option<JoinHandle<Option<PartialRemoteSegment>>>,
     partial_backup_uploaded: &mut Option<PartialRemoteSegment>,
+    next_guard_id: &mut u64,
+    guard_ids: &mut HashSet<u64>,
+    manager_tx: &tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
 ) {
     // check if partial backup is enabled and should be started
     if !conf.is_wal_backup_enabled() || !conf.partial_backup_enabled {
@@ -560,15 +587,10 @@ async fn update_partial_backup(
     }
 
     // Get FullAccessTimeline and start partial backup task.
-    match tli.full_access_guard().await {
-        Ok(tli) => {
-            *partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
-                tli,
-                conf.clone(),
-            )));
-        }
-        Err(e) => {
-            warn!("failed to start partial backup task: {:?}", e);
-        }
-    }
+    let guard = create_guard(next_guard_id, guard_ids, manager_tx);
+    let tli = FullAccessTimeline::new(tli.clone(), guard);
+    *partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
+        tli,
+        conf.clone(),
+    )));
 }

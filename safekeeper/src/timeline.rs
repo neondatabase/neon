@@ -774,16 +774,16 @@ impl Timeline {
     /// TODO(TODO): if WAL files are not present on disk (evicted), they will be
     /// downloaded from S3. Also there will logic for preventing eviction
     /// while someone is holding FullAccessTimeline guard.
+    ///
+    /// NB: don't use this function from timeline_manager, it will deadlock.
     pub async fn full_access_guard(self: &Arc<Self>) -> Result<FullAccessTimeline> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
 
-        let _guard = self.manager_ctl.full_access_guard().await?;
-        Ok(FullAccessTimeline {
-            tli: self.clone(),
-            _guard,
-        })
+        info!("requesting FullAccessTimeline guard");
+        let guard = self.manager_ctl.full_access_guard().await?;
+        Ok(FullAccessTimeline::new(self.clone(), guard))
     }
 }
 
@@ -792,6 +792,12 @@ impl Timeline {
 pub struct FullAccessTimeline {
     pub tli: Arc<Timeline>,
     _guard: timeline_manager::AccessGuard,
+}
+
+impl FullAccessTimeline {
+    pub fn new(tli: Arc<Timeline>, _guard: timeline_manager::AccessGuard) -> Self {
+        FullAccessTimeline { tli, _guard }
+    }
 }
 
 impl Deref for FullAccessTimeline {
