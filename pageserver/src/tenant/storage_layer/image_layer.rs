@@ -702,7 +702,8 @@ impl ImageLayerInner {
             key_values_batch: Vec::new(),
             next_idx_in_batch: 0,
             is_end: false,
-            batch_size: 1024, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+            batch_size: 1024, // The default value. Unit tests might use a different value.
+            max_read_size: 1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
         }
     }
 }
@@ -966,7 +967,10 @@ pub struct ImageLayerIterator<'a, 'ctx> {
     key_values_batch: Vec<(Key, Lsn, Value)>,
     next_idx_in_batch: usize,
     is_end: bool,
+    /// Limit of number of keys per batch
     batch_size: usize,
+    /// Limit of read size per batch
+    max_read_size: u64,
 }
 
 impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
@@ -986,8 +990,11 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
         let mut search_key = [0; KEY_SIZE];
         self.next_batch_start_key
             .write_to_byte_slice(&mut search_key);
-        let mut read_planner = VectoredReadPlanner::new(self.batch_size * 8192); // TODO: avoid hard-coded constant for image size
+        // We want to have exactly one I/O for each `next_batch` call. Therefore, we enforce `self.max_read_size` by ourselves instead of
+        // using the VectoredReadPlanner's capability, to avoid splitting into two I/Os.
+        let mut read_planner = VectoredReadPlanner::new_without_max_limit();
         let mut cnt = 0;
+        let mut start_pos = None;
         let mut range_end_handled = false;
         // TODO: dedup with vectored read?
         tree_reader
@@ -995,11 +1002,18 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
                 &search_key,
                 VisitDirection::Forwards,
                 |raw_key, offset| {
-                    if cnt >= self.batch_size {
+                    if start_pos
+                        .map(|start_pos| offset - start_pos >= self.max_read_size)
+                        .unwrap_or(false)
+                        || cnt >= self.batch_size
+                    {
+                        // At this point, the I/O size might have already exceeded `self.max_read_size`. This is fine. We do not expect
+                        // `self.max_read_size` to be a hard limit.
                         read_planner.handle_range_end(offset);
                         range_end_handled = true;
                         return false;
                     }
+                    start_pos = Some(offset);
                     read_planner.handle(
                         Key::from_slice(&raw_key[..KEY_SIZE]),
                         self.image_layer.lsn,
@@ -1272,12 +1286,12 @@ mod test {
         let key_end = key_last.next();
         let key_range = *key_start..key_end;
         let mut writer = ImageLayerWriter::new(
-            &tenant.conf,
+            tenant.conf,
             tline.timeline_id,
             tenant.tenant_shard_id,
             &key_range,
             lsn,
-            &ctx,
+            ctx,
         )
         .await?;
 
@@ -1294,7 +1308,7 @@ mod test {
         expect: &[(Key, Bytes)],
         expect_lsn: Lsn,
     ) {
-        let mut expect_iter = expect.into_iter();
+        let mut expect_iter = expect.iter();
         loop {
             let o1 = img_iter.next().await.unwrap();
             let o2 = expect_iter.next();

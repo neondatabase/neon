@@ -1300,7 +1300,7 @@ impl DeltaLayerInner {
                         offsets.start.pos(),
                         offsets.end.pos(),
                         meta,
-                        max_read_size,
+                        Some(max_read_size),
                     ))
                 }
             } else {

@@ -77,7 +77,7 @@ pub(crate) struct VectoredReadBuilder {
     start: u64,
     end: u64,
     blobs_at: VecMap<u64, BlobMeta>,
-    max_read_size: usize,
+    max_read_size: Option<usize>,
 }
 
 impl VectoredReadBuilder {
@@ -90,7 +90,7 @@ impl VectoredReadBuilder {
         start_offset: u64,
         end_offset: u64,
         meta: BlobMeta,
-        max_read_size: usize,
+        max_read_size: Option<usize>,
     ) -> Self {
         let mut blobs_at = VecMap::default();
         blobs_at
@@ -111,7 +111,13 @@ impl VectoredReadBuilder {
     pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
         tracing::trace!(start, end, "trying to extend");
         let size = (end - start) as usize;
-        if self.end == start && self.size() + size <= self.max_read_size {
+        if self.end == start && {
+            if let Some(max_read_size) = self.max_read_size {
+                self.size() + size <= max_read_size
+            } else {
+                true
+            }
+        } {
             self.end = end;
             self.blobs_at
                 .append(start, meta)
@@ -157,7 +163,7 @@ pub struct VectoredReadPlanner {
     // Arguments for previous blob passed into [`VectoredReadPlanner::handle`]
     prev: Option<(Key, Lsn, u64, BlobFlag)>,
 
-    max_read_size: usize,
+    max_read_size: Option<usize>,
 }
 
 impl VectoredReadPlanner {
@@ -165,7 +171,15 @@ impl VectoredReadPlanner {
         Self {
             blobs: BTreeMap::new(),
             prev: None,
-            max_read_size,
+            max_read_size: Some(max_read_size),
+        }
+    }
+
+    pub fn new_without_max_limit() -> Self {
+        Self {
+            blobs: BTreeMap::new(),
+            prev: None,
+            max_read_size: None,
         }
     }
 
