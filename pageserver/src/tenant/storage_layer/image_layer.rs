@@ -369,6 +369,14 @@ impl ImageLayer {
 }
 
 impl ImageLayerInner {
+    pub(crate) fn key_range(&self) -> &Range<Key> {
+        &self.key_range
+    }
+
+    pub(crate) fn lsn(&self) -> Lsn {
+        self.lsn
+    }
+
     /// Returns nested result following Result<Result<_, OpErr>, Critical>:
     /// - inner has the success or transient failure
     /// - outer has the permanent failure
@@ -689,11 +697,10 @@ impl ImageLayerInner {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let tree_reader =
-            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
+    pub(crate) fn iter<'a, 'ctx>(
+        &'a self,
+        ctx: &'ctx RequestContext,
+    ) -> ImageLayerIterator<'a, 'ctx> {
         ImageLayerIterator {
             image_layer: self,
             ctx,
