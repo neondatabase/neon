@@ -1064,7 +1064,7 @@ impl Timeline {
                 img: base_image,
                 records: delta_above_base_image,
             };
-            let img = tline.reconstruct_value(key, horizon, state).await?;
+            let (img, _) = tline.reconstruct_value(key, horizon, state).await?;
             Ok((keys_above_horizon, img))
         }
 

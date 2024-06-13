@@ -73,7 +73,7 @@ where
 /// the same ValueReconstructState struct in the next 'get_value_reconstruct_data'
 /// call, to collect more records.
 ///
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ValueReconstructState {
     pub records: Vec<(Lsn, NeonWalRecord)>,
     pub img: Option<(Lsn, Bytes)>,

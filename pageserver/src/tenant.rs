@@ -6364,7 +6364,7 @@ mod tests {
                 .await?;
             Ok(res.pop_last().map(|(k, v)| {
                 assert_eq!(k, key);
-                v.unwrap()
+                v.unwrap().0
             }))
         }
 
