@@ -1568,9 +1568,8 @@ impl Timeline {
         lsn: Lsn,
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
-        const LEASE_LENGTH: Duration = Duration::from_secs(5 * 60);
         let lease = LsnLease {
-            valid_until: SystemTime::now() + LEASE_LENGTH,
+            valid_until: SystemTime::now() + LsnLease::DEFAULT_LENGTH,
         };
 
         {

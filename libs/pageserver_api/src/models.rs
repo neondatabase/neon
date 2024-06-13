@@ -178,6 +178,8 @@ serde_with::serde_conv!(
 );
 
 impl LsnLease {
+    pub const DEFAULT_LENGTH: Duration = Duration::from_secs(10 * 60);
+
     /// Checks whether the lease is expired.
     pub fn is_expired(&self) -> bool {
         SystemTime::now() > self.valid_until
