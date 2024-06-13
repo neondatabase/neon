@@ -318,7 +318,7 @@ pub(crate) struct LayerFringe {
 #[derive(Debug)]
 struct LayerKeyspace {
     layer: ReadableLayer,
-    target_keyspace: Vec<KeySpace>,
+    target_keyspace: KeySpaceRandomAccum,
 }
 
 impl LayerFringe {
@@ -342,17 +342,13 @@ impl LayerFringe {
                 _,
                 LayerKeyspace {
                     layer,
-                    target_keyspace,
+                    mut target_keyspace,
                 },
-            )) => {
-                let mut keyspace = KeySpaceRandomAccum::new();
-                for ks in target_keyspace {
-                    for part in ks.ranges {
-                        keyspace.add_range(part);
-                    }
-                }
-                Some((layer, keyspace.consume_keyspace(), read_desc.lsn_range))
-            }
+            )) => Some((
+                layer,
+                target_keyspace.consume_keyspace(),
+                read_desc.lsn_range,
+            )),
             None => unreachable!("fringe internals are always consistent"),
         }
     }
@@ -367,16 +363,18 @@ impl LayerFringe {
         let entry = self.layers.entry(layer_id.clone());
         match entry {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().target_keyspace.push(keyspace);
+                entry.get_mut().target_keyspace.add_keyspace(keyspace);
             }
             Entry::Vacant(entry) => {
                 self.planned_reads_by_lsn.push(ReadDesc {
                     lsn_range,
                     layer_id: layer_id.clone(),
                 });
+                let mut accum = KeySpaceRandomAccum::new();
+                accum.add_keyspace(keyspace);
                 entry.insert(LayerKeyspace {
                     layer,
-                    target_keyspace: vec![keyspace],
+                    target_keyspace: accum,
                 });
             }
         }
