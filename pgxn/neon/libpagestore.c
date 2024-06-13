@@ -49,7 +49,9 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
-int         neon_protocol_version = 2;
+int			neon_protocol_version = 2;
+static int	last_protocol_version = -1;	/* copy of n_p_v used to detect changes
+										 * to the parameter at runtime */
 
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
@@ -230,6 +232,14 @@ AssignPageserverConnstring(const char *newval, void *extra)
 		memcpy(&pagestore_shared->shard_map, &shard_map, sizeof(ShardMap));
 		pg_write_barrier();
 		pg_atomic_add_fetch_u64(&pagestore_shared->end_update_counter, 1);
+
+		neon_log(LOG, "Updated shard map: %d active shards",
+				 shard_map.num_shards);
+		for (int i = 0; i < shard_map.num_shards; i++)
+		{
+			neon_shard_log(i, LOG, "New connection string: \"%s\"",
+						   shard_map.connstring[i]);
+		}
 	}
 	else
 	{
@@ -616,6 +626,9 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		/* fallthrough */
 	}
 	case PS_Connected:
+	{
+		int			ll;
+
 		/*
 		 * We successfully connected. Future connections to this PageServer
 		 * will do fast retries again, with exponential backoff.
@@ -623,8 +636,18 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		shard->delay_us = MIN_RECONNECT_INTERVAL_USEC;
 
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connected");
-		neon_shard_log(shard_no, DEBUG1, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
+		if (last_protocol_version != neon_protocol_version)
+		{
+			ll = LOG;
+			last_protocol_version = neon_protocol_version;
+		}
+		else
+		{
+			ll = DEBUG1;
+		}
+		neon_shard_log(shard_no, ll, "libpagestore: connected to '%s' with protocol version %d", connstr, neon_protocol_version);
 		return true;
+	}
 	default:
 		neon_shard_log(shard_no, ERROR, "libpagestore: invalid connection state %d", shard->state);
 	}
@@ -1054,6 +1077,14 @@ pg_init_libpagestore(void)
 							PGC_SU_BACKEND,
 							0,	/* no flags required */
 							NULL, NULL, NULL);
+
+	/*
+	 * Store last seen protocol version as initialization, so we can log
+	 * differences once we see them appear.
+	 */
+	last_protocol_version = neon_protocol_version;
+	neon_log(LOG, "Initializing libpagestore with protocol version %d",
+			 neon_protocol_version);
 
 	relsize_hash_init();
 
