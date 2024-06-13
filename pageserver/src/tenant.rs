@@ -5331,6 +5331,9 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let mut test_key_end = test_key;
+        test_key_end.field6 = NUM_KEYS as u32;
+        tline.add_extra_test_dense_keyspace(KeySpace::single(test_key..test_key_end));
 
         let mut keyspace = KeySpaceAccum::new();
 
@@ -6290,8 +6293,8 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
-        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
-        base_key.field1 = AUX_KEY_PREFIX;
+        let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        assert_eq!(base_key.field1, AUX_KEY_PREFIX); // in case someone accidentally changed the prefix...
         let mut test_key = base_key;
         let mut lsn = Lsn(0x10);
 
@@ -6396,6 +6399,7 @@ mod tests {
                 Lsn(0x20), // it's fine to not advance LSN to 0x30 while using 0x30 to get below because `get_vectored_impl` does not wait for LSN
             )
             .await?;
+        tline.add_extra_test_dense_keyspace(KeySpace::single(base_key..(base_key_nonexist.next())));
 
         let child = tenant
             .branch_timeline_test_with_layers(
