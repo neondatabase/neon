@@ -4823,7 +4823,7 @@ impl Timeline {
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<GcCutoffs> {
+    ) -> Result<GcCutoffs, PageReconstructError> {
         let _timer = self
             .metrics
             .find_gc_cutoffs_histo

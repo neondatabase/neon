@@ -509,9 +509,22 @@ pub(crate) enum GcError {
     #[error(transparent)]
     Remote(anyhow::Error),
 
+    // An error reading while calculating GC cutoffs
+    #[error(transparent)]
+    GcCutoffs(PageReconstructError),
+
     // If GC was invoked for a particular timeline, this error means it didn't exist
     #[error("timeline not found")]
     TimelineNotFound,
+}
+
+impl From<PageReconstructError> for GcError {
+    fn from(value: PageReconstructError) -> Self {
+        match value {
+            PageReconstructError::Cancelled => Self::TimelineCancelled,
+            other => Self::GcCutoffs(other),
+        }
+    }
 }
 
 impl Tenant {
@@ -2921,17 +2934,9 @@ impl Tenant {
                 .checked_sub(horizon)
                 .unwrap_or(Lsn(0));
 
-            let res = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await;
-
-            match res {
-                Ok(cutoffs) => {
-                    let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
-                    assert!(old.is_none());
-                }
-                Err(e) => {
-                    tracing::warn!(timeline_id = %timeline.timeline_id, "ignoring failure to find gc cutoffs: {e:#}");
-                }
-            }
+            let cutoffs = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await?;
+            let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
+            assert!(old.is_none());
         }
 
         if !self.is_active() || self.cancel.is_cancelled() {
