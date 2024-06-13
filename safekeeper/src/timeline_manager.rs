@@ -65,7 +65,7 @@ impl StateSnapshot {
             flush_lsn: read_guard.sk.flush_lsn(),
             term: state.acceptor_state.term,
             cfile_last_persist_at: state.pers.last_persist_at(),
-            inmem_flush_pending: Self::has_unflushed_inmem_state(&state),
+            inmem_flush_pending: Self::has_unflushed_inmem_state(state),
             wal_removal_on_hold: read_guard.wal_removal_on_hold,
             peers: read_guard.get_peers(heartbeat_timeout),
         }
