@@ -336,7 +336,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
 
     // Don't throw an error here because it's not as important
     // as the fact that the request itself has failed.
-    let mut body = serde_json::from_str(&s).unwrap_or_else(|e| {
+    let mut body = serde_json::from_slice(&s).unwrap_or_else(|e| {
         warn!("failed to parse error body: {e}");
         ConsoleError {
             error: "reason unclear (malformed error message)".into(),
