@@ -99,7 +99,7 @@ jobs:
         # Set --sparse-ordering option of pytest-order plugin
         # to ensure tests are running in order of appears in the file.
         # It's important for test_perf_pgbench.py::test_pgbench_remote_* tests
-        extra_params: -m remote_cluster --sparse-ordering --timeout 5400 --ignore test_runner/performance/test_perf_olap.py
+        extra_params: -m remote_cluster --sparse-ordering --timeout 5400 --ignore test_runner/performance/test_perf_olap.py --ignore test_runner/performance/test_perf_pgvector_queries.py
       env:
         BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -410,14 +410,14 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
-    - name: Benchmark pgvector hnsw queries
+    - name: Benchmark pgvector queries
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
-        test_selection: performance
+        test_selection: performance/test_perf_pgvector_queries.py
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_pgvector
+        extra_params: -m remote_cluster --timeout 21600 
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"

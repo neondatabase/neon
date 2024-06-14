@@ -18,6 +18,7 @@ class PgBenchLoadType(enum.Enum):
     SIMPLE_UPDATE = "simple-update"
     SELECT_ONLY = "select-only"
     PGVECTOR_HNSW = "pgvector-hnsw"
+    PGVECTOR_HALFVEC = "pgvector-halfvec"
 
 
 def utc_now_timestamp() -> int:
@@ -153,6 +154,26 @@ def run_test_pgbench(env: PgCompare, scale: int, duration: int, workload_type: P
             password=password,
         )
 
+    if workload_type == PgBenchLoadType.PGVECTOR_HALFVEC:
+        # Run simple-update workload
+        run_pgbench(
+            env,
+            "pgvector-halfvec",
+            [
+                "pgbench",
+                "-f",
+                "test_runner/performance/pgvector/pgbench_custom_script_pgvector_halfvec_queries.sql",
+                "-c100",
+                "-j20",
+                f"-T{duration}",
+                "-P2",
+                "--protocol=prepared",
+                "--progress-timestamp",
+                connstr,
+            ],
+            password=password,
+        )
+
     env.report_size()
 
 
@@ -222,13 +243,3 @@ def test_pgbench_remote_simple_update(remote_compare: PgCompare, scale: int, dur
 @pytest.mark.remote_cluster
 def test_pgbench_remote_select_only(remote_compare: PgCompare, scale: int, duration: int):
     run_test_pgbench(remote_compare, scale, duration, PgBenchLoadType.SELECT_ONLY)
-
-
-# The following test runs on an existing database that has pgvector extension installed
-# and a table with 1 million embedding vectors loaded and indexed with HNSW.
-#
-# Run this pgbench tests against an existing remote Postgres cluster with the necessary setup.
-@pytest.mark.parametrize("duration", get_durations_matrix())
-@pytest.mark.remote_cluster
-def test_pgbench_remote_pgvector(remote_compare: PgCompare, duration: int):
-    run_test_pgbench(remote_compare, 1, duration, PgBenchLoadType.PGVECTOR_HNSW)
