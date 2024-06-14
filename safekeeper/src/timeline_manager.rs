@@ -280,10 +280,13 @@ pub async fn main_task(
             && partial_backup_uploaded.is_some()
             && guard_ids.is_empty()
             && !is_active
-            && !wal_backup_partial::needs_uploading(&state_snapshot, &partial_backup_uploaded);
+            && !wal_backup_partial::needs_uploading(&state_snapshot, &partial_backup_uploaded)
+            && partial_backup_uploaded.as_ref().unwrap().flush_lsn.segment_number(wal_seg_size)
+                == last_removed_segno + 1;
 
         if ready_for_eviction {
             info!("timeline is ready for eviction");
+            // TODO: evict
         }
 
         // wait until something changes. tx channels are stored under Arc, so they will not be

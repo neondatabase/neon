@@ -2178,3 +2178,40 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
 
     do_something()
     do_something()
+
+def test_s3_eviction(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "checkpoint_timeout": "100ms",
+        }
+    )
+
+    n_timelines = 10
+
+    branch_names = [f"branch{tlin}" for tlin in range(n_timelines)]
+
+    # start postgres on each timeline
+    endpoints: list[Endpoint] = []
+    for branch_name in branch_names:
+        env.neon_cli.create_branch(branch_name)
+        endpoints.append(env.endpoints.create_start(branch_name))
+        endpoints[-1].safe_psql("CREATE TABLE t(i int)")
+        endpoints[-1].safe_psql("INSERT INTO t VALUES (0)")
+        endpoints[-1].stop()
+
+    check_values = [0] * n_timelines
+
+    n_iters = 50
+    for _ in range(n_iters):
+        i = random.randint(0, n_timelines - 1)
+        log.info(f"Starting endpoint {i}")
+        endpoints[i].start()
+        check_values[i] += 1
+        res = endpoints[i].safe_psql("UPDATE t SET i = i + 1 RETURNING i")
+        assert res[0][0] == check_values[i]
+        endpoints[i].stop()
+        time.sleep(0.5)
+
+    # TODO: check logs for successful eviction

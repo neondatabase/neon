@@ -48,7 +48,7 @@ pub mod defaults {
 
     pub const DEFAULT_HEARTBEAT_TIMEOUT: &str = "5000ms";
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
-    pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
+    pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "50ms";
 }
 
 #[derive(Debug, Clone)]
