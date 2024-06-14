@@ -243,4 +243,3 @@ def test_pgbench_remote_simple_update(remote_compare: PgCompare, scale: int, dur
 @pytest.mark.remote_cluster
 def test_pgbench_remote_select_only(remote_compare: PgCompare, scale: int, duration: int):
     run_test_pgbench(remote_compare, scale, duration, PgBenchLoadType.SELECT_ONLY)
-
