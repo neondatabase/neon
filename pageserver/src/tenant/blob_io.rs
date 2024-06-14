@@ -325,7 +325,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         encoder.shutdown().await.unwrap();
                         let compressed = encoder.into_inner();
                         if compressed.len() < len {
-                            let compressed_len = len;
+                            let compressed_len = compressed.len();
                             compressed_buf = Some(compressed);
                             (BYTE_ZSTD, compressed_len, slice.into_inner())
                         } else {
@@ -336,7 +336,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         let slice = srcbuf.slice(..);
                         let compressed = lz4_flex::block::compress(&slice[..]);
                         if compressed.len() < len {
-                            let compressed_len = len;
+                            let compressed_len = compressed.len();
                             compressed_buf = Some(compressed);
                             (BYTE_LZ4, compressed_len, slice.into_inner())
                         } else {
@@ -418,8 +418,22 @@ mod tests {
             for blob in blobs.iter() {
                 let (_, res) = match COMPRESSION {
                     0 => wtr.write_blob(blob.clone(), &ctx).await,
-                    1 => wtr.write_blob_compressed(blob.clone(), &ctx, Some(ImageCompressionAlgorithm::ZstdLow)).await,
-                    2 => wtr.write_blob_compressed(blob.clone(), &ctx, Some(ImageCompressionAlgorithm::LZ4)).await,
+                    1 => {
+                        wtr.write_blob_compressed(
+                            blob.clone(),
+                            &ctx,
+                            Some(ImageCompressionAlgorithm::ZstdLow),
+                        )
+                        .await
+                    }
+                    2 => {
+                        wtr.write_blob_compressed(
+                            blob.clone(),
+                            &ctx,
+                            Some(ImageCompressionAlgorithm::LZ4),
+                        )
+                        .await
+                    }
                     _ => unreachable!("Invalid compression {COMPRESSION}"),
                 };
                 let offs = res?;
