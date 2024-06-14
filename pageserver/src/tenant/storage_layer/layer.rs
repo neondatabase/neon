@@ -1905,7 +1905,7 @@ impl ResidentLayer {
     }
 
     #[cfg(test)]
-    pub(crate) async fn as_delta(
+    pub(crate) async fn get_as_delta(
         &self,
         ctx: &RequestContext,
     ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
@@ -1917,7 +1917,7 @@ impl ResidentLayer {
     }
 
     #[cfg(test)]
-    pub(crate) async fn as_image(
+    pub(crate) async fn get_as_image(
         &self,
         ctx: &RequestContext,
     ) -> anyhow::Result<&image_layer::ImageLayerInner> {

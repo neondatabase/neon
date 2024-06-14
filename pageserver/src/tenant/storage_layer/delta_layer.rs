@@ -1857,7 +1857,7 @@ mod test {
             .finish(entries_meta.key_range.end, &timeline, &ctx)
             .await?;
 
-        let inner = resident.as_delta(&ctx).await?;
+        let inner = resident.get_as_delta(&ctx).await?;
 
         let file_size = inner.file.metadata().await?.len();
         tracing::info!(
@@ -2044,11 +2044,11 @@ mod test {
 
             let copied_layer = writer.finish(Key::MAX, &branch, ctx).await.unwrap();
 
-            copied_layer.as_delta(ctx).await.unwrap();
+            copied_layer.get_as_delta(ctx).await.unwrap();
 
             assert_keys_and_values_eq(
-                new_layer.as_delta(ctx).await.unwrap(),
-                copied_layer.as_delta(ctx).await.unwrap(),
+                new_layer.get_as_delta(ctx).await.unwrap(),
+                copied_layer.get_as_delta(ctx).await.unwrap(),
                 truncate_at,
                 ctx,
             )

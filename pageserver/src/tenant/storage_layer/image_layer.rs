@@ -1350,7 +1350,7 @@ mod test {
             produce_image_layer(&tenant, &tline, test_imgs.clone(), Lsn(0x10), &ctx)
                 .await
                 .unwrap();
-        let img_layer = resident_layer.as_image(&ctx).await.unwrap();
+        let img_layer = resident_layer.get_as_image(&ctx).await.unwrap();
         for batch_size in [1, 2, 4, 8, 3, 7, 13] {
             println!("running with batch_size={batch_size}");
             let mut iter = img_layer.iter(&ctx);
