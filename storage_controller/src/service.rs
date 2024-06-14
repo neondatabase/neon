@@ -4312,6 +4312,13 @@ impl Service {
                         continue;
                     }
 
+                    if !new_nodes.values().any(Node::is_available) {
+                        // Special case for when all nodes are unavailable: there is no point
+                        // trying to reschedule since there's nowhere else to go. Without this
+                        // branch we incorrectly detach tenants in response to node unavailability.
+                        continue;
+                    }
+
                     if tenant_shard.intent.demote_attached(scheduler, node_id) {
                         tenant_shard.sequence = tenant_shard.sequence.next();
 
