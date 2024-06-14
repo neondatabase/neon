@@ -974,7 +974,7 @@ pub struct ImageLayerIterator<'a, 'ctx> {
 }
 
 impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
-    /// Retrieve a batch of key-value pairs into the iterator buffer with a single (vectored) I/O.
+    /// Retrieve a batch of key-value pairs into the iterator buffer.
     async fn next_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.next_idx_in_batch >= self.key_values_batch.len());
         assert!(!self.is_end);
