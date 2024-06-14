@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 hyper.workspace = true
 opentelemetry = { workspace = true, features=["rt-tokio"] }
-opentelemetry-otlp = { workspace = true, default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-otlp = { workspace = true, default-features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
 opentelemetry-semantic-conventions.workspace = true
 reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }

@@ -1046,7 +1046,6 @@ impl Tenant {
                 remote_metadata,
                 TimelineResources {
                     remote_client,
-                    deletion_queue_client: self.deletion_queue_client.clone(),
                     timeline_get_throttle: self.timeline_get_throttle.clone(),
                 },
                 ctx,
@@ -1072,7 +1071,6 @@ impl Tenant {
                 timeline_id,
                 &index_part.metadata,
                 remote_timeline_client,
-                self.deletion_queue_client.clone(),
             )
             .instrument(tracing::info_span!("timeline_delete", %timeline_id))
             .await
@@ -3448,7 +3446,6 @@ impl Tenant {
         );
         TimelineResources {
             remote_client,
-            deletion_queue_client: self.deletion_queue_client.clone(),
             timeline_get_throttle: self.timeline_get_throttle.clone(),
         }
     }
