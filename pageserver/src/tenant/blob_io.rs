@@ -114,6 +114,7 @@ impl<'a> BlockCursor<'a> {
             if compression_bits == BYTE_ZSTD {
                 let mut decoder = async_compression::tokio::write::ZstdDecoder::new(dstbuf);
                 decoder.write_all(buf_to_write).await?;
+                decoder.flush().await?;
             } else if compression_bits == BYTE_LZ4 {
                 let decompressed = lz4_flex::block::decompress(&buf_to_write, 128 as usize)
                     .map_err(|_| {
