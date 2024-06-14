@@ -116,11 +116,11 @@ impl<'a> BlockCursor<'a> {
                 decoder.write_all(buf_to_write).await?;
                 decoder.flush().await?;
             } else if compression_bits == BYTE_LZ4 {
-                let decompressed = lz4_flex::block::decompress(&buf_to_write, 128 as usize)
-                    .map_err(|_| {
+                let decompressed = lz4_flex::block::decompress_size_prepended(&buf_to_write)
+                    .map_err(|e| {
                         std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
-                            "lz4 decompression error",
+                            format!("lz4 decompression error: {e:?}"),
                         )
                     })?;
                 dstbuf.extend_from_slice(&decompressed);
@@ -334,7 +334,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                     }
                     Some(ImageCompressionAlgorithm::LZ4) => {
                         let slice = srcbuf.slice(..);
-                        let compressed = lz4_flex::block::compress(&slice[..]);
+                        let compressed = lz4_flex::block::compress_prepend_size(&slice[..]);
                         if compressed.len() < len {
                             let compressed_len = compressed.len();
                             compressed_buf = Some(compressed);
