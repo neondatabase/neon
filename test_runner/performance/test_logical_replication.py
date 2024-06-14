@@ -57,6 +57,12 @@ def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg
     assert sum_master == sum_replica
 
 
+def check_pgbench_still_running(pgbench, label=""):
+    rc = pgbench.poll()
+    if rc is not None:
+        raise RuntimeError(f"{label} pgbench terminated early with return code {rc}")
+
+
 def measure_logical_replication_lag(sub_cur, pub_cur):
     start = time.time()
     pub_cur.execute("SELECT pg_current_wal_flush_lsn()")
@@ -87,13 +93,12 @@ def test_subscriber_lag(
     pub_project = neon_api.create_project(pg_version)
     pub_project_id = pub_project["project"]["id"]
     neon_api.wait_for_operation_to_finish(pub_project_id)
-    should_delete_pub = True
+    error_occurred = False
     try:
         sub_project = neon_api.create_project(pg_version)
         sub_project_id = sub_project["project"]["id"]
         sub_endpoint_id = sub_project["endpoints"][0]["id"]
         neon_api.wait_for_operation_to_finish(sub_project_id)
-        should_delete_sub = True
         try:
             pub_env = connection_parameters_to_env(
                 pub_project["connection_uris"][0]["connection_parameters"]
@@ -113,8 +118,8 @@ def test_subscriber_lag(
             pub_cur = pub_conn.cursor()
             sub_cur = sub_conn.cursor()
 
-            pg_bin.run_capture(["pgbench", "-i", "-s100", pub_connstr])
-            pg_bin.run_capture(["pgbench", "-i", "-s100", sub_connstr])
+            pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
+            pg_bin.run_capture(["pgbench", "-i", "-s100"], env=sub_env)
             sub_cur.execute("truncate table pgbench_accounts")
             sub_cur.execute("truncate table pgbench_history")
 
@@ -138,26 +143,38 @@ def test_subscriber_lag(
                     start = time.time()
                     while time.time() - start < test_duration_min * 60:
                         time.sleep(sync_interval_min * 60)
+                        check_pgbench_still_running(pub_workload, "pub")
+                        check_pgbench_still_running(sub_workload, "sub")
                         lag = measure_logical_replication_lag(sub_cur, pub_cur)
                         log.info(f"Replica lagged behind master by {lag} seconds")
                         zenbenchmark.record("replica_lag", lag, "s", MetricReport.LOWER_IS_BETTER)
                         sub_workload.terminate()
+                        sub_cur.close()
+                        sub_conn.close()
                         neon_api.restart_endpoint(
                             sub_project_id,
                             sub_endpoint_id,
                         )
 
+                        sub_conn = psycopg2.connect(sub_connstr)
+                        sub_cur = sub_conn.cursor()
                         sub_workload = pg_bin.run_nonblocking(
-                            ["pgbench", "-c10", "-T1000", "-S", sub_connstr]
+                            ["pgbench", "-c10", "-T1000", "-S"],
+                            env=sub_env,
                         )
-
                 finally:
                     sub_workload.terminate()
             finally:
                 pub_workload.terminate()
+        except Exception as e:
+            error_occurred = True
+            log.error(f"Caught exception {e}")
         finally:
-            if should_delete_sub:
+            if not error_occurred:
                 neon_api.delete_project(sub_project_id)
+    except Exception as e:
+        error_occurred = True
+        log.error(f"Caught exception {e}")
     finally:
-        if should_delete_pub:
-            neon_api.delete_project(pub_project_id)
+        assert not error_occurred
+        neon_api.delete_project(pub_project_id)

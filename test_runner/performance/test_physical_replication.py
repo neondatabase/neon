@@ -38,6 +38,12 @@ def measure_replication_lag(master, replica):
         time.sleep(0.5)
 
 
+def check_pgbench_still_running(pgbench):
+    rc = pgbench.poll()
+    if rc is not None:
+        raise RuntimeError(f"Pgbench terminated early with return code {rc}")
+
+
 @pytest.mark.remote_cluster
 @pytest.mark.timeout(2 * 60 * 60)
 def test_ro_replica_lag(
@@ -52,7 +58,7 @@ def test_ro_replica_lag(
     project = neon_api.create_project(pg_version)
     project_id = project["project"]["id"]
     neon_api.wait_for_operation_to_finish(project_id)
-    should_delete = True
+    error_occurred = False
     try:
         branch_id = project["branch"]["id"]
         master_connstr = project["connection_uris"][0]["connection_uri"]
@@ -65,7 +71,7 @@ def test_ro_replica_lag(
             branch_id,
             endpoint_type="read_only",
         )
-        replica_env = master_env
+        replica_env = master_env.copy()
         replica_env["PGHOST"] = replica["endpoint"]["host"]
         neon_api.wait_for_operation_to_finish(project_id)
 
@@ -92,6 +98,8 @@ def test_ro_replica_lag(
             try:
                 start = time.time()
                 while time.time() - start < test_duration_min * 60:
+                    check_pgbench_still_running(master_workload)
+                    check_pgbench_still_running(replica_workload)
                     time.sleep(sync_interval_min * 60)
                     lag = measure_replication_lag(cur_master, cur_replica)
                     log.info(f"Replica lagged behind master by {lag} seconds")
@@ -100,11 +108,12 @@ def test_ro_replica_lag(
                 replica_workload.terminate()
         finally:
             master_workload.terminate()
-    except Exception:
-        should_delete = False
+    except Exception as e:
+        error_occurred = True
+        log.error(f"Caught exception: {e}")
     finally:
-        if should_delete:
-            neon_api.delete_project(project_id)
+        assert not error_occurred  # Fail the test if an error occurred
+        neon_api.delete_project(project_id)
 
 
 def report_pgbench_aggregate_intervals(
@@ -161,7 +170,7 @@ def test_replication_start_stop(
     prefix = "pgbench_agg"
     num_replicas = 2
     configuration_test_time_sec = 10 * 60
-    should_delete = True
+    error_occurred = False
 
     project = neon_api.create_project(pg_version)
     project_id = project["project"]["id"]
@@ -191,7 +200,7 @@ def test_replication_start_stop(
             )["uri"]
             for i in range(num_replicas)
         ]
-        replica_env = [master_env for i in range(num_replicas)]
+        replica_env = [master_env.copy() for i in range(num_replicas)]
         for i in range(num_replicas):
             replica_env[i]["PGHOST"] = replicas[i]["endpoint"]["host"]
 
@@ -280,10 +289,11 @@ def test_replication_start_stop(
                     f"Replica {ireplica} lagging behind master by {lag} seconds after configuration {iconfig:>b}"
                 )
         master_pgbench.terminate()
-    except Exception:
-        should_delete = False
+    except Exception as e:
+        error_occurred = True
+        log.error(f"Caught exception {e}")
     finally:
-        if should_delete:
-            neon_api.delete_project(project_id)
-            # Only report results if we didn't error out
-            report_pgbench_aggregate_intervals(test_output_dir, prefix, zenbenchmark)
+        assert not error_occurred
+        neon_api.delete_project(project_id)
+        # Only report results if we didn't error out
+        report_pgbench_aggregate_intervals(test_output_dir, prefix, zenbenchmark)
