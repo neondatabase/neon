@@ -400,6 +400,12 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
+        round_trip_test_compressed::<BUFFERED, 0>(blobs).await
+    }
+
+    async fn round_trip_test_compressed<const BUFFERED: bool, const COMPRESSION: u8>(
+        blobs: &[Vec<u8>],
+    ) -> Result<(), Error> {
         let temp_dir = camino_tempfile::tempdir()?;
         let pathbuf = temp_dir.path().join("file");
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
@@ -410,7 +416,12 @@ mod tests {
             let file = VirtualFile::create(pathbuf.as_path(), &ctx).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
-                let (_, res) = wtr.write_blob(blob.clone(), &ctx).await;
+                let (_, res) = match COMPRESSION {
+                    0 => wtr.write_blob(blob.clone(), &ctx).await,
+                    1 => wtr.write_blob_compressed(blob.clone(), &ctx, Some(ImageCompressionAlgorithm::ZstdLow)).await,
+                    2 => wtr.write_blob_compressed(blob.clone(), &ctx, Some(ImageCompressionAlgorithm::LZ4)).await,
+                    _ => unreachable!("Invalid compression {COMPRESSION}"),
+                };
                 let offs = res?;
                 offsets.push(offs);
             }
@@ -466,10 +477,17 @@ mod tests {
         let blobs = &[
             b"test".to_vec(),
             random_array(10 * PAGE_SZ),
+            b"hello".to_vec(),
+            random_array(66 * PAGE_SZ),
+            vec![0xf3; 24 * PAGE_SZ],
             b"foobar".to_vec(),
         ];
         round_trip_test::<false>(blobs).await?;
         round_trip_test::<true>(blobs).await?;
+        round_trip_test_compressed::<false, 1>(blobs).await?;
+        round_trip_test_compressed::<true, 1>(blobs).await?;
+        round_trip_test_compressed::<false, 2>(blobs).await?;
+        round_trip_test_compressed::<true, 2>(blobs).await?;
         Ok(())
     }
 

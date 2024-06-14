@@ -1367,6 +1367,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             },
             "Correct defaults should be used when no config values are provided"
@@ -1440,6 +1441,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             },
             "Should be able to parse all basic config values correctly"
