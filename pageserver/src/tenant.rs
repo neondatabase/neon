@@ -509,9 +509,22 @@ pub(crate) enum GcError {
     #[error(transparent)]
     Remote(anyhow::Error),
 
+    // An error reading while calculating GC cutoffs
+    #[error(transparent)]
+    GcCutoffs(PageReconstructError),
+
     // If GC was invoked for a particular timeline, this error means it didn't exist
     #[error("timeline not found")]
     TimelineNotFound,
+}
+
+impl From<PageReconstructError> for GcError {
+    fn from(value: PageReconstructError) -> Self {
+        match value {
+            PageReconstructError::Cancelled => Self::TimelineCancelled,
+            other => Self::GcCutoffs(other),
+        }
+    }
 }
 
 impl Tenant {
@@ -2921,17 +2934,9 @@ impl Tenant {
                 .checked_sub(horizon)
                 .unwrap_or(Lsn(0));
 
-            let res = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await;
-
-            match res {
-                Ok(cutoffs) => {
-                    let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
-                    assert!(old.is_none());
-                }
-                Err(e) => {
-                    tracing::warn!(timeline_id = %timeline.timeline_id, "ignoring failure to find gc cutoffs: {e:#}");
-                }
-            }
+            let cutoffs = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await?;
+            let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
+            assert!(old.is_none());
         }
 
         if !self.is_active() || self.cancel.is_cancelled() {
@@ -3553,7 +3558,7 @@ impl Tenant {
         cause: LogicalSizeCalculationCause,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<size::ModelInputs> {
+    ) -> Result<size::ModelInputs, size::CalculateSyntheticSizeError> {
         let logical_sizes_at_once = self
             .conf
             .concurrent_tenant_size_logical_size_queries
@@ -3568,8 +3573,8 @@ impl Tenant {
         // See more for on the issue #2748 condenced out of the initial PR review.
         let mut shared_cache = tokio::select! {
             locked = self.cached_logical_sizes.lock() => locked,
-            _ = cancel.cancelled() => anyhow::bail!("cancelled"),
-            _ = self.cancel.cancelled() => anyhow::bail!("tenant is shutting down"),
+            _ = cancel.cancelled() => return Err(size::CalculateSyntheticSizeError::Cancelled),
+            _ = self.cancel.cancelled() => return Err(size::CalculateSyntheticSizeError::Cancelled),
         };
 
         size::gather_inputs(
@@ -3593,10 +3598,10 @@ impl Tenant {
         cause: LogicalSizeCalculationCause,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<u64> {
+    ) -> Result<u64, size::CalculateSyntheticSizeError> {
         let inputs = self.gather_size_inputs(None, cause, cancel, ctx).await?;
 
-        let size = inputs.calculate()?;
+        let size = inputs.calculate();
 
         self.set_cached_synthetic_size(size);
 

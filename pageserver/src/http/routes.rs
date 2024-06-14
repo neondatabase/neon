@@ -1135,7 +1135,10 @@ async fn tenant_size_handler(
             &ctx,
         )
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(|e| match e {
+            crate::tenant::size::CalculateSyntheticSizeError::Cancelled => ApiError::ShuttingDown,
+            other => ApiError::InternalServerError(anyhow::anyhow!(other)),
+        })?;
 
     let mut sizes = None;
     let accepts_html = headers
@@ -1143,9 +1146,7 @@ async fn tenant_size_handler(
         .map(|v| v == "text/html")
         .unwrap_or_default();
     if !inputs_only.unwrap_or(false) {
-        let storage_model = inputs
-            .calculate_model()
-            .map_err(ApiError::InternalServerError)?;
+        let storage_model = inputs.calculate_model();
         let size = storage_model.calculate();
 
         // If request header expects html, return html
