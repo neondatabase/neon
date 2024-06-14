@@ -1568,13 +1568,24 @@ impl Timeline {
         lsn: Lsn,
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
-        let lease = LsnLease {
+        let mut lease = LsnLease {
             valid_until: SystemTime::now() + LsnLease::DEFAULT_LENGTH,
         };
 
         {
             let mut gc_info = self.gc_info.write().unwrap();
-            gc_info.leases.insert(lsn, lease.clone());
+            gc_info
+                .leases
+                .entry(lsn)
+                .and_modify(|existing| {
+                    // Insert a lease only if it extends longer than the existing one.
+                    if lease.valid_until > existing.valid_until {
+                        *existing = lease.clone();
+                    } else {
+                        lease = existing.clone();
+                    }
+                })
+                .or_insert(lease.clone());
         }
         Ok(lease)
     }
@@ -5036,11 +5047,8 @@ impl Timeline {
         // 1. it is older than cutoff LSN;
         // 2. it is older than PITR interval;
         // 3. it doesn't need to be retained for 'retain_lsns';
-
-        // TODO(yuchen): we could consider current retain_lsns as infinite leases.
-        // 3.5. it does not need to be kept for LSNs holding valid leases (logic is very similar to retain_lsns)
-
-        // 4. newer on-disk image layers cover the layer's whole key range
+        // 4. it does not need to be kept for LSNs holding valid leases (logic is very similar to retain_lsns);
+        // 5. newer on-disk image layers cover the layer's whole key range
         //
         // TODO holding a write lock is too agressive and avoidable
         let mut guard = self.layers.write().await;
@@ -5091,7 +5099,7 @@ impl Timeline {
                 }
             }
 
-            // 3.5 Is there a valid lease that requires us to keep this layer?
+            // 4. Is there a valid lease that requires us to keep this layer?
             if let Some(lsn) = &min_lsn_with_valid_lease {
                 if &l.get_lsn_range().start <= lsn {
                     debug!(
@@ -5104,7 +5112,7 @@ impl Timeline {
                 }
             }
 
-            // 4. Is there a later on-disk layer for this relation?
+            // 5. Is there a later on-disk layer for this relation?
             //
             // The end-LSN is exclusive, while disk_consistent_lsn is
             // inclusive. For example, if disk_consistent_lsn is 100, it is

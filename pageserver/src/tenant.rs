@@ -21,7 +21,6 @@ use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
-use pageserver_api::models::LsnLease;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::WalRedoManagerStatus;
@@ -32,6 +31,7 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
 use std::fmt;
+use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
 use tokio::sync::watch;
@@ -3008,9 +3008,8 @@ impl Tenant {
             {
                 let mut target = timeline.gc_info.write().unwrap();
 
-                target
-                    .leases
-                    .retain(|_, lease| !LsnLease::is_expired(lease));
+                let now = SystemTime::now();
+                target.leases.retain(|_, lease| !lease.is_expired(&now));
 
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
@@ -4298,7 +4297,9 @@ mod tests {
             )
             .await?;
 
-        // Keeping everything <= Lsn(0x20) b/c leases: {0/10, 0/20};
+        // Keeping everything <= Lsn(0x20) b/c leases:
+        // 0/10: initdb layer
+        // 0/20: image layer added when creating the timeline.
         assert_eq!(res.layers_needed_by_leases, 2);
         // Keeping 0/40 b/c it is the latest layer.
         assert_eq!(res.layers_not_updated, 1);
