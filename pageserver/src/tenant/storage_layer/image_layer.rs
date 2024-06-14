@@ -690,7 +690,7 @@ impl ImageLayerInner {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn iter<'a, 'ctx>(
         &'a self,
         ctx: &'ctx RequestContext,
@@ -960,6 +960,7 @@ impl Drop for ImageLayerWriter {
     }
 }
 
+#[cfg(test)]
 pub struct ImageLayerIterator<'a, 'ctx> {
     image_layer: &'a ImageLayerInner,
     ctx: &'ctx RequestContext,
@@ -973,6 +974,7 @@ pub struct ImageLayerIterator<'a, 'ctx> {
     max_read_size: u64,
 }
 
+#[cfg(test)]
 impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
     /// Retrieve a batch of key-value pairs into the iterator buffer.
     async fn next_batch(&mut self) -> anyhow::Result<()> {
@@ -1056,7 +1058,6 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
         if self.is_end {
             return Ok(None);
