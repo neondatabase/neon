@@ -417,7 +417,20 @@ jobs:
         test_selection: performance
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_pgvector
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_pgvector_hnsw
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Benchmark pgvector halfvec queries
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_pgvector_halfvec
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
