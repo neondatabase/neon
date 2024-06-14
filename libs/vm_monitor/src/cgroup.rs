@@ -254,7 +254,7 @@ impl MemoryStatus {
     /// Check if the other memory status is a close or similar result.
     /// Returns true if the larger value is not larger than the smaller value
     /// by 1/8 of the smaller value, and within 128MiB.
-    /// See
+    /// See check_similarity_behaviour for examples of behaviour
     fn status_is_close_or_similar(&self, other: &MemoryStatus) -> bool {
         let margin;
         let diff;
