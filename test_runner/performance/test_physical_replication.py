@@ -25,17 +25,18 @@ if TYPE_CHECKING:
 
 
 # Granularity of ~0.5 sec
-def measure_replication_lag(master, replica):
+def measure_replication_lag(master, replica, timeout_sec=600):
     start = time.time()
     master.execute("SELECT pg_current_wal_flush_lsn()")
     master_lsn = Lsn(master.fetchall()[0][0])
-    while True:
+    while (time.time() - start) < timeout_sec:
         replica.execute("select pg_last_wal_replay_lsn()")
         replica_lsn = replica.fetchall()[0][0]
         if replica_lsn:
             if Lsn(replica_lsn) >= master_lsn:
                 return time.time() - start
         time.sleep(0.5)
+    raise TimeoutError(f"Replication sync took more than {timeout_sec} sec")
 
 
 def check_pgbench_still_running(pgbench):

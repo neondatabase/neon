@@ -63,11 +63,11 @@ def check_pgbench_still_running(pgbench, label=""):
         raise RuntimeError(f"{label} pgbench terminated early with return code {rc}")
 
 
-def measure_logical_replication_lag(sub_cur, pub_cur):
+def measure_logical_replication_lag(sub_cur, pub_cur, timeout_sec=600):
     start = time.time()
     pub_cur.execute("SELECT pg_current_wal_flush_lsn()")
     pub_lsn = Lsn(pub_cur.fetchall()[0][0])
-    while True:
+    while (time.time() - start) < timeout_sec:
         sub_cur.execute("SELECT latest_end_lsn FROM pg_catalog.pg_stat_subscription")
         res = sub_cur.fetchall()[0][0]
         if res:
@@ -77,6 +77,7 @@ def measure_logical_replication_lag(sub_cur, pub_cur):
             if sub_lsn >= pub_lsn:
                 return time.time() - start
         time.sleep(0.5)
+    raise TimeoutError(f"Logical replication sync took more than {timeout_sec} sec")
 
 
 @pytest.mark.remote_cluster
