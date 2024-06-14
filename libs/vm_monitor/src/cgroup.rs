@@ -300,8 +300,8 @@ mod tests {
 
     #[test]
     fn check_similarity_behaviour() {
-        /// This all accesses private methods, so we can't actually run this
-        /// as doctests, because doctests run as an external crate.
+        // This all accesses private methods, so we can't actually run this
+        // as doctests, because doctests run as an external crate.
         let mut small = super::MemoryStatus {
             non_reclaimable: 1024,
         };
@@ -310,52 +310,52 @@ mod tests {
         };
 
         // objects are self-similar, no matter the size
-        assert_eq!(true, small.status_is_close_or_similar(&small));
-        assert_eq!(true, large.status_is_close_or_similar(&large));
+        assert!(small.status_is_close_or_similar(&small));
+        assert!(large.status_is_close_or_similar(&large));
 
         // inequality is symmetric
-        assert_eq!(false, small.status_is_close_or_similar(&large));
-        assert_eq!(false, large.status_is_close_or_similar(&small));
+        assert!(!small.status_is_close_or_similar(&large));
+        assert!(!large.status_is_close_or_similar(&small));
 
         small.non_reclaimable = 64;
         large.non_reclaimable = (small.non_reclaimable / 8) * 9;
 
         // objects are self-similar, no matter the size
-        assert_eq!(true, small.status_is_close_or_similar(&small));
-        assert_eq!(true, large.status_is_close_or_similar(&large));
+        assert!(small.status_is_close_or_similar(&small));
+        assert!(large.status_is_close_or_similar(&large));
 
         // values are similar if the larger value is larger by less than
         // 12.5%, i.e. 1/8 of the smaller value.
         // In the example above, large is exactly 12.5% larger, so this doesn't
         // match.
-        assert_eq!(false, small.status_is_close_or_similar(&large));
-        assert_eq!(false, large.status_is_close_or_similar(&small));
+        assert!(!small.status_is_close_or_similar(&large));
+        assert!(!large.status_is_close_or_similar(&small));
 
         large.non_reclaimable -= 1;
-        assert_eq!(true, large.status_is_close_or_similar(&large));
+        assert!(large.status_is_close_or_similar(&large));
 
-        assert_eq!(true, small.status_is_close_or_similar(&large));
-        assert_eq!(true, large.status_is_close_or_similar(&small));
+        assert!(small.status_is_close_or_similar(&large));
+        assert!(large.status_is_close_or_similar(&small));
 
         // The 1/8 rule only applies up to 128MiB of difference
         small.non_reclaimable = 1024 * 1024 * 1024 * 1024;
         large.non_reclaimable = small.non_reclaimable / 8 * 9;
-        assert_eq!(true, small.status_is_close_or_similar(&small));
-        assert_eq!(true, large.status_is_close_or_similar(&large));
+        assert!(small.status_is_close_or_similar(&small));
+        assert!(large.status_is_close_or_similar(&large));
 
-        assert_eq!(false, small.status_is_close_or_similar(&large));
-        assert_eq!(false, large.status_is_close_or_similar(&small));
+        assert!(!small.status_is_close_or_similar(&large));
+        assert!(!large.status_is_close_or_similar(&small));
         // the large value is put just above the threshold
         large.non_reclaimable = small.non_reclaimable + 128 * 1024 * 1024;
-        assert_eq!(true, large.status_is_close_or_similar(&large));
+        assert!(large.status_is_close_or_similar(&large));
 
-        assert_eq!(false, small.status_is_close_or_similar(&large));
-        assert_eq!(false, large.status_is_close_or_similar(&small));
+        assert!(!small.status_is_close_or_similar(&large));
+        assert!(!large.status_is_close_or_similar(&small));
         // now below
         large.non_reclaimable -= 1;
-        assert_eq!(true, large.status_is_close_or_similar(&large));
+        assert!(large.status_is_close_or_similar(&large));
 
-        assert_eq!(true, small.status_is_close_or_similar(&large));
-        assert_eq!(true, large.status_is_close_or_similar(&small));
+        assert!(small.status_is_close_or_similar(&large));
+        assert!(large.status_is_close_or_similar(&small));
     }
 }
