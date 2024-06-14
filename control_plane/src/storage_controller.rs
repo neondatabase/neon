@@ -313,6 +313,11 @@ impl StorageController {
             args.push(format!("--split-threshold={split_threshold}"))
         }
 
+        args.push(format!(
+            "--neon-local-repo-dir={}",
+            self.env.base_data_dir.display()
+        ));
+
         background_process::start_process(
             COMMAND,
             &self.env.base_data_dir,

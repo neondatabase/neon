@@ -431,9 +431,7 @@ impl LocalEnv {
     }
 
     ///  Construct `Self` from on-disk state.
-    pub fn load_config() -> anyhow::Result<Self> {
-        let repopath = base_path();
-
+    pub fn load_config(repopath: &Path) -> anyhow::Result<Self> {
         if !repopath.exists() {
             bail!(
                 "Neon config is not found in {}. You need to run 'neon_local init' first",
@@ -461,7 +459,7 @@ impl LocalEnv {
                 branch_name_mappings,
             } = on_disk_config;
             LocalEnv {
-                base_data_dir: repopath.clone(),
+                base_data_dir: repopath.to_owned(),
                 pg_distrib_dir,
                 neon_distrib_dir,
                 default_tenant_id,
@@ -482,7 +480,7 @@ impl LocalEnv {
             "we ensure this during deserialization"
         );
         env.pageservers = {
-            let iter = std::fs::read_dir(&repopath).context("open dir")?;
+            let iter = std::fs::read_dir(repopath).context("open dir")?;
             let mut pageservers = Vec::new();
             for res in iter {
                 let dentry = res?;
