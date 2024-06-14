@@ -14,7 +14,6 @@
 use async_compression::Level;
 use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
-use postgres_ffi::BLCKSZ;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 

@@ -344,7 +344,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     tmp_dir: Utf8PathBuf,
                     storage: Arc<GenericRemoteStorage>,
                     file_key: RemotePath,
-                ) -> Result<Vec<(Option<ImageCompressionAlgorithm>, u64, u64)>, anyhow::Error>
+                ) -> Result<Vec<(Option<ImageCompressionAlgorithm>, u64, u64, u64)>, anyhow::Error>
                 {
                     let _permit = semaphore.acquire().await?;
                     let cancel = CancellationToken::new();
