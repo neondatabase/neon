@@ -42,8 +42,8 @@ pub struct LocalEnv {
     // compute endpoints).
     //
     // This is not stored in the config file. Rather, this is the path where the
-    // config file itself is. It is read from the NEON_REPO_DIR env variable or
-    // '.neon' if not given.
+    // config file itself is. It is read from the NEON_REPO_DIR env variable which
+    // must be an absolute path. If the env var is not set, $PWD/.neon is used.
     pub base_data_dir: PathBuf,
 
     // Path to postgres distribution. It's expected that "bin", "include",
@@ -719,10 +719,25 @@ impl LocalEnv {
 }
 
 pub fn base_path() -> PathBuf {
-    match std::env::var_os("NEON_REPO_DIR") {
-        Some(val) => PathBuf::from(val),
-        None => PathBuf::from(".neon"),
-    }
+    let path = match std::env::var_os("NEON_REPO_DIR") {
+        Some(val) => {
+            let path = PathBuf::from(val);
+            if !path.is_absolute() {
+                // repeat the env var in the error because our default is always absolute
+                panic!("NEON_REPO_DIR must be an absolute path, got {path:?}");
+            }
+            path
+        }
+        None => {
+            let pwd = std::env::current_dir()
+                // technically this can fail but it's quite unlikeley
+                .expect("determine current directory");
+            let pwd_abs = pwd.canonicalize().expect("canonicalize current directory");
+            pwd_abs.join(".neon")
+        }
+    };
+    assert!(path.is_absolute());
+    path
 }
 
 /// Generate a public/private key pair for JWT authentication

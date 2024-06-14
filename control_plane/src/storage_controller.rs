@@ -318,10 +318,7 @@ impl StorageController {
             &self.env.base_data_dir,
             &self.env.storage_controller_bin(),
             args,
-            [(
-                "NEON_REPO_DIR".to_string(),
-                self.env.base_data_dir.to_string_lossy().to_string(),
-            )],
+            [],
             background_process::InitialPidFile::Create(self.pid_file()),
             || async {
                 match self.ready().await {
