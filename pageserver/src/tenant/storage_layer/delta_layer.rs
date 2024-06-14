@@ -44,7 +44,7 @@ use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -188,6 +188,20 @@ impl DeltaKey {
         let mut lsn_buf = [0u8; 8];
         lsn_buf.copy_from_slice(&buf[KEY_SIZE..]);
         Lsn(u64::from_be_bytes(lsn_buf))
+    }
+
+    fn next(&self) -> Self {
+        let key = self.key();
+        let lsn = self.lsn();
+        if lsn == Lsn::MAX {
+            Self::from_key_lsn(&key.next(), Lsn::MIN)
+        } else {
+            Self::from_key_lsn(&key, Lsn(lsn.0 + 1))
+        }
+    }
+
+    fn min() -> Self {
+        Self::from_key_lsn(&Key::MIN, Lsn::MIN)
     }
 }
 
@@ -1492,6 +1506,23 @@ impl DeltaLayerInner {
         );
         offset
     }
+
+    #[allow(dead_code)]
+    pub(crate) fn iter<'a, 'ctx>(
+        &'a self,
+        ctx: &'ctx RequestContext,
+    ) -> DeltaLayerIterator<'a, 'ctx> {
+        DeltaLayerIterator {
+            delta_layer: self,
+            ctx,
+            next_batch_start_key: DeltaKey::min(),
+            key_values_batch: Vec::new(),
+            next_idx_in_batch: 0,
+            is_end: false,
+            batch_size: 1024, // The default value. Unit tests might use a different value.
+            max_read_size: 1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+        }
+    }
 }
 
 /// A set of data associated with a delta layer key and its value
@@ -1551,6 +1582,118 @@ impl<'a> pageserver_compaction::interface::CompactionDeltaEntry<'a, Key> for Del
     }
 }
 
+// TODO: dedup code across delta layer iterator and image layer iterator, and get_reconstruct_value things.
+
+pub struct DeltaLayerIterator<'a, 'ctx> {
+    delta_layer: &'a DeltaLayerInner,
+    ctx: &'ctx RequestContext,
+    next_batch_start_key: DeltaKey,
+    key_values_batch: Vec<(Key, Lsn, Value)>,
+    next_idx_in_batch: usize,
+    is_end: bool,
+    /// Limit of number of keys per batch
+    batch_size: usize,
+    /// Limit of read size per batch
+    max_read_size: u64,
+}
+
+impl<'a, 'ctx> DeltaLayerIterator<'a, 'ctx> {
+    /// Retrieve a batch of key-value pairs into the iterator buffer.
+    async fn next_batch(&mut self) -> anyhow::Result<()> {
+        assert!(self.next_idx_in_batch >= self.key_values_batch.len());
+        assert!(!self.is_end);
+        self.key_values_batch.clear();
+        self.next_idx_in_batch = 0;
+
+        let block_reader = FileBlockReader::new(&self.delta_layer.file, self.delta_layer.file_id);
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.delta_layer.index_start_blk,
+            self.delta_layer.index_root_blk,
+            block_reader,
+        );
+        // We want to have exactly one read syscall (plus several others for index lookup) for each `next_batch` call.
+        // Therefore, we enforce `self.max_read_size` by ourselves instead of using the VectoredReadPlanner's capability,
+        // to avoid splitting into two I/Os.
+        let mut read_planner = VectoredReadPlanner::new_without_max_limit();
+        let mut cnt = 0;
+        let mut start_pos = None;
+        let mut range_end_handled = false;
+        // TODO: dedup with vectored read?
+        tree_reader
+            .visit(
+                &self.next_batch_start_key.0,
+                VisitDirection::Forwards,
+                |raw_key, value| {
+                    let blob_ref = BlobRef(value);
+                    let offset = blob_ref.pos();
+                    if start_pos
+                        .map(|start_pos| offset - start_pos >= self.max_read_size)
+                        .unwrap_or(false)
+                        || cnt >= self.batch_size
+                    {
+                        // At this point, the I/O size might have already exceeded `self.max_read_size`. This is fine. We do not expect
+                        // `self.max_read_size` to be a hard limit.
+                        read_planner.handle_range_end(offset);
+                        range_end_handled = true;
+                        return false;
+                    }
+                    start_pos = Some(offset);
+                    let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                    let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
+                    read_planner.handle(key, lsn, offset, BlobFlag::None);
+                    cnt += 1;
+                    true
+                },
+                self.ctx,
+            )
+            .await?;
+        if cnt == 0 {
+            self.is_end = true;
+            return Ok(());
+        }
+        if !range_end_handled {
+            let data_end_offset = self.delta_layer.index_start_offset();
+            read_planner.handle_range_end(data_end_offset);
+        }
+        let plan = read_planner.finish();
+        let vectored_blob_reader = VectoredBlobReader::new(&self.delta_layer.file);
+        let mut next_batch = Vec::new();
+        for read in plan {
+            let buf_size = read.size();
+            let buf = BytesMut::with_capacity(buf_size);
+            let blobs_buf = vectored_blob_reader
+                .read_blobs(&read, buf, self.ctx)
+                .await?;
+            let frozen_buf: Bytes = blobs_buf.buf.freeze();
+            for meta in blobs_buf.blobs.iter() {
+                let value = Value::des(&frozen_buf[meta.start..meta.end])?;
+                next_batch.push((meta.meta.key, meta.meta.lsn, value));
+            }
+        }
+        let (last_key, last_lsn, _) = next_batch.last().unwrap();
+        self.next_batch_start_key = DeltaKey::from_key_lsn(last_key, *last_lsn).next();
+        self.key_values_batch = next_batch;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
+        if self.is_end {
+            return Ok(None);
+        }
+        if self.next_idx_in_batch >= self.key_values_batch.len() {
+            self.next_batch().await?;
+            if self.is_end {
+                return Ok(None);
+            }
+        }
+        assert!(!self.key_values_batch.is_empty());
+        let ret = self.key_values_batch[self.next_idx_in_batch].clone();
+        self.next_idx_in_batch += 1;
+        Ok(Some(ret))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
@@ -1560,6 +1703,8 @@ mod test {
     use rand::RngCore;
 
     use super::*;
+    use crate::tenant::harness::TIMELINE_ID;
+    use crate::tenant::Tenant;
     use crate::{
         context::DownloadBehavior,
         task_mgr::TaskKind,
@@ -2124,6 +2269,95 @@ mod test {
             tokio::try_join!(left, right).unwrap();
 
             assert_eq!(utils::Hex(&scratch_left), utils::Hex(&scratch_right));
+        }
+    }
+
+    async fn produce_delta_layer(
+        tenant: &Tenant,
+        tline: &Arc<Timeline>,
+        mut deltas: Vec<(Key, Lsn, Value)>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
+        deltas.sort_by(|(k1, l1, _), (k2, l2, _)| (k1, l1).cmp(&(k2, l2)));
+        let (key_start, _, _) = deltas.first().unwrap();
+        let (key_max, _, _) = deltas.first().unwrap();
+        let lsn_min = deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
+        let lsn_max = deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
+        let lsn_end = Lsn(lsn_max.0 + 1);
+        let mut writer = DeltaLayerWriter::new(
+            tenant.conf,
+            tline.timeline_id,
+            tenant.tenant_shard_id,
+            *key_start,
+            (*lsn_min)..lsn_end,
+            ctx,
+        )
+        .await?;
+        let key_end = key_max.next();
+
+        for (key, lsn, value) in deltas {
+            writer.put_value(key, lsn, value, ctx).await?;
+        }
+        let delta_layer = writer.finish(key_end, tline, ctx).await?;
+
+        Ok::<_, anyhow::Error>(delta_layer)
+    }
+
+    async fn assert_delta_iter_equal(
+        delta_iter: &mut DeltaLayerIterator<'_, '_>,
+        expect: &[(Key, Lsn, Value)],
+    ) {
+        let mut expect_iter = expect.iter();
+        loop {
+            let o1 = delta_iter.next().await.unwrap();
+            let o2 = expect_iter.next();
+            assert_eq!(o1.is_some(), o2.is_some());
+            if o1.is_none() && o2.is_none() {
+                break;
+            }
+            let (k1, l1, v1) = o1.unwrap();
+            let (k2, l2, v2) = o2.unwrap();
+            assert_eq!(&k1, k2);
+            assert_eq!(l1, *l2);
+            assert_eq!(&v1, v2);
+        }
+    }
+
+    #[tokio::test]
+    async fn delta_layer_iterator() {
+        use crate::repository::Value;
+
+        let harness = TenantHarness::create("delta_layer_iterator").unwrap();
+        let (tenant, ctx) = harness.load().await;
+
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        fn get_key(id: u32) -> Key {
+            let mut key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+        let test_deltas = (0..1000)
+            .map(|idx| {
+                (
+                    get_key(idx / 10),
+                    Lsn(0x10 * ((idx as u64) % 10 + 1)),
+                    Value::Image(Bytes::from(format!("img{idx:05}"))),
+                )
+            })
+            .collect_vec();
+        let resident_layer = produce_delta_layer(&tenant, &tline, test_deltas.clone(), &ctx)
+            .await
+            .unwrap();
+        let delta_layer = resident_layer.as_delta(&ctx).await.unwrap();
+        for batch_size in [1, 2, 4, 8, 3, 7, 13] {
+            println!("running with batch_size={batch_size}");
+            let mut iter = delta_layer.iter(&ctx);
+            iter.batch_size = batch_size;
+            assert_delta_iter_equal(&mut iter, &test_deltas).await;
         }
     }
 }
