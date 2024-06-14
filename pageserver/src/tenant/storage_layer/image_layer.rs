@@ -990,8 +990,9 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
         let mut search_key = [0; KEY_SIZE];
         self.next_batch_start_key
             .write_to_byte_slice(&mut search_key);
-        // We want to have exactly one read syscall for each `next_batch` call. Therefore, we enforce `self.max_read_size` by ourselves instead of
-        // using the VectoredReadPlanner's capability, to avoid splitting into two I/Os.
+        // We want to have exactly one read syscall (plus several others for index lookup) for each `next_batch` call.
+        // Therefore, we enforce `self.max_read_size` by ourselves instead of using the VectoredReadPlanner's capability,
+        // to avoid splitting into two I/Os.
         let mut read_planner = VectoredReadPlanner::new_without_max_limit();
         let mut cnt = 0;
         let mut start_pos = None;
