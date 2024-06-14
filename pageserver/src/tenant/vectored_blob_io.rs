@@ -175,7 +175,12 @@ impl VectoredReadPlanner {
         }
     }
 
-    pub fn new_without_max_limit() -> Self {
+    /// This function should *only* be used if the caller has a way to control the limit. e.g., in `ImageLayerIterator`,
+    /// it uses the vectored read planner to avoid duplicated logic on handling blob start/end, while expecting the vectored
+    /// read planner to give a single read to a continuous range of bytes in the image layer. Therefore, it does not need the
+    /// code path to split reads into chunks of `max_read_size`, and controls the read size itself.
+    #[cfg(test)]
+    pub(crate) fn new_caller_controlled_max_limit() -> Self {
         Self {
             blobs: BTreeMap::new(),
             prev: None,

@@ -995,7 +995,7 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
         // We want to have exactly one read syscall (plus several others for index lookup) for each `next_batch` call.
         // Therefore, we enforce `self.max_read_size` by ourselves instead of using the VectoredReadPlanner's capability,
         // to avoid splitting into two I/Os.
-        let mut read_planner = VectoredReadPlanner::new_without_max_limit();
+        let mut read_planner = VectoredReadPlanner::new_caller_controlled_max_limit();
         let mut cnt = 0;
         let mut start_pos = None;
         let mut range_end_handled = false;
