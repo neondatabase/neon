@@ -322,7 +322,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         };
                         let slice = srcbuf.slice(..);
                         encoder.write_all(&slice[..]).await.unwrap();
-                        encoder.flush().await.unwrap();
+                        encoder.shutdown().await.unwrap();
                         let compressed = encoder.into_inner();
                         if compressed.len() < len {
                             let compressed_len = len;
