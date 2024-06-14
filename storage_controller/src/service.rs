@@ -2409,11 +2409,17 @@ impl Service {
             (detach_waiters, shard_ids, node.clone())
         };
 
-        if let Err(e) = self.await_waiters(detach_waiters, RECONCILE_TIMEOUT).await {
-            // Failing to detach shouldn't hold up deletion, e.g. if a node is offline we should be able
-            // to use some other node to run the remote deletion.
-            tracing::warn!("Failed to detach some locations: {e}");
-        }
+        // This reconcile wait can fail in a few ways:
+        //  A there is a very long queue for the reconciler semaphore
+        //  B some pageserver is failing to handle a detach promptly
+        //  C some pageserver goes offline right at the moment we send it a request.
+        //
+        // A and C are transient: the semaphore will eventually become available, and once a node is marked offline
+        // the next attempt to reconcile will silently skip detaches for an offline node and succeed.  If B happens,
+        // it's a bug, and needs resolving at the pageserver level (we shouldn't just leave attachments behind while
+        // deleting the underlying data).
+        self.await_waiters(detach_waiters, RECONCILE_TIMEOUT)
+            .await?;
 
         let locations = shard_ids
             .into_iter()
@@ -2431,13 +2437,11 @@ impl Service {
         for result in results {
             match result {
                 Ok(StatusCode::ACCEPTED) => {
-                    // This could happen if we failed detach above, and hit a pageserver where the tenant
-                    // is still attached: it will accept the deletion in the background
-                    tracing::warn!(
-                        "Unexpectedly still attached on {}, client should retry",
+                    // This should never happen: we waited for detaches to finish above
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Unexpectedly still attached on {}",
                         node
-                    );
-                    return Ok(StatusCode::ACCEPTED);
+                    )));
                 }
                 Ok(_) => {}
                 Err(mgmt_api::Error::Cancelled) => {

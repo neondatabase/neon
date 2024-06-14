@@ -858,7 +858,7 @@ jobs:
           cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
           tags: |
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
-      
+
       - name: Build neon extensions test image
         if: matrix.version == 'v16'
         uses: docker/build-push-action@v5
@@ -965,7 +965,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 

@@ -2,10 +2,9 @@
 //! and push them to a HTTP endpoint.
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::tenant::size::CalculateSyntheticSizeError;
 use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::{
-    mgr::TenantManager, LogicalSizeCalculationCause, PageReconstructError, Tenant,
-};
+use crate::tenant::{mgr::TenantManager, LogicalSizeCalculationCause, Tenant};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
@@ -350,19 +349,12 @@ async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &Re
     // Same for the loop that fetches computed metrics.
     // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
     // which turns out is really handy to understand the system.
-    let Err(e) = tenant.calculate_synthetic_size(CAUSE, cancel, ctx).await else {
-        return;
-    };
-
-    // this error can be returned if timeline is shutting down, but it does not
-    // mean the synthetic size worker should terminate.
-    let shutting_down = matches!(
-        e.downcast_ref::<PageReconstructError>(),
-        Some(PageReconstructError::Cancelled)
-    );
-
-    if !shutting_down {
-        let tenant_shard_id = tenant.tenant_shard_id();
-        error!("failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}");
+    match tenant.calculate_synthetic_size(CAUSE, cancel, ctx).await {
+        Ok(_) => {}
+        Err(CalculateSyntheticSizeError::Cancelled) => {}
+        Err(e) => {
+            let tenant_shard_id = tenant.tenant_shard_id();
+            error!("failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}");
+        }
     }
 }

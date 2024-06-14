@@ -62,6 +62,7 @@ use std::{
     ops::ControlFlow,
 };
 
+use crate::metrics::GetKind;
 use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -75,7 +76,6 @@ use crate::{
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     pgdatadir_mapping::CollectKeySpaceError,
 };
-use crate::{deletion_queue::DeletionQueueClient, metrics::GetKind};
 use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
@@ -205,7 +205,6 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
-    pub deletion_queue_client: DeletionQueueClient,
     pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
@@ -4843,7 +4842,7 @@ impl Timeline {
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<GcCutoffs> {
+    ) -> Result<GcCutoffs, PageReconstructError> {
         let _timer = self
             .metrics
             .find_gc_cutoffs_histo

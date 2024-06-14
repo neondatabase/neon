@@ -510,9 +510,22 @@ pub(crate) enum GcError {
     #[error(transparent)]
     Remote(anyhow::Error),
 
+    // An error reading while calculating GC cutoffs
+    #[error(transparent)]
+    GcCutoffs(PageReconstructError),
+
     // If GC was invoked for a particular timeline, this error means it didn't exist
     #[error("timeline not found")]
     TimelineNotFound,
+}
+
+impl From<PageReconstructError> for GcError {
+    fn from(value: PageReconstructError) -> Self {
+        match value {
+            PageReconstructError::Cancelled => Self::TimelineCancelled,
+            other => Self::GcCutoffs(other),
+        }
+    }
 }
 
 impl Tenant {
@@ -1034,7 +1047,6 @@ impl Tenant {
                 remote_metadata,
                 TimelineResources {
                     remote_client,
-                    deletion_queue_client: self.deletion_queue_client.clone(),
                     timeline_get_throttle: self.timeline_get_throttle.clone(),
                 },
                 ctx,
@@ -1060,7 +1072,6 @@ impl Tenant {
                 timeline_id,
                 &index_part.metadata,
                 remote_timeline_client,
-                self.deletion_queue_client.clone(),
             )
             .instrument(tracing::info_span!("timeline_delete", %timeline_id))
             .await
@@ -2922,17 +2933,9 @@ impl Tenant {
                 .checked_sub(horizon)
                 .unwrap_or(Lsn(0));
 
-            let res = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await;
-
-            match res {
-                Ok(cutoffs) => {
-                    let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
-                    assert!(old.is_none());
-                }
-                Err(e) => {
-                    tracing::warn!(timeline_id = %timeline.timeline_id, "ignoring failure to find gc cutoffs: {e:#}");
-                }
-            }
+            let cutoffs = timeline.find_gc_cutoffs(cutoff, pitr, cancel, ctx).await?;
+            let old = gc_cutoffs.insert(timeline.timeline_id, cutoffs);
+            assert!(old.is_none());
         }
 
         if !self.is_active() || self.cancel.is_cancelled() {
@@ -3445,7 +3448,6 @@ impl Tenant {
         );
         TimelineResources {
             remote_client,
-            deletion_queue_client: self.deletion_queue_client.clone(),
             timeline_get_throttle: self.timeline_get_throttle.clone(),
         }
     }
@@ -3555,7 +3557,7 @@ impl Tenant {
         cause: LogicalSizeCalculationCause,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<size::ModelInputs> {
+    ) -> Result<size::ModelInputs, size::CalculateSyntheticSizeError> {
         let logical_sizes_at_once = self
             .conf
             .concurrent_tenant_size_logical_size_queries
@@ -3570,8 +3572,8 @@ impl Tenant {
         // See more for on the issue #2748 condenced out of the initial PR review.
         let mut shared_cache = tokio::select! {
             locked = self.cached_logical_sizes.lock() => locked,
-            _ = cancel.cancelled() => anyhow::bail!("cancelled"),
-            _ = self.cancel.cancelled() => anyhow::bail!("tenant is shutting down"),
+            _ = cancel.cancelled() => return Err(size::CalculateSyntheticSizeError::Cancelled),
+            _ = self.cancel.cancelled() => return Err(size::CalculateSyntheticSizeError::Cancelled),
         };
 
         size::gather_inputs(
@@ -3595,10 +3597,10 @@ impl Tenant {
         cause: LogicalSizeCalculationCause,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<u64> {
+    ) -> Result<u64, size::CalculateSyntheticSizeError> {
         let inputs = self.gather_size_inputs(None, cause, cancel, ctx).await?;
 
-        let size = inputs.calculate()?;
+        let size = inputs.calculate();
 
         self.set_cached_synthetic_size(size);
 
@@ -4043,6 +4045,7 @@ mod tests {
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
+    use crate::walrecord::NeonWalRecord;
     use crate::DEFAULT_PG_VERSION;
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
@@ -6756,8 +6759,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_simple_bottom_most_compaction() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_simple_bottom_most_compaction")?;
+    async fn test_simple_bottom_most_compaction_images() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction_images")?;
         let (tenant, ctx) = harness.load().await;
 
         fn get_key(id: u32) -> Key {
@@ -6909,6 +6912,81 @@ mod tests {
                 }
             ]
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_neon_test_record() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_neon_test_record")?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append(",0x20")),
+            ),
+            (
+                get_key(1),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append(",0x30")),
+            ),
+            (get_key(2), Lsn(0x10), Value::Image("0x10".into())),
+            (
+                get_key(2),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append(",0x20")),
+            ),
+            (
+                get_key(2),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append(",0x30")),
+            ),
+            (get_key(3), Lsn(0x10), Value::Image("0x10".into())),
+            (
+                get_key(3),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_clear()),
+            ),
+            (get_key(4), Lsn(0x10), Value::Image("0x10".into())),
+            (
+                get_key(4),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_init()),
+            ),
+        ];
+        let image1 = vec![(get_key(1), "0x10".into())];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![delta1],              // delta layers
+                vec![(Lsn(0x10), image1)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+
+        assert_eq!(
+            tline.get(get_key(1), Lsn(0x50), &ctx).await?,
+            Bytes::from_static(b"0x10,0x20,0x30")
+        );
+        assert_eq!(
+            tline.get(get_key(2), Lsn(0x50), &ctx).await?,
+            Bytes::from_static(b"0x10,0x20,0x30")
+        );
+        // assert_eq!(tline.get(get_key(3), Lsn(0x50), &ctx).await?, Bytes::new());
+        // assert_eq!(tline.get(get_key(4), Lsn(0x50), &ctx).await?, Bytes::new());
 
         Ok(())
     }
