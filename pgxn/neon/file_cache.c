@@ -26,7 +26,6 @@
 #include "miscadmin.h"
 #include "pagestore_client.h"
 #include "common/hashfn.h"
-#include "lib/hyperloglog.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include RELFILEINFO_HDR
@@ -39,6 +38,8 @@
 #include "utils/builtins.h"
 #include "utils/dynahash.h"
 #include "utils/guc.h"
+
+#include "hll.h"
 
 /*
  * Local file cache is used to temporary store relations pages in local file system.
@@ -62,7 +63,6 @@
 #define BLOCKS_PER_CHUNK	128 /* 1Mb chunk */
 #define MB					((uint64)1024*1024)
 
-#define HYPER_LOG_LOG_BIT_WIDTH   10
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ / BLOCKS_PER_CHUNK))
 
 typedef struct FileCacheEntry
@@ -87,8 +87,7 @@ typedef struct FileCacheControl
 	uint64		writes;
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
-	hyperLogLogState wss_estimation; /* estimation of wroking set size */
-	uint8_t		hyperloglog_hashes[(1 << HYPER_LOG_LOG_BIT_WIDTH) + 1];
+	HyperLogLogState wss_estimation; /* estimation of working set size */
 } FileCacheControl;
 
 static HTAB *lfc_hash;
@@ -96,6 +95,7 @@ static int	lfc_desc = 0;
 static LWLockId lfc_lock;
 static int	lfc_max_size;
 static int	lfc_size_limit;
+static int  wss_max_duration;
 static char *lfc_path;
 static FileCacheControl *lfc_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook;
@@ -238,12 +238,7 @@ lfc_shmem_startup(void)
 		dlist_init(&lfc_ctl->lru);
 
 		/* Initialize hyper-log-log structure for estimating working set size */
-		initHyperLogLog(&lfc_ctl->wss_estimation, HYPER_LOG_LOG_BIT_WIDTH);
-
-		/* We need hashes in shared memory */
-		pfree(lfc_ctl->wss_estimation.hashesArr);
-		memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
-		lfc_ctl->wss_estimation.hashesArr = lfc_ctl->hyperloglog_hashes;
+		initHyperLogLog(&lfc_ctl->wss_estimation, wss_max_duration);
 
 		/* Recreate file cache on restart */
 		fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
@@ -382,6 +377,19 @@ lfc_init(void)
 							   NULL,
 							   NULL,
 							   NULL);
+
+	DefineCustomIntVariable("neon.wss_max_duration",
+							"Maximal duration for estimating working set size",
+							NULL,
+							&wss_max_duration,
+							3600,	/* one hour */
+							0,
+							INT_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_S,
+							NULL,
+							NULL,
+							NULL);
 
 	if (lfc_max_size == 0)
 		return;
@@ -986,20 +994,38 @@ local_cache_pages(PG_FUNCTION_ARGS)
 		SRF_RETURN_DONE(funcctx);
 }
 
+PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
+
+Datum
+approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
+{
+	if (lfc_size_limit != 0)
+	{
+		int32 dc;
+		time_t duration = PG_ARGISNULL(0) ? wss_max_duration : PG_GETARG_UINT32(0);
+		LWLockAcquire(lfc_lock, LW_SHARED);
+		dc = (int32) estimateHyperLogLog(&lfc_ctl->wss_estimation, duration);
+		LWLockRelease(lfc_lock);
+		PG_RETURN_INT32(dc);
+	}
+	PG_RETURN_NULL();
+}
+
 PG_FUNCTION_INFO_V1(approximate_working_set_size);
 
 Datum
 approximate_working_set_size(PG_FUNCTION_ARGS)
 {
-	int32 dc = -1;
 	if (lfc_size_limit != 0)
 	{
+		int32 dc;
 		bool reset = PG_GETARG_BOOL(0);
 		LWLockAcquire(lfc_lock, reset ? LW_EXCLUSIVE : LW_SHARED);
-		dc = (int32) estimateHyperLogLog(&lfc_ctl->wss_estimation);
+		dc = (int32) estimateHyperLogLog(&lfc_ctl->wss_estimation, wss_max_duration);
 		if (reset)
-			memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
+			memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
 		LWLockRelease(lfc_lock);
+		PG_RETURN_INT32(dc);
 	}
-	PG_RETURN_INT32(dc);
+	PG_RETURN_NULL();
 }
