@@ -246,12 +246,17 @@ COPY patches/pgvector.patch /pgvector.patch
 # By default, pgvector Makefile uses `-march=native`. We don't want that,
 # because we build the images on different machines than where we run them.
 # Pass OPTFLAGS="" to remove it.
-RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.2.tar.gz -O pgvector.tar.gz && \
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+        OPTFLAGS=" -march=x86-64 "; \
+    elif [ "$(uname -m)" = "aarch64" ]; then \
+        OPTFLAGS=""; \
+    fi && \
+    wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.2.tar.gz -O pgvector.tar.gz && \
     echo "617fba855c9bcb41a2a9bc78a78567fd2e147c72afd5bf9d37b31b9591632b30 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xzf ../pgvector.tar.gz --strip-components=1 -C . && \
     patch -p1 < /pgvector.patch && \
-    make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS=" -march=x86-64 " PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS=" -march=x86-64 " install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="$OPTFLAGS" PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="$OPTFLAGS" install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/vector.control
 
 #########################################################################################
