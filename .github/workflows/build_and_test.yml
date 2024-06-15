@@ -727,7 +727,7 @@ jobs:
     needs: [ check-permissions, build-build-tools-image, tag ]
     strategy:
       matrix:
-        arch: [ x64, arm64 ]
+        arch: [ x64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
