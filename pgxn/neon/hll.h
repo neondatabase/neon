@@ -75,7 +75,7 @@ typedef struct LFPM
 typedef struct HyperLogLogState
 {
 	time_t		window; /* window size in microseconds */
-	LFPM	    regs[HLL_N_REGISTERS];
+	LFPM	    regs[HLL_N_REGISTERS+1];
 } HyperLogLogState;
 
 extern void   initHyperLogLog(HyperLogLogState *cState, time_t max_duration);
