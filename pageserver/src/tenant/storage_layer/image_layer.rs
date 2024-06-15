@@ -395,12 +395,14 @@ impl ImageLayer {
         for (image_compression, conf) in image_compressions.into_iter().zip(confs) {
             let start_compression = Instant::now();
             let compressed_path = Self::compress_for_conf(path, ctx, conf).await?;
+            scopeguard::defer!({
+                let _ = std::fs::remove_file(compressed_path);
+            });
             let size = path.metadata()?.size();
             let elapsed_ms = start_compression.elapsed().as_millis() as u64;
             let start_decompression = Instant::now();
             Self::compare_are_equal(path, &compressed_path, ctx).await?;
             let elapsed_decompression_ms = start_decompression.elapsed().as_millis() as u64;
-            std::fs::remove_file(compressed_path)?;
             stats.push((
                 image_compression,
                 size,
