@@ -78,8 +78,8 @@ typedef struct HyperLogLogState
 	LFPM	    regs[HLL_N_REGISTERS+1];
 } HyperLogLogState;
 
-extern void   initHyperLogLog(HyperLogLogState *cState, time_t max_duration);
-extern void   addHyperLogLog(HyperLogLogState *cState, uint32 hash);
-extern double estimateHyperLogLog(HyperLogLogState *cState, time_t dutration);
+extern void   initSHLL(HyperLogLogState *cState, time_t max_duration);
+extern void   addSHLL(HyperLogLogState *cState, uint32 hash);
+extern double estimateSHLL(HyperLogLogState *cState, time_t dutration);
 
 #endif

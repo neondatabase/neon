@@ -97,7 +97,7 @@ rho(uint32 x, uint8 b)
  * Initialize HyperLogLog track state
  */
 void
-initHyperLogLog(HyperLogLogState *cState, time_t max_duration)
+initSHLL(HyperLogLogState *cState, time_t max_duration)
 {
 	cState->window = max_duration * USECS_PER_SEC;
 	memset(cState->regs, 0, sizeof(cState->regs));
@@ -113,7 +113,7 @@ initHyperLogLog(HyperLogLogState *cState, time_t max_duration)
  * observed.
  */
 void
-addHyperLogLog(HyperLogLogState *cState, uint32 hash)
+addSHLL(HyperLogLogState *cState, uint32 hash)
 {
 	uint8		count;
 	uint32		index;
@@ -159,7 +159,7 @@ getMaximum(LFPM* lfpm, TimestampTz since)
  * Estimates cardinality, based on elements added so far
  */
 double
-estimateHyperLogLog(HyperLogLogState *cState, time_t duration)
+estimateSHLL(HyperLogLogState *cState, time_t duration)
 {
 	double		result;
 	double		sum = 0.0;

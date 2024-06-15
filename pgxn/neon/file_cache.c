@@ -238,7 +238,7 @@ lfc_shmem_startup(void)
 		dlist_init(&lfc_ctl->lru);
 
 		/* Initialize hyper-log-log structure for estimating working set size */
-		initHyperLogLog(&lfc_ctl->wss_estimation, wss_max_duration);
+		initSHLL(&lfc_ctl->wss_estimation, wss_max_duration);
 
 		/* Recreate file cache on restart */
 		fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
@@ -553,7 +553,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	/* Approximate working set */
 	tag.blockNum = blkno;
-	addHyperLogLog(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
 
 	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
 	{
@@ -1004,7 +1004,7 @@ approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
 		int32 dc;
 		time_t duration = PG_ARGISNULL(0) ? wss_max_duration : PG_GETARG_UINT32(0);
 		LWLockAcquire(lfc_lock, LW_SHARED);
-		dc = (int32) estimateHyperLogLog(&lfc_ctl->wss_estimation, duration);
+		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration);
 		LWLockRelease(lfc_lock);
 		PG_RETURN_INT32(dc);
 	}
@@ -1021,7 +1021,7 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 		int32 dc;
 		bool reset = PG_GETARG_BOOL(0);
 		LWLockAcquire(lfc_lock, reset ? LW_EXCLUSIVE : LW_SHARED);
-		dc = (int32) estimateHyperLogLog(&lfc_ctl->wss_estimation, wss_max_duration);
+		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, wss_max_duration);
 		if (reset)
 			memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
 		LWLockRelease(lfc_lock);
