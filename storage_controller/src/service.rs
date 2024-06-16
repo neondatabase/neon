@@ -747,29 +747,61 @@ impl Service {
             let res = self.heartbeater.heartbeat(nodes).await;
             if let Ok(deltas) = res {
                 for (node_id, state) in deltas.0 {
-                    let new_availability = match state {
-                        PageserverState::Available { utilization, .. } => NodeAvailability::Active(
-                            UtilizationScore(utilization.utilization_score),
+                    let (new_node, new_availability) = match state {
+                        PageserverState::Available {
+                            utilization, new, ..
+                        } => (
+                            new,
+                            NodeAvailability::Active(UtilizationScore(
+                                utilization.utilization_score,
+                            )),
                         ),
-                        PageserverState::Offline => NodeAvailability::Offline,
+                        PageserverState::Offline => (false, NodeAvailability::Offline),
                     };
-                    let res = self
-                        .node_configure(node_id, Some(new_availability), None)
-                        .await;
 
-                    match res {
-                        Ok(()) => {}
-                        Err(ApiError::NotFound(_)) => {
-                            // This should be rare, but legitimate since the heartbeats are done
-                            // on a snapshot of the nodes.
-                            tracing::info!("Node {} was not found after heartbeat round", node_id);
+                    if new_node {
+                        // When the heartbeats detect a newly added node, we don't wish
+                        // to attempt to reconcile the shards assigned to it. The node
+                        // is likely handling it's re-attach response, so reconciling now
+                        // would be counterproductive.
+                        //
+                        // Instead, update the in-memory state with the details learned about the
+                        // node.
+                        let mut locked = self.inner.write().unwrap();
+                        let (nodes, _tenants, scheduler) = locked.parts_mut();
+
+                        let mut new_nodes = (**nodes).clone();
+
+                        if let Some(node) = new_nodes.get_mut(&node_id) {
+                            node.set_availability(new_availability);
+                            scheduler.node_upsert(node);
                         }
-                        Err(err) => {
-                            tracing::error!(
-                                "Failed to update node {} after heartbeat round: {}",
-                                node_id,
-                                err
-                            );
+
+                        locked.nodes = Arc::new(new_nodes);
+                    } else {
+                        // This is the code path for geniune availability transitions (i.e node
+                        // goes unavailable and/or comes back online).
+                        let res = self
+                            .node_configure(node_id, Some(new_availability), None)
+                            .await;
+
+                        match res {
+                            Ok(()) => {}
+                            Err(ApiError::NotFound(_)) => {
+                                // This should be rare, but legitimate since the heartbeats are done
+                                // on a snapshot of the nodes.
+                                tracing::info!(
+                                    "Node {} was not found after heartbeat round",
+                                    node_id
+                                );
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    "Failed to update node {} after heartbeat round: {}",
+                                    node_id,
+                                    err
+                                );
+                            }
                         }
                     }
                 }
@@ -4316,6 +4348,13 @@ impl Service {
                         continue;
                     }
 
+                    if !new_nodes.values().any(Node::is_available) {
+                        // Special case for when all nodes are unavailable: there is no point
+                        // trying to reschedule since there's nowhere else to go. Without this
+                        // branch we incorrectly detach tenants in response to node unavailability.
+                        continue;
+                    }
+
                     if tenant_shard.intent.demote_attached(scheduler, node_id) {
                         tenant_shard.sequence = tenant_shard.sequence.next();
 
@@ -4353,6 +4392,12 @@ impl Service {
                 // When a node comes back online, we must reconcile any tenant that has a None observed
                 // location on the node.
                 for tenant_shard in locked.tenants.values_mut() {
+                    // If a reconciliation is already in progress, rely on the previous scheduling
+                    // decision and skip triggering a new reconciliation.
+                    if tenant_shard.reconciler.is_some() {
+                        continue;
+                    }
+
                     if let Some(observed_loc) = tenant_shard.observed.locations.get_mut(&node_id) {
                         if observed_loc.conf.is_none() {
                             self.maybe_reconcile_shard(tenant_shard, &new_nodes);
