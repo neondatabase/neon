@@ -231,6 +231,10 @@ impl ConnectMechanism for TokioMechanism {
             .dbname(&self.conn_info.dbname)
             .connect_timeout(timeout);
 
+        config
+            .param("client_encoding", "UTF8")
+            .expect("client encoding UTF8 is always valid");
+
         let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
         let res = config.connect(tokio_postgres::NoTls).await;
         drop(pause);
