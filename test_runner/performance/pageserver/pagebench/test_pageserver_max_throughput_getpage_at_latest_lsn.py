@@ -85,6 +85,8 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
         f"max_throughput_latest_lsn-{n_tenants}-{pgbench_scale}",
         n_tenants,
         setup_wrapper,
+        # https://github.com/neondatabase/neon/issues/8070
+        timeout_in_seconds=60,
     )
 
     env.pageserver.allowed_errors.append(
