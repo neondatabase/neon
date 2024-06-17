@@ -1933,6 +1933,7 @@ class NeonCli(AbstractNeonCli):
         endpoint_id: str,
         tenant_id: Optional[TenantId] = None,
         pageserver_id: Optional[int] = None,
+        safekeepers: Optional[List[int]] = None,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
         args = ["endpoint", "reconfigure", endpoint_id]
@@ -1940,6 +1941,8 @@ class NeonCli(AbstractNeonCli):
             args.extend(["--tenant-id", str(tenant_id)])
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
+        if safekeepers is not None:
+            args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
         return self.raw_cli(args, check_return_code=check_return_code)
 
     def endpoint_stop(
@@ -3484,6 +3487,7 @@ class Endpoint(PgProtocol, LogUtils):
         self.pg_port = pg_port
         self.http_port = http_port
         self.check_stop_result = check_stop_result
+        # passed to endpoint create and endpoint reconfigure
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
@@ -3552,6 +3556,7 @@ class Endpoint(PgProtocol, LogUtils):
         self,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
+        safekeepers: Optional[List[int]] = None,
         allow_multiple: bool = False,
     ) -> "Endpoint":
         """
@@ -3560,6 +3565,11 @@ class Endpoint(PgProtocol, LogUtils):
         """
 
         assert self.endpoint_id is not None
+
+        # If `safekeepers` is not None, they are remember them as active and use
+        # in the following commands.
+        if safekeepers is not None:
+            self.active_safekeepers = safekeepers
 
         log.info(f"Starting postgres endpoint {self.endpoint_id}")
 
@@ -3624,9 +3634,17 @@ class Endpoint(PgProtocol, LogUtils):
     def is_running(self):
         return self._running._value > 0
 
-    def reconfigure(self, pageserver_id: Optional[int] = None):
+    def reconfigure(
+        self, pageserver_id: Optional[int] = None, safekeepers: Optional[List[int]] = None
+    ):
         assert self.endpoint_id is not None
-        self.env.neon_cli.endpoint_reconfigure(self.endpoint_id, self.tenant_id, pageserver_id)
+        # If `safekeepers` is not None, they are remember them as active and use
+        # in the following commands.
+        if safekeepers is not None:
+            self.active_safekeepers = safekeepers
+        self.env.neon_cli.endpoint_reconfigure(
+            self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
+        )
 
     def respec(self, **kwargs):
         """Update the endpoint.json file used by control_plane."""

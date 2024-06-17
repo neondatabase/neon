@@ -848,20 +848,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             let allow_multiple = sub_args.get_flag("allow-multiple");
 
-            // If --safekeepers argument is given, use only the listed safekeeper nodes.
-            let safekeepers =
-                if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
-                    let mut safekeepers: Vec<NodeId> = Vec::new();
-                    for sk_id in safekeepers_str.split(',').map(str::trim) {
-                        let sk_id = NodeId(u64::from_str(sk_id).map_err(|_| {
-                            anyhow!("invalid node ID \"{sk_id}\" in --safekeepers list")
-                        })?);
-                        safekeepers.push(sk_id);
-                    }
-                    safekeepers
-                } else {
-                    env.safekeepers.iter().map(|sk| sk.id).collect()
-                };
+            // If --safekeepers argument is given, use only the listed
+            // safekeeper nodes; otherwise all from the env.
+            let safekeepers = if let Some(safekeepers) = parse_safekeepers(sub_args)? {
+                safekeepers
+            } else {
+                env.safekeepers.iter().map(|sk| sk.id).collect()
+            };
 
             let endpoint = cplane
                 .endpoints
@@ -965,7 +958,10 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                         })
                         .collect::<Vec<_>>()
                 };
-            endpoint.reconfigure(pageservers, None).await?;
+            // If --safekeepers argument is given, use only the listed
+            // safekeeper nodes; otherwise all from the env.
+            let safekeepers = parse_safekeepers(sub_args)?;
+            endpoint.reconfigure(pageservers, None, safekeepers).await?;
         }
         "stop" => {
             let endpoint_id = sub_args
@@ -985,6 +981,23 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
     }
 
     Ok(())
+}
+
+/// Parse --safekeepers as list of safekeeper ids.
+fn parse_safekeepers(sub_args: &ArgMatches) -> Result<Option<Vec<NodeId>>> {
+    if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
+        let mut safekeepers: Vec<NodeId> = Vec::new();
+        for sk_id in safekeepers_str.split(',').map(str::trim) {
+            let sk_id = NodeId(
+                u64::from_str(sk_id)
+                    .map_err(|_| anyhow!("invalid node ID \"{sk_id}\" in --safekeepers list"))?,
+            );
+            safekeepers.push(sk_id);
+        }
+        Ok(Some(safekeepers))
+    } else {
+        Ok(None)
+    }
 }
 
 fn handle_mappings(sub_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Result<()> {
@@ -1590,7 +1603,7 @@ fn cli() -> Command {
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
                     .arg(endpoint_id_arg.clone())
                     .arg(endpoint_pageserver_id_arg.clone())
-                    .arg(safekeepers_arg)
+                    .arg(safekeepers_arg.clone())
                     .arg(remote_ext_config_args)
                     .arg(create_test_user)
                     .arg(allow_multiple.clone())
@@ -1599,6 +1612,7 @@ fn cli() -> Command {
                 .subcommand(Command::new("reconfigure")
                             .about("Reconfigure the endpoint")
                             .arg(endpoint_pageserver_id_arg)
+                            .arg(safekeepers_arg)
                             .arg(endpoint_id_arg.clone())
                             .arg(tenant_id_arg.clone())
                 )
