@@ -4050,6 +4050,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
     use itertools::Itertools;
+    use models::LsnLease;
     use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
@@ -4293,7 +4294,7 @@ mod tests {
 
         let leased_lsns = [0x30, 0x50, 0x70];
         let _: anyhow::Result<_> = leased_lsns.iter().try_for_each(|n| {
-            let _ = timeline.make_lsn_lease(Lsn(*n), &ctx)?;
+            let _ = timeline.make_lsn_lease(Lsn(*n), LsnLease::DEFAULT_LENGTH, &ctx)?;
             Ok(())
         });
 

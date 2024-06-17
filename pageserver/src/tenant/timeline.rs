@@ -1565,10 +1565,16 @@ impl Timeline {
     pub(crate) fn make_lsn_lease(
         &self,
         lsn: Lsn,
+        length: Duration,
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
+        let latest_gc_cutoff_lsn = self.get_latest_gc_cutoff_lsn();
+        if lsn < *latest_gc_cutoff_lsn {
+            bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
+        }
+
         let mut lease = LsnLease {
-            valid_until: SystemTime::now() + LsnLease::DEFAULT_LENGTH,
+            valid_until: SystemTime::now() + length,
         };
 
         {

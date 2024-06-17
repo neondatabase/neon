@@ -9,6 +9,7 @@ use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
 use pageserver_api::key::Key;
+use pageserver_api::models::LsnLease;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -935,7 +936,7 @@ impl PageServerHandler {
         let timeline = self
             .get_active_tenant_timeline(tenant_shard_id.tenant_id, timeline_id, shard_selector)
             .await?;
-        let lease = timeline.make_lsn_lease(lsn, ctx)?;
+        let lease = timeline.make_lsn_lease(lsn, LsnLease::DEFAULT_LENGTH, ctx)?;
         let valid_until = lease
             .valid_until
             .duration_since(SystemTime::UNIX_EPOCH)
