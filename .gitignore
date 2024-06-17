@@ -23,3 +23,7 @@ compaction-suite-results.*
 
 # pgindent typedef lists
 *.list
+
+# nix dev env
+.direnv
+.devenv
