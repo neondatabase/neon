@@ -35,7 +35,7 @@ impl Default for Config {
             memory_poll_interval: Duration::from_millis(100),
             memory_history_len: 5, // use 500ms of history for decision-making
             memory_history_log_interval: 20, // but only log every ~2s (otherwise it's spammy)
-            memory_history_log_noskip_interval: Duration::from_secs(60), // but only if it's changed, or 60 seconds have passed
+            memory_history_log_noskip_interval: Duration::from_secs(15), // but only if it's changed, or 60 seconds have passed
         }
     }
 }
@@ -56,7 +56,7 @@ pub struct CgroupWatcher {
 
 impl CgroupWatcher {
     /// Create a new `CgroupWatcher`.
-    #[tracing::instrument(skip_all, fields(% name))]
+    #[tracing::instrument(skip_all, fields(%name))]
     pub fn new(name: String) -> anyhow::Result<Self> {
         // TODO: clarify exactly why we need v2
         // Make sure cgroups v2 (aka unified) are supported
@@ -91,6 +91,8 @@ impl CgroupWatcher {
         let max_skip = self.config.memory_history_log_noskip_interval;
         let mut history_log_buf = vec![MemoryStatus::zeroed(); history_log_len];
         let mut last_logged_memusage = MemoryStatus::zeroed();
+
+        // Ensure that we're tracking a value that's definitely in the past, as Instant::now is only guaranteed to be non-decreasing on Rust's T1-supported systems.
         let mut can_skip_logs_until = Instant::now() - max_skip;
 
         for t in 0_u64.. {
@@ -123,7 +125,7 @@ impl CgroupWatcher {
             // ring buffer (because all the entries are in order of increasing time).
             //
             // We skip logging the data if data hasn't meaningfully changed in a while, unless
-            // we've already ignored too many (=history_log_len) previous iterations.
+            // we've already ignored previous iterations for the last max_skip period.
             if i == history_log_len - 1
                 && (now > can_skip_logs_until
                     || !history_log_buf
