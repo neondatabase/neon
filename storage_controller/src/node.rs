@@ -3,7 +3,7 @@ use std::{str::FromStr, time::Duration};
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy,
-        TenantLocateResponseShard,
+        TenantLocateResponseShard, UtilizationScore,
     },
     shard::TenantShardId,
 };
@@ -116,6 +116,16 @@ impl Node {
         match (self.availability, availability) {
             (Offline, Active(_)) => ToActive,
             (Active(_), Offline) => ToOffline,
+            // Consider the case when the storage controller handles the re-attach of a node
+            // before the heartbeats detect that the node is back online. We still need
+            // [`Service::node_configure`] to attempt reconciliations for shards with an
+            // unknown observed location.
+            // The unsavoury match arm below handles this situation.
+            (Active(lhs), Active(rhs))
+                if lhs == UtilizationScore::worst() && rhs < UtilizationScore::worst() =>
+            {
+                ToActive
+            }
             _ => Unchanged,
         }
     }
