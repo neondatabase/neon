@@ -346,6 +346,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                     None => (BYTE_UNCOMPRESSED, len, srcbuf.slice(..).into_inner()),
                 };
                 let mut len_buf = (len_written as u32).to_be_bytes();
+                assert_eq!(len_buf[0] & 0xf0, 0);
                 len_buf[0] |= high_bit_mask;
                 io_buf.extend_from_slice(&len_buf[..]);
                 (self.write_all(io_buf, ctx).await, srcbuf)

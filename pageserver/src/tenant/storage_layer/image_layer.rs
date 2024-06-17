@@ -528,6 +528,7 @@ impl ImageLayer {
                 content_a, content_b,
                 "mismatch for key={key} cmp={cmp:?} and {path_a}:{path_b}"
             );
+            println!("match for key={key} cmp={cmp:?} from {path_a}");
         }
         Ok(())
     }
