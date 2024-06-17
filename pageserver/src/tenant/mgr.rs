@@ -298,7 +298,7 @@ pub struct TenantManager {
     // This is for edge cases like tenant deletion.  In normal cases (within a Tenant lifetime),
     // tenants have their own cancellation tokens, which we fire individually in [`Self::shutdown`], or
     // when the tenant detaches.
-    cancel: CancellationToken,
+    pub(crate) cancel: CancellationToken,
 }
 
 fn emergency_generations(

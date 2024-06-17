@@ -47,6 +47,7 @@ use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
+use utils::failpoint_support;
 use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::prometheus_metrics_handler;
 use utils::http::endpoint::request_span;
@@ -2587,7 +2588,9 @@ where
     R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
     H: FnOnce(Request<Body>, CancellationToken) -> R + Send + Sync + 'static,
 {
-    if request.uri() != &"/v1/failpoints".parse::<Uri>().unwrap() {
+    if request.uri() != &"/v1/failpoints".parse::<Uri>().unwrap()
+        && request.uri() != &"/v1/status".parse::<Uri>().unwrap()
+    {
         fail::fail_point!("api-503", |_| Err(ApiError::ResourceUnavailable(
             "failpoint".into()
         )));
@@ -2595,6 +2598,11 @@ where
         fail::fail_point!("api-500", |_| Err(ApiError::InternalServerError(
             anyhow::anyhow!("failpoint")
         )));
+
+        // This failpoint is meant to check that callers handle hanging requests properly, but not
+        // to block pageserver clean shutdown: hence it respects the tenant manager cancellation token.
+        let state = get_state(&request);
+        failpoint_support::sleep_millis_async!("api-hang", &state.tenant_manager.cancel);
     }
 
     // Spawn a new task to handle the request, to protect the handler from unexpected
