@@ -63,6 +63,8 @@ char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 
+/* Set to true in the walproposer bgw. */
+static bool am_walproposer;
 static WalproposerShmemState *walprop_shared;
 static WalProposerConfig walprop_config;
 static XLogRecPtr sentPtr = InvalidXLogRecPtr;
@@ -76,6 +78,7 @@ static HotStandbyFeedback agg_hs_feedback;
 
 static void nwp_shmem_startup_hook(void);
 static void nwp_register_gucs(void);
+static void assign_neon_safekeepers(const char *newval, void *extra);
 static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
 static bool backpressure_throttling_impl(void);
@@ -111,7 +114,8 @@ init_walprop_config(bool syncSafekeepers)
 {
 	walprop_config.neon_tenant = neon_tenant;
 	walprop_config.neon_timeline = neon_timeline;
-	walprop_config.safekeepers_list = wal_acceptors_list;
+	/* WalProposerCreate scribbles directly on it, so pstrdup */
+	walprop_config.safekeepers_list = pstrdup(wal_acceptors_list);
 	walprop_config.safekeeper_reconnect_timeout = wal_acceptor_reconnect_timeout;
 	walprop_config.safekeeper_connection_timeout = wal_acceptor_connection_timeout;
 	walprop_config.wal_segment_size = wal_segment_size;
@@ -151,6 +155,7 @@ WalProposerMain(Datum main_arg)
 
 	init_walprop_config(false);
 	walprop_pg_init_bgworker();
+	am_walproposer = true;
 	walprop_pg_load_libpqwalreceiver();
 
 	wp = WalProposerCreate(&walprop_config, walprop_pg);
@@ -189,10 +194,10 @@ nwp_register_gucs(void)
 							   NULL,	/* long_desc */
 							   &wal_acceptors_list, /* valueAddr */
 							   "",	/* bootValue */
-							   PGC_POSTMASTER,
+							   PGC_SIGHUP,
 							   GUC_LIST_INPUT,	/* extensions can't use*
 												 * GUC_LIST_QUOTE */
-							   NULL, NULL, NULL);
+							   NULL, assign_neon_safekeepers, NULL);
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_reconnect_timeout",
@@ -213,6 +218,33 @@ nwp_register_gucs(void)
 							PGC_SIGHUP,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
+}
+
+/*
+ * GUC assign_hook for neon.safekeepers. Restarts walproposer through FATAL if
+ * the list changed.
+ */
+static void
+assign_neon_safekeepers(const char *newval, void *extra)
+{
+	if (!am_walproposer)
+		return;
+
+	if (!newval) {
+		/* should never happen */
+		wpg_log(FATAL, "neon.safekeepers is empty");
+	}
+
+	/* 
+	 * TODO: restarting through FATAL is stupid and introduces 1s delay before
+	 * next bgw start. We should refactor walproposer to allow graceful exit and
+	 * thus remove this delay.
+	 */
+	if (strcmp(wal_acceptors_list, newval) != 0)
+	{
+		wpg_log(FATAL, "restarting walproposer to change safekeeper list from %s to %s",
+				wal_acceptors_list, newval);
+	}
 }
 
 /*  Check if we need to suspend inserts because of lagging replication. */
@@ -363,7 +395,7 @@ walprop_register_bgworker(void)
 	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "WalProposerMain");
 	snprintf(bgw.bgw_name, BGW_MAXLEN, "WAL proposer");
 	snprintf(bgw.bgw_type, BGW_MAXLEN, "WAL proposer");
-	bgw.bgw_restart_time = 5;
+	bgw.bgw_restart_time = 1;
 	bgw.bgw_notify_pid = 0;
 	bgw.bgw_main_arg = (Datum) 0;
 
@@ -1638,6 +1670,18 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	if (WalSndCtl != NULL)
 		late_cv_trigger = ConditionVariableCancelSleep();
 #endif
+
+	/*
+	 * Process config if requested. This restarts walproposer if safekeepers
+	 * list changed. Don't do that for sync-safekeepers because quite probably
+	 * it (re-reading config) won't work without some effort, and
+	 * sync-safekeepers should be quick to finish anyway.
+	 */
+	if (!wp->config->syncSafekeepers && ConfigReloadPending)
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+	}
 
 	/*
 	 * If wait is terminated by latch set (walsenders' latch is set on each
