@@ -5140,6 +5140,8 @@ impl Service {
         self.gate.close().await;
     }
 
+    /// Drain a node by moving the shards attached to it as primaries.
+    /// This is a long running operation and it should run as a separate Tokio task.
     pub(crate) async fn drain_node(
         &self,
         node_id: NodeId,
@@ -5303,6 +5305,10 @@ impl Service {
         plan
     }
 
+    /// Fill a node by promoting its secondaries until the cluster is balanced
+    /// with regards to attached shard counts. Note that this operation only
+    /// makes sense as a counterpart to the drain implemented in [`Service::drain_node`].
+    /// This is a long running operation and it should run as a separate Tokio task.
     pub(crate) async fn fill_node(
         &self,
         node_id: NodeId,
