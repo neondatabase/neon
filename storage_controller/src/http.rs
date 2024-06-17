@@ -486,7 +486,7 @@ async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiErr
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
 
-    let node_status = state.service.get_node_status(node_id).await?;
+    let node_status = state.service.get_node(node_id).await?;
 
     json_response(StatusCode::OK, node_status)
 }

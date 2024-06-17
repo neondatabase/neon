@@ -4202,7 +4202,7 @@ impl Service {
         Ok(nodes)
     }
 
-    pub(crate) async fn get_node_status(&self, node_id: NodeId) -> Result<Node, ApiError> {
+    pub(crate) async fn get_node(&self, node_id: NodeId) -> Result<Node, ApiError> {
         self.inner
             .read()
             .unwrap()
