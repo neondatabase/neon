@@ -12,7 +12,7 @@ use crate::{
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, WrappedWriteGuard},
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
-    scheduler::{ScheduleContext, ScheduleMode},
+    scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
         MigrateAttachment, ReconcileNeeded, ScheduleOptimization, ScheduleOptimizationAction,
     },
@@ -4344,8 +4344,11 @@ impl Service {
                         continue;
                     }
 
-                    if !new_nodes.values().any(Node::is_available) {
-                        // Special case for when all nodes are unavailable: there is no point
+                    if !new_nodes
+                        .values()
+                        .any(|n| matches!(n.may_schedule(), MaySchedule::Yes(_)))
+                    {
+                        // Special case for when all nodes are unavailable and/or unschedulable: there is no point
                         // trying to reschedule since there's nowhere else to go. Without this
                         // branch we incorrectly detach tenants in response to node unavailability.
                         continue;
