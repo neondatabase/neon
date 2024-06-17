@@ -177,6 +177,20 @@ serde_with::serde_conv!(
     |value: String| -> Result<_, humantime::TimestampError> { humantime::parse_rfc3339(&value) }
 );
 
+impl LsnLease {
+    /// The default length for an explicit LSN lease request (10 minutes).
+    pub const DEFAULT_LENGTH: Duration = Duration::from_secs(10 * 60);
+
+    /// The default length for an implicit LSN lease granted during
+    /// `get_lsn_by_timestamp` request (1 minutes).
+    pub const DEFAULT_LENGTH_FOR_TS: Duration = Duration::from_secs(60);
+
+    /// Checks whether the lease is expired.
+    pub fn is_expired(&self, now: &SystemTime) -> bool {
+        now > &self.valid_until
+    }
+}
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {

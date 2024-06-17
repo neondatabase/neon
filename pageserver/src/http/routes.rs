@@ -21,6 +21,7 @@ use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
+use pageserver_api::models::LsnLease;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
@@ -1730,7 +1731,7 @@ async fn lsn_lease_handler(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
     let result = timeline
-        .make_lsn_lease(lsn, &ctx)
+        .make_lsn_lease(lsn, LsnLease::DEFAULT_LENGTH, &ctx)
         .map_err(|e| ApiError::InternalServerError(e.context("lsn lease http handler")))?;
 
     json_response(StatusCode::OK, result)

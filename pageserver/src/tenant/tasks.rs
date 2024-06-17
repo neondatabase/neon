@@ -14,6 +14,7 @@ use crate::tenant::config::defaults::DEFAULT_COMPACTION_PERIOD;
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
+use pageserver_api::models::LsnLease;
 use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -346,6 +347,10 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
         // cutoff specified as time.
         let ctx =
             RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
+
+        // Delay GC by default lease period at pageserver restart.
+        tokio::time::sleep(LsnLease::DEFAULT_LENGTH).await;
+
         let mut first = true;
         loop {
             tokio::select! {
