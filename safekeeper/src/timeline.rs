@@ -829,12 +829,16 @@ impl Timeline {
         )
     }
 
-    pub(crate) async fn switch_to_offloaded(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub(crate) async fn switch_to_offloaded(
+        self: &Arc<Self>,
+        flush_lsn: &Lsn,
+    ) -> anyhow::Result<()> {
         let mut shared = self.write_shared_state().await;
 
         // updating control file
         let mut pstate = shared.sk.state_mut().start_change();
         assert!(matches!(pstate.eviction_state, EvictionState::Present));
+        assert!(shared.sk.flush_lsn() == *flush_lsn);
         pstate.eviction_state = EvictionState::Offloaded(shared.sk.flush_lsn());
         shared.sk.state_mut().finish_change(&pstate).await?;
 

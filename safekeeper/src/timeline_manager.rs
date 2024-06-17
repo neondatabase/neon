@@ -90,7 +90,7 @@ const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
 
 pub enum ManagerCtlMessage {
     /// Request to get a guard for FullAccessTimeline, with WAL files available locally.
-    GuardRequest(tokio::sync::oneshot::Sender<AccessGuard>),
+    GuardRequest(tokio::sync::oneshot::Sender<anyhow::Result<AccessGuard>>),
     /// Request to drop the guard.
     GuardDrop(u64),
 }
@@ -135,6 +135,7 @@ impl ManagerCtl {
         // wait for the manager to respond with the guard
         rx.await
             .map_err(|e| anyhow::anyhow!("failed to wait for manager guard: {:?}", e))
+            .and_then(std::convert::identity)
     }
 
     /// Must be called exactly once to bootstrap the manager.
@@ -216,7 +217,7 @@ pub async fn main_task(
     let mut next_guard_id: u64 = 0;
     let mut guard_ids: HashSet<u64> = HashSet::new();
 
-    let is_offloaded = tli.is_offloaded().await;
+    let mut is_offloaded = tli.is_offloaded().await;
 
     // Start recovery task which always runs on the timeline.
     // TODO: don't start it for evicted timelines
@@ -292,8 +293,13 @@ pub async fn main_task(
                     == last_removed_segno + 1;
 
             if ready_for_eviction {
-                info!("timeline is ready for eviction");
-                // TODO: evict
+                let _ = offload_timeline(
+                    &tli,
+                    partial_backup_uploaded.as_ref().unwrap(),
+                    wal_seg_size,
+                    &mut is_offloaded,
+                )
+                .await;
             }
 
             next_cfile_save
@@ -362,10 +368,22 @@ pub async fn main_task(
                 info!("received manager message: {:?}", res);
                 match res {
                     Some(ManagerCtlMessage::GuardRequest(tx)) => {
-                        // TODO: un-evict the timeline if it's evicted
+                        if is_offloaded {
+                            // trying to unevict timeline
+                            if !unoffload_timeline(&tli, &mut is_offloaded).await {
+                                warn!("failed to unoffload timeline");
+                                let guard = Err(anyhow::anyhow!("failed to unoffload timeline"));
+                                if tx.send(guard).is_err() {
+                                    warn!("failed to reply with a guard");
+                                }
+                                continue 'outer;
+                            }
+                        }
+                        assert!(!is_offloaded);
+
                         let guard = create_guard(&mut next_guard_id, &mut guard_ids, &manager_tx);
                         let guard_id = guard.guard_id;
-                        if tx.send(guard).is_err() {
+                        if tx.send(Ok(guard)).is_err() {
                             warn!("failed to reply with a guard {}", guard_id);
                         }
                     }
@@ -408,19 +426,45 @@ pub async fn main_task(
     }
 }
 
+#[instrument(name = "offload_timeline", skip_all)]
 async fn offload_timeline(
     tli: &Arc<Timeline>,
     partial_backup_uploaded: &PartialRemoteSegment,
     wal_seg_size: usize,
     is_offloaded: &mut bool,
-) -> anyhow::Result<()> {
+) -> bool {
+    info!("timeline is ready for eviction");
     assert!(!(*is_offloaded));
 
     let flush_lsn = partial_backup_uploaded.flush_lsn;
     let segno = flush_lsn.segment_number(wal_seg_size);
 
     info!("TODO: delete partial WAL file with segno={}", segno);
-    tli.switch_to_offloaded().await
+    info!("offloading timeline at flush_lsn={}", flush_lsn);
+    if let Err(e) = tli.switch_to_offloaded(&flush_lsn).await {
+        warn!("failed to offload timeline: {:?}", e);
+        return false;
+    }
+    info!("successfully offloaded timeline");
+    *is_offloaded = true;
+
+    true
+}
+
+#[instrument(name = "unoffload_timeline", skip_all)]
+async fn unoffload_timeline(tli: &Arc<Timeline>, is_offloaded: &mut bool) -> bool {
+    info!("timeline is ready for uneviction");
+    assert!(*is_offloaded);
+
+    info!("TODO: validate local WAL files");
+    if let Err(e) = tli.switch_to_present().await {
+        warn!("failed to unoffload timeline: {:?}", e);
+        return false;
+    }
+    info!("successfully unoffloaded timeline");
+    *is_offloaded = false;
+
+    true
 }
 
 // WARN: can be used only if timeline is not evicted
