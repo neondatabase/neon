@@ -170,24 +170,21 @@ fn watch_compute_activity(compute: &ComputeNode) {
                 //
                 let physical_replication_query =
                     "select last_msg_receipt_time from pg_stat_wal_receiver;";
-                match cli.query_opt(physical_replication_query, &[])
-                {
-                    Ok(Some(row)) => match row.try_get::<&str, DateTime<Utc>>("last_msg_receipt_time")
-                    {
-                        Ok(last_msg_receipt_time) =>
-                        {
-                            compute.update_last_active(Some(last_msg_receipt_time));
-                            continue;
+                match cli.query_opt(physical_replication_query, &[]) {
+                    Ok(Some(row)) => {
+                        match row.try_get::<&str, DateTime<Utc>>("last_msg_receipt_time") {
+                            Ok(last_msg_receipt_time) => {
+                                compute.update_last_active(Some(last_msg_receipt_time));
+                                continue;
+                            }
+                            Err(e) => {
+                                warn!("failed to parse `pg_stat_wal_receiver` `last_msg_receipt_time`: {:?}", e);
+                                continue;
+                            }
                         }
-                        Err(e) =>
-                        {
-                            warn!("failed to parse `pg_stat_wal_receiver` `last_msg_receipt_time`: {:?}", e);
-                            continue;
-                        }
-                    },
-                    Ok(None) => { /* fall through */ },
-                    Err(e) =>
-                    {
+                    }
+                    Ok(None) => { /* fall through */ }
+                    Err(e) => {
                         warn!("Failed to query `pg_stat_wal_receiver`: {:?}", e);
                         continue;
                     }
