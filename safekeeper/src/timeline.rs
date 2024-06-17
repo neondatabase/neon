@@ -31,7 +31,7 @@ use crate::safekeeper::{
     INVALID_TERM,
 };
 use crate::send_wal::WalSenders;
-use crate::state::{TimelineMemState, TimelinePersistentState, TimelineState};
+use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, TimelineState};
 use crate::timeline_manager::ManagerCtl;
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self};
@@ -166,13 +166,18 @@ impl<'a> Drop for WriteGuardSharedState<'a> {
 pub enum StateSK {
     Loaded(SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>),
     Offloaded(TimelineState<control_file::FileStorage>),
+    Empty,
 }
 
 impl StateSK {
     pub fn flush_lsn(&self) -> Lsn {
         match self {
             StateSK::Loaded(sk) => sk.wal_store.flush_lsn(),
-            StateSK::Offloaded(_) => todo!(),
+            StateSK::Offloaded(state) => match state.eviction_state {
+                EvictionState::Offloaded(flush_lsn) => flush_lsn,
+                _ => unreachable!(),
+            },
+            StateSK::Empty => unreachable!(),
         }
     }
 
@@ -180,6 +185,7 @@ impl StateSK {
         match self {
             StateSK::Loaded(sk) => &sk.state,
             StateSK::Offloaded(ref s) => s,
+            StateSK::Empty => unreachable!(),
         }
     }
 
@@ -187,6 +193,7 @@ impl StateSK {
         match self {
             StateSK::Loaded(sk) => &mut sk.state,
             StateSK::Offloaded(ref mut s) => s,
+            StateSK::Empty => unreachable!(),
         }
     }
 
@@ -209,7 +216,14 @@ impl StateSK {
     pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
         match self {
             StateSK::Loaded(sk) => sk.record_safekeeper_info(sk_info).await,
-            StateSK::Offloaded(_) => todo!(),
+            StateSK::Offloaded(_) => {
+                warn!(
+                    "received broker message for offloaded timeline, ignoring: {:?}",
+                    sk_info
+                );
+                Ok(())
+            }
+            StateSK::Empty => unreachable!(),
         }
     }
 
@@ -217,6 +231,7 @@ impl StateSK {
         match self {
             StateSK::Loaded(sk) => sk.term_start_lsn,
             StateSK::Offloaded(_) => Lsn(0),
+            StateSK::Empty => unreachable!(),
         }
     }
 
@@ -224,6 +239,7 @@ impl StateSK {
         match self {
             StateSK::Loaded(sk) => sk.wal_store.get_metrics(),
             StateSK::Offloaded(_) => WalStorageMetrics::default(),
+            StateSK::Empty => unreachable!(),
         }
     }
 
@@ -234,6 +250,7 @@ impl StateSK {
                 let flush_lsn = self.flush_lsn();
                 (flush_lsn, flush_lsn, flush_lsn, false)
             }
+            StateSK::Empty => unreachable!(),
         }
     }
 
@@ -245,6 +262,15 @@ impl StateSK {
             StateSK::Offloaded(_) => {
                 panic!("safekeeper is offloaded, cannot be used")
             }
+            StateSK::Empty => unreachable!(),
+        }
+    }
+
+    fn take_state(self) -> TimelineState<control_file::FileStorage> {
+        match self {
+            StateSK::Loaded(sk) => sk.state,
+            StateSK::Offloaded(state) => state,
+            StateSK::Empty => unreachable!(),
         }
     }
 }
@@ -290,7 +316,7 @@ impl SharedState {
             control_file::FileStorage::create_new(timeline_dir.clone(), conf, state)?;
         let wal_store =
             wal_storage::PhysicalStorage::new(ttid, timeline_dir, conf, &control_store)?;
-        let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
+        let sk = SafeKeeper::new(TimelineState::new(control_store), wal_store, conf.my_id)?;
 
         Ok(Self {
             sk: StateSK::Loaded(sk),
@@ -307,11 +333,21 @@ impl SharedState {
             bail!(TimelineError::UninitializedWalSegSize(*ttid));
         }
 
-        let wal_store =
-            wal_storage::PhysicalStorage::new(ttid, timeline_dir, conf, &control_store)?;
+        let sk = match control_store.eviction_state {
+            EvictionState::Present => {
+                let wal_store =
+                    wal_storage::PhysicalStorage::new(ttid, timeline_dir, conf, &control_store)?;
+                StateSK::Loaded(SafeKeeper::new(
+                    TimelineState::new(control_store),
+                    wal_store,
+                    conf.my_id,
+                )?)
+            }
+            EvictionState::Offloaded(_) => StateSK::Offloaded(TimelineState::new(control_store)),
+        };
 
         Ok(Self {
-            sk: StateSK::Loaded(SafeKeeper::new(control_store, wal_store, conf.my_id)?),
+            sk,
             peers_info: PeersInfo(vec![]),
             wal_removal_on_hold: false,
         })
@@ -784,6 +820,56 @@ impl Timeline {
         info!("requesting FullAccessTimeline guard");
         let guard = self.manager_ctl.full_access_guard().await?;
         Ok(FullAccessTimeline::new(self.clone(), guard))
+    }
+
+    pub async fn is_offloaded(&self) -> bool {
+        matches!(
+            self.read_shared_state().await.sk.state().eviction_state,
+            EvictionState::Offloaded(_)
+        )
+    }
+
+    pub(crate) async fn switch_to_offloaded(self: &Arc<Self>) -> anyhow::Result<()> {
+        let mut shared = self.write_shared_state().await;
+
+        // updating control file
+        let mut pstate = shared.sk.state_mut().start_change();
+        assert!(matches!(pstate.eviction_state, EvictionState::Present));
+        pstate.eviction_state = EvictionState::Offloaded(shared.sk.flush_lsn());
+        shared.sk.state_mut().finish_change(&pstate).await?;
+
+        // now we can switch shared.sk to Offloaded, shouldn't fail
+        let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
+        let cfile_state = prev_sk.take_state();
+
+        shared.sk = StateSK::Offloaded(cfile_state);
+        Ok(())
+    }
+
+    pub(crate) async fn switch_to_present(self: &Arc<Self>) -> anyhow::Result<()> {
+        let conf = GlobalTimelines::get_global_config();
+        let mut shared = self.write_shared_state().await;
+
+        // trying to restore WAL storage
+        let wal_store = wal_storage::PhysicalStorage::new(
+            &self.ttid,
+            self.timeline_dir.clone(),
+            &conf,
+            shared.sk.state(),
+        )?;
+
+        // updating control file
+        let mut pstate = shared.sk.state_mut().start_change();
+        assert!(matches!(pstate.eviction_state, EvictionState::Offloaded(_)));
+        pstate.eviction_state = EvictionState::Present;
+        shared.sk.state_mut().finish_change(&pstate).await?;
+
+        // now we can switch shared.sk to Present, shouldn't fail
+        let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
+        let cfile_state = prev_sk.take_state();
+        shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, conf.my_id)?);
+
+        Ok(())
     }
 }
 

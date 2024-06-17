@@ -499,7 +499,11 @@ where
     /// Accepts a control file storage containing the safekeeper state.
     /// State must be initialized, i.e. contain filled `tenant_id`, `timeline_id`
     /// and `server` (`wal_seg_size` inside it) fields.
-    pub fn new(state: CTRL, wal_store: WAL, node_id: NodeId) -> Result<SafeKeeper<CTRL, WAL>> {
+    pub fn new(
+        state: TimelineState<CTRL>,
+        wal_store: WAL,
+        node_id: NodeId,
+    ) -> Result<SafeKeeper<CTRL, WAL>> {
         if state.tenant_id == TenantId::from([0u8; 16])
             || state.timeline_id == TimelineId::from([0u8; 16])
         {
@@ -512,7 +516,7 @@ where
 
         Ok(SafeKeeper {
             term_start_lsn: Lsn(0),
-            state: TimelineState::new(state),
+            state,
             wal_store,
             node_id,
         })
@@ -1039,7 +1043,7 @@ mod tests {
             persisted_state: test_sk_state(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
-        let mut sk = SafeKeeper::new(storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -1055,7 +1059,7 @@ mod tests {
             persisted_state: state,
         };
 
-        sk = SafeKeeper::new(storage, sk.wal_store, NodeId(0)).unwrap();
+        sk = SafeKeeper::new(TimelineState::new(storage), sk.wal_store, NodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request).await;
@@ -1072,7 +1076,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
 
-        let mut sk = SafeKeeper::new(storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,

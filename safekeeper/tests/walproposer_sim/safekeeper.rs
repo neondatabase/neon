@@ -16,7 +16,7 @@ use desim::{
 use hyper::Uri;
 use safekeeper::{
     safekeeper::{ProposerAcceptorMessage, SafeKeeper, ServerInfo, UNKNOWN_SERVER_VERSION},
-    state::TimelinePersistentState,
+    state::{TimelinePersistentState, TimelineState},
     timeline::TimelineError,
     wal_storage::Storage,
     SafeKeeperConf,
@@ -68,7 +68,7 @@ impl GlobalMap {
             let control_store = DiskStateStorage::new(disk.clone());
             let wal_store = DiskWALStorage::new(disk.clone(), &control_store)?;
 
-            let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
+            let sk = SafeKeeper::new(TimelineState::new(control_store), wal_store, conf.my_id)?;
             timelines.insert(
                 ttid,
                 SharedState {
@@ -118,7 +118,11 @@ impl GlobalMap {
         let control_store = DiskStateStorage::new(disk_timeline.clone());
         let wal_store = DiskWALStorage::new(disk_timeline.clone(), &control_store)?;
 
-        let sk = SafeKeeper::new(control_store, wal_store, self.conf.my_id)?;
+        let sk = SafeKeeper::new(
+            TimelineState::new(control_store),
+            wal_store,
+            self.conf.my_id,
+        )?;
 
         self.timelines.insert(
             ttid,

@@ -216,9 +216,11 @@ pub async fn main_task(
     let mut next_guard_id: u64 = 0;
     let mut guard_ids: HashSet<u64> = HashSet::new();
 
+    let is_offloaded = tli.is_offloaded().await;
+
     // Start recovery task which always runs on the timeline.
     // TODO: don't start it for evicted timelines
-    if conf.peer_recovery_enabled {
+    if !is_offloaded && conf.peer_recovery_enabled {
         let guard = create_guard(&mut next_guard_id, &mut guard_ids, &manager_tx);
         let tli = FullAccessTimeline::new(tli.clone(), guard);
         recovery_task = Some(tokio::spawn(recovery_main(tli, conf.clone())));
@@ -228,66 +230,76 @@ pub async fn main_task(
         MANAGER_ITERATIONS_TOTAL.inc();
 
         let state_snapshot = StateSnapshot::new(tli.read_shared_state().await, heartbeat_timeout);
-        let num_computes = *num_computes_rx.borrow();
+        let next_cfile_save = if !is_offloaded {
+            let num_computes = *num_computes_rx.borrow();
+            let is_wal_backup_required = update_backup(
+                &conf,
+                &tli,
+                wal_seg_size,
+                num_computes,
+                &state_snapshot,
+                &mut backup_task,
+            )
+            .await;
 
-        let is_wal_backup_required = update_backup(
-            &conf,
-            &tli,
-            wal_seg_size,
-            num_computes,
-            &state_snapshot,
-            &mut backup_task,
-        )
-        .await;
+            let is_active = update_is_active(
+                is_wal_backup_required,
+                num_computes,
+                &state_snapshot,
+                &mut tli_broker_active,
+                &tli,
+            );
 
-        let is_active = update_is_active(
-            is_wal_backup_required,
-            num_computes,
-            &state_snapshot,
-            &mut tli_broker_active,
-            &tli,
-        );
+            let next_cfile_save = update_control_file_save(&state_snapshot, &tli).await;
 
-        let next_cfile_save = update_control_file_save(&state_snapshot, &tli).await;
+            update_wal_removal(
+                &conf,
+                walsenders,
+                &tli,
+                wal_seg_size,
+                &state_snapshot,
+                last_removed_segno,
+                &mut wal_removal_task,
+            )
+            .await;
 
-        update_wal_removal(
-            &conf,
-            walsenders,
-            &tli,
-            wal_seg_size,
-            &state_snapshot,
-            last_removed_segno,
-            &mut wal_removal_task,
-        )
-        .await;
+            update_partial_backup(
+                &conf,
+                &tli,
+                &state_snapshot,
+                &mut partial_backup_task,
+                &mut partial_backup_uploaded,
+                &mut next_guard_id,
+                &mut guard_ids,
+                &manager_tx,
+            )
+            .await;
 
-        update_partial_backup(
-            &conf,
-            &tli,
-            &state_snapshot,
-            &mut partial_backup_task,
-            &mut partial_backup_uploaded,
-            &mut next_guard_id,
-            &mut guard_ids,
-            &manager_tx,
-        )
-        .await;
+            let ready_for_eviction = backup_task.is_none()
+                && recovery_task.is_none()
+                && wal_removal_task.is_none()
+                && partial_backup_task.is_none()
+                && partial_backup_uploaded.is_some()
+                && next_cfile_save.is_none()
+                && guard_ids.is_empty()
+                && !is_active
+                && !wal_backup_partial::needs_uploading(&state_snapshot, &partial_backup_uploaded)
+                && partial_backup_uploaded
+                    .as_ref()
+                    .unwrap()
+                    .flush_lsn
+                    .segment_number(wal_seg_size)
+                    == last_removed_segno + 1;
 
-        let ready_for_eviction = backup_task.is_none()
-            && recovery_task.is_none()
-            && wal_removal_task.is_none()
-            && partial_backup_task.is_none()
-            && partial_backup_uploaded.is_some()
-            && guard_ids.is_empty()
-            && !is_active
-            && !wal_backup_partial::needs_uploading(&state_snapshot, &partial_backup_uploaded)
-            && partial_backup_uploaded.as_ref().unwrap().flush_lsn.segment_number(wal_seg_size)
-                == last_removed_segno + 1;
+            if ready_for_eviction {
+                info!("timeline is ready for eviction");
+                // TODO: evict
+            }
 
-        if ready_for_eviction {
-            info!("timeline is ready for eviction");
-            // TODO: evict
-        }
+            next_cfile_save
+        } else {
+            None
+        };
 
         // wait until something changes. tx channels are stored under Arc, so they will not be
         // dropped until the manager task is finished.
@@ -396,6 +408,22 @@ pub async fn main_task(
     }
 }
 
+async fn offload_timeline(
+    tli: &Arc<Timeline>,
+    partial_backup_uploaded: &PartialRemoteSegment,
+    wal_seg_size: usize,
+    is_offloaded: &mut bool,
+) -> anyhow::Result<()> {
+    assert!(!(*is_offloaded));
+
+    let flush_lsn = partial_backup_uploaded.flush_lsn;
+    let segno = flush_lsn.segment_number(wal_seg_size);
+
+    info!("TODO: delete partial WAL file with segno={}", segno);
+    tli.switch_to_offloaded().await
+}
+
+// WARN: can be used only if timeline is not evicted
 fn create_guard(
     next_guard_id: &mut u64,
     guard_ids: &mut HashSet<u64>,
@@ -528,6 +556,7 @@ async fn update_wal_removal(
                 // TODO: log warning?
                 return;
             }
+            StateSK::Empty => unreachable!(),
         };
 
         *wal_removal_task = Some(tokio::spawn(
