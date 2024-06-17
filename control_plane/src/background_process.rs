@@ -51,7 +51,6 @@ pub enum InitialPidFile {
     Expect(Utf8PathBuf),
 }
 
-
 /// Start a background child process using the parameters given.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_process<F, Fut, AI, A, EI>(
@@ -236,7 +235,9 @@ pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
         }
     }
     println!();
-    anyhow::bail!("{process_name} with pid {pid} did not stop in {DEFAULT_RETRY_TIMEOUT_SECS} seconds");
+    anyhow::bail!(
+        "{process_name} with pid {pid} did not stop in {DEFAULT_RETRY_TIMEOUT_SECS} seconds"
+    );
 }
 
 fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {

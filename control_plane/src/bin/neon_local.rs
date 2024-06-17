@@ -1058,7 +1058,10 @@ fn get_retry_timeout(args: &ArgMatches) -> u64 {
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
-            if let Err(e) = get_pageserver(env, subcommand_args)?.start(get_retry_timeout(subcommand_args)).await {
+            if let Err(e) = get_pageserver(env, subcommand_args)?
+                .start(get_retry_timeout(subcommand_args))
+                .await
+            {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1172,7 +1175,10 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
         "start" => {
             let extra_opts = safekeeper_extra_opts(sub_args);
 
-            if let Err(e) = safekeeper.start(extra_opts, get_retry_timeout(sub_args)).await {
+            if let Err(e) = safekeeper
+                .start(extra_opts, get_retry_timeout(sub_args))
+                .await
+            {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1198,7 +1204,10 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
             }
 
             let extra_opts = safekeeper_extra_opts(sub_args);
-            if let Err(e) = safekeeper.start(extra_opts, get_retry_timeout(sub_args)).await {
+            if let Err(e) = safekeeper
+                .start(extra_opts, get_retry_timeout(sub_args))
+                .await
+            {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1211,7 +1220,10 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
-async fn handle_start_all(env: &local_env::LocalEnv, retry_timeout_in_seconds: u64) -> anyhow::Result<()> {
+async fn handle_start_all(
+    env: &local_env::LocalEnv,
+    retry_timeout_in_seconds: u64,
+) -> anyhow::Result<()> {
     // Endpoints are not started automatically
 
     broker::start_broker_process(env, retry_timeout_in_seconds).await?;

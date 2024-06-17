@@ -110,7 +110,11 @@ impl SafekeeperNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, extra_opts: Vec<String>, retry_timeout_in_seconds: u64) -> anyhow::Result<()> {
+    pub async fn start(
+        &self,
+        extra_opts: Vec<String>,
+        retry_timeout_in_seconds: u64,
+    ) -> anyhow::Result<()> {
         print!(
             "Starting safekeeper at '{}' in '{}', retrying for {} seconds",
             self.pg_connection_config.raw_address(),

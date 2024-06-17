@@ -11,7 +11,10 @@ use camino::Utf8PathBuf;
 
 use crate::{background_process, local_env};
 
-pub async fn start_broker_process(env: &local_env::LocalEnv, retry_timeout_in_seconds: u64) -> anyhow::Result<()> {
+pub async fn start_broker_process(
+    env: &local_env::LocalEnv,
+    retry_timeout_in_seconds: u64,
+) -> anyhow::Result<()> {
     let broker = &env.broker;
     let listen_addr = &broker.listen_addr;
 
