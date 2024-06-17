@@ -5248,6 +5248,15 @@ impl Service {
                                 tracing::warn!(%tid, "Scheduling error when draining pageserver {} : {e}", node_id);
                             }
                             Ok(()) => {
+                                let scheduled_to = tenant_shard.intent.get_attached();
+                                tracing::info!(
+                                    "Rescheduled shard {} while draining node {}: {} -> {:?}",
+                                    tid,
+                                    node_id,
+                                    node_id,
+                                    scheduled_to
+                                );
+
                                 let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
                                 if let Some(some) = waiter {
                                     waiters.push(some);
@@ -5407,12 +5416,22 @@ impl Service {
                                 continue;
                             }
 
+                            let previously_attached_to = *tenant_shard.intent.get_attached();
+
                             tenant_shard.intent.promote_attached(scheduler, node_id);
                             match tenant_shard.schedule(scheduler, &mut schedule_context) {
                                 Err(e) => {
                                     tracing::warn!(%tid, "Scheduling error when filling pageserver {} : {e}", node_id);
                                 }
                                 Ok(()) => {
+                                    tracing::info!(
+                                        "Rescheduled shard {} while filling node {}: {:?} -> {}",
+                                        tid,
+                                        node_id,
+                                        previously_attached_to,
+                                        node_id
+                                    );
+
                                     if let Some(waiter) =
                                         self.maybe_reconcile_shard(tenant_shard, nodes)
                                     {
