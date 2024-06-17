@@ -1310,7 +1310,8 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 
 fn cli() -> Command {
     let timeout_arg = Arg::new("timeout-in-seconds")
-        .long("t")
+        .long("start-timeout")
+        .short('t')
         .global(true)
         .help("timeout in seconds until we fail the command")
         .value_parser(value_parser!(u64))
