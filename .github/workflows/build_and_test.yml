@@ -337,34 +337,8 @@ jobs:
         run: |
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
-      - name: Run rust tests
-        env:
-          NEXTEST_RETRIES: 3
-        run: |
-          #nextest does not yet support running doctests
-          cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
-
-          for io_engine in std-fs tokio-epoll-uring ; do
-            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
-          done
-
-          # Run separate tests for real S3
-          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
-          export REMOTE_STORAGE_S3_REGION=eu-central-1
-          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_s3)'
-
-          # Run separate tests for real Azure Blob Storage
-          # XXX: replace region with `eu-central-1`-like region
-          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
-          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
-          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
-          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
-          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
-          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_azure)'
-
+      # Do install *before* running rust tests because they might recompile the
+      # binaries with different features/flags.
       - name: Install rust binaries
         run: |
           # Install target binaries
@@ -404,6 +378,32 @@ jobs:
               echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
           fi
+
+      - name: Run rust tests
+        env:
+          NEXTEST_RETRIES: 3
+        run: |
+          #nextest does not yet support running doctests
+          cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
+
+          for io_engine in std-fs tokio-epoll-uring ; do
+            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+          done
+
+          # Run separate tests for real S3
+          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
+          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
+          export REMOTE_STORAGE_S3_REGION=eu-central-1
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_s3)'
+
+          # Run separate tests for real Azure Blob Storage
+          # XXX: replace region with `eu-central-1`-like region
+          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
+          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
+          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
+          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
+          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
       - name: Install postgres binaries
         run: cp -a pg_install /tmp/neon/pg_install
@@ -859,6 +859,26 @@ jobs:
           tags: |
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
+      - name: Build neon extensions test image
+        if: matrix.version == 'v16'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            PG_VERSION=${{ matrix.version }}
+            BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile.compute-node
+          target: neon-pg-ext-test
+          cache-from: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
+          cache-to: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
+          tags: |
+            neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
+
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
         if: matrix.version == 'v16'
@@ -902,6 +922,13 @@ jobs:
                                              neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
                                              neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
 
+      - name: Create multi-arch neon-test-extensions image
+        if: matrix.version == 'v16'
+        run: |
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
+
       - name: Create multi-arch compute-tools image
         if: matrix.version == 'v16'
         run: |
@@ -938,7 +965,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -1020,7 +1047,7 @@ jobs:
             exit 1
           fi
 
-      - name: Verify docker-compose example
+      - name: Verify docker-compose example and test extensions
         timeout-minutes: 20
         run: env TAG=${{needs.tag.outputs.build-tag}} ./docker-compose/docker_compose_test.sh
 
@@ -1074,6 +1101,8 @@ jobs:
                                                  $repo/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
             done
           done
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
+                                             neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]

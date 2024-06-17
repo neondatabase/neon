@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
+#include "replication/logical.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "storage/procsignal.h"
@@ -280,6 +281,7 @@ _PG_init(void)
 	pg_init_libpagestore();
 	pg_init_walproposer();
         WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitLogicalReplicationMonitor();
 

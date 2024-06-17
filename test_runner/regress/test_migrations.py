@@ -8,8 +8,6 @@ def test_migrations(neon_simple_env: NeonEnv):
     env.neon_cli.create_branch("test_migrations", "empty")
 
     endpoint = env.endpoints.create("test_migrations")
-    log_path = endpoint.endpoint_path() / "compute.log"
-
     endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
 
@@ -22,9 +20,7 @@ def test_migrations(neon_simple_env: NeonEnv):
         migration_id = cur.fetchall()
         assert migration_id[0][0] == num_migrations
 
-    with open(log_path, "r") as log_file:
-        logs = log_file.read()
-        assert f"INFO handle_migrations: Ran {num_migrations} migrations" in logs
+    endpoint.assert_log_contains(f"INFO handle_migrations: Ran {num_migrations} migrations")
 
     endpoint.stop()
     endpoint.start()
@@ -36,6 +32,4 @@ def test_migrations(neon_simple_env: NeonEnv):
         migration_id = cur.fetchall()
         assert migration_id[0][0] == num_migrations
 
-    with open(log_path, "r") as log_file:
-        logs = log_file.read()
-        assert "INFO handle_migrations: Ran 0 migrations" in logs
+    endpoint.assert_log_contains("INFO handle_migrations: Ran 0 migrations")

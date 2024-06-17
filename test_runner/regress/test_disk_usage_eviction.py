@@ -17,7 +17,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.utils import wait_until
+from fixtures.utils import human_bytes, wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
 
@@ -218,19 +218,6 @@ def count_layers_per_tenant(
     return dict(ret)
 
 
-def human_bytes(amt: float) -> str:
-    suffixes = ["", "Ki", "Mi", "Gi"]
-
-    last = suffixes[-1]
-
-    for name in suffixes:
-        if amt < 1024 or name == last:
-            return f"{int(round(amt))} {name}B"
-        amt = amt / 1024
-
-    raise RuntimeError("unreachable")
-
-
 def _eviction_env(
     request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, num_pageservers: int
 ) -> EvictionEnv:
@@ -294,7 +281,7 @@ def pgbench_init_tenant(
             "gc_period": "0s",
             "compaction_period": "0s",
             "checkpoint_distance": f"{layer_size}",
-            "image_creation_threshold": "100",
+            "image_creation_threshold": "999999",
             "compaction_target_size": f"{layer_size}",
         }
     )
@@ -668,11 +655,10 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
         finish_tenant_creation(env, tenant_id, timeline_id, min_expected_layers)
 
     tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
-    (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, False)
+    (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, True)
 
-    # cut 10 percent
     response = env.pageserver.http_client().disk_usage_eviction_run(
-        {"evict_bytes": total_on_disk // 10, "eviction_order": order.config()}
+        {"evict_bytes": total_on_disk // 5, "eviction_order": order.config()}
     )
     log.info(f"{response}")
 

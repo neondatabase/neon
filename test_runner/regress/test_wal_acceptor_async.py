@@ -601,13 +601,16 @@ async def run_segment_init_failure(env: NeonEnv):
     conn = await ep.connect_async()
     ep.safe_psql("select pg_switch_wal()")  # jump to the segment boundary
     # next insertion should hang until failpoint is disabled.
-    asyncio.create_task(conn.execute("insert into t select generate_series(1,1), 'payload'"))
+    bg_query = asyncio.create_task(
+        conn.execute("insert into t select generate_series(1,1), 'payload'")
+    )
     sleep_sec = 2
     await asyncio.sleep(sleep_sec)
-    # also restart ep at segment boundary to make test more interesting
-    ep.stop()
     # it must still be not finished
-    # assert not bg_query.done()
+    assert not bg_query.done()
+    # Also restart ep at segment boundary to make test more interesting. Do it in immediate mode;
+    # fast will hang because it will try to gracefully finish sending WAL.
+    ep.stop(mode="immediate")
     # Without segment rename during init (#6402) previous statement created
     # partially initialized 16MB segment, so sk restart also triggers #6401.
     sk.stop().start()

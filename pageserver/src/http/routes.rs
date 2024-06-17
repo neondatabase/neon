@@ -1135,7 +1135,10 @@ async fn tenant_size_handler(
             &ctx,
         )
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(|e| match e {
+            crate::tenant::size::CalculateSyntheticSizeError::Cancelled => ApiError::ShuttingDown,
+            other => ApiError::InternalServerError(anyhow::anyhow!(other)),
+        })?;
 
     let mut sizes = None;
     let accepts_html = headers
@@ -1143,9 +1146,7 @@ async fn tenant_size_handler(
         .map(|v| v == "text/html")
         .unwrap_or_default();
     if !inputs_only.unwrap_or(false) {
-        let storage_model = inputs
-            .calculate_model()
-            .map_err(ApiError::InternalServerError)?;
+        let storage_model = inputs.calculate_model();
         let size = storage_model.calculate();
 
         // If request header expects html, return html
@@ -2429,6 +2430,25 @@ async fn list_aux_files(
     json_response(StatusCode::OK, files)
 }
 
+async fn perf_info(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let result = timeline.perf_info().await;
+
+    json_response(StatusCode::OK, result)
+}
+
 async fn ingest_aux_files(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -2856,5 +2876,9 @@ pub fn make_router(
             |r| testing_api_handler("list_aux_files", r, list_aux_files),
         )
         .post("/v1/top_tenants", |r| api_handler(r, post_top_tenants))
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/perf_info",
+            |r| testing_api_handler("perf_info", r, perf_info),
+        )
         .any(handler_404))
 }
