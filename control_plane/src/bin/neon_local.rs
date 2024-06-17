@@ -1112,8 +1112,8 @@ async fn handle_storage_controller(
 ) -> Result<()> {
     let svc = StorageController::from_env(env);
     match sub_match.subcommand() {
-        Some(("start", _start_match)) => {
-            if let Err(e) = svc.start(get_retry_timeout(sub_match)).await {
+        Some(("start", start_match)) => {
+            if let Err(e) = svc.start(get_retry_timeout(start_match)).await {
                 eprintln!("start failed: {e}");
                 exit(1);
             }
