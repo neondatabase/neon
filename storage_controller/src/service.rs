@@ -1908,7 +1908,7 @@ impl Service {
 
     /// Same as [`Service::await_waiters`], but returns the waiters which are still
     /// in progress
-    async fn kick_waiters(
+    async fn await_waiters_remainder(
         &self,
         waiters: Vec<ReconcilerWaiter>,
         timeout: Duration,
@@ -5210,11 +5210,11 @@ impl Service {
                 }
             }
 
-            waiters = self.kick_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await;
+            waiters = self.await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT).await;
         }
 
         while !waiters.is_empty() {
-            waiters = self.kick_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await;
+            waiters = self.await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT).await;
         }
 
         // At this point we have done the best we could to drain shards from this node.
@@ -5367,11 +5367,11 @@ impl Service {
                 }
             }
 
-            waiters = self.kick_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await;
+            waiters = self.await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT).await;
         }
 
         while !waiters.is_empty() {
-            waiters = self.kick_waiters(waiters, SHORT_RECONCILE_TIMEOUT).await;
+            waiters = self.await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT).await;
         }
 
         if let Err(err) = self
