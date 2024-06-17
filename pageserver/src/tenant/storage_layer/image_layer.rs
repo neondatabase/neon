@@ -402,7 +402,7 @@ impl ImageLayer {
             let size = path.metadata()?.size();
             let elapsed_ms = start_compression.elapsed().as_millis() as u64;
             let start_decompression = Instant::now();
-            Self::compare_are_equal(path, &compressed_path, ctx).await?;
+            Self::compare_are_equal(path, &compressed_path, ctx, &image_compression).await?;
             let elapsed_decompression_ms = start_decompression.elapsed().as_millis() as u64;
             stats.push((
                 image_compression,
@@ -471,6 +471,7 @@ impl ImageLayer {
         path_a: &Utf8Path,
         path_b: &Utf8Path,
         ctx: &RequestContext,
+        cmp: &Option<ImageCompressionAlgorithm>,
     ) -> anyhow::Result<()> {
         let mut files = Vec::new();
         for path in [path_a, path_b] {
@@ -525,7 +526,7 @@ impl ImageLayer {
             let content_b = tree_readers_cursors[1].1.read_blob(offset_b, ctx).await?;
             assert_eq!(
                 content_a, content_b,
-                "mismatch for key={key} and {path_a}:{path_b}"
+                "mismatch for key={key} cmp={cmp:?} and {path_a}:{path_b}"
             );
         }
         Ok(())
