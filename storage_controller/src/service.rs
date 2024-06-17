@@ -5322,28 +5322,30 @@ impl Service {
                         }
                     };
 
-                    if tenant_shard.intent.demote_attached(scheduler, node_id) {
-                        match tenant_shard.schedule(scheduler, &mut schedule_context) {
-                            Err(e) => {
-                                tracing::warn!(
-                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                    "Scheduling error when draining pageserver {} : {e}", node_id
-                                );
-                            }
-                            Ok(()) => {
-                                let scheduled_to = tenant_shard.intent.get_attached();
-                                tracing::info!(
-                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                    "Rescheduled shard while draining node {}: {} -> {:?}",
-                                    node_id,
-                                    node_id,
-                                    scheduled_to
-                                );
+                    match tenant_shard.reschedule_to_secondary(
+                        node_id,
+                        scheduler,
+                        &mut schedule_context,
+                    ) {
+                        Err(e) => {
+                            tracing::warn!(
+                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                "Scheduling error when draining pageserver {} : {e}", node_id
+                            );
+                        }
+                        Ok(()) => {
+                            let scheduled_to = tenant_shard.intent.get_attached();
+                            tracing::info!(
+                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                "Rescheduled shard while draining node {}: {} -> {:?}",
+                                node_id,
+                                node_id,
+                                scheduled_to
+                            );
 
-                                let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
-                                if let Some(some) = waiter {
-                                    waiters.push(some);
-                                }
+                            let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
+                            if let Some(some) = waiter {
+                                waiters.push(some);
                             }
                         }
                     }
