@@ -6809,26 +6809,26 @@ mod tests {
             Bytes::from_static(b"value 9@0x40"),
         ];
 
-        for idx in 0..10 {
+        for (idx, expected) in expected_result.iter().enumerate() {
             assert_eq!(
                 tline
                     .get(get_key(idx as u32), Lsn(0x50), &ctx)
                     .await
                     .unwrap(),
-                &expected_result[idx]
+                expected
             );
         }
 
         let cancel = CancellationToken::new();
         tline.compact_with_gc(&cancel, &ctx).await.unwrap();
 
-        for idx in 0..10 {
+        for (idx, expected) in expected_result.iter().enumerate() {
             assert_eq!(
                 tline
                     .get(get_key(idx as u32), Lsn(0x50), &ctx)
                     .await
                     .unwrap(),
-                &expected_result[idx]
+                expected
             );
         }
 

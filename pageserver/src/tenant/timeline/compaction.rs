@@ -994,6 +994,8 @@ impl Timeline {
             all_key_values.extend(layer.load_key_values(ctx).await?);
             let desc = layer.layer_desc();
             if desc.is_delta() {
+                // TODO: is it correct to only record split points for deltas intersecting with the GC horizon? (exclude those below/above the horizon)
+                // so that we can avoid having too many small delta layers.
                 let key_range = desc.get_key_range();
                 delta_split_points.insert(key_range.start);
                 delta_split_points.insert(key_range.end);
