@@ -395,8 +395,9 @@ impl ImageLayer {
         for (image_compression, conf) in image_compressions.into_iter().zip(confs) {
             let start_compression = Instant::now();
             let compressed_path = Self::compress_for_conf(path, ctx, conf).await?;
+            let path_to_delete = compressed_path.clone();
             scopeguard::defer!({
-                let _ = std::fs::remove_file(compressed_path);
+                let _ = std::fs::remove_file(path_to_delete);
             });
             let size = path.metadata()?.size();
             let elapsed_ms = start_compression.elapsed().as_millis() as u64;
