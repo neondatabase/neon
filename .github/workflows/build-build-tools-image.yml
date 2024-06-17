@@ -30,7 +30,6 @@ jobs:
   check-image:
     uses: ./.github/workflows/check-build-tools-image.yml
 
-  # This job uses older version of GitHub Actions because it's run on gen2 runners, which don't support node 20 (for newer versions)
   build-image:
     needs: [ check-image ]
     if: needs.check-image.outputs.found == 'false'
