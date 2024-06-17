@@ -5192,7 +5192,6 @@ impl Service {
                     };
 
                     if tenant_shard.intent.demote_attached(scheduler, node_id) {
-                        tenant_shard.sequence = tenant_shard.sequence.next();
                         match tenant_shard.schedule(scheduler, &mut schedule_context) {
                             Err(e) => {
                                 tracing::warn!(%tid, "Scheduling error when draining pageserver {} : {e}", node_id);
