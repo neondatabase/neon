@@ -767,6 +767,7 @@ pub(crate) async fn open_wal_file(
 }
 
 /// Helper returning full path to WAL segment file and its .partial brother.
+/// TODO: this function doesn't return Err, we need to remove the Result.
 pub fn wal_file_paths(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,

@@ -2179,6 +2179,7 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
     do_something()
     do_something()
 
+
 def test_s3_eviction(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)

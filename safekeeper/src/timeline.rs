@@ -596,7 +596,7 @@ impl Timeline {
         // Start manager task which will monitor timeline state and update
         // background tasks.
         tokio::spawn(timeline_manager::main_task(
-            self.clone(),
+            ManagerTimeline { tli: self.clone() },
             conf.clone(),
             broker_active_set,
             rx,
@@ -821,60 +821,6 @@ impl Timeline {
         let guard = self.manager_ctl.full_access_guard().await?;
         Ok(FullAccessTimeline::new(self.clone(), guard))
     }
-
-    pub async fn is_offloaded(&self) -> bool {
-        matches!(
-            self.read_shared_state().await.sk.state().eviction_state,
-            EvictionState::Offloaded(_)
-        )
-    }
-
-    pub(crate) async fn switch_to_offloaded(
-        self: &Arc<Self>,
-        flush_lsn: &Lsn,
-    ) -> anyhow::Result<()> {
-        let mut shared = self.write_shared_state().await;
-
-        // updating control file
-        let mut pstate = shared.sk.state_mut().start_change();
-        assert!(matches!(pstate.eviction_state, EvictionState::Present));
-        assert!(shared.sk.flush_lsn() == *flush_lsn);
-        pstate.eviction_state = EvictionState::Offloaded(shared.sk.flush_lsn());
-        shared.sk.state_mut().finish_change(&pstate).await?;
-
-        // now we can switch shared.sk to Offloaded, shouldn't fail
-        let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
-        let cfile_state = prev_sk.take_state();
-
-        shared.sk = StateSK::Offloaded(cfile_state);
-        Ok(())
-    }
-
-    pub(crate) async fn switch_to_present(self: &Arc<Self>) -> anyhow::Result<()> {
-        let conf = GlobalTimelines::get_global_config();
-        let mut shared = self.write_shared_state().await;
-
-        // trying to restore WAL storage
-        let wal_store = wal_storage::PhysicalStorage::new(
-            &self.ttid,
-            self.timeline_dir.clone(),
-            &conf,
-            shared.sk.state(),
-        )?;
-
-        // updating control file
-        let mut pstate = shared.sk.state_mut().start_change();
-        assert!(matches!(pstate.eviction_state, EvictionState::Offloaded(_)));
-        pstate.eviction_state = EvictionState::Present;
-        shared.sk.state_mut().finish_change(&pstate).await?;
-
-        // now we can switch shared.sk to Present, shouldn't fail
-        let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
-        let cfile_state = prev_sk.take_state();
-        shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, conf.my_id)?);
-
-        Ok(())
-    }
 }
 
 /// This is a guard that allows to read/write disk timeline state.
@@ -975,6 +921,76 @@ impl FullAccessTimeline {
             shared_state.sk.state().inmem.remote_consistent_lsn,
             candidate,
         );
+    }
+}
+
+/// This struct is used to give special access to the timeline manager.
+pub(crate) struct ManagerTimeline {
+    pub(crate) tli: Arc<Timeline>,
+}
+
+impl Deref for ManagerTimeline {
+    type Target = Arc<Timeline>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tli
+    }
+}
+
+impl ManagerTimeline {
+    pub(crate) fn timeline_dir(&self) -> &Utf8PathBuf {
+        &self.tli.timeline_dir
+    }
+
+    pub(crate) async fn is_offloaded(&self) -> bool {
+        matches!(
+            self.read_shared_state().await.sk.state().eviction_state,
+            EvictionState::Offloaded(_)
+        )
+    }
+
+    pub(crate) async fn switch_to_offloaded(&self, flush_lsn: &Lsn) -> anyhow::Result<()> {
+        let mut shared = self.write_shared_state().await;
+
+        // updating control file
+        let mut pstate = shared.sk.state_mut().start_change();
+        assert!(matches!(pstate.eviction_state, EvictionState::Present));
+        assert!(shared.sk.flush_lsn() == *flush_lsn);
+        pstate.eviction_state = EvictionState::Offloaded(shared.sk.flush_lsn());
+        shared.sk.state_mut().finish_change(&pstate).await?;
+
+        // now we can switch shared.sk to Offloaded, shouldn't fail
+        let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
+        let cfile_state = prev_sk.take_state();
+
+        shared.sk = StateSK::Offloaded(cfile_state);
+        Ok(())
+    }
+
+    pub(crate) async fn switch_to_present(&self) -> anyhow::Result<()> {
+        let conf = GlobalTimelines::get_global_config();
+        let mut shared = self.write_shared_state().await;
+
+        // trying to restore WAL storage
+        let wal_store = wal_storage::PhysicalStorage::new(
+            &self.ttid,
+            self.timeline_dir.clone(),
+            &conf,
+            shared.sk.state(),
+        )?;
+
+        // updating control file
+        let mut pstate = shared.sk.state_mut().start_change();
+        assert!(matches!(pstate.eviction_state, EvictionState::Offloaded(_)));
+        pstate.eviction_state = EvictionState::Present;
+        shared.sk.state_mut().finish_change(&pstate).await?;
+
+        // now we can switch shared.sk to Present, shouldn't fail
+        let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
+        let cfile_state = prev_sk.take_state();
+        shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, conf.my_id)?);
+
+        Ok(())
     }
 }
 

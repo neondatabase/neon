@@ -22,10 +22,11 @@ use crate::{
     safekeeper::Term,
     send_wal::WalSenders,
     state::{EvictionState, TimelineState},
-    timeline::{FullAccessTimeline, PeerInfo, ReadGuardSharedState, StateSK, Timeline},
+    timeline::{FullAccessTimeline, ManagerTimeline, PeerInfo, ReadGuardSharedState, StateSK},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
     wal_backup_partial::{self, PartialRemoteSegment},
+    wal_storage::wal_file_paths,
     SafeKeeperConf,
 };
 
@@ -86,7 +87,7 @@ impl StateSnapshot {
 const REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 
 /// How often to save the control file if the is no other activity.
-const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
+const CF_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub enum ManagerCtlMessage {
     /// Request to get a guard for FullAccessTimeline, with WAL files available locally.
@@ -178,7 +179,7 @@ impl Drop for AccessGuard {
 /// Be careful, this task is not respawned on panic, so it should not panic.
 #[instrument(name = "manager", skip_all, fields(ttid = %tli.ttid))]
 pub async fn main_task(
-    tli: Arc<Timeline>,
+    tli: ManagerTimeline,
     conf: SafeKeeperConf,
     broker_active_set: Arc<TimelinesSet>,
     mut manager_rx: tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
@@ -211,6 +212,7 @@ pub async fn main_task(
 
     // partial backup task
     let mut partial_backup_task: Option<JoinHandle<Option<PartialRemoteSegment>>> = None;
+    // TODO: it should be initialized if timeline is evicted
     let mut partial_backup_uploaded: Option<PartialRemoteSegment> = None;
 
     // active FullAccessTimeline guards
@@ -370,7 +372,12 @@ pub async fn main_task(
                     Some(ManagerCtlMessage::GuardRequest(tx)) => {
                         if is_offloaded {
                             // trying to unevict timeline
-                            if !unoffload_timeline(&tli, &mut is_offloaded).await {
+                            if !unoffload_timeline(
+                                &tli,
+                                &mut is_offloaded,
+                                partial_backup_uploaded.as_ref().expect("partial backup should exist"),
+                                wal_seg_size,
+                            ).await {
                                 warn!("failed to unoffload timeline");
                                 let guard = Err(anyhow::anyhow!("failed to unoffload timeline"));
                                 if tx.send(guard).is_err() {
@@ -428,7 +435,7 @@ pub async fn main_task(
 
 #[instrument(name = "offload_timeline", skip_all)]
 async fn offload_timeline(
-    tli: &Arc<Timeline>,
+    tli: &ManagerTimeline,
     partial_backup_uploaded: &PartialRemoteSegment,
     wal_seg_size: usize,
     is_offloaded: &mut bool,
@@ -438,8 +445,9 @@ async fn offload_timeline(
 
     let flush_lsn = partial_backup_uploaded.flush_lsn;
     let segno = flush_lsn.segment_number(wal_seg_size);
+    let (_, partial_segfile) = wal_file_paths(tli.timeline_dir(), segno, wal_seg_size).unwrap();
 
-    info!("TODO: delete partial WAL file with segno={}", segno);
+    info!("TODO: delete WAL file here: {}", partial_segfile);
     info!("offloading timeline at flush_lsn={}", flush_lsn);
     if let Err(e) = tli.switch_to_offloaded(&flush_lsn).await {
         warn!("failed to offload timeline: {:?}", e);
@@ -452,11 +460,20 @@ async fn offload_timeline(
 }
 
 #[instrument(name = "unoffload_timeline", skip_all)]
-async fn unoffload_timeline(tli: &Arc<Timeline>, is_offloaded: &mut bool) -> bool {
+async fn unoffload_timeline(
+    tli: &ManagerTimeline,
+    is_offloaded: &mut bool,
+    partial_backup_uploaded: &PartialRemoteSegment,
+    wal_seg_size: usize,
+) -> bool {
     info!("timeline is ready for uneviction");
     assert!(*is_offloaded);
 
-    info!("TODO: validate local WAL files");
+    let flush_lsn = partial_backup_uploaded.flush_lsn;
+    let segno = flush_lsn.segment_number(wal_seg_size);
+    let (_, partial_segfile) = wal_file_paths(tli.timeline_dir(), segno, wal_seg_size).unwrap();
+
+    info!("TODO: validate local WAL file: {}", partial_segfile);
     if let Err(e) = tli.switch_to_present().await {
         warn!("failed to unoffload timeline: {:?}", e);
         return false;
@@ -488,7 +505,7 @@ fn create_guard(
 /// Spawns/kills backup task and returns true if backup is required.
 async fn update_backup(
     conf: &SafeKeeperConf,
-    tli: &Arc<Timeline>,
+    tli: &ManagerTimeline,
     wal_seg_size: usize,
     num_computes: usize,
     state: &StateSnapshot,
@@ -513,7 +530,7 @@ fn update_is_active(
     num_computes: usize,
     state: &StateSnapshot,
     tli_broker_active: &mut TimelineSetGuard,
-    tli: &Arc<Timeline>,
+    tli: &ManagerTimeline,
 ) -> bool {
     let is_active = is_wal_backup_required
         || num_computes > 0
@@ -539,7 +556,7 @@ fn update_is_active(
 /// Save control file if needed. Returns Instant if we should persist the control file in the future.
 async fn update_control_file_save(
     state: &StateSnapshot,
-    tli: &Arc<Timeline>,
+    tli: &ManagerTimeline,
 ) -> Option<tokio::time::Instant> {
     if !state.inmem_flush_pending {
         return None;
@@ -564,7 +581,7 @@ async fn update_control_file_save(
 async fn update_wal_removal(
     conf: &SafeKeeperConf,
     walsenders: &Arc<WalSenders>,
-    tli: &Arc<Timeline>,
+    tli: &ManagerTimeline,
     wal_seg_size: usize,
     state: &StateSnapshot,
     last_removed_segno: u64,
@@ -616,7 +633,7 @@ async fn update_wal_removal(
 /// Update the state after WAL removal task finished.
 fn update_wal_removal_end(
     res: Result<anyhow::Result<u64>, JoinError>,
-    tli: &Arc<Timeline>,
+    tli: &ManagerTimeline,
     last_removed_segno: &mut u64,
 ) {
     let new_last_removed_segno = match res {
@@ -639,7 +656,7 @@ fn update_wal_removal_end(
 
 async fn update_partial_backup(
     conf: &SafeKeeperConf,
-    tli: &Arc<Timeline>,
+    tli: &ManagerTimeline,
     state: &StateSnapshot,
     partial_backup_task: &mut Option<JoinHandle<Option<PartialRemoteSegment>>>,
     partial_backup_uploaded: &mut Option<PartialRemoteSegment>,
@@ -664,7 +681,7 @@ async fn update_partial_backup(
 
     // Get FullAccessTimeline and start partial backup task.
     let guard = create_guard(next_guard_id, guard_ids, manager_tx);
-    let tli = FullAccessTimeline::new(tli.clone(), guard);
+    let tli = FullAccessTimeline::new(tli.tli.clone(), guard);
     *partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
         tli,
         conf.clone(),
