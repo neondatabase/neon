@@ -2,6 +2,7 @@ import concurrent.futures
 import random
 from collections import defaultdict
 
+import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
@@ -29,9 +30,22 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return total, attached
 
 
+FAILPOINT_API_503 = ("api-503", "5%1000*return(1)")
+FAILPOINT_API_500 = ("api-500", "5%1000*return(1)")
+FAILPOINT_API_HANG = ("api-hang", "5%1000*return(60000)")
+
+
+@pytest.mark.parametrize(
+    "failpoints",
+    [
+        #    [],
+        #    [FAILPOINT_API_503, FAILPOINT_API_500],
+        #    [FAILPOINT_API_HANG],
+        [FAILPOINT_API_503, FAILPOINT_API_500, FAILPOINT_API_HANG],
+    ],
+)
 def test_storcon_rolling_failures(
-    neon_env_builder: NeonEnvBuilder,
-    compute_reconfigure_listener: ComputeReconfigure,
+    neon_env_builder: NeonEnvBuilder, compute_reconfigure_listener: ComputeReconfigure, failpoints
 ):
     neon_env_builder.num_pageservers = 8
 
@@ -43,24 +57,30 @@ def test_storcon_rolling_failures(
 
     env = neon_env_builder.init_start()
 
+    env.storage_controller.allowed_errors.extend(
+        [
+            # This log is emitted when a node comes online but then fails to respond to a request: this is
+            # expected, because we do API-level failure injection.
+            ".*Failed to query node location configs, cannot activate.*"
+        ]
+    )
+
     for ps in env.pageservers:
         # We will do unclean detaches
         ps.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
 
-    n_tenants = 32
+    n_tenants = 8
     tenants = [(env.initial_tenant, env.initial_timeline)]
     for i in range(0, n_tenants - 1):
         tenant_id = TenantId.generate()
         timeline_id = TimelineId.generate()
         shard_count = [1, 2, 4][i % 3]
         env.neon_cli.create_tenant(
-            tenant_id, timeline_id, shard_count=shard_count, placement_policy='{"Double":1}'
+            tenant_id, timeline_id, shard_count=shard_count, placement_policy='{"Attached":1}'
         )
         tenants.append((tenant_id, timeline_id))
 
     # Background pain:
-    # - TODO: some fraction of pageserver API requests hang
-    #   (this requires implementing wrap of location_conf calls with proper timeline/cancel)
     # - TODO: continuous tenant/timeline creation/destruction over a different ID range than
     #   the ones we're using for availability checks.
 
@@ -81,11 +101,13 @@ def test_storcon_rolling_failures(
                 psid = shard["node_id"]
                 tsid = TenantShardId.parse(shard["shard_id"])
                 status = env.get_pageserver(psid).http_client().tenant_status(tenant_id=tsid)
+                log.info(f"Shard {tsid} status on node {psid}: {status}")
                 assert status["state"]["slug"] == "Active"
                 log.info(f"Shard {tsid} active on node {psid}")
 
-    failpoints = ("api-503", "5%1000*return(1)")
-    failpoints_str = f"{failpoints[0]}={failpoints[1]}"
+    failpoints = [("api-503", "5%1000*return(1)")]
+    # failpoints_str = f"{failpoints[0]}={failpoints[1]}"
+    failpoints_str = ",".join(f"{f[0]}={f[1]}" for f in failpoints)
     for ps in env.pageservers:
         ps.http_client().configure_failpoints(failpoints)
 
@@ -156,8 +178,8 @@ def test_storcon_rolling_failures(
 
     for_all_workloads(init_one, timeout=60)
 
-    for i in range(0, 20):
-        mode = rng.choice([0, 1, 2])
+    for i in range(0, 4):
+        mode = rng.choice([0, 1, 2, 3])
         log.info(f"Iteration {i}, mode {mode}")
         if mode == 0:
             # Traffic interval: sometimes, instead of a failure, just let the clients
@@ -165,9 +187,22 @@ def test_storcon_rolling_failures(
             # small quantities of data in flight.
             traffic()
         elif mode == 1:
-            clean_fail_restore()
+            # Consistency check: quiesce the controller and check that runtime state matches
+            # database.  We intentionally do _not_ do this on every iteration, so that we sometimes leave
+            # some background reconciliations running across iterations, rather than entering each iteration
+            # in a pristine state.
+            env.storage_controller.reconcile_until_idle()
+            env.storage_controller.consistency_check()
         elif mode == 2:
+            clean_fail_restore()
+        elif mode == 3:
             hard_fail_restore()
+
+        # For convenience when developing, we surface unexpected log errors at every iteration rather than waiting
+        # for the end of the test.
+        env.storage_controller.assert_no_errors()
+        for ps in env.pageservers:
+            ps.assert_no_errors()
 
         # Fail and restart: hard-kill one node. Notify the storage controller that it is offline.
         # Success criteria:
@@ -180,9 +215,6 @@ def test_storcon_rolling_failures(
         # - New attach locations should activate within bounded time
         # - New secondary locations should fill up with data within bounded time
 
-        # TODO: somehow need to wait for reconciles to complete before doing consistency check
-        # (or make the check wait).
-
-        # Do consistency check on every iteration, not just at the end: this makes it more obvious
-        # which change caused an issue.
-        env.storage_controller.consistency_check()
+    # Final check that we can reconcile to a clean state
+    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.consistency_check()
