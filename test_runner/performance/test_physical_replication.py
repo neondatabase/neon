@@ -4,6 +4,7 @@ import csv
 import os
 import subprocess
 import time
+import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,7 +55,9 @@ def test_ro_replica_lag(
     zenbenchmark: NeonBenchmarker,
 ):
     test_duration_min = 60
-    sync_interval_min = 6
+    sync_interval_min = 10
+
+    pgbench_duration = f"-T{test_duration_min * 60 * 2}"
 
     project = neon_api.create_project(pg_version)
     project_id = project["project"]["id"]
@@ -82,18 +85,14 @@ def test_ro_replica_lag(
         )["uri"]
 
         pg_bin.run_capture(["pgbench", "-i", "-s100"], env=master_env)
-        conn_master = psycopg2.connect(master_connstr)
-        cur_master = conn_master.cursor()
-        conn_replica = psycopg2.connect(replica_connstr)
-        cur_replica = conn_replica.cursor()
 
         master_workload = pg_bin.run_nonblocking(
-            ["pgbench", "-c10", "-T1000", "-Mprepared"],
+            ["pgbench", "-c10", pgbench_duration, "-Mprepared"],
             env=master_env,
         )
         try:
             replica_workload = pg_bin.run_nonblocking(
-                ["pgbench", "-c10", "-T1000", "-S"],
+                ["pgbench", "-c10", pgbench_duration, "-S"],
                 env=replica_env,
             )
             try:
@@ -102,7 +101,11 @@ def test_ro_replica_lag(
                     check_pgbench_still_running(master_workload)
                     check_pgbench_still_running(replica_workload)
                     time.sleep(sync_interval_min * 60)
-                    lag = measure_replication_lag(cur_master, cur_replica)
+                    with psycopg2.connect(master_connstr) as conn_master, psycopg2.connect(
+                        replica_connstr
+                    ) as conn_replica:
+                        with conn_master.cursor() as cur_master, conn_replica.cursor() as cur_replica:
+                            lag = measure_replication_lag(cur_master, cur_replica)
                     log.info(f"Replica lagged behind master by {lag} seconds")
                     zenbenchmark.record("replica_lag", lag, "s", MetricReport.LOWER_IS_BETTER)
             finally:
@@ -112,6 +115,7 @@ def test_ro_replica_lag(
     except Exception as e:
         error_occurred = True
         log.error(f"Caught exception: {e}")
+        log.error(traceback.format_exc())
     finally:
         assert not error_occurred  # Fail the test if an error occurred
         neon_api.delete_project(project_id)
@@ -171,6 +175,7 @@ def test_replication_start_stop(
     prefix = "pgbench_agg"
     num_replicas = 2
     configuration_test_time_sec = 10 * 60
+    pgbench_duration = f"-T{2 ** num_replicas * configuration_test_time_sec}"
     error_occurred = False
 
     project = neon_api.create_project(pg_version)
@@ -206,27 +211,22 @@ def test_replication_start_stop(
             replica_env[i]["PGHOST"] = replicas[i]["endpoint"]["host"]
 
         pg_bin.run_capture(["pgbench", "-i", "-s10"], env=master_env)
-        conn_master = psycopg2.connect(master_connstr)
-        cur_master = conn_master.cursor()
 
-        conn_replica: List[Optional[psycopg2.connection]] = [
-            psycopg2.connect(replica_connstr[i]) for i in range(num_replicas)
-        ]
-        cur_replica: List[Optional[psycopg2.cursor]] = []
-        for i in range(num_replicas):
-            conn = conn_replica[i]
-            assert conn is not None
-            cur_replica.append(conn.cursor())
+        def connect_replica(ireplica):
+            return psycopg2.connect(replica_connstr[i])
 
         # Sync replicas
-        for i in range(num_replicas):
-            measure_replication_lag(cur_master, cur_replica[i])
+        with psycopg2.connect(master_connstr) as conn_master:
+            with conn_master.cursor() as cur_master:
+                for i in range(num_replicas):
+                    conn_replica = connect_replica(i)
+                    measure_replication_lag(cur_master, conn_replica.cursor())
 
         master_pgbench = pg_bin.run_nonblocking(
             [
                 "pgbench",
                 "-c10",
-                "-T1000",
+                pgbench_duration,
                 "-Mprepared",
                 "--log",
                 f"--log-prefix={test_output_dir}/{prefix}_master",
@@ -252,7 +252,7 @@ def test_replication_start_stop(
                             "pgbench",
                             "-c10",
                             "-S",
-                            "-T1000",
+                            pgbench_duration,
                             "--log",
                             f"--log-prefix={test_output_dir}/{prefix}_replica_{ireplica}",
                             f"--aggregate-interval={configuration_test_time_sec}",
@@ -265,34 +265,31 @@ def test_replication_start_stop(
                     pgb.terminate()
                     pgb.wait()
                     replica_pgbench[ireplica] = None
-                    conn_replica[ireplica] = None
-                    cur_replica[ireplica] = None
 
                     neon_api.suspend_endpoint(
                         project_id,
                         replicas[ireplica]["endpoint"]["id"],
                     )
                     neon_api.wait_for_operation_to_finish(project_id)
+
             time.sleep(configuration_test_time_sec)
 
-            for ireplica in range(num_replicas):
-                conn = conn_replica[ireplica]
-                if conn is None:
-                    conn = psycopg2.connect(replica_connstr[ireplica])
-                    conn_replica[ireplica] = conn
-                    cur_replica[ireplica] = conn.cursor()
-
-                lag = measure_replication_lag(cur_master, cur_replica[ireplica])
-                zenbenchmark.record(
-                    f"Replica {ireplica} lag", lag, "s", MetricReport.LOWER_IS_BETTER
-                )
-                log.info(
-                    f"Replica {ireplica} lagging behind master by {lag} seconds after configuration {iconfig:>b}"
-                )
+            with psycopg2.connect(master_connstr) as conn_master:
+                with conn_master.cursor() as cur_master:
+                    for ireplica in range(num_replicas):
+                        replica_conn = connect_replica(ireplica)
+                        lag = measure_replication_lag(cur_master, replica_conn.cursor())
+                        zenbenchmark.record(
+                            f"Replica {ireplica} lag", lag, "s", MetricReport.LOWER_IS_BETTER
+                        )
+                        log.info(
+                            f"Replica {ireplica} lagging behind master by {lag} seconds after configuration {iconfig:>b}"
+                        )
         master_pgbench.terminate()
     except Exception as e:
         error_occurred = True
         log.error(f"Caught exception {e}")
+        log.error(traceback.format_exc())
     finally:
         assert not error_occurred
         neon_api.delete_project(project_id)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import traceback
 from typing import TYPE_CHECKING
 
 import psycopg2
@@ -88,8 +89,9 @@ def test_subscriber_lag(
     pg_version: PgVersion,
     zenbenchmark: NeonBenchmarker,
 ):
-    test_duration_min = 2
-    sync_interval_min = 0.5
+    test_duration_min = 60
+    sync_interval_min = 5
+    pgbench_duration = f"-T{test_duration_min * 60 * 2}"
 
     pub_project = neon_api.create_project(pg_version)
     pub_project_id = pub_project["project"]["id"]
@@ -110,34 +112,38 @@ def test_subscriber_lag(
             pub_connstr = pub_project["connection_uris"][0]["connection_uri"]
             sub_connstr = sub_project["connection_uris"][0]["connection_uri"]
 
-            pub_conn = psycopg2.connect(pub_connstr)
-            sub_conn = psycopg2.connect(sub_connstr)
-
-            pub_conn.autocommit = True
-            sub_conn.autocommit = True
-
-            pub_cur = pub_conn.cursor()
-            sub_cur = sub_conn.cursor()
-
             pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
             pg_bin.run_capture(["pgbench", "-i", "-s100"], env=sub_env)
-            sub_cur.execute("truncate table pgbench_accounts")
-            sub_cur.execute("truncate table pgbench_history")
 
-            pub_cur.execute("create publication pub1 for table pgbench_accounts, pgbench_history")
-            sub_cur.execute(f"create subscription sub1 connection '{pub_connstr}' publication pub1")
+            pub_conn = psycopg2.connect(pub_connstr)
+            sub_conn = psycopg2.connect(sub_connstr)
+            pub_conn.autocommit = True
+            sub_conn.autocommit = True
+            with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
+                sub_cur.execute("truncate table pgbench_accounts")
+                sub_cur.execute("truncate table pgbench_history")
 
-            initial_sync_lag = measure_logical_replication_lag(sub_cur, pub_cur)
+                pub_cur.execute(
+                    "create publication pub1 for table pgbench_accounts, pgbench_history"
+                )
+                sub_cur.execute(
+                    f"create subscription sub1 connection '{pub_connstr}' publication pub1"
+                )
+
+                initial_sync_lag = measure_logical_replication_lag(sub_cur, pub_cur)
+            pub_conn.close()
+            sub_conn.close()
+
             zenbenchmark.record(
                 "initial_sync_lag", initial_sync_lag, "s", MetricReport.LOWER_IS_BETTER
             )
 
             pub_workload = pg_bin.run_nonblocking(
-                ["pgbench", "-c10", "-T1000", "-Mprepared"], env=pub_env
+                ["pgbench", "-c10", pgbench_duration, "-Mprepared"], env=pub_env
             )
             try:
                 sub_workload = pg_bin.run_nonblocking(
-                    ["pgbench", "-c10", "-T1000", "-S"],
+                    ["pgbench", "-c10", pgbench_duration, "-S"],
                     env=sub_env,
                 )
                 try:
@@ -146,21 +152,22 @@ def test_subscriber_lag(
                         time.sleep(sync_interval_min * 60)
                         check_pgbench_still_running(pub_workload, "pub")
                         check_pgbench_still_running(sub_workload, "sub")
-                        lag = measure_logical_replication_lag(sub_cur, pub_cur)
+
+                        with psycopg2.connect(pub_connstr) as pub_conn, psycopg2.connect(
+                            sub_connstr
+                        ) as sub_conn:
+                            with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
+                                lag = measure_logical_replication_lag(sub_cur, pub_cur)
+
                         log.info(f"Replica lagged behind master by {lag} seconds")
                         zenbenchmark.record("replica_lag", lag, "s", MetricReport.LOWER_IS_BETTER)
                         sub_workload.terminate()
-                        sub_cur.close()
-                        sub_conn.close()
                         neon_api.restart_endpoint(
                             sub_project_id,
                             sub_endpoint_id,
                         )
-
-                        sub_conn = psycopg2.connect(sub_connstr)
-                        sub_cur = sub_conn.cursor()
                         sub_workload = pg_bin.run_nonblocking(
-                            ["pgbench", "-c10", "-T1000", "-S"],
+                            ["pgbench", "-c10", pgbench_duration, "-S"],
                             env=sub_env,
                         )
                 finally:
@@ -170,12 +177,14 @@ def test_subscriber_lag(
         except Exception as e:
             error_occurred = True
             log.error(f"Caught exception {e}")
+            log.error(traceback.format_exc())
         finally:
             if not error_occurred:
                 neon_api.delete_project(sub_project_id)
     except Exception as e:
         error_occurred = True
         log.error(f"Caught exception {e}")
+        log.error(traceback.format_exc())
     finally:
         assert not error_occurred
         neon_api.delete_project(pub_project_id)
