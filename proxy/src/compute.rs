@@ -146,6 +146,7 @@ impl ConnCfg {
                 }
 
                 // the special ones in tokio-postgres that we don't want being set by the user
+                "dbname" => {}
                 "password" => {}
                 "sslmode" => {}
                 "host" => {}
