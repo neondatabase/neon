@@ -511,7 +511,7 @@ impl ImageLayer {
         let mut key_offset_stream_a = std::pin::pin!(tree_readers_cursors[0]
             .0
             .get_stream_from(&[0u8; KEY_SIZE], ctx));
-        let mut key_offset_stream_b = std::pin::pin!(tree_readers_cursors[0]
+        let mut key_offset_stream_b = std::pin::pin!(tree_readers_cursors[1]
             .0
             .get_stream_from(&[0u8; KEY_SIZE], ctx));
         while let Some(r) = key_offset_stream_a.next().await {
@@ -528,7 +528,7 @@ impl ImageLayer {
                 content_a, content_b,
                 "mismatch for key={key} cmp={cmp:?} and {path_a}:{path_b}"
             );
-            println!("match for key={key} cmp={cmp:?} from {path_a}");
+            //println!("match for key={key} cmp={cmp:?} from {path_a}");
         }
         Ok(())
     }
