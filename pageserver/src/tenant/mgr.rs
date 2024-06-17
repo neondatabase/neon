@@ -3,7 +3,6 @@
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
-use hyper::StatusCode;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::LocationConfigMode;
@@ -1374,7 +1373,7 @@ impl TenantManager {
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,
-    ) -> Result<StatusCode, DeleteTenantError> {
+    ) -> Result<(), DeleteTenantError> {
         super::span::debug_assert_current_span_has_tenant_id();
 
         async fn delete_local(
@@ -1433,7 +1432,7 @@ impl TenantManager {
             Err(remote_storage::DownloadError::Cancelled) => {
                 return Err(DeleteTenantError::Cancelled)
             }
-            Err(remote_storage::DownloadError::NotFound) => return Ok(StatusCode::NOT_FOUND),
+            Err(remote_storage::DownloadError::NotFound) => return Ok(()),
             Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
         };
 
@@ -1448,7 +1447,7 @@ impl TenantManager {
         }
 
         // Callers use 404 as success for deletions, for historical reasons.
-        Ok(StatusCode::NOT_FOUND)
+        Ok(())
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant.get_tenant_shard_id().tenant_id, shard_id=%tenant.get_tenant_shard_id().shard_slug(), new_shard_count=%new_shard_count.literal()))]

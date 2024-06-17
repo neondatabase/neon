@@ -1068,7 +1068,7 @@ async fn tenant_delete_handler(
 
     let state = get_state(&request);
 
-    let status = state
+    state
         .tenant_manager
         .delete_tenant(tenant_shard_id)
         .instrument(info_span!("tenant_delete_handler",
@@ -1077,14 +1077,7 @@ async fn tenant_delete_handler(
         ))
         .await?;
 
-    // Callers use 404 as success for deletions, for historical reasons.
-    if status == StatusCode::NOT_FOUND {
-        return Err(ApiError::NotFound(
-            anyhow::anyhow!("Deletion complete").into(),
-        ));
-    }
-
-    json_response(status, ())
+    json_response(StatusCode::OK, ())
 }
 
 /// HTTP endpoint to query the current tenant_size of a tenant.
