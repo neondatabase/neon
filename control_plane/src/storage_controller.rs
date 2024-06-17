@@ -223,7 +223,7 @@ impl StorageController {
         Ok(database_url)
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
+    pub async fn start(&self, retry_timeout_in_seconds: u64) -> anyhow::Result<()> {
         // Start a vanilla Postgres process used by the storage controller for persistence.
         let pg_data_path = Utf8PathBuf::from_path_buf(self.env.base_data_dir.clone())
             .unwrap()
@@ -272,6 +272,7 @@ impl StorageController {
             [],
             background_process::InitialPidFile::Create(self.postgres_pid_file()),
             || self.pg_isready(&pg_bin_dir),
+            Some(retry_timeout_in_seconds),
         )
         .await?;
 
@@ -329,6 +330,7 @@ impl StorageController {
                     Err(_) => Ok(false),
                 }
             },
+            Some(retry_timeout_in_seconds),
         )
         .await?;
 

@@ -49,6 +49,7 @@ use utils::{
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
 const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
+const DEFAULT_RETRY_UNTIL_SECS: u64 = 10;
 project_git_version!(GIT_VERSION);
 
 const DEFAULT_PG_VERSION: &str = "15";
@@ -98,7 +99,7 @@ fn main() -> Result<()> {
         let subcommand_result = match sub_name {
             "tenant" => rt.block_on(handle_tenant(sub_args, &mut env)),
             "timeline" => rt.block_on(handle_timeline(sub_args, &mut env)),
-            "start" => rt.block_on(handle_start_all(&env)),
+            "start" => rt.block_on(handle_start_all(&env, get_retry_timeout(sub_args))),
             "stop" => rt.block_on(handle_stop_all(sub_args, &env)),
             "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
             "storage_controller" => rt.block_on(handle_storage_controller(sub_args, &env)),
@@ -1046,10 +1047,18 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
     ))
 }
 
+fn get_retry_timeout(args: &ArgMatches) -> u64 {
+    if let Some(timeout) = args.get_one::<u64>("timeout-in-seconds") {
+        *timeout
+    } else {
+        DEFAULT_RETRY_UNTIL_SECS
+    }
+}
+
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
-            if let Err(e) = get_pageserver(env, subcommand_args)?.start().await {
+            if let Err(e) = get_pageserver(env, subcommand_args)?.start(get_retry_timeout(subcommand_args)).await {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1075,7 +1084,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
                 exit(1);
             }
 
-            if let Err(e) = pageserver.start().await {
+            if let Err(e) = pageserver.start(get_retry_timeout(sub_match)).await {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1104,7 +1113,7 @@ async fn handle_storage_controller(
     let svc = StorageController::from_env(env);
     match sub_match.subcommand() {
         Some(("start", _start_match)) => {
-            if let Err(e) = svc.start().await {
+            if let Err(e) = svc.start(get_retry_timeout(sub_match)).await {
                 eprintln!("start failed: {e}");
                 exit(1);
             }
@@ -1163,7 +1172,7 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
         "start" => {
             let extra_opts = safekeeper_extra_opts(sub_args);
 
-            if let Err(e) = safekeeper.start(extra_opts).await {
+            if let Err(e) = safekeeper.start(extra_opts, get_retry_timeout(sub_args)).await {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1189,7 +1198,7 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
             }
 
             let extra_opts = safekeeper_extra_opts(sub_args);
-            if let Err(e) = safekeeper.start(extra_opts).await {
+            if let Err(e) = safekeeper.start(extra_opts, get_retry_timeout(sub_args)).await {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1202,15 +1211,15 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
-async fn handle_start_all(env: &local_env::LocalEnv) -> anyhow::Result<()> {
+async fn handle_start_all(env: &local_env::LocalEnv, retry_timeout_in_seconds: u64) -> anyhow::Result<()> {
     // Endpoints are not started automatically
 
-    broker::start_broker_process(env).await?;
+    broker::start_broker_process(env, retry_timeout_in_seconds).await?;
 
     // Only start the storage controller if the pageserver is configured to need it
     if env.control_plane_api.is_some() {
         let storage_controller = StorageController::from_env(env);
-        if let Err(e) = storage_controller.start().await {
+        if let Err(e) = storage_controller.start(retry_timeout_in_seconds).await {
             eprintln!("storage_controller start failed: {:#}", e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1219,7 +1228,7 @@ async fn handle_start_all(env: &local_env::LocalEnv) -> anyhow::Result<()> {
 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
-        if let Err(e) = pageserver.start().await {
+        if let Err(e) = pageserver.start(retry_timeout_in_seconds).await {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1228,7 +1237,7 @@ async fn handle_start_all(env: &local_env::LocalEnv) -> anyhow::Result<()> {
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
-        if let Err(e) = safekeeper.start(vec![]).await {
+        if let Err(e) = safekeeper.start(vec![], retry_timeout_in_seconds).await {
             eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
             try_stop_all(env, false).await;
             exit(1);
@@ -1288,6 +1297,14 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 }
 
 fn cli() -> Command {
+    let timeout_arg = Arg::new("timeout-in-seconds")
+        .long("t")
+        .global(true)
+        .help("timeout in seconds until we fail the command")
+        .value_parser(value_parser!(u64))
+        .default_value("10")
+        .required(false);
+
     let branch_name_arg = Arg::new("branch-name")
         .long("branch-name")
         .help("Name of the branch to be created or used as an alias for other services")
@@ -1507,6 +1524,7 @@ fn cli() -> Command {
                 .subcommand(Command::new("status"))
                 .subcommand(Command::new("start")
                     .about("Start local pageserver")
+                    .arg(timeout_arg.clone())
                 )
                 .subcommand(Command::new("stop")
                     .about("Stop local pageserver")
@@ -1514,13 +1532,15 @@ fn cli() -> Command {
                 )
                 .subcommand(Command::new("restart")
                     .about("Restart local pageserver")
+                    .arg(timeout_arg.clone())
                 )
         )
         .subcommand(
             Command::new("storage_controller")
                 .arg_required_else_help(true)
                 .about("Manage storage_controller")
-                .subcommand(Command::new("start").about("Start storage controller"))
+                .subcommand(Command::new("start").about("Start storage controller")
+                            .arg(timeout_arg.clone()))
                 .subcommand(Command::new("stop").about("Stop storage controller")
                             .arg(stop_mode_arg.clone()))
         )
@@ -1532,6 +1552,7 @@ fn cli() -> Command {
                             .about("Start local safekeeper")
                             .arg(safekeeper_id_arg.clone())
                             .arg(safekeeper_extra_opt_arg.clone())
+                            .arg(timeout_arg.clone())
                 )
                 .subcommand(Command::new("stop")
                             .about("Stop local safekeeper")
@@ -1543,6 +1564,7 @@ fn cli() -> Command {
                             .arg(safekeeper_id_arg)
                             .arg(stop_mode_arg.clone())
                             .arg(safekeeper_extra_opt_arg)
+                            .arg(timeout_arg.clone())
                 )
         )
         .subcommand(
@@ -1577,6 +1599,7 @@ fn cli() -> Command {
                     .arg(remote_ext_config_args)
                     .arg(create_test_user)
                     .arg(allow_multiple.clone())
+                    .arg(timeout_arg.clone())
                 )
                 .subcommand(Command::new("reconfigure")
                             .about("Reconfigure the endpoint")
@@ -1628,6 +1651,7 @@ fn cli() -> Command {
         .subcommand(
             Command::new("start")
                 .about("Start page server and safekeepers")
+                .arg(timeout_arg.clone())
         )
         .subcommand(
             Command::new("stop")

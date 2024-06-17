@@ -36,8 +36,8 @@ use utils::pid_file::{self, PidFileRead};
 // it's waiting. If the process hasn't started/stopped after 5 seconds,
 // it prints a notice that it's taking long, but keeps waiting.
 //
-const RETRY_UNTIL_SECS: u64 = 10;
-const RETRIES: u64 = (RETRY_UNTIL_SECS * 1000) / RETRY_INTERVAL_MILLIS;
+const DEFAULT_RETRY_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_RETRIES: u64 = (DEFAULT_RETRY_TIMEOUT_SECS * 1000) / RETRY_INTERVAL_MILLIS;
 const RETRY_INTERVAL_MILLIS: u64 = 100;
 const DOT_EVERY_RETRIES: u64 = 10;
 const NOTICE_AFTER_RETRIES: u64 = 50;
@@ -51,7 +51,9 @@ pub enum InitialPidFile {
     Expect(Utf8PathBuf),
 }
 
+
 /// Start a background child process using the parameters given.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_process<F, Fut, AI, A, EI>(
     process_name: &str,
     datadir: &Path,
@@ -60,6 +62,7 @@ pub async fn start_process<F, Fut, AI, A, EI>(
     envs: EI,
     initial_pid_file: InitialPidFile,
     process_status_check: F,
+    retry_timeout_in_seconds: Option<u64>,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> Fut,
@@ -69,6 +72,8 @@ where
     // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
     EI: IntoIterator<Item = (String, String)>,
 {
+    let retry_timeout_in_seconds = retry_timeout_in_seconds.unwrap_or(DEFAULT_RETRY_TIMEOUT_SECS);
+    let retries: u64 = (retry_timeout_in_seconds * 1000) / RETRY_INTERVAL_MILLIS;
     let log_path = datadir.join(format!("{process_name}.log"));
     let process_log_file = fs::OpenOptions::new()
         .create(true)
@@ -121,7 +126,7 @@ where
         .unwrap();
     });
 
-    for retries in 0..RETRIES {
+    for retries in 0..retries {
         match process_started(pid, pid_file_to_check, &process_status_check).await {
             Ok(true) => {
                 println!("\n{process_name} started and passed status check, pid: {pid}");
@@ -149,7 +154,7 @@ where
     }
     println!();
     anyhow::bail!(
-        "{process_name} did not start+pass status checks within {RETRY_UNTIL_SECS} seconds"
+        "{process_name} did not start+pass status checks within {retry_timeout_in_seconds} seconds"
     );
 }
 
@@ -206,7 +211,7 @@ pub fn stop_process(
 }
 
 pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
-    for retries in 0..RETRIES {
+    for retries in 0..DEFAULT_RETRIES {
         match process_has_stopped(pid) {
             Ok(true) => {
                 println!("\n{process_name} stopped");
@@ -231,7 +236,7 @@ pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
         }
     }
     println!();
-    anyhow::bail!("{process_name} with pid {pid} did not stop in {RETRY_UNTIL_SECS} seconds");
+    anyhow::bail!("{process_name} with pid {pid} did not stop in {DEFAULT_RETRY_TIMEOUT_SECS} seconds");
 }
 
 fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {

@@ -110,11 +110,12 @@ impl SafekeeperNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<()> {
+    pub async fn start(&self, extra_opts: Vec<String>, retry_timeout_in_seconds: u64) -> anyhow::Result<()> {
         print!(
-            "Starting safekeeper at '{}' in '{}'",
+            "Starting safekeeper at '{}' in '{}', retrying for {} seconds",
             self.pg_connection_config.raw_address(),
-            self.datadir_path().display()
+            self.datadir_path().display(),
+            retry_timeout_in_seconds
         );
         io::stdout().flush().unwrap();
 
@@ -206,6 +207,7 @@ impl SafekeeperNode {
                     Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
                 }
             },
+            Some(retry_timeout_in_seconds),
         )
         .await
     }

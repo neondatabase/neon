@@ -158,8 +158,8 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
-        self.start_node().await
+    pub async fn start(&self, retry_timeout_in_seconds: u64) -> anyhow::Result<()> {
+        self.start_node(retry_timeout_in_seconds).await
     }
 
     fn pageserver_init(&self, conf: NeonLocalInitPageserverConf) -> anyhow::Result<()> {
@@ -214,14 +214,15 @@ impl PageServerNode {
         Ok(())
     }
 
-    async fn start_node(&self) -> anyhow::Result<()> {
+    async fn start_node(&self, retry_timeout_in_seconds: u64) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
-            "Starting pageserver node {} at '{}' in {:?}",
+            "Starting pageserver node {} at '{}' in {:?}, retrying for {} seconds",
             self.conf.id,
             self.pg_connection_config.raw_address(),
-            datadir
+            datadir,
+            retry_timeout_in_seconds
         );
         io::stdout().flush().context("flush stdout")?;
 
@@ -247,6 +248,7 @@ impl PageServerNode {
                     Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
                 }
             },
+            Some(retry_timeout_in_seconds),
         )
         .await?;
 
