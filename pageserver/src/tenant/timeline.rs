@@ -4927,7 +4927,7 @@ impl Timeline {
             return Err(GcError::TimelineCancelled);
         }
 
-        let (horizon_cutoff, pitr_cutoff, retain_lsns, min_lsn_with_valid_lease) = {
+        let (horizon_cutoff, pitr_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
             let gc_info = self.gc_info.read().unwrap();
 
             let horizon_cutoff = min(gc_info.cutoffs.horizon, self.get_disk_consistent_lsn());
@@ -4937,12 +4937,12 @@ impl Timeline {
             // Gets the minimum LSN that holds the valid lease.
             // Caveat: This value could be stale since we rely on refresh_gc_info to invalidate leases,
             // so there could be leases invalidated between the refresh and here.
-            let min_lsn_with_valid_lease = gc_info.leases.first_key_value().map(|(lsn, _)| *lsn);
+            let max_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
             (
                 horizon_cutoff,
                 pitr_cutoff,
                 retain_lsns,
-                min_lsn_with_valid_lease,
+                max_lsn_with_valid_lease,
             )
         };
 
@@ -4979,7 +4979,7 @@ impl Timeline {
                 pitr_cutoff,
                 retain_lsns,
                 new_gc_cutoff,
-                min_lsn_with_valid_lease,
+                max_lsn_with_valid_lease,
             )
             .instrument(
                 info_span!("gc_timeline", timeline_id = %self.timeline_id, cutoff = %new_gc_cutoff),
@@ -4998,7 +4998,7 @@ impl Timeline {
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
-        min_lsn_with_valid_lease: Option<Lsn>,
+        max_lsn_with_valid_lease: Option<Lsn>,
     ) -> Result<GcResult, GcError> {
         // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
 
@@ -5099,7 +5099,7 @@ impl Timeline {
             }
 
             // 4. Is there a valid lease that requires us to keep this layer?
-            if let Some(lsn) = &min_lsn_with_valid_lease {
+            if let Some(lsn) = &max_lsn_with_valid_lease {
                 if &l.get_lsn_range().start <= lsn {
                     debug!(
                         "keeping {} because there is a valid lease preventing GC at {}",
@@ -5133,13 +5133,13 @@ impl Timeline {
             if !layers
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
             {
-                debug!("keeping {} because it is the latest layer", l.layer_name());
+                info!("keeping {} because it is the latest layer", l.layer_name());
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            debug!(
+            info!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
                 l.layer_name(),
                 l.is_incremental(),

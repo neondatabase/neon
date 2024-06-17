@@ -4267,7 +4267,18 @@ mod tests {
     async fn test_lsn_leases() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_lsn_leases")?.load().await;
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
-        let end_lsn = Lsn(0x50);
+
+        let end_lsn = Lsn(0x100);
+        let image_layers = (0x20..=0x90)
+            .step_by(0x10)
+            .map(|n| {
+                (
+                    Lsn(n),
+                    vec![(key, test_img(&format!("data key at {:x}", n)))],
+                )
+            })
+            .collect();
+
         let timeline = tenant
             .create_test_timeline_with_layers(
                 TIMELINE_ID,
@@ -4275,16 +4286,16 @@ mod tests {
                 DEFAULT_PG_VERSION,
                 &ctx,
                 Vec::new(),
-                vec![
-                    (Lsn(0x20), vec![(key, test_img("data key 0"))]),
-                    (Lsn(0x30), vec![(key, test_img("data key 1"))]),
-                    (Lsn(0x40), vec![(key, test_img("data key 2"))]),
-                ],
+                image_layers,
                 end_lsn,
             )
             .await?;
 
-        let _ = timeline.make_lsn_lease(Lsn(0x20), &ctx)?;
+        let leased_lsns = [0x30, 0x50, 0x70];
+        let _: anyhow::Result<_> = leased_lsns.iter().try_for_each(|n| {
+            let _ = timeline.make_lsn_lease(Lsn(*n), &ctx)?;
+            Ok(())
+        });
 
         // Force set disk consistent lsn so we can get the cutoff at `end_lsn`.
 
@@ -4300,13 +4311,13 @@ mod tests {
             )
             .await?;
 
-        // Keeping everything <= Lsn(0x20) b/c leases:
+        // Keeping everything <= Lsn(0x80) b/c leases:
         // 0/10: initdb layer
-        // 0/20: image layer added when creating the timeline.
-        assert_eq!(res.layers_needed_by_leases, 2);
-        // Keeping 0/40 b/c it is the latest layer.
+        // (0/20..=0/70).step_by(0x10): image layers added when creating the timeline.
+        assert_eq!(res.layers_needed_by_leases, 7);
+        // Keeping 0/90 b/c it is the latest layer.
         assert_eq!(res.layers_not_updated, 1);
-        // Removed 0/30.
+        // Removed 0/80.
         assert_eq!(res.layers_removed, 1);
 
         Ok(())
