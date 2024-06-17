@@ -8,7 +8,9 @@ use std::{
 };
 
 use crate::{
-    background_node_operations::{self, Controller, OperationError, MAX_RECONCILES_PER_OPERATION},
+    background_node_operations::{
+        Drain, Fill, Operation, OperationError, OperationHandler, MAX_RECONCILES_PER_OPERATION,
+    },
     compute_hook::NotifyError,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, WrappedWriteGuard},
     persistence::{AbortShardSplitStatus, TenantFilter},
@@ -136,6 +138,8 @@ struct ServiceState {
 
     scheduler: Scheduler,
 
+    ongoing_operation: Option<OperationHandler>,
+
     /// Queue of tenants who are waiting for concurrency limits to permit them to reconcile
     delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
 }
@@ -187,6 +191,7 @@ impl ServiceState {
             tenants,
             nodes: Arc::new(nodes),
             scheduler,
+            ongoing_operation: None,
             delayed_reconcile_rx,
         }
     }
@@ -277,8 +282,6 @@ pub struct Service {
     /// use a VecDeque instead of a channel to reduce synchronization overhead, at the cost of some code complexity.
     delayed_reconcile_tx: tokio::sync::mpsc::Sender<TenantShardId>,
 
-    background_operations_controller: std::sync::OnceLock<Controller>,
-
     // Process shutdown will fire this token
     cancel: CancellationToken,
 
@@ -303,11 +306,9 @@ impl From<ReconcileWaitError> for ApiError {
 impl From<OperationError> for ApiError {
     fn from(value: OperationError) -> Self {
         match value {
-            OperationError::PreconditionFailed(err) => ApiError::PreconditionFailed(err.into()),
             OperationError::NodeStateChanged(err) => {
                 ApiError::InternalServerError(anyhow::anyhow!(err))
             }
-            OperationError::ShuttingDown => ApiError::ShuttingDown,
             OperationError::Cancelled => ApiError::Conflict("Operation was cancelled".into()),
         }
     }
@@ -1107,19 +1108,11 @@ impl Service {
             delayed_reconcile_tx,
             abort_tx,
             startup_complete: startup_complete.clone(),
-            background_operations_controller: Default::default(),
             cancel,
             gate: Gate::default(),
             tenant_op_locks: Default::default(),
             node_op_locks: Default::default(),
         });
-
-        let (controller, node_operations_receiver) =
-            background_node_operations::Controller::new(this.clone());
-
-        this.background_operations_controller
-            .set(controller)
-            .expect("This is the only code path that sets the controller");
 
         let result_task_this = this.clone();
         tokio::task::spawn(async move {
@@ -1189,19 +1182,6 @@ impl Service {
             async move {
                 startup_complete.wait().await;
                 this.spawn_heartbeat_driver().await;
-            }
-        });
-
-        tokio::task::spawn({
-            let this = this.clone();
-            let startup_complete = startup_complete.clone();
-            async move {
-                startup_complete.wait().await;
-                this.background_operations_controller
-                    .get()
-                    .expect("Initialized at start up")
-                    .handle_operations(node_operations_receiver)
-                    .await;
             }
         });
 
@@ -4451,8 +4431,11 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) async fn start_node_drain(&self, node_id: NodeId) -> Result<(), ApiError> {
-        let (node_available, node_policy, schedulable_nodes_count) = {
+    pub(crate) async fn start_node_drain(
+        self: &Arc<Self>,
+        node_id: NodeId,
+    ) -> Result<(), ApiError> {
+        let (ongoing_op, node_available, node_policy, schedulable_nodes_count) = {
             let locked = self.inner.read().unwrap();
             let nodes = &locked.nodes;
             let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
@@ -4464,11 +4447,21 @@ impl Service {
                 .count();
 
             (
+                locked
+                    .ongoing_operation
+                    .as_ref()
+                    .map(|ongoing| ongoing.operation),
                 node.is_available(),
                 node.get_scheduling(),
                 schedulable_nodes_count,
             )
         };
+
+        if let Some(ongoing) = ongoing_op {
+            return Err(ApiError::PreconditionFailed(
+                format!("Background operation already ongoing for node: {}", ongoing).into(),
+            ));
+        }
 
         if !node_available {
             return Err(ApiError::ResourceUnavailable(
@@ -4486,11 +4479,30 @@ impl Service {
             NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Pause => {
                 self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Draining))
                     .await?;
-                let controller = self
-                    .background_operations_controller
-                    .get()
-                    .expect("Initialized at start up");
-                controller.drain_node(node_id)?;
+
+                let cancel = CancellationToken::new();
+
+                self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
+                    operation: Operation::Drain(Drain { node_id }),
+                    cancel: cancel.clone(),
+                });
+
+                tokio::task::spawn({
+                    let service = self.clone();
+                    let cancel = cancel.clone();
+                    async move {
+                        scopeguard::defer! {
+                            let prev = service.inner.write().unwrap().ongoing_operation.take();
+
+                            if let Some(Operation::Drain(removed_drain)) = prev.map(|h| h.operation) {
+                                assert_eq!(removed_drain.node_id, node_id, "We always take the same operation");
+                            } else {
+                                panic!("We always remove the same operation")
+                            }
+                        }
+                        service.drain_node(node_id, cancel).await
+                    }
+                });
             }
             NodeSchedulingPolicy::Draining => {
                 return Err(ApiError::Conflict(format!(
@@ -4507,16 +4519,30 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) async fn start_node_fill(&self, node_id: NodeId) -> Result<(), ApiError> {
-        let (node_available, node_policy, total_nodes_count) = {
+    pub(crate) async fn start_node_fill(self: &Arc<Self>, node_id: NodeId) -> Result<(), ApiError> {
+        let (ongoing_op, node_available, node_policy, total_nodes_count) = {
             let locked = self.inner.read().unwrap();
             let nodes = &locked.nodes;
             let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
                 anyhow::anyhow!("Node {} not registered", node_id).into(),
             ))?;
 
-            (node.is_available(), node.get_scheduling(), nodes.len())
+            (
+                locked
+                    .ongoing_operation
+                    .as_ref()
+                    .map(|ongoing| ongoing.operation),
+                node.is_available(),
+                node.get_scheduling(),
+                nodes.len(),
+            )
         };
+
+        if let Some(ongoing) = ongoing_op {
+            return Err(ApiError::PreconditionFailed(
+                format!("Background operation already ongoing for node: {}", ongoing).into(),
+            ));
+        }
 
         if !node_available {
             return Err(ApiError::ResourceUnavailable(
@@ -4534,11 +4560,31 @@ impl Service {
             NodeSchedulingPolicy::Active => {
                 self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Filling))
                     .await?;
-                let controller = self
-                    .background_operations_controller
-                    .get()
-                    .expect("Initialized at start up");
-                controller.fill_node(node_id)?;
+
+                let cancel = CancellationToken::new();
+
+                self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
+                    operation: Operation::Fill(Fill { node_id }),
+                    cancel: cancel.clone(),
+                });
+
+                tokio::task::spawn({
+                    let service = self.clone();
+                    let cancel = cancel.clone();
+                    async move {
+                        scopeguard::defer! {
+                            let prev = service.inner.write().unwrap().ongoing_operation.take();
+
+                            if let Some(Operation::Fill(removed_fill)) = prev.map(|h| h.operation) {
+                                assert_eq!(removed_fill.node_id, node_id, "We always take the same operation");
+                            } else {
+                                panic!("We always remove the same operation")
+                            }
+                        }
+
+                        service.fill_node(node_id, cancel).await
+                    }
+                });
             }
             NodeSchedulingPolicy::Filling => {
                 return Err(ApiError::Conflict(format!(
