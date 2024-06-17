@@ -1,6 +1,0 @@
-2024-06-17 12:29:50.341 GMT [13829] LOG:  starting PostgreSQL 16.2 (8ef3c33aa01631e17cb24a122776349fcc777b46) on aarch64-apple-darwin23.5.0, compiled by Apple clang version 15.0.0 (clang-1500.3.9.4), 64-bit
-2024-06-17 12:29:50.343 GMT [13829] LOG:  listening on IPv6 address "::1", port 1235
-2024-06-17 12:29:50.343 GMT [13829] LOG:  listening on IPv4 address "127.0.0.1", port 1235
-2024-06-17 12:29:50.343 GMT [13829] LOG:  listening on Unix socket "/tmp/.s.PGSQL.1235"
-2024-06-17 12:29:50.345 GMT [13832] LOG:  database system was shut down at 2024-06-17 12:26:39 GMT
-2024-06-17 12:29:50.346 GMT [13829] LOG:  database system is ready to accept connections
