@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex, RwLock};
 use std::thread;
 use std::time;
+use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
@@ -1425,14 +1426,18 @@ fn lsn_lease_loop(configs: Vec<postgres::Config>, cmd: String) {
     loop {
         match lsn_lease_request(&configs, &cmd) {
             Ok(valid_until) => {
-                let now = SystemTime::now()
+                let valid_until_duration = Duration::from_millis(valid_until as u64);
+
+                let sleep_duration = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .expect("Time went backwards")
-                    .as_millis();
+                    .unwrap_or(Duration::ZERO)
+                    .checked_sub(valid_until_duration)
+                    .unwrap_or(Duration::ZERO)
+                    .checked_sub(Duration::from_secs(60))
+                    .unwrap_or(Duration::ZERO);
 
-                let sleep_duration_millis = valid_until - now - 60_000;
-
-                let sleep_duration = time::Duration::from_millis(sleep_duration_millis as u64);
+                // Ensure the sleep duration is at least 60 seconds to avoid busy loops
+                let sleep_duration = std::cmp::max(sleep_duration, Duration::from_secs(60));
 
                 info!(
                     "lsn_lease_request succeeded, sleeping for {} seconds",
@@ -1455,7 +1460,7 @@ fn lsn_lease_request(configs: &[postgres::Config], cmd: &str) -> Result<u128> {
         .map(|config| {
             let mut client = config.connect(NoTls)?;
             let res = client.simple_query(cmd)?;
-            let msg = match res.get(0) {
+            let msg = match res.first() {
                 Some(msg) => msg,
                 None => bail!("empty response"),
             };
