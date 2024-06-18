@@ -1213,13 +1213,14 @@ impl Service {
             let locked = self.inner.write().unwrap();
             !locked.tenants.contains_key(&attach_req.tenant_shard_id)
         };
+
         if insert {
             let tsp = TenantShardPersistence {
                 tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
                 shard_number: attach_req.tenant_shard_id.shard_number.0 as i32,
                 shard_count: attach_req.tenant_shard_id.shard_count.literal() as i32,
                 shard_stripe_size: 0,
-                generation: Some(0),
+                generation: attach_req.generation_override.or(Some(0)),
                 generation_pageserver: None,
                 placement_policy: serde_json::to_string(&PlacementPolicy::Attached(0)).unwrap(),
                 config: serde_json::to_string(&TenantConfig::default()).unwrap(),
