@@ -1110,8 +1110,8 @@ jobs:
         # if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         with:
           registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_PROD }}
-          password: ${{ secrets.AWS_SECRET_KEY_PROD }}
+          username: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_ACCESS_KEY_ID }}
+          password: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_SECRET_ACCESS_KEY }}
 
       - name: Copy all images to prod ECR
         # if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
