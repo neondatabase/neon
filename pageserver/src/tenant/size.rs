@@ -60,10 +60,6 @@ pub(crate) enum CalculateSyntheticSizeError {
     #[error(transparent)]
     Fatal(anyhow::Error),
 
-    /// The LSN we are trying to calculate a size at no longer exists at the point we query it
-    #[error("Could not find size at {lsn} in timeline {timeline_id}")]
-    LsnNotFound { timeline_id: TimelineId, lsn: Lsn },
-
     /// Tenant shut down while calculating size
     #[error("Cancelled")]
     Cancelled,
@@ -375,9 +371,8 @@ pub(super) async fn gather_inputs(
 
 /// Augment 'segments' with logical sizes
 ///
-/// this will probably conflict with on-demand downloaded layers, or at least force them all
-/// to be downloaded
-///
+/// This will leave segments' sizes as None if the Timeline associated with the segment is deleted concurrently
+/// (i.e. we cannot read its logical size at a particular LSN).
 async fn fill_logical_sizes(
     timelines: &[Arc<Timeline>],
     segments: &mut [SegmentMeta],
@@ -498,8 +493,6 @@ async fn fill_logical_sizes(
 
         if let Some(Some(size)) = sizes_needed.get(&(timeline_id, lsn)) {
             seg.segment.size = Some(*size);
-        } else {
-            return Err(CalculateSyntheticSizeError::LsnNotFound { timeline_id, lsn });
         }
     }
     Ok(())
