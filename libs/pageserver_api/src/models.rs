@@ -179,11 +179,19 @@ serde_with::serde_conv!(
 
 impl LsnLease {
     /// The default length for an explicit LSN lease request (10 minutes).
+    #[cfg(not(feature = "testing"))]
     pub const DEFAULT_LENGTH: Duration = Duration::from_secs(10 * 60);
+
+    #[cfg(feature = "testing")]
+    pub const DEFAULT_LENGTH: Duration = Duration::from_secs(2);
 
     /// The default length for an implicit LSN lease granted during
     /// `get_lsn_by_timestamp` request (1 minutes).
+    #[cfg(not(feature = "testing"))]
     pub const DEFAULT_LENGTH_FOR_TS: Duration = Duration::from_secs(60);
+
+    #[cfg(feature = "testing")]
+    pub const DEFAULT_LENGTH_FOR_TS: Duration = Duration::from_secs(2);
 
     /// Checks whether the lease is expired.
     pub fn is_expired(&self, now: &SystemTime) -> bool {
