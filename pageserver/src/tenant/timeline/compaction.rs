@@ -988,6 +988,7 @@ impl Timeline {
             (selected_layers, gc_cutoff)
         };
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
+        // Also, collect the layer information to decide when to split the new delta layers.
         let mut all_key_values = Vec::new();
         let mut delta_split_points = BTreeSet::new();
         for layer in &layer_selection {
@@ -1091,6 +1092,16 @@ impl Timeline {
         ) -> anyhow::Result<Option<ResidentLayer>> {
             // Check if we need to split the delta layer. We split at the original delta layer boundary to avoid
             // overlapping layers.
+            //
+            // If we have a structure like this:
+            //
+            // | Delta 1 |         | Delta 4 |
+            // |---------| Delta 2 |---------|
+            // | Delta 3 |         | Delta 5 |
+            //
+            // And we choose to compact delta 2+3+5. We will get an overlapping delta layer with delta 1+4.
+            // A simple solution here is to split the delta layers using the original boundary, while this
+            // might produce a lot of small layers. This should be improved and fixed in the future.
             let mut need_split = false;
             while *current_delta_split_point < delta_split_points.len()
                 && last_key >= delta_split_points[*current_delta_split_point]
@@ -1164,6 +1175,8 @@ impl Timeline {
                 last_key = *key;
             }
         }
+
+        // TODO: move this part to the loop body
         let (deltas, image) =
             flush_accumulated_states(self, last_key, &accumulated_values, gc_cutoff).await?;
         // Put the image into the image layer. Currently we have a single big layer for the compaction.

@@ -6736,7 +6736,6 @@ mod tests {
             .collect_vec();
 
         let delta1 = vec![
-            // TODO: we should test a real delta record here, which requires us to add a variant of NeonWalRecord for testing purpose.
             (
                 get_key(1),
                 Lsn(0x20),
@@ -7013,7 +7012,6 @@ mod tests {
             .collect_vec();
 
         let delta1 = vec![
-            // TODO: we should test a real delta record here, which requires us to add a variant of NeonWalRecord for testing purpose.
             (
                 get_key(1),
                 Lsn(0x20),
@@ -7069,8 +7067,13 @@ mod tests {
         {
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.pitr = Lsn(0x30);
-            guard.cutoffs.horizon = Lsn(0x30);
+            *guard = GcInfo {
+                retain_lsns: vec![],
+                cutoffs: GcCutoffs {
+                    pitr: Lsn(0x30),
+                    horizon: Lsn(0x30),
+                },
+            };
         }
 
         let expected_result = [
