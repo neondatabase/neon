@@ -201,21 +201,6 @@ async fn cleanup_remaining_fs_traces(
     Ok(())
 }
 
-/// Orchestrates tenant shut down of all tasks, removes its in-memory structures,
-/// and deletes its data from both disk and s3.
-/// The sequence of steps:
-/// 1. Upload remote deletion mark.
-/// 2. Create local mark file.
-/// 3. Shutdown tasks
-/// 4. Run ordered timeline deletions
-/// 5. Wait for timeline deletion operations that were scheduled before tenant deletion was requested
-/// 6. Remove remote mark
-/// 7. Cleanup remaining fs traces, tenant dir, config, timelines dir, local delete mark
-/// It is resumable from any step in case a crash/restart occurs.
-/// There are two entrypoints to the process:
-/// 1. [`DeleteTenantFlow::run`] this is the main one called by a management api handler.
-/// 2. [`DeleteTenantFlow::resume_from_attach`] is called when deletion is resumed tenant is found to be deleted during attach process.
-///  Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
 #[derive(Default)]
 pub enum DeleteTenantFlow {
     #[default]
