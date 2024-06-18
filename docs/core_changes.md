@@ -156,7 +156,7 @@ index 0415df9ccb..9f9db3c8bc 100644
   * crash we can lose (skip over) as many values as we pre-logged.
   */
 -#define SEQ_LOG_VALS   32
-+/* Zenith XXX: to ensure sequence order of sequence in Zenith we need to WAL log each sequence update. */
++/* Neon XXX: to ensure sequence order of sequence in Zenith we need to WAL log each sequence update. */
 +/* #define SEQ_LOG_VALS        32 */
 +#define SEQ_LOG_VALS   0
 ```
@@ -485,6 +485,6 @@ Add special WAL record for setting page hints.
 
 ### Why?
 
-Short downtime (or, in other words, fast compute node restart time) is one of the key feature of Zenith.
+Short downtime (or, in other words, fast compute node restart time) is one of the key feature of Neon.
 But overhead of request-response round-trip for loading pages on demand can make started node warm-up quite slow.
 We can capture state of compute node buffer cache and send bulk request for this pages at startup.
