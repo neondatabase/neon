@@ -128,7 +128,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::{config::TenantConf};
+use super::config::TenantConf;
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
