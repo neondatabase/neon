@@ -507,7 +507,7 @@ where
 }
 
 pub struct DiskBtreeIterator<'a> {
-    #[allow(clippoy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     stream: std::pin::Pin<
         Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a>,
     >,
