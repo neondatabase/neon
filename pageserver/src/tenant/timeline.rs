@@ -2117,6 +2117,24 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
+    pub(crate) fn get_lsn_lease_length(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .lsn_lease_length
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+    }
+
+    // TODO(yuchen): remove unused flag after implementing https://github.com/neondatabase/neon/issues/8072
+    #[allow(unused)]
+    pub(crate) fn get_lsn_lease_length_for_ts(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .lsn_lease_length
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+    }
+
     pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf

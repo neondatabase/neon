@@ -2429,6 +2429,13 @@ impl Tenant {
         }
     }
 
+    pub fn get_lsn_lease_length(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .lsn_lease_length
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+    }
+
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         // Use read-copy-update in order to avoid overwriting the location config
         // state if this races with [`Tenant::set_new_location_config`]. Note that
@@ -3835,6 +3842,8 @@ pub(crate) mod harness {
                     tenant_conf.image_layer_creation_check_threshold,
                 ),
                 switch_aux_file_policy: Some(tenant_conf.switch_aux_file_policy),
+                lsn_lease_length: Some(tenant_conf.lsn_lease_length),
+                lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
             }
         }
     }
@@ -4052,7 +4061,7 @@ mod tests {
     use itertools::Itertools;
     use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
-    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings, LsnLease};
+    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use rand::{thread_rng, Rng};
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
@@ -6973,7 +6982,7 @@ mod tests {
         let leased_lsns = [0x30, 0x50, 0x70];
         let mut leases = Vec::new();
         let _: anyhow::Result<_> = leased_lsns.iter().try_for_each(|n| {
-            leases.push(timeline.make_lsn_lease(Lsn(*n), LsnLease::DEFAULT_LENGTH, &ctx)?);
+            leases.push(timeline.make_lsn_lease(Lsn(*n), timeline.get_lsn_lease_length(), &ctx)?);
             Ok(())
         });
 
@@ -6983,8 +6992,11 @@ mod tests {
         assert_eq!(updated_lease_0.valid_until, leases[0].valid_until);
 
         // Renewing with a long lease should renew lease with later expiration time.
-        let updated_lease_1 =
-            timeline.make_lsn_lease(Lsn(leased_lsns[1]), LsnLease::DEFAULT_LENGTH * 2, &ctx)?;
+        let updated_lease_1 = timeline.make_lsn_lease(
+            Lsn(leased_lsns[1]),
+            timeline.get_lsn_lease_length() * 2,
+            &ctx,
+        )?;
 
         assert!(updated_lease_1.valid_until > leases[1].valid_until);
 
@@ -7017,12 +7029,13 @@ mod tests {
         // Make lease on a already GC-ed LSN.
         // 0/80 does not have a valid lease + is below latest_gc_cutoff
         assert!(Lsn(0x80) < *timeline.get_latest_gc_cutoff_lsn());
-        let res = timeline.make_lsn_lease(Lsn(0x80), LsnLease::DEFAULT_LENGTH, &ctx);
+        let res = timeline.make_lsn_lease(Lsn(0x80), timeline.get_lsn_lease_length(), &ctx);
         assert!(res.is_err());
 
         // Should still be able to renew a currently valid lease
         // Assumption: original lease to is still valid for 0/50.
-        let _ = timeline.make_lsn_lease(Lsn(leased_lsns[1]), LsnLease::DEFAULT_LENGTH, &ctx)?;
+        let _ =
+            timeline.make_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)?;
 
         Ok(())
     }

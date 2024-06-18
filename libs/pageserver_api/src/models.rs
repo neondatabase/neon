@@ -179,19 +179,11 @@ serde_with::serde_conv!(
 
 impl LsnLease {
     /// The default length for an explicit LSN lease request (10 minutes).
-    #[cfg(not(feature = "testing"))]
     pub const DEFAULT_LENGTH: Duration = Duration::from_secs(10 * 60);
-
-    #[cfg(feature = "testing")]
-    pub const DEFAULT_LENGTH: Duration = Duration::from_secs(2);
 
     /// The default length for an implicit LSN lease granted during
     /// `get_lsn_by_timestamp` request (1 minutes).
-    #[cfg(not(feature = "testing"))]
     pub const DEFAULT_LENGTH_FOR_TS: Duration = Duration::from_secs(60);
-
-    #[cfg(feature = "testing")]
-    pub const DEFAULT_LENGTH_FOR_TS: Duration = Duration::from_secs(2);
 
     /// Checks whether the lease is expired.
     pub fn is_expired(&self, now: &SystemTime) -> bool {
@@ -344,6 +336,8 @@ pub struct TenantConfig {
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
+    pub lsn_lease_length: Option<String>,
+    pub lsn_lease_length_for_ts: Option<String>,
 }
 
 /// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`

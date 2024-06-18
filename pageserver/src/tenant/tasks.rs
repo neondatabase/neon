@@ -14,7 +14,6 @@ use crate::tenant::config::defaults::DEFAULT_COMPACTION_PERIOD;
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
-use pageserver_api::models::LsnLease;
 use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -365,7 +364,10 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             if first {
                 first = false;
 
-                if delay_by_default_lease_length(&cancel).await.is_err() {
+                if delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
 
@@ -543,10 +545,11 @@ pub(crate) async fn random_init_delay(
 /// We do this as the leases mapping are not persisted to disk. By delaying GC by default
 /// length, we gurantees that all the leases we granted before the restart will expire
 /// when we run GC for the first time after the restart.
-pub(crate) async fn delay_by_default_lease_length(
+pub(crate) async fn delay_by_lease_length(
+    length: Duration,
     cancel: &CancellationToken,
 ) -> Result<(), Cancelled> {
-    match tokio::time::timeout(LsnLease::DEFAULT_LENGTH, cancel.cancelled()).await {
+    match tokio::time::timeout(length, cancel.cancelled()).await {
         Ok(_) => Err(Cancelled),
         Err(_) => Ok(()),
     }
