@@ -83,7 +83,13 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     let keys: Vec<&str> = split[0].split('-').collect();
     let mut lsns: Vec<&str> = split[1].split('-').collect();
 
+    // Handle generation number
     if lsns.last().expect("should").len() == 8 {
+        lsns.pop();
+    }
+
+    // Handle version number
+    if lsns.last().expect("should").starts_with("v") {
         lsns.pop();
     }
 
