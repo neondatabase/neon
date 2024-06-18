@@ -420,10 +420,6 @@ impl DeleteTimelineFlow {
         Ok(())
     }
 
-    pub(crate) fn is_finished(&self) -> bool {
-        matches!(self, Self::Finished)
-    }
-
     pub(crate) fn is_not_started(&self) -> bool {
         matches!(self, Self::NotStarted)
     }

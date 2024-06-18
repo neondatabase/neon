@@ -329,9 +329,9 @@ impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
     }
 }
 
-impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
-    fn from(value: crate::tenant::delete::DeleteTenantError) -> Self {
-        use crate::tenant::delete::DeleteTenantError::*;
+impl From<crate::tenant::mgr::DeleteTenantError> for ApiError {
+    fn from(value: crate::tenant::mgr::DeleteTenantError) -> Self {
+        use crate::tenant::mgr::DeleteTenantError::*;
         match value {
             Get(g) => ApiError::from(g),
             Timeline(t) => ApiError::from(t),
