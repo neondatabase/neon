@@ -11,9 +11,10 @@ page server. We currently use the same binary for both, with --wal-redo runtime 
 the WAL redo mode. Some PostgreSQL changes are needed in the compute node, while others are just for
 the WAL redo process.
 
-In addition to core PostgreSQL changes, there is a Neon extension in contrib/neon, to hook into the
-smgr interface. Once all the core changes have been submitted to upstream or eliminated some other
-way, the extension could live outside the postgres repository and build against vanilla PostgreSQL.
+In addition to core PostgreSQL changes, there is a Neon extension in the pgxn/neon directory that
+hooks into the smgr interface, and rmgr extension in pgxn/neon_rmgr. The extensions are loaded into
+the Postgres processes with shared_preload_libraries. Most of the Neon-specific code is in the
+extensions, and for any new features, that is preferred over modifying core PostgreSQL code.
 
 Below is a list of all the PostgreSQL source code changes, categorized into changes needed for
 compute, and changes needed for the WAL redo process:
