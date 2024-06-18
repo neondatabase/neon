@@ -466,7 +466,11 @@ impl GenericRemoteStorage {
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout)?))
             }
             RemoteStorageKind::AzureContainer(azure_config) => {
-                info!("Using azure container '{}' in region '{}' as a remote storage, prefix in container: '{:?}'",
+                let storage_account = azure_config
+                    .storage_account
+                    .as_deref()
+                    .unwrap_or("<AZURE_STORAGE_ACCOUNT>");
+                info!("Using azure container '{}' in account {storage_account} in region '{}' as a remote storage, prefix in container: '{:?}'",
                       azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
                 Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config, timeout)?))
             }
