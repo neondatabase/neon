@@ -1107,14 +1107,14 @@ jobs:
 
       - name: Login to prod ECR
         uses: docker/login-action@v3
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        # if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         with:
           registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
           username: ${{ secrets.AWS_ACCESS_KEY_PROD }}
           password: ${{ secrets.AWS_SECRET_KEY_PROD }}
 
       - name: Copy all images to prod ECR
-        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        # if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         run: |
           for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
