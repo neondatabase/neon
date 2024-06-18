@@ -1270,13 +1270,8 @@ WalSndLoop(WalProposer *wp)
 {
 	XLogRecPtr	flushPtr;
 
-	/* Clear any already-pending wakeups */
-	ResetLatch(MyLatch);
-
 	for (;;)
 	{
-		CHECK_FOR_INTERRUPTS();
-
 		XLogBroadcastWalProposer(wp);
 		WalProposerPoll(wp);
 	}
@@ -1806,6 +1801,8 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	if (WalSndCtl != NULL)
 		late_cv_trigger = ConditionVariableCancelSleep();
 #endif
+
+	CHECK_FOR_INTERRUPTS();
 
 	/*
 	 * Process config if requested. This restarts walproposer if safekeepers
