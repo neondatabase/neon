@@ -583,6 +583,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_repartition=False,
         force_image_layer_creation=False,
         wait_until_uploaded=False,
+        enhanced_gc_bottom_most_compaction=False,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -592,6 +593,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_image_layer_creation"] = "true"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
+        if enhanced_gc_bottom_most_compaction:
+            query["enhanced_gc_bottom_most_compaction"] = "true"
 
         log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
