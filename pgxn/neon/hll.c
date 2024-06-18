@@ -97,9 +97,8 @@ rho(uint32 x, uint8 b)
  * Initialize HyperLogLog track state
  */
 void
-initSHLL(HyperLogLogState *cState, time_t max_duration)
+initSHLL(HyperLogLogState *cState)
 {
-	cState->window = max_duration * USECS_PER_SEC;
 	memset(cState->regs, 0, sizeof(cState->regs));
 }
 
@@ -127,30 +126,25 @@ addSHLL(HyperLogLogState *cState, uint32 hash)
 	/* Compute the rank of the remaining 32 - "k" (registerWidth) bits */
 	count = rho(hash << HLL_BIT_WIDTH, HLL_C_BITS);
 
-	for (i = 0, j = 0; i < cState->regs[index].size; i++)
+	for (i = 0; i < count + 1; i++)
 	{
-		if (cState->regs[index].fpm[i].ts >= now - cState->window
-			&& cState->regs[index].fpm[i].R > count)
-		{
-			cState->regs[index].fpm[j++] = cState->regs[index].fpm[i];
-		}
+		cState->regs[index][i] = now;
 	}
-	cState->regs[index].fpm[j].ts = now;
-	cState->regs[index].fpm[j].R = count;
-	cState->regs[index].size = j + 1;
 }
 
 static uint8
-getMaximum(LFPM* lfpm, TimestampTz since)
+getMaximum(const TimestampTz* reg, TimestampTz since)
 {
 	uint8 max = 0;
-	for (size_t i = 0; i < lfpm->size; i++)
+
+	for (size_t i = 0; i < HLL_C_BITS + 1; i++)
 	{
-		if (lfpm->fpm[i].ts >= since && lfpm->fpm[i].R > max)
+		if (reg[i] >= since)
 		{
-			max = lfpm->fpm[i].R;
+			max = i;
 		}
 	}
+
 	return max;
 }
 
@@ -169,7 +163,7 @@ estimateSHLL(HyperLogLogState *cState, time_t duration)
 
 	for (i = 0; i < HLL_N_REGISTERS; i++)
 	{
-		R[i] = getMaximum(&cState->regs[i], since);
+		R[i] = getMaximum(cState->regs[i], since);
 		sum += 1.0 / pow(2.0, R[i]);
 	}
 

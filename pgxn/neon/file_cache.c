@@ -238,7 +238,7 @@ lfc_shmem_startup(void)
 		dlist_init(&lfc_ctl->lru);
 
 		/* Initialize hyper-log-log structure for estimating working set size */
-		initSHLL(&lfc_ctl->wss_estimation, wss_max_duration);
+		initSHLL(&lfc_ctl->wss_estimation);
 
 		/* Recreate file cache on restart */
 		fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);

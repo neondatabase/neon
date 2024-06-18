@@ -53,32 +53,33 @@
 #define HLL_C_BITS      (32 - HLL_BIT_WIDTH)
 #define HLL_N_REGISTERS (1 << HLL_BIT_WIDTH)
 
-/* Future possible maximum */
-typedef struct FPM
-{
-	uint8 R;
-	TimestampTz ts;
-} FPM;
-
-typedef struct LFPM
-{
-	FPM fpm[HLL_C_BITS];
-	size_t size;
-} LFPM;
-
 /*
  * HyperLogLog is an approximate technique for computing the number of distinct
  * entries in a set.  Importantly, it does this by using a fixed amount of
  * memory.  See the 2007 paper "HyperLogLog: the analysis of a near-optimal
  * cardinality estimation algorithm" for more.
+ *
+ * Instead of a single counter for every bits register, we have a timestamp
+ * for every valid number of bits we can encounter. Every time we encounter
+ * a certain number of bits, we update the timestamp in those registers to
+ * the current timestamp.
+ *
+ * We can query the sketch's stored cardinality for the range of some timestamp
+ * up to now: For each register, we return the highest bits bucket that has a
+ * modified timestamp >= the query timestamp. This value is the number of bits
+ * for this register in the normal HLL calculation.
+ *
+ * The memory usage is 2^B * (C + 1) * sizeof(TimetampTz), or 184kiB.
+ * Usage could be halved if we decide to reduce the required time dimension
+ * precision; as 32 bits in second precision should be enough for statistics.
+ * However, that is not yet implemented.
  */
 typedef struct HyperLogLogState
 {
-	time_t		window; /* window size in microseconds */
-	LFPM	    regs[HLL_N_REGISTERS+1];
+	TimestampTz regs[HLL_N_REGISTERS][HLL_C_BITS + 1];
 } HyperLogLogState;
 
-extern void   initSHLL(HyperLogLogState *cState, time_t max_duration);
+extern void   initSHLL(HyperLogLogState *cState);
 extern void   addSHLL(HyperLogLogState *cState, uint32 hash);
 extern double estimateSHLL(HyperLogLogState *cState, time_t dutration);
 
