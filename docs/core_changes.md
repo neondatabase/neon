@@ -55,50 +55,6 @@ Update from Heikki (2024-04-17): I tried to write an upstream patch for that, to
 ### Alternatives
 Perhaps we could write an extra WAL record with the t_cid information, when a page is evicted that contains rows that were touched a transaction that's still running. However, that seems very complicated.
 
-## ginfast.c
-
-```
-diff --git a/src/backend/access/gin/ginfast.c b/src/backend/access/gin/ginfast.c
-index e0d9940946..2d964c02e9 100644
---- a/src/backend/access/gin/ginfast.c
-+++ b/src/backend/access/gin/ginfast.c
-@@ -285,6 +285,17 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
-                memset(&sublist, 0, sizeof(GinMetaPageData));
-                makeSublist(index, collector->tuples, collector->ntuples, &sublist);
- 
-+               if (metadata->head != InvalidBlockNumber)
-+               {
-+                       /*
-+                        * ZENITH: Get buffer before XLogBeginInsert() to avoid recursive call
-+                        * of XLogBeginInsert(). Reading a new buffer might evict a dirty page from
-+                        * the buffer cache, and if that page happens to be an FSM or VM page, zenith_write()
-+                        * will try to WAL-log an image of the page.
-+                        */
-+                       buffer = ReadBuffer(index, metadata->tail);
-+               }
-+
-                if (needWal)
-                        XLogBeginInsert();
- 
-@@ -316,7 +327,6 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
-                        data.prevTail = metadata->tail;
-                        data.newRightlink = sublist.head;
- 
--                       buffer = ReadBuffer(index, metadata->tail);
-                        LockBuffer(buffer, GIN_EXCLUSIVE);
-                        page = BufferGetPage(buffer);
-```
-
-The problem is explained in the comment above
-
-### How to get rid of the patch
-
-Can we stop WAL-logging FSM or VM pages? Or delay the WAL logging until we're out of the critical
-section or something.
-
-Maybe some bigger rewrite of FSM and VM would help to avoid WAL-logging FSM and VM page images?
-
-
 ## Mark index builds that use buffer manager without logging explicitly
 
 ```
@@ -160,57 +116,6 @@ The old method is still available, though.
 Wait until v15?
 
 
-## Cache relation sizes
-
-The Neon extension contains a little cache for smgrnblocks() and smgrexists() calls, to avoid going
-to the page server every time. It might be useful to cache those in PostgreSQL, maybe in the
-relcache? (I think we do cache nblocks in relcache already, check why that's not good enough for
-Neon)
-
-
-## Use buffer manager when extending VM or FSM
-
-```
- src/backend/storage/freespace/freespace.c                   |   14 +-
- src/backend/access/heap/visibilitymap.c                     |   15 +-
-
-diff --git a/src/backend/access/heap/visibilitymap.c b/src/backend/access/heap/visibilitymap.c
-index e198df65d8..addfe93eac 100644
---- a/src/backend/access/heap/visibilitymap.c
-+++ b/src/backend/access/heap/visibilitymap.c
-@@ -652,10 +652,19 @@ vm_extend(Relation rel, BlockNumber vm_nblocks)
-        /* Now extend the file */
-        while (vm_nblocks_now < vm_nblocks)
-        {
--               PageSetChecksumInplace((Page) pg.data, vm_nblocks_now);
-+               /*
-+                * ZENITH: Initialize VM pages through buffer cache to prevent loading
-+                * them from pageserver.
-+                */
-+               Buffer  buffer = ReadBufferExtended(rel, VISIBILITYMAP_FORKNUM, P_NEW,
-+                                                                                       RBM_ZERO_AND_LOCK, NULL);
-+               Page    page = BufferGetPage(buffer);
-+
-+               PageInit((Page) page, BLCKSZ, 0);
-+               PageSetChecksumInplace(page, vm_nblocks_now);
-+               MarkBufferDirty(buffer);
-+               UnlockReleaseBuffer(buffer);
- 
--               smgrextend(rel->rd_smgr, VISIBILITYMAP_FORKNUM, vm_nblocks_now,
--                                  pg.data, false);
-                vm_nblocks_now++;
-        }
-```
-
-### Problem we're trying to solve
-
-???
-
-### How to get rid of the patch
-
-Maybe this would be a reasonable change in PostgreSQL too?
-
-
 ## Allow startup without reading checkpoint record
 
 In Neon, the compute node is stateless. So when we are launching compute node, we need to provide
@@ -269,66 +174,6 @@ would be weird if the sequence moved backwards though, think of PITR.
 
 Or add a GUC for the amount to prefix to PostgreSQL, and force it to 1 in Neon.
 
-
-## Walproposer
-
-```
- src/Makefile                                                |    1 +
- src/backend/replication/libpqwalproposer/Makefile           |   37 +
- src/backend/replication/libpqwalproposer/libpqwalproposer.c |  416 ++++++++++++
- src/backend/postmaster/bgworker.c                           |    4 +
- src/backend/postmaster/postmaster.c                         |    6 +
- src/backend/replication/Makefile                            |    4 +-
- src/backend/replication/walproposer.c                       | 2350 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- src/backend/replication/walproposer_utils.c                 |  402 +++++++++++
- src/backend/replication/walreceiver.c                       |    7 +
- src/backend/replication/walsender.c                         |  320 ++++++---
- src/backend/storage/ipc/ipci.c                              |    6 +
- src/include/replication/walproposer.h                       |  565 ++++++++++++++++
-```
-
-WAL proposer is communicating with safekeeper and ensures WAL durability by quorum writes.  It is
-currently implemented as patch to standard WAL sender.
-
-### How to get rid of the patch
-
-Refactor into an extension. Submit hooks or APIs into upstream if necessary.
-
-@MMeent did some work on this already: https://github.com/neondatabase/postgres/pull/96
-
-## Ignore unexpected data beyond EOF in bufmgr.c
-
-```
-@@ -922,11 +928,14 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
-                 */
-                bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
-                if (!PageIsNew((Page) bufBlock))
--                       ereport(ERROR,
-+               {
-+                        // XXX-ZENITH
-+                        MemSet((char *) bufBlock, 0, BLCKSZ);
-+                        ereport(DEBUG1,
-                                        (errmsg("unexpected data beyond EOF in block %u of relation %s",
-                                                        blockNum, relpath(smgr->smgr_rnode, forkNum)),
-                                         errhint("This has been seen to occur with buggy kernels; consider updating your system.")));
--
-+               }
-                /*
-                 * We *must* do smgrextend before succeeding, else the page will not
-                 * be reserved by the kernel, and the next P_NEW call will decide to
-```
-
-PostgreSQL is a bit sloppy with extending relations. Usually, the relation is extended with zeros
-first, then the page is filled, and finally the new page WAL-logged. But if multiple backends extend
-a relation at the same time, the pages can be WAL-logged in different order.
-
-I'm not sure what scenario exactly required this change in Neon, though.
-
-### How to get rid of the patch
-
-Submit patches to pgsql-hackers, to tighten up the WAL-logging around relation extension. It's a bit
-confusing even in PostgreSQL. Maybe WAL log the intention to extend first, then extend the relation,
-and finally WAL-log that the extension succeeded.
 
 ## Make smgr interface available to extensions
 
