@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
-use utils::{completion, crashsafe};
+use utils::{backoff, completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -1365,6 +1365,43 @@ impl TenantManager {
         }
     }
 
+    async fn delete_tenant_remote(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), DeleteTenantError> {
+        let remote_path = remote_tenant_path(&tenant_shard_id);
+        let keys = match self
+            .resources
+            .remote_storage
+            .list(
+                Some(&remote_path),
+                remote_storage::ListingMode::NoDelimiter,
+                None,
+                &self.cancel,
+            )
+            .await
+        {
+            Ok(listing) => listing.keys,
+            Err(remote_storage::DownloadError::Cancelled) => {
+                return Err(DeleteTenantError::Cancelled)
+            }
+            Err(remote_storage::DownloadError::NotFound) => return Ok(()),
+            Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
+        };
+
+        if keys.is_empty() {
+            tracing::info!("Remote storage already deleted");
+        } else {
+            tracing::info!("Deleting {} keys from remote storage", keys.len());
+            self.resources
+                .remote_storage
+                .delete_objects(&keys, &self.cancel)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     /// If a tenant is attached, detach it.  Then remove its data from remote storage.
     ///
     /// A tenant is considered deleted once it is gone from remote storage.  It is the caller's
@@ -1415,39 +1452,30 @@ impl TenantManager {
             None => {}
         };
 
-        // Fall through: local state for this tenant is no longer present, proceed with remote delete
-        let remote_path = remote_tenant_path(&tenant_shard_id);
-        let keys = match self
-            .resources
-            .remote_storage
-            .list(
-                Some(&remote_path),
-                remote_storage::ListingMode::NoDelimiter,
-                None,
-                &self.cancel,
-            )
-            .await
+        // Fall through: local state for this tenant is no longer present, proceed with remote delete.
+        // - We use a retry wrapper here so that common transient S3 errors (e.g. 503, 429) do not result
+        //   in 500 responses to delete requests.
+        // - We keep the `SlotGuard` during this I/O, so that if a concurrent delete request comes in, it will
+        //   503/retry, rather than kicking off a wasteful concurrent deletion.
+        match backoff::retry(
+            || async move { self.delete_tenant_remote(tenant_shard_id).await },
+            |e| match e {
+                DeleteTenantError::Cancelled => true,
+                DeleteTenantError::SlotError(_) => {
+                    unreachable!("Remote deletion doesn't touch slots")
+                }
+                _ => false,
+            },
+            1,
+            3,
+            &format!("delete_tenant[tenant_shard_id={tenant_shard_id}]"),
+            &self.cancel,
+        )
+        .await
         {
-            Ok(listing) => listing.keys,
-            Err(remote_storage::DownloadError::Cancelled) => {
-                return Err(DeleteTenantError::Cancelled)
-            }
-            Err(remote_storage::DownloadError::NotFound) => return Ok(()),
-            Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
-        };
-
-        if keys.is_empty() {
-            tracing::info!("Remote storage already deleted");
-        } else {
-            tracing::info!("Deleting {} keys from remote storage", keys.len());
-            self.resources
-                .remote_storage
-                .delete_objects(&keys, &self.cancel)
-                .await?;
+            Some(r) => r,
+            None => Err(DeleteTenantError::Cancelled),
         }
-
-        // Callers use 404 as success for deletions, for historical reasons.
-        Ok(())
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant.get_tenant_shard_id().tenant_id, shard_id=%tenant.get_tenant_shard_id().shard_slug(), new_shard_count=%new_shard_count.literal()))]
