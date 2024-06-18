@@ -311,6 +311,148 @@ Ignore it. This is only needed for disaster recovery, so once we've eliminated a
 patches, we can just keep it around as a patch or as separate branch in a repo.
 
 
+## pg_waldump flags to ignore errors
+
+After creating a new project or branch in Neon, the first timeline can begin in the middle of a WAL segment. pg_waldump chokes on that, so we added some flags to make it possible to ignore errors.
+
+### How to get rid of the patch
+
+Like previous one, ignore it.
+
+
+
+## Backpressure if pageserver doesn't ingest WAL fast enough
+
+```
+@@ -3200,6 +3202,7 @@ ProcessInterrupts(void)
+                return;
+        InterruptPending = false;
+ 
++retry:
+        if (ProcDiePending)
+        {
+                ProcDiePending = false;
+@@ -3447,6 +3450,13 @@ ProcessInterrupts(void)
+ 
+        if (ParallelApplyMessagePending)
+                HandleParallelApplyMessages();
++
++       /* Call registered callback if any */
++       if (ProcessInterruptsCallback)
++       {
++               if (ProcessInterruptsCallback())
++                       goto retry;
++       }
+ }
+```
+
+
+### How to get rid of the patch
+
+Submit a patch to upstream, for a hook in ProcessInterrupts. Could be useful for other extensions
+too.
+
+
+## SLRU on-demand download
+
+```
+ src/backend/access/transam/slru.c | 105 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 92 insertions(+), 13 deletions(-)
+```
+
+### Problem we're trying to solve
+
+Previously, SLRU files were included in the basebackup, but the total size of them can be large,
+several GB, and downloading them all made the startup time too long.
+
+### Alternatives
+
+FUSE hook or LD_PRELOAD trick to intercept the reads on SLRU files
+
+
+## WAL-log an all-zeros page as one large hole
+
+- In XLogRecordAssemble()
+
+### Problem we're trying to solve
+
+This change was made in v16. Starting with v16, when PostgreSQL extends a relation, it first extends
+it with zeros, and it can extend the relation more than one block at a time. The all-zeros page is WAL-ogged, but it's very wasteful to include 8 kB of zeros in the WAL for that. This hack was made so that we WAL logged a compact record with a whole-page "hole". However, PostgreSQL has assertions that prevent that such WAL records from being replayed, so this breaks compatibility such that unmodified PostreSQL cannot process Neon-generated WAL.
+
+### How to get rid of the patch
+
+Find another compact representation for a full-page image of an all-zeros page. A compressed image perhaps.
+
+
+## Shut down walproposer after checkpointer
+
+```
++                       /* Neon: Also allow walproposer background worker to be treated like a WAL sender, so that it's shut down last */
++                       if ((bp->bkend_type == BACKEND_TYPE_NORMAL || bp->bkend_type == BACKEND_TYPE_BGWORKER) &&
+```
+
+This changes was needed so that postmaster shuts down the walproposer process only after the shutdown checkpoint record is written. Otherwise, the shutdown record will never make it to the safekeepers.
+
+### How to get rid of the patch
+
+Do a bigger refactoring of the postmaster state machine, such that a background worker can specify
+the shutdown ordering by itself. The postmaster state machine has grown pretty complicated, and
+would benefit from a refactoring for the sake of readability anyway.
+
+
+## EXPLAIN changes for prefetch and LFC
+
+### How to get rid of the patch
+
+Konstantin submitted a patch to -hackers already: https://commitfest.postgresql.org/47/4643/. Get that into a committable state.
+
+
+## On-demand download of extensions
+
+### How to get rid of the patch
+
+FUSE or LD_PRELOAD trickery to intercept reads?
+
+
+## Publication superuser checks
+
+We have hacked CreatePublication so that also neon_superuser can create them.
+
+### How to get rid of the patch
+
+Create an upstream patch with more fine-grained privileges for publications CREATE/DROP that can be GRANTed to users.
+
+
+## WAL log replication slots
+
+### How to get rid of the patch
+
+Utilize the upcoming v17 "slot sync worker", or a similar neon-specific background worker process, to periodically WAL-log the slots, or to export them somewhere else.
+
+
+## WAL-log replication snapshots
+
+### How to get rid of the patch
+
+WAL-log them periodically, from a backgound worker.
+
+
+## WAL-log relmapper files
+
+Similarly to replications snapshot files, the CID mapping files generated during VACUUM FULL of a catalog table are WAL-logged
+
+### How to get rid of the patch
+
+WAL-log them periodically, from a backgound worker.
+
+
+## XLogWaitForReplayOf()
+
+??
+
+
+
+
 # Not currently committed but proposed
 
 ## Disable ring buffer buffer manager strategies
