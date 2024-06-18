@@ -38,6 +38,7 @@ The problem is that the XLOG_HEAP_INSERT record does not include the command id 
 
 Bite the bullet and submit the patch to PostgreSQL, to add the t_cid to the WAL records. It makes the WAL records larger, which could make this unpopular in the PostgreSQL community. However, it might simplify some logical decoding code; Andres Freund briefly mentioned in PGCon 2022 discussion on Heikki's Neon presentation that logical decoding currently needs to jump through some hoops to reconstruct the same information.
 
+Update from Heikki (2024-04-17): I tried to write an upstream patch for that, to use the t_cid field for logical decoding, but it was not as straightforward as it first sounded.
 
 ### Alternatives
 Perhaps we could write an extra WAL record with the t_cid information, when a page is evicted that contains rows that were touched a transaction that's still running. However, that seems very complicated.
@@ -96,6 +97,8 @@ Maybe some bigger rewrite of FSM and VM would help to avoid WAL-logging FSM and 
 also some changes in src/backend/storage/smgr/smgr.c
 ```
 
+pgvector 0.6.0 also needs a similar change, which would be very nice to get rid of too.
+
 When a GIN index is built, for example, it is built by inserting the entries into the index more or
 less normally, but without WAL-logging anything. After the index has been built, we iterate through
 all pages and write them to the WAL. That doesn't work for Neon, because if a page is not WAL-logged
@@ -110,6 +113,10 @@ an operation: `smgr_start_unlogged_build`, `smgr_finish_unlogged_build_phase_1` 
 I think it would make sense to be more explicit about that in PostgreSQL too. So extract these
 changes to a patch and post to pgsql-hackers.
 
+Perhaps we could deduce that an unlogged index build has started when we see a page being evicted
+with zero LSN. How to be sure it's an unlogged index build rather than a bug? Currently we have a
+check for that and PANIC if we see page with zero LSN being evicted. And how do we detect when the
+index build has finished? See https://github.com/neondatabase/neon/pull/7440 for an attempt at that.
 
 ## Track last-written page LSN
 
@@ -322,6 +329,8 @@ and finally WAL-log that the extension succeeded.
 
 Submit to upstream. This could be useful for the Disk Encryption patches too, or for compression.
 
+We have submitted this to upstream, but it's moving at glacial a speed.
+https://commitfest.postgresql.org/47/4428/
 
 ## Added relpersistence argument to smgropen()
 
