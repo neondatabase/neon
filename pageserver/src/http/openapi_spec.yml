@@ -1093,9 +1093,10 @@ components:
         kind:
           type: string
           enum: [past, present, future, nodata]
-        lease_valid_until:
+        valid_until:
           type: string
           format: date-time
+          description: The expiration time of the granted lease.
 
     LsnLease:
       type: object
