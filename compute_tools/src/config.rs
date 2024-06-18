@@ -131,18 +131,17 @@ pub fn write_postgres_conf(
     Ok(())
 }
 
-/// create file compute_ctl_temp_override.conf in pgdata_dir
-/// add provided options to this file
-pub fn compute_ctl_temp_override_create(pgdata_path: &Path, options: &str) -> Result<()> {
+pub fn with_compute_ctl_tmp_override<F>(pgdata_path: &Path, options: &str, exec: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
     let path = pgdata_path.join("compute_ctl_temp_override.conf");
     let mut file = File::create(path)?;
     write!(file, "{}", options)?;
-    Ok(())
-}
 
-/// remove file compute_ctl_temp_override.conf in pgdata_dir
-pub fn compute_ctl_temp_override_remove(pgdata_path: &Path) -> Result<()> {
-    let path = pgdata_path.join("compute_ctl_temp_override.conf");
-    std::fs::remove_file(path)?;
-    Ok(())
+    let res = exec();
+
+    file.set_len(0)?;
+
+    res
 }
