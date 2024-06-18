@@ -100,6 +100,9 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     )
 
     client.timeline_compact(tenant_id, timeline_id, enhanced_gc_bottom_most_compaction=True)
+    tline_detail = client.timeline_detail(tenant_id, timeline_id)
+    logical_size = tline_detail["current_logical_size"]
+    physical_size = tline_detail["current_physical_size"]
 
     max_num_of_deltas_above_image = 0
     max_total_num_of_deltas = 0
