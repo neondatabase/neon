@@ -72,6 +72,18 @@ class NeonAPI:
 
         return cast("Dict[str, Any]", resp.json())
 
+    def get_project_details(self, project_id: str) -> Dict[str, Any]:
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+        )
+        assert resp.status_code == 200
+        return cast("Dict[str, Any]", resp.json())
+
     def delete_project(
         self,
         project_id: str,
