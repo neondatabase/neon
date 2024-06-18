@@ -24,7 +24,6 @@ from fixtures.pageserver.utils import (
     enable_remote_storage_versioning,
     list_prefix,
     remote_storage_delete_key,
-    tenant_delete_wait_completed,
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
@@ -158,7 +157,7 @@ def test_storage_controller_smoke(
 
     # Delete all the tenants
     for tid in tenant_ids:
-        tenant_delete_wait_completed(env.storage_controller.pageserver_api(), tid, 10)
+        env.storage_controller.pageserver_api().tenant_delete(tid)
 
     env.storage_controller.consistency_check()
 

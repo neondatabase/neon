@@ -1,17 +1,11 @@
-import concurrent.futures
-import enum
-import os
-import shutil
 from threading import Thread
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     StorageScrubber,
-    last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -19,11 +13,9 @@ from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     assert_prefix_not_empty,
-    poll_for_remote_storage_iterations,
-    tenant_delete_wait_completed,
     wait_for_upload,
 )
-from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
+from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.utils import run_pg_bench_small, wait_until
 from requests.exceptions import ReadTimeout
 
@@ -297,9 +289,7 @@ def test_tenant_delete_races_timeline_creation(
     # Disable the failpoint and wait for deletion to finish
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
 
-    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
-
-    tenant_delete_wait_completed(ps_http, tenant_id, iterations, ignore_errors=True)
+    ps_http.tenant_delete(tenant_id)
 
     # Physical deletion should have happened
     assert_prefix_empty(
@@ -350,8 +340,7 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
 
     env.start()
     ps_http = env.pageserver.http_client()
-    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
-    tenant_delete_wait_completed(ps_http, tenant_id, iterations)
+    ps_http.tenant_delete(tenant_id)
     env.stop()
 
     scrubber.scan_metadata()
