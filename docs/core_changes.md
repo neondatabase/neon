@@ -21,6 +21,18 @@ compute, and changes needed for the WAL redo process:
 
 # Changes for Compute node
 
+## Prefetching
+
+There are changes in many places to perform prefetching, for example for sequential scans. Neon
+doesn't benefit from OS readahead, and the latency to pageservers is quite high compared to local
+disk, so prefetching is critical for performance, also for sequential scans.
+
+### How to get rid of the patch
+
+Upcoming "streaming read" work in v17 might simplify this. And async I/O work in v18 will hopefully
+do more.
+
+
 ## Add t_cid to heap WAL records
 
 ```
@@ -481,19 +493,6 @@ hint bits are set. Wal logging hint bits updates requires FPI which significantl
 ### Alternatives?
 
 Add special WAL record for setting page hints.
-
-## Prefetching
-
-### Why?
-
-As far as pages in Neon are loaded on demand, to reduce node startup time
-and also speedup some massive queries we need some mechanism for bulk loading to
-reduce page request round-trip overhead.
-
-Currently Postgres is supporting prefetching only for bitmap scan.
-In Neon we should also use prefetch for sequential and index scans, because the OS is not doing it for us.
-For sequential scan we could prefetch some number of following pages. For index scan we could prefetch pages
-of heap relation addressed by TIDs.
 
 ## Prewarming
 
