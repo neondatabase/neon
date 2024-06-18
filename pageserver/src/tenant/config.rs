@@ -13,6 +13,7 @@ use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::CompactionAlgorithm;
 use pageserver_api::models::CompactionAlgorithmSettings;
 use pageserver_api::models::EvictionPolicy;
+use pageserver_api::models::LsnLease;
 use pageserver_api::models::{self, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
@@ -377,6 +378,16 @@ pub struct TenantConf {
     /// There is a `last_aux_file_policy` flag which gets persisted in `index_part.json` once the first aux
     /// file is written.
     pub switch_aux_file_policy: AuxFilePolicy,
+
+    /// The length for an explicit LSN lease request.
+    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length: Duration,
+
+    /// The length for an implicit LSN lease granted as part of `get_lsn_by_timestamp` request.
+    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length_for_ts: Duration,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -476,6 +487,16 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
+    pub lsn_lease_length: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
+    pub lsn_lease_length_for_ts: Option<Duration>,
 }
 
 impl TenantConfOpt {
@@ -538,6 +559,12 @@ impl TenantConfOpt {
             switch_aux_file_policy: self
                 .switch_aux_file_policy
                 .unwrap_or(global_conf.switch_aux_file_policy),
+            lsn_lease_length: self
+                .lsn_lease_length
+                .unwrap_or(global_conf.lsn_lease_length),
+            lsn_lease_length_for_ts: self
+                .lsn_lease_length_for_ts
+                .unwrap_or(global_conf.lsn_lease_length_for_ts),
         }
     }
 }
@@ -582,6 +609,8 @@ impl Default for TenantConf {
             timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
             switch_aux_file_policy: AuxFilePolicy::default_tenant_config(),
+            lsn_lease_length: LsnLease::DEFAULT_LENGTH,
+            lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
         }
     }
 }
@@ -657,6 +686,8 @@ impl From<TenantConfOpt> for models::TenantConfig {
             timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
             switch_aux_file_policy: value.switch_aux_file_policy,
+            lsn_lease_length: value.lsn_lease_length.map(humantime),
+            lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
         }
     }
 }
