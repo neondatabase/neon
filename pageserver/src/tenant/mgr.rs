@@ -435,17 +435,8 @@ async fn init_load_tenant_configs(
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DeleteTenantError {
-    #[error("GetTenant {0}")]
-    Get(#[from] GetTenantError),
-
     #[error("Tenant map slot error {0}")]
     SlotError(#[from] TenantSlotError),
-
-    #[error("Tenant map slot upsert error {0}")]
-    SlotUpsertError(#[from] TenantSlotUpsertError),
-
-    #[error("Timeline {0}")]
-    Timeline(#[from] DeleteTimelineError),
 
     #[error("Cancelled")]
     Cancelled,

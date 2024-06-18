@@ -333,10 +333,7 @@ impl From<crate::tenant::mgr::DeleteTenantError> for ApiError {
     fn from(value: crate::tenant::mgr::DeleteTenantError) -> Self {
         use crate::tenant::mgr::DeleteTenantError::*;
         match value {
-            Get(g) => ApiError::from(g),
-            Timeline(t) => ApiError::from(t),
             SlotError(e) => e.into(),
-            SlotUpsertError(e) => e.into(),
             Other(o) => ApiError::InternalServerError(o),
             Cancelled => ApiError::ShuttingDown,
         }
