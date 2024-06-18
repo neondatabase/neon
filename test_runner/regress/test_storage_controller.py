@@ -40,7 +40,7 @@ from werkzeug.wrappers.response import Response
 
 
 def get_node_shard_counts(env: NeonEnv, tenant_ids):
-    counts: defaultdict[str, int] = defaultdict(int)
+    counts: defaultdict[int, int] = defaultdict(int)
     for tid in tenant_ids:
         for shard in env.storage_controller.locate(tid):
             counts[shard["node_id"]] += 1
@@ -1574,7 +1574,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after draining node {ps.id}: {shard_counts}")
         # Assert that we've drained the node
-        assert shard_counts[str(ps.id)] == 0
+        assert shard_counts[ps.id] == 0
         # Assert that those shards actually went somewhere
         assert sum(shard_counts.values()) == total_shards
 
