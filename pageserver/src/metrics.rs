@@ -2860,7 +2860,7 @@ pub fn preinitialize_metrics() {
     // FIXME(4813): make it so that we have no top level metrics as this fn will easily fall out of
     // order:
     // - global metrics reside in a Lazy<PageserverMetrics>
-    //   - access via crate::metrics::PS_METRICS.materialized_page_cache_hit.inc()
+    //   - access via crate::metrics::PS_METRICS.some_metric.inc()
     // - could move the statics into TimelineMetrics::new()?
 
     // counters

@@ -17,7 +17,6 @@
 //!
 //! Two types of pages are supported:
 //!
-//! * **Materialized pages**, filled & used by page reconstruction
 //! * **Immutable File pages**, filled & used by [`crate::tenant::block_io`] and [`crate::tenant::ephemeral_file`].
 //!
 //! Note that [`crate::tenant::ephemeral_file::EphemeralFile`] is generally mutable, but, it's append-only.
@@ -27,9 +26,6 @@
 //!
 //! Page cache maps from a cache key to a buffer slot.
 //! The cache key uniquely identifies the piece of data that is being cached.
-//!
-//! The cache key for **materialized pages** is  [`TenantShardId`], [`TimelineId`], [`Key`], and [`Lsn`].
-//! Use [`PageCache::memorize_materialized_page`] and [`PageCache::lookup_materialized_page`] for fill & access.
 //!
 //! The cache key for **immutable file** pages is [`FileId`] and a block number.
 //! Users of page cache that wish to page-cache an arbitrary (immutable!) on-disk file do the following:
@@ -337,9 +333,8 @@ impl PageCache {
         blkno: u32,
         ctx: &RequestContext,
     ) -> anyhow::Result<ReadBufResult> {
-        let mut cache_key = CacheKey::ImmutableFilePage { file_id, blkno };
-
-        self.lock_for_read(&mut cache_key, ctx).await
+        self.lock_for_read(&(CacheKey::ImmutableFilePage { file_id, blkno }), ctx)
+            .await
     }
 
     //
@@ -373,19 +368,11 @@ impl PageCache {
 
     /// Look up a page in the cache.
     ///
-    /// If the search criteria is not exact, *cache_key is updated with the key
-    /// for exact key of the returned page. (For materialized pages, that means
-    /// that the LSN in 'cache_key' is updated with the LSN of the returned page
-    /// version.)
-    ///
-    /// If no page is found, returns None and *cache_key is left unmodified.
-    ///
     async fn try_lock_for_read(
         &self,
-        cache_key: &mut CacheKey,
+        cache_key: &CacheKey,
         permit: &mut Option<PinnedSlotsPermit>,
     ) -> Option<PageReadGuard> {
-        let cache_key_orig = cache_key.clone();
         if let Some(slot_idx) = self.search_mapping(cache_key) {
             // The page was found in the mapping. Lock the slot, and re-check
             // that it's still what we expected (because we released the mapping
@@ -398,9 +385,6 @@ impl PageCache {
                     _permit: inner.coalesce_readers_permit(permit.take().unwrap()),
                     slot_guard: inner,
                 });
-            } else {
-                // search_mapping might have modified the search key; restore it.
-                *cache_key = cache_key_orig;
             }
         }
         None
@@ -437,7 +421,7 @@ impl PageCache {
     ///
     async fn lock_for_read(
         &self,
-        cache_key: &mut CacheKey,
+        cache_key: &CacheKey,
         ctx: &RequestContext,
     ) -> anyhow::Result<ReadBufResult> {
         let mut permit = Some(self.try_get_pinned_slot_permit().await?);
@@ -514,15 +498,14 @@ impl PageCache {
 
     /// Search for a page in the cache using the given search key.
     ///
-    /// Returns the slot index, if any. If the search criteria is not exact,
-    /// *cache_key is updated with the actual key of the found page.
+    /// Returns the slot index, if any.
     ///
     /// NOTE: We don't hold any lock on the mapping on return, so the slot might
     /// get recycled for an unrelated page immediately after this function
     /// returns.  The caller is responsible for re-checking that the slot still
     /// contains the page with the same key before using it.
     ///
-    fn search_mapping(&self, cache_key: &mut CacheKey) -> Option<usize> {
+    fn search_mapping(&self, cache_key: &CacheKey) -> Option<usize> {
         match cache_key {
             CacheKey::ImmutableFilePage { file_id, blkno } => {
                 let map = self.immutable_page_map.read().unwrap();
