@@ -2131,8 +2131,8 @@ impl Timeline {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
             .tenant_conf
-            .lsn_lease_length
-            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+            .lsn_lease_length_for_ts
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
     pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
