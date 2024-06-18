@@ -1270,13 +1270,8 @@ WalSndLoop(WalProposer *wp)
 {
 	XLogRecPtr	flushPtr;
 
-	/* Clear any already-pending wakeups */
-	ResetLatch(MyLatch);
-
 	for (;;)
 	{
-		CHECK_FOR_INTERRUPTS();
-
 		XLogBroadcastWalProposer(wp);
 		WalProposerPoll(wp);
 	}
@@ -1806,6 +1801,20 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	if (WalSndCtl != NULL)
 		late_cv_trigger = ConditionVariableCancelSleep();
 #endif
+
+	CHECK_FOR_INTERRUPTS();
+
+	/*
+	 * Process config if requested. This restarts walproposer if safekeepers
+	 * list changed. Don't do that for sync-safekeepers because quite probably
+	 * it (re-reading config) won't work without some effort, and
+	 * sync-safekeepers should be quick to finish anyway.
+	 */
+	if (!wp->config->syncSafekeepers && ConfigReloadPending)
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+	}
 
 	/*
 	 * Process config if requested. This restarts walproposer if safekeepers

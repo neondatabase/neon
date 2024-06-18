@@ -286,7 +286,6 @@ WalProposerPoll(WalProposer *wp)
 void
 WalProposerStart(WalProposer *wp)
 {
-
 	/* Initiate connections to all safekeeper nodes */
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
