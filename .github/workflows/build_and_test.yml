@@ -432,8 +432,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
-        pg_version: [ v14, v15, v16 ]
+        build_type: [ debug ]
+        pg_version: [ v15 ]
+        pageserver_compaction_algorithm_kind: [ "legacy", "tiered" ]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -461,6 +462,9 @@ jobs:
           PAGESERVER_GET_VECTORED_IMPL: vectored
           PAGESERVER_GET_IMPL: vectored
           PAGESERVER_VALIDATE_VEC_GET: true
+          PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM: 'kind="${{ matrix.pageserver_compaction_algorithm_kind }}"'
+          # catch the tests that override `tenant_config` as a whole without specifying the compaction algorithm `kind`
+          NEON_PAGESERVER_PANIC_ON_UNSPECIFIED_COMPACTION_ALGORITHM: true
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
