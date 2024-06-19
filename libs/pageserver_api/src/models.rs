@@ -455,6 +455,25 @@ pub enum CompactionAlgorithm {
     Tiered,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum_macros::FromRepr,
+    strum_macros::EnumString,
+    enum_map::Enum,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ImageCompressionAlgorithm {
+    ZstdLow,
+    Zstd,
+    ZstdHigh,
+}
+
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionAlgorithmSettings {
     pub kind: CompactionAlgorithm,

@@ -11,7 +11,10 @@
 //! len <  128: 0XXXXXXX
 //! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
+use async_compression::Level;
 use bytes::{BufMut, BytesMut};
+use pageserver_api::models::ImageCompressionAlgorithm;
+use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
 
 use crate::context::RequestContext;
@@ -66,12 +69,29 @@ impl<'a> BlockCursor<'a> {
                 len_buf.copy_from_slice(&buf[off..off + 4]);
                 off += 4;
             }
-            len_buf[0] &= 0x7f;
+            len_buf[0] &= 0x0f;
             u32::from_be_bytes(len_buf) as usize
         };
+        let compression_bits = first_len_byte & 0xf0;
 
-        dstbuf.clear();
-        dstbuf.reserve(len);
+        let mut tmp_buf = Vec::new();
+        let buf_to_write;
+        let compression = if compression_bits <= BYTE_UNCOMPRESSED {
+            buf_to_write = dstbuf;
+            None
+        } else if compression_bits == BYTE_ZSTD {
+            buf_to_write = &mut tmp_buf;
+            Some(dstbuf)
+        } else {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid compression byte {compression_bits:x}"),
+            );
+            return Err(error);
+        };
+
+        buf_to_write.clear();
+        buf_to_write.reserve(len);
 
         // Read the payload
         let mut remain = len;
@@ -85,13 +105,27 @@ impl<'a> BlockCursor<'a> {
                 page_remain = PAGE_SZ;
             }
             let this_blk_len = min(remain, page_remain);
-            dstbuf.extend_from_slice(&buf[off..off + this_blk_len]);
+            buf_to_write.extend_from_slice(&buf[off..off + this_blk_len]);
             remain -= this_blk_len;
             off += this_blk_len;
         }
+
+        if let Some(dstbuf) = compression {
+            if compression_bits == BYTE_ZSTD {
+                let mut decoder = async_compression::tokio::write::ZstdDecoder::new(dstbuf);
+                decoder.write_all(buf_to_write).await?;
+                decoder.flush().await?;
+            } else {
+                unreachable!("already checked above")
+            }
+        }
+
         Ok(())
     }
 }
+
+const BYTE_UNCOMPRESSED: u8 = 0x80;
+const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 
 /// A wrapper of `VirtualFile` that allows users to write blobs.
 ///
@@ -220,35 +254,81 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
+        self.write_blob_maybe_compressed(srcbuf, ctx, None).await
+    }
+
+    /// Write a blob of data. Returns the offset that it was written to,
+    /// which can be used to retrieve the data later.
+    pub async fn write_blob_maybe_compressed<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        &mut self,
+        srcbuf: B,
+        ctx: &RequestContext,
+        algorithm: Option<ImageCompressionAlgorithm>,
+    ) -> (B::Buf, Result<u64, Error>) {
         let offset = self.offset;
 
         let len = srcbuf.bytes_init();
 
         let mut io_buf = self.io_buf.take().expect("we always put it back below");
         io_buf.clear();
-        let (io_buf, hdr_res) = async {
+        let mut compressed_buf = None;
+        let ((io_buf, hdr_res), srcbuf) = async {
             if len < 128 {
                 // Short blob. Write a 1-byte length header
                 io_buf.put_u8(len as u8);
-                self.write_all(io_buf, ctx).await
+                (
+                    self.write_all(io_buf, ctx).await,
+                    srcbuf.slice(..).into_inner(),
+                )
             } else {
                 // Write a 4-byte length header
-                if len > 0x7fff_ffff {
+                if len > 0x0fff_ffff {
                     return (
-                        io_buf,
-                        Err(Error::new(
-                            ErrorKind::Other,
-                            format!("blob too large ({len} bytes)"),
-                        )),
+                        (
+                            io_buf,
+                            Err(Error::new(
+                                ErrorKind::Other,
+                                format!("blob too large ({len} bytes)"),
+                            )),
+                        ),
+                        srcbuf.slice(..).into_inner(),
                     );
                 }
-                if len > 0x0fff_ffff {
-                    tracing::warn!("writing blob above future limit ({len} bytes)");
-                }
-                let mut len_buf = (len as u32).to_be_bytes();
-                len_buf[0] |= 0x80;
+                use ImageCompressionAlgorithm::*;
+                let (high_bit_mask, len_written, srcbuf) = match algorithm {
+                    Some(ZstdLow | Zstd | ZstdHigh) => {
+                        let mut encoder = if matches!(algorithm, Some(ZstdLow)) {
+                            async_compression::tokio::write::ZstdEncoder::with_quality(
+                                Vec::new(),
+                                Level::Precise(1),
+                            )
+                        } else if matches!(algorithm, Some(ZstdHigh)) {
+                            async_compression::tokio::write::ZstdEncoder::with_quality(
+                                Vec::new(),
+                                Level::Precise(6),
+                            )
+                        } else {
+                            async_compression::tokio::write::ZstdEncoder::new(Vec::new())
+                        };
+                        let slice = srcbuf.slice(..);
+                        encoder.write_all(&slice[..]).await.unwrap();
+                        encoder.shutdown().await.unwrap();
+                        let compressed = encoder.into_inner();
+                        if compressed.len() < len {
+                            let compressed_len = compressed.len();
+                            compressed_buf = Some(compressed);
+                            (BYTE_ZSTD, compressed_len, slice.into_inner())
+                        } else {
+                            (BYTE_UNCOMPRESSED, len, slice.into_inner())
+                        }
+                    }
+                    None => (BYTE_UNCOMPRESSED, len, srcbuf.slice(..).into_inner()),
+                };
+                let mut len_buf = (len_written as u32).to_be_bytes();
+                assert_eq!(len_buf[0] & 0xf0, 0);
+                len_buf[0] |= high_bit_mask;
                 io_buf.extend_from_slice(&len_buf[..]);
-                self.write_all(io_buf, ctx).await
+                (self.write_all(io_buf, ctx).await, srcbuf)
             }
         }
         .await;
@@ -257,7 +337,12 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             Ok(_) => (),
             Err(e) => return (Slice::into_inner(srcbuf.slice(..)), Err(e)),
         }
-        let (srcbuf, res) = self.write_all(srcbuf, ctx).await;
+        let (srcbuf, res) = if let Some(compressed_buf) = compressed_buf {
+            let (_buf, res) = self.write_all(compressed_buf, ctx).await;
+            (Slice::into_inner(srcbuf.slice(..)), res)
+        } else {
+            self.write_all(srcbuf, ctx).await
+        };
         (srcbuf, res.map(|_| offset))
     }
 }
@@ -295,6 +380,12 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
+        round_trip_test_compressed::<BUFFERED, 0>(blobs).await
+    }
+
+    async fn round_trip_test_compressed<const BUFFERED: bool, const COMPRESSION: u8>(
+        blobs: &[Vec<u8>],
+    ) -> Result<(), Error> {
         let temp_dir = camino_tempfile::tempdir()?;
         let pathbuf = temp_dir.path().join("file");
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
@@ -305,7 +396,18 @@ mod tests {
             let file = VirtualFile::create(pathbuf.as_path(), &ctx).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
-                let (_, res) = wtr.write_blob(blob.clone(), &ctx).await;
+                let (_, res) = match COMPRESSION {
+                    0 => wtr.write_blob(blob.clone(), &ctx).await,
+                    1 => {
+                        wtr.write_blob_maybe_compressed(
+                            blob.clone(),
+                            &ctx,
+                            Some(ImageCompressionAlgorithm::ZstdLow),
+                        )
+                        .await
+                    }
+                    _ => unreachable!("Invalid compression {COMPRESSION}"),
+                };
                 let offs = res?;
                 offsets.push(offs);
             }
@@ -361,10 +463,15 @@ mod tests {
         let blobs = &[
             b"test".to_vec(),
             random_array(10 * PAGE_SZ),
+            b"hello".to_vec(),
+            random_array(66 * PAGE_SZ),
+            vec![0xf3; 24 * PAGE_SZ],
             b"foobar".to_vec(),
         ];
         round_trip_test::<false>(blobs).await?;
         round_trip_test::<true>(blobs).await?;
+        round_trip_test_compressed::<false, 1>(blobs).await?;
+        round_trip_test_compressed::<true, 1>(blobs).await?;
         Ok(())
     }
 
