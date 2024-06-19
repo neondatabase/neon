@@ -241,6 +241,7 @@ impl WalIngest {
             }
             pg_constants::RM_TBLSPC_ID => {
                 trace!("XLOG_TBLSPC_CREATE/DROP is not handled yet");
+                todo!() // should we do: special_treatment_check!(unknown record type, pg_version, lsn, decoded);
             }
             pg_constants::RM_CLOG_ID => {
                 let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
@@ -463,6 +464,9 @@ impl WalIngest {
                 if info == pg_constants::XLOG_RUNNING_XACTS {
                     let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
                     self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
+                    todo!() // checkpoint_modified=true missing?
+                } else {
+                    todo!()
                 }
             }
             pg_constants::RM_REPLORIGIN_ID => {
@@ -475,6 +479,8 @@ impl WalIngest {
                 } else if info == pg_constants::XLOG_REPLORIGIN_DROP {
                     let xlrec = crate::walrecord::XlReploriginDrop::decode(&mut buf);
                     modification.drop_replorigin(xlrec.node_id).await?
+                } else {
+                    todo!()
                 }
             }
 
