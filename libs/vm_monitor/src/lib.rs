@@ -11,7 +11,7 @@ use axum::{routing::get, Router, Server};
 use clap::Parser;
 use futures::Future;
 use std::{fmt::Debug, time::Duration};
-use sysinfo::{RefreshKind, System, SystemExt};
+use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tokio::{sync::broadcast, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -64,7 +64,8 @@ pub fn bytes_to_mebibytes(bytes: u64) -> f32 {
 }
 
 pub fn get_total_system_memory() -> u64 {
-    System::new_with_specifics(RefreshKind::new().with_memory()).total_memory()
+    System::new_with_specifics(RefreshKind::new().with_memory(MemoryRefreshKind::new().with_ram()))
+        .total_memory()
 }
 
 /// Global app state for the Axum server
