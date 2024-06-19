@@ -2,9 +2,7 @@
 //!
 //! Contains types that manage the interaction (not data interchange, see `protocol`)
 //! between agent and monitor, allowing us to to process and send messages in a
-//! straightforward way. The dispatcher also manages that signals that come from
-//! the cgroup (requesting upscale), and the signals that go to the cgroup
-//! (notifying it of upscale).
+//! straightforward way.
 
 use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
@@ -21,11 +19,7 @@ use crate::protocol::{
 
 /// The central handler for all communications in the monitor.
 ///
-/// The dispatcher has two purposes:
-/// 1. Manage the connection to the agent, sending and receiving messages.
-/// 2. Communicate with the cgroup manager, notifying it when upscale is received,
-///    and sending a message to the agent when the cgroup manager requests
-///    upscale.
+/// The dispatcher manages the connection to the agent, sending and receiving messages.
 #[derive(Debug)]
 pub struct Dispatcher {
     /// We read agent messages of of `source`
