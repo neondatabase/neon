@@ -174,6 +174,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         pg_auth: None,
         pg_tenant_only_auth: None,
         http_auth: None,
+        sk_auth_token: None,
         current_thread_runtime: false,
         walsenders_keep_horizon: false,
         partial_backup_enabled: false,

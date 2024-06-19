@@ -16,6 +16,8 @@ use std::pin::Pin;
 use std::task::{ready, Poll};
 use utils::lsn::Lsn;
 
+pub const PAGE_SZ: u64 = 8192;
+
 pub fn keyspace_total_size<K>(
     keyspace: &CompactionKeySpace<K>,
     shard_identity: &ShardIdentity,

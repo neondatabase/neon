@@ -1,5 +1,3 @@
-version: '3'
-
 services:
   minio:
     restart: always
@@ -161,12 +159,12 @@ services:
       context: ./compute_wrapper/
       args:
         - REPOSITORY=${REPOSITORY:-neondatabase}
-        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-14}
+        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-16}
         - TAG=${TAG:-latest}
         - http_proxy=$http_proxy
         - https_proxy=$https_proxy
     environment:
-      - PG_VERSION=${PG_VERSION:-14}
+      - PG_VERSION=${PG_VERSION:-16}
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
@@ -192,5 +190,16 @@ services:
       - "until pg_isready -h compute -p 55433 -U cloud_admin ; do
             echo 'Waiting to start compute...' && sleep 1;
          done"
+    depends_on:
+      - compute
+
+  neon-test-extensions:
+    profiles: ["test-extensions"]
+    image: ${REPOSITORY:-neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-16}:${TAG:-latest}
+    entrypoint:
+      - "/bin/bash"
+      - "-c"
+    command:
+      - sleep 1800
     depends_on:
       - compute

@@ -17,9 +17,13 @@ def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    # eviction might be the first one after an attach to access the layers
-    env.pageserver.allowed_errors.append(
-        ".*unexpectedly on-demand downloading remote layer .* for task kind Eviction"
+    env.pageserver.allowed_errors.extend(
+        [
+            # eviction might be the first one after an attach to access the layers
+            ".*unexpectedly on-demand downloading remote layer .* for task kind Eviction",
+            # detach can happen before we get to validate the generation number
+            ".*deletion backend: Dropped remote consistent LSN updates for tenant.*",
+        ]
     )
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     return env
@@ -162,7 +166,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
         "compaction_algorithm": {
-            "kind": "Tiered",
+            "kind": "tiered",
         },
         "eviction_policy": {
             "kind": "LayerAccessThreshold",
@@ -190,7 +194,9 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "trace_read_requests": True,
         "walreceiver_connect_timeout": "13m",
         "image_layer_creation_check_threshold": 1,
-        "switch_aux_file_policy": "CrossValidation",
+        "switch_aux_file_policy": "cross-validation",
+        "lsn_lease_length": "1m",
+        "lsn_lease_length_for_ts": "5s",
     }
 
     ps_http = env.pageserver.http_client()

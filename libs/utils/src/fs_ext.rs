@@ -3,6 +3,9 @@ use std::{fs, io, path::Path};
 
 use anyhow::Context;
 
+mod rename_noreplace;
+pub use rename_noreplace::rename_noreplace;
+
 pub trait PathExt {
     /// Returns an error if `self` is not a directory.
     fn is_empty_dir(&self) -> io::Result<bool>;

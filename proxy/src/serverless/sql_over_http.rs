@@ -17,6 +17,7 @@ use hyper1::http::HeaderValue;
 use hyper1::Response;
 use hyper1::StatusCode;
 use hyper1::{HeaderMap, Request};
+use pq_proto::StartupMessageParamsBuilder;
 use serde_json::json;
 use serde_json::Value;
 use tokio::time;
@@ -192,13 +193,13 @@ fn get_conn_info(
 
     let mut options = Option::None;
 
+    let mut params = StartupMessageParamsBuilder::default();
+    params.insert("user", &username);
+    params.insert("database", &dbname);
     for (key, value) in pairs {
-        match &*key {
-            "options" => {
-                options = Some(NeonOptions::parse_options_raw(&value));
-            }
-            "application_name" => ctx.set_application(Some(value.into())),
-            _ => {}
+        params.insert(&key, &value);
+        if key == "options" {
+            options = Some(NeonOptions::parse_options_raw(&value));
         }
     }
 
@@ -532,27 +533,31 @@ async fn handle_inner(
         return Err(SqlOverHttpError::RequestTooLarge);
     }
 
-    let fetch_and_process_request = async {
-        let body = request.into_body().collect().await?.to_bytes();
-        info!(length = body.len(), "request payload read");
-        let payload: Payload = serde_json::from_slice(&body)?;
-        Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
-    }
-    .map_err(SqlOverHttpError::from);
+    let fetch_and_process_request = Box::pin(
+        async {
+            let body = request.into_body().collect().await?.to_bytes();
+            info!(length = body.len(), "request payload read");
+            let payload: Payload = serde_json::from_slice(&body)?;
+            Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
+        }
+        .map_err(SqlOverHttpError::from),
+    );
 
-    let authenticate_and_connect = async {
-        let keys = backend
-            .authenticate(ctx, &config.authentication_config, &conn_info)
-            .await?;
-        let client = backend
-            .connect_to_compute(ctx, conn_info, keys, !allow_pool)
-            .await?;
-        // not strictly necessary to mark success here,
-        // but it's just insurance for if we forget it somewhere else
-        ctx.latency_timer.success();
-        Ok::<_, HttpConnError>(client)
-    }
-    .map_err(SqlOverHttpError::from);
+    let authenticate_and_connect = Box::pin(
+        async {
+            let keys = backend
+                .authenticate(ctx, &config.authentication_config, &conn_info)
+                .await?;
+            let client = backend
+                .connect_to_compute(ctx, conn_info, keys, !allow_pool)
+                .await?;
+            // not strictly necessary to mark success here,
+            // but it's just insurance for if we forget it somewhere else
+            ctx.latency_timer.success();
+            Ok::<_, HttpConnError>(client)
+        }
+        .map_err(SqlOverHttpError::from),
+    );
 
     let (payload, mut client) = match run_until_cancelled(
         // Run both operations in parallel

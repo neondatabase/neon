@@ -1,9 +1,6 @@
 use std::{ops::RangeInclusive, str::FromStr};
 
-use crate::{
-    key::{is_rel_block_key, Key},
-    models::ShardParameters,
-};
+use crate::{key::Key, models::ShardParameters};
 use hex::FromHex;
 use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
@@ -125,7 +122,7 @@ impl ShardCount {
 
     /// `v` may be zero, or the number of shards in the tenant.  `v` is what
     /// [`Self::literal`] would return.
-    pub fn new(val: u8) -> Self {
+    pub const fn new(val: u8) -> Self {
         Self(val)
     }
 }
@@ -428,6 +425,12 @@ impl<'de> Deserialize<'de> for TenantShardId {
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShardStripeSize(pub u32);
 
+impl Default for ShardStripeSize {
+    fn default() -> Self {
+        DEFAULT_STRIPE_SIZE
+    }
+}
+
 /// Layout version: for future upgrades where we might change how the key->shard mapping works
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShardLayout(u8);
@@ -559,6 +562,14 @@ impl ShardIdentity {
         }
     }
 
+    /// Obtains the shard number and count combined into a `ShardIndex`.
+    pub fn shard_index(&self) -> ShardIndex {
+        ShardIndex {
+            shard_count: self.count,
+            shard_number: self.number,
+        }
+    }
+
     pub fn shard_slug(&self) -> String {
         if self.count > ShardCount(0) {
             format!("-{:02x}{:02x}", self.number.0, self.count.0)
@@ -658,7 +669,7 @@ fn key_is_shard0(key: &Key) -> bool {
     // because they must be included in basebackups.
     let is_initfork = key.field5 == INIT_FORKNUM;
 
-    !is_rel_block_key(key) || is_initfork
+    !key.is_rel_block_key() || is_initfork
 }
 
 /// Provide the same result as the function in postgres `hashfn.h` with the same name
@@ -703,6 +714,25 @@ fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Ke
     hash = hash_combine(hash, murmurhash32(key.field6 / stripe_size.0));
 
     ShardNumber((hash % count.0 as u32) as u8)
+}
+
+/// For debugging, while not exposing the internals.
+#[derive(Debug)]
+#[allow(unused)] // used by debug formatting by pagectl
+struct KeyShardingInfo {
+    shard0: bool,
+    shard_number: ShardNumber,
+}
+
+pub fn describe(
+    key: &Key,
+    shard_count: ShardCount,
+    stripe_size: ShardStripeSize,
+) -> impl std::fmt::Debug {
+    KeyShardingInfo {
+        shard0: key_is_shard0(key),
+        shard_number: key_to_shard_number(shard_count, stripe_size, key),
+    }
 }
 
 #[cfg(test)]

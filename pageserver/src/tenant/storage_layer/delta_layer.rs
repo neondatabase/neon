@@ -219,7 +219,6 @@ pub struct DeltaLayerInner {
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
-    lsn_range: Range<Lsn>,
 
     file: VirtualFile,
     file_id: FileId,
@@ -479,6 +478,23 @@ impl DeltaLayerWriterInner {
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
+        let temp_path = self.path.clone();
+        let result = self.finish0(key_end, timeline, ctx).await;
+        if result.is_err() {
+            tracing::info!(%temp_path, "cleaning up temporary file after error during writing");
+            if let Err(e) = std::fs::remove_file(&temp_path) {
+                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
+            }
+        }
+        result
+    }
+
+    async fn finish0(
+        self,
+        key_end: Key,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -651,19 +667,11 @@ impl DeltaLayerWriter {
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
-        let inner = self.inner.take().unwrap();
-        let temp_path = inner.path.clone();
-        let result = inner.finish(key_end, timeline, ctx).await;
-        // The delta layer files can sometimes be really large. Clean them up.
-        if result.is_err() {
-            tracing::warn!(
-                "Cleaning up temporary delta file {temp_path} after error during writing"
-            );
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!("Error cleaning up temporary delta layer file {temp_path}: {e:?}")
-            }
-        }
-        result
+        self.inner
+            .take()
+            .unwrap()
+            .finish(key_end, timeline, ctx)
+            .await
     }
 }
 
@@ -776,7 +784,6 @@ impl DeltaLayerInner {
             file_id,
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
-            lsn_range: actual_summary.lsn_range,
             max_vectored_read_bytes,
         }))
     }
@@ -902,7 +909,7 @@ impl DeltaLayerInner {
 
         let reads = Self::plan_reads(
             &keyspace,
-            lsn_range,
+            lsn_range.clone(),
             data_end_offset,
             index_reader,
             planner,
@@ -915,9 +922,48 @@ impl DeltaLayerInner {
         self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
 
-        reconstruct_state.on_lsn_advanced(&keyspace, self.lsn_range.start);
+        reconstruct_state.on_lsn_advanced(&keyspace, lsn_range.start);
 
         Ok(())
+    }
+
+    /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
+    #[cfg(test)]
+    pub(super) async fn load_key_values(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let index_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            block_reader,
+        );
+        let mut result = Vec::new();
+        let mut stream =
+            Box::pin(self.stream_index_forwards(&index_reader, &[0; DELTA_KEY_SIZE], ctx));
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let cursor = block_reader.block_cursor();
+        let mut buf = Vec::new();
+        while let Some(item) = stream.next().await {
+            let (key, lsn, pos) = item?;
+            // TODO: dedup code with get_reconstruct_value
+            // TODO: ctx handling and sharding
+            cursor
+                .read_blob_into_buf(pos.pos(), &mut buf, ctx)
+                .await
+                .with_context(|| {
+                    format!("Failed to read blob from virtual file {}", self.file.path)
+                })?;
+            let val = Value::des(&buf).with_context(|| {
+                format!(
+                    "Failed to deserialize file blob from virtual file {}",
+                    self.file.path
+                )
+            })?;
+            result.push((key, lsn, val));
+        }
+        Ok(result)
     }
 
     async fn plan_reads<Reader>(

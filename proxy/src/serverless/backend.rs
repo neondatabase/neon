@@ -15,6 +15,7 @@ use crate::{
     },
     context::RequestMonitoring,
     error::{ErrorKind, ReportableError, UserFacingError},
+    intern::EndpointIdInt,
     proxy::{connect_compute::ConnectMechanism, retry::ShouldRetry},
     rate_limiter::EndpointRateLimiter,
     Host,
@@ -66,8 +67,14 @@ impl PoolingBackend {
                 return Err(AuthError::auth_failed(&*user_info.user));
             }
         };
-        let auth_outcome =
-            crate::auth::validate_password_and_exchange(&conn_info.password, secret).await?;
+        let ep = EndpointIdInt::from(&conn_info.user_info.endpoint);
+        let auth_outcome = crate::auth::validate_password_and_exchange(
+            &config.thread_pool,
+            ep,
+            &conn_info.password,
+            secret,
+        )
+        .await?;
         let res = match auth_outcome {
             crate::sasl::Outcome::Success(key) => {
                 info!("user successfully authenticated");
@@ -97,7 +104,7 @@ impl PoolingBackend {
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         let maybe_client = if !force_new {
             info!("pool: looking for an existing connection");
-            self.pool.get(ctx, &conn_info).await?
+            self.pool.get(ctx, &conn_info)?
         } else {
             info!("pool: pool is disabled");
             None
@@ -225,9 +232,9 @@ impl ConnectMechanism for TokioMechanism {
             .connect_timeout(timeout);
 
         let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
-        let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+        let res = config.connect(tokio_postgres::NoTls).await;
         drop(pause);
-        drop(permit);
+        let (client, connection) = permit.release_result(res)?;
 
         tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
         Ok(poll_client(

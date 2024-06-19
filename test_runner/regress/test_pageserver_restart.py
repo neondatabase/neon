@@ -163,11 +163,6 @@ def test_pageserver_chaos(
 
     env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
-    # these can happen, if we shutdown at a good time. to be fixed as part of #5172.
-    message = ".*duplicated L1 layer layer=.*"
-    for ps in env.pageservers:
-        ps.allowed_errors.append(message)
-
     # Use a tiny checkpoint distance, to create a lot of layers quickly.
     # That allows us to stress the compaction and layer flushing logic more.
     tenant, _ = env.neon_cli.create_tenant(

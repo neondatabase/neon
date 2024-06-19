@@ -3,7 +3,7 @@ use std::{str::FromStr, time::Duration};
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy,
-        TenantLocateResponseShard,
+        TenantLocateResponseShard, UtilizationScore,
     },
     shard::TenantShardId,
 };
@@ -57,6 +57,10 @@ impl Node {
 
     pub(crate) fn get_id(&self) -> NodeId {
         self.id
+    }
+
+    pub(crate) fn get_scheduling(&self) -> NodeSchedulingPolicy {
+        self.scheduling
     }
 
     pub(crate) fn set_scheduling(&mut self, scheduling: NodeSchedulingPolicy) {
@@ -116,6 +120,16 @@ impl Node {
         match (self.availability, availability) {
             (Offline, Active(_)) => ToActive,
             (Active(_), Offline) => ToOffline,
+            // Consider the case when the storage controller handles the re-attach of a node
+            // before the heartbeats detect that the node is back online. We still need
+            // [`Service::node_configure`] to attempt reconciliations for shards with an
+            // unknown observed location.
+            // The unsavoury match arm below handles this situation.
+            (Active(lhs), Active(rhs))
+                if lhs == UtilizationScore::worst() && rhs < UtilizationScore::worst() =>
+            {
+                ToActive
+            }
             _ => Unchanged,
         }
     }
@@ -141,6 +155,7 @@ impl Node {
             NodeSchedulingPolicy::Draining => MaySchedule::No,
             NodeSchedulingPolicy::Filling => MaySchedule::Yes(score),
             NodeSchedulingPolicy::Pause => MaySchedule::No,
+            NodeSchedulingPolicy::PauseForRestart => MaySchedule::No,
         }
     }
 
@@ -157,7 +172,7 @@ impl Node {
             listen_http_port,
             listen_pg_addr,
             listen_pg_port,
-            scheduling: NodeSchedulingPolicy::Filling,
+            scheduling: NodeSchedulingPolicy::Active,
             availability: NodeAvailability::Offline,
             cancel: CancellationToken::new(),
         }

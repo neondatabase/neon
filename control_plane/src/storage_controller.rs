@@ -46,6 +46,7 @@ const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
 pub struct AttachHookRequest {
     pub tenant_shard_id: TenantShardId,
     pub node_id: Option<NodeId>,
+    pub generation_override: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -243,9 +244,13 @@ impl StorageController {
                 anyhow::bail!("initdb failed with status {status}");
             }
 
+            // Write a minimal config file:
+            // - Specify the port, since this is chosen dynamically
+            // - Switch off fsync, since we're running on lightweight test environments and when e.g. scale testing
+            //   the storage controller we don't want a slow local disk to interfere with that.
             tokio::fs::write(
                 &pg_data_path.join("postgresql.conf"),
-                format!("port = {}", self.postgres_port),
+                format!("port = {}\nfsync=off\n", self.postgres_port),
             )
             .await?;
         };
@@ -305,15 +310,21 @@ impl StorageController {
             ));
         }
 
+        if let Some(split_threshold) = self.config.split_threshold.as_ref() {
+            args.push(format!("--split-threshold={split_threshold}"))
+        }
+
+        args.push(format!(
+            "--neon-local-repo-dir={}",
+            self.env.base_data_dir.display()
+        ));
+
         background_process::start_process(
             COMMAND,
             &self.env.base_data_dir,
             &self.env.storage_controller_bin(),
             args,
-            [(
-                "NEON_REPO_DIR".to_string(),
-                self.env.base_data_dir.to_string_lossy().to_string(),
-            )],
+            [],
             background_process::InitialPidFile::Create(self.pid_file()),
             || async {
                 match self.ready().await {
@@ -432,6 +443,7 @@ impl StorageController {
         let request = AttachHookRequest {
             tenant_shard_id,
             node_id: Some(pageserver_id),
+            generation_override: None,
         };
 
         let response = self

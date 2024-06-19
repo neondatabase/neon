@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{layer_manager::LayerManager, Timeline};
+use super::{layer_manager::LayerManager, FlushLayerError, Timeline};
 use crate::{
     context::{DownloadBehavior, RequestContext},
     task_mgr::TaskKind,
@@ -12,7 +12,7 @@ use crate::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use utils::{completion, generation::Generation, id::TimelineId, lsn::Lsn};
+use utils::{completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -23,7 +23,7 @@ pub(crate) enum Error {
     #[error("shutting down, please retry later")]
     ShuttingDown,
     #[error("flushing failed")]
-    FlushAncestor(#[source] anyhow::Error),
+    FlushAncestor(#[source] FlushLayerError),
     #[error("layer download failed")]
     RewrittenDeltaDownloadFailed(#[source] anyhow::Error),
     #[error("copying LSN prefix locally failed")]
@@ -41,6 +41,27 @@ pub(crate) enum Error {
     Unexpected(#[source] anyhow::Error),
 }
 
+impl From<Error> for ApiError {
+    fn from(value: Error) -> Self {
+        match value {
+            e @ Error::NoAncestor => ApiError::Conflict(e.to_string()),
+            // TODO: ApiError converts the anyhow using debug formatting ... just stop using ApiError?
+            e @ Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{}", e)),
+            Error::ShuttingDown => ApiError::ShuttingDown,
+            Error::OtherTimelineDetachOngoing(_) => {
+                ApiError::ResourceUnavailable("other timeline detach is already ongoing".into())
+            }
+            // All of these contain shutdown errors, in fact, it's the most common
+            e @ Error::FlushAncestor(_)
+            | e @ Error::RewrittenDeltaDownloadFailed(_)
+            | e @ Error::CopyDeltaPrefix(_)
+            | e @ Error::UploadRewritten(_)
+            | e @ Error::CopyFailed(_)
+            | e @ Error::Unexpected(_) => ApiError::InternalServerError(e.into()),
+        }
+    }
+}
+
 pub(crate) struct PreparedTimelineDetach {
     layers: Vec<Layer>,
 }
@@ -56,7 +77,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             rewrite_concurrency: std::num::NonZeroUsize::new(2).unwrap(),
-            copy_concurrency: std::num::NonZeroUsize::new(10).unwrap(),
+            copy_concurrency: std::num::NonZeroUsize::new(100).unwrap(),
         }
     }
 }
@@ -75,6 +96,11 @@ pub(super) async fn prepare(
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
+        // TODO: check if we have already been detached; for this we need to read the stored data
+        // on remote client, for that we need a follow-up which makes uploads cheaper and maintains
+        // a projection of the commited data.
+        //
+        // the error is wrong per openapi
         return Err(NoAncestor);
     };
 
@@ -84,7 +110,7 @@ pub(super) async fn prepare(
 
     if ancestor.ancestor_timeline.is_some() {
         // non-technical requirement; we could flatten N ancestors just as easily but we chose
-        // not to
+        // not to, at least initially
         return Err(TooManyAncestors);
     }
 

@@ -25,7 +25,7 @@ use utils::crashsafe::durable_rename;
 
 use crate::metrics::{time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS};
 use crate::state::TimelinePersistentState;
-use crate::wal_backup::read_object;
+use crate::wal_backup::{read_object, remote_timeline_path};
 use crate::SafeKeeperConf;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::XLogFileName;
@@ -536,7 +536,7 @@ async fn remove_segments_from_disk(
 }
 
 pub struct WalReader {
-    workdir: Utf8PathBuf,
+    remote_path: RemotePath,
     timeline_dir: Utf8PathBuf,
     wal_seg_size: usize,
     pos: Lsn,
@@ -558,7 +558,7 @@ pub struct WalReader {
 
 impl WalReader {
     pub fn new(
-        workdir: Utf8PathBuf,
+        ttid: &TenantTimelineId,
         timeline_dir: Utf8PathBuf,
         state: &TimelinePersistentState,
         start_pos: Lsn,
@@ -586,7 +586,7 @@ impl WalReader {
         }
 
         Ok(Self {
-            workdir,
+            remote_path: remote_timeline_path(ttid)?,
             timeline_dir,
             wal_seg_size: state.server.wal_seg_size as usize,
             pos: start_pos,
@@ -684,13 +684,12 @@ impl WalReader {
         let xlogoff = self.pos.segment_offset(self.wal_seg_size);
         let segno = self.pos.segment_number(self.wal_seg_size);
         let wal_file_name = XLogFileName(PG_TLI, segno, self.wal_seg_size);
-        let wal_file_path = self.timeline_dir.join(wal_file_name);
 
         // Try to open local file, if we may have WAL locally
         if self.pos >= self.local_start_lsn {
-            let res = Self::open_wal_file(&wal_file_path).await;
+            let res = open_wal_file(&self.timeline_dir, segno, self.wal_seg_size).await;
             match res {
-                Ok(mut file) => {
+                Ok((mut file, _)) => {
                     file.seek(SeekFrom::Start(xlogoff as u64)).await?;
                     return Ok(Box::pin(file));
                 }
@@ -712,39 +711,11 @@ impl WalReader {
 
         // Try to open remote file, if remote reads are enabled
         if self.enable_remote_read {
-            let remote_wal_file_path = wal_file_path
-                .strip_prefix(&self.workdir)
-                .context("Failed to strip workdir prefix")
-                .and_then(RemotePath::new)
-                .with_context(|| {
-                    format!(
-                        "Failed to resolve remote part of path {:?} for base {:?}",
-                        wal_file_path, self.workdir,
-                    )
-                })?;
+            let remote_wal_file_path = self.remote_path.join(&wal_file_name);
             return read_object(&remote_wal_file_path, xlogoff as u64).await;
         }
 
         bail!("WAL segment is not found")
-    }
-
-    /// Helper function for opening a wal file.
-    async fn open_wal_file(wal_file_path: &Utf8Path) -> Result<tokio::fs::File> {
-        // First try to open the .partial file.
-        let mut partial_path = wal_file_path.to_owned();
-        partial_path.set_extension("partial");
-        if let Ok(opened_file) = tokio::fs::File::open(&partial_path).await {
-            return Ok(opened_file);
-        }
-
-        // If that failed, try it without the .partial extension.
-        tokio::fs::File::open(&wal_file_path)
-            .await
-            .with_context(|| format!("Failed to open WAL file {:?}", wal_file_path))
-            .map_err(|e| {
-                warn!("{}", e);
-                e
-            })
     }
 }
 
@@ -765,6 +736,34 @@ async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
     file.write_all(&ZERO_BLOCK[0..count]).await?;
     file.flush().await?;
     Ok(())
+}
+
+/// Helper function for opening WAL segment `segno` in `dir`. Returns file and
+/// whether it is .partial.
+pub(crate) async fn open_wal_file(
+    timeline_dir: &Utf8Path,
+    segno: XLogSegNo,
+    wal_seg_size: usize,
+) -> Result<(tokio::fs::File, bool)> {
+    let (wal_file_path, wal_file_partial_path) = wal_file_paths(timeline_dir, segno, wal_seg_size)?;
+
+    // First try to open the .partial file.
+    let mut partial_path = wal_file_path.to_owned();
+    partial_path.set_extension("partial");
+    if let Ok(opened_file) = tokio::fs::File::open(&wal_file_partial_path).await {
+        return Ok((opened_file, true));
+    }
+
+    // If that failed, try it without the .partial extension.
+    let pf = tokio::fs::File::open(&wal_file_path)
+        .await
+        .with_context(|| format!("failed to open WAL file {:#}", wal_file_path))
+        .map_err(|e| {
+            warn!("{}", e);
+            e
+        })?;
+
+    Ok((pf, false))
 }
 
 /// Helper returning full path to WAL segment file and its .partial brother.

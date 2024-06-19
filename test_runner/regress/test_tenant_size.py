@@ -502,9 +502,14 @@ def test_get_tenant_size_with_multiple_branches(
 
     gc_horizon = 128 * 1024
 
-    neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='0s', gc_period='0s', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
-
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "compaction_period": "0s",
+            "gc_period": "0s",
+            "pitr_interval": "0sec",
+            "gc_horizon": gc_horizon,
+        }
+    )
 
     # FIXME: we have a race condition between GC and delete timeline. GC might fail with this
     # error. Similar to https://github.com/neondatabase/neon/issues/2671
@@ -673,10 +678,6 @@ def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
         with pytest.raises(PageserverApiException, match=matcher):
             completion.result()
 
-    # this happens on both cases
-    env.pageserver.allowed_errors.append(
-        ".*ignoring failure to find gc cutoffs: timeline shutting down.*"
-    )
     # this happens only in the case of deletion (http response logging)
     env.pageserver.allowed_errors.append(".*Failed to refresh gc_info before gathering inputs.*")
 

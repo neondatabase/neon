@@ -81,11 +81,19 @@ page_cache_size=10
 
     non_vectored_sum = metrics.query_one("pageserver_layers_visited_per_read_global_sum")
     non_vectored_count = metrics.query_one("pageserver_layers_visited_per_read_global_count")
-    non_vectored_average = non_vectored_sum.value / non_vectored_count.value
-
+    if non_vectored_count.value != 0:
+        non_vectored_average = non_vectored_sum.value / non_vectored_count.value
+    else:
+        non_vectored_average = 0
     vectored_sum = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_sum")
     vectored_count = metrics.query_one("pageserver_layers_visited_per_vectored_read_global_count")
-    vectored_average = vectored_sum.value / vectored_count.value
+    if vectored_count.value > 0:
+        assert vectored_sum.value > 0
+        vectored_average = vectored_sum.value / vectored_count.value
+    else:
+        # special case: running local tests with default legacy configuration
+        assert vectored_sum.value == 0
+        vectored_average = 0
 
     log.info(f"{non_vectored_average=} {vectored_average=}")
 
@@ -165,7 +173,6 @@ def test_sharding_compaction(
                 image_layer_sizes[layer.layer_file_name] = layer.layer_file_size
 
                 # Pageserver should assert rather than emit an empty layer file, but double check here
-                assert layer.layer_file_size is not None
                 assert layer.layer_file_size > 0
 
         shard_has_image_layers.append(len(image_layer_sizes) > 1)
@@ -178,7 +185,7 @@ def test_sharding_compaction(
             #
             # We only do this check with tiny stripes, because large stripes may not give all shards enough
             # data to have statistically significant image layers
-            avg_size = sum(v for v in image_layer_sizes.values()) / len(image_layer_sizes)  # type: ignore
+            avg_size = sum(v for v in image_layer_sizes.values()) / len(image_layer_sizes)
             log.info(f"Shard {shard_id} average image layer size: {avg_size}")
             assert avg_size > compaction_target_size / 2
 
@@ -195,8 +202,8 @@ def test_sharding_compaction(
 
 
 class CompactionAlgorithm(str, enum.Enum):
-    LEGACY = "Legacy"
-    TIERED = "Tiered"
+    LEGACY = "legacy"
+    TIERED = "tiered"
 
 
 @pytest.mark.parametrize(
@@ -231,7 +238,7 @@ def test_uploads_and_deletions(
     # https://github.com/neondatabase/neon/issues/7707
     # https://github.com/neondatabase/neon/issues/7759
     allowed_errors = [
-        ".*duplicated L1 layer.*",
+        ".*/checkpoint.*rename temporary file as correct path for.*",  # EEXIST
         ".*delta layer created with.*duplicate values.*",
         ".*assertion failed: self.lsn_range.start <= lsn.*",
         ".*HTTP request handler task panicked: task.*panicked.*",

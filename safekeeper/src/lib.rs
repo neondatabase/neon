@@ -7,10 +7,7 @@ use tokio::runtime::Runtime;
 use std::time::Duration;
 use storage_broker::Uri;
 
-use utils::{
-    auth::SwappableJwtAuth,
-    id::{NodeId, TenantId, TenantTimelineId},
-};
+use utils::{auth::SwappableJwtAuth, id::NodeId, logging::SecretString};
 
 mod auth;
 pub mod broker;
@@ -31,6 +28,8 @@ pub mod safekeeper;
 pub mod send_wal;
 pub mod state;
 pub mod timeline;
+pub mod timeline_manager;
+pub mod timelines_set;
 pub mod wal_backup;
 pub mod wal_backup_partial;
 pub mod wal_service;
@@ -79,6 +78,8 @@ pub struct SafeKeeperConf {
     pub pg_auth: Option<Arc<JwtAuth>>,
     pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
     pub http_auth: Option<Arc<SwappableJwtAuth>>,
+    /// JWT token to connect to other safekeepers with.
+    pub sk_auth_token: Option<SecretString>,
     pub current_thread_runtime: bool,
     pub walsenders_keep_horizon: bool,
     pub partial_backup_enabled: bool,
@@ -87,15 +88,6 @@ pub struct SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    pub fn tenant_dir(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.workdir.join(tenant_id.to_string())
-    }
-
-    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> Utf8PathBuf {
-        self.tenant_dir(&ttid.tenant_id)
-            .join(ttid.timeline_id.to_string())
-    }
-
     pub fn is_wal_backup_enabled(&self) -> bool {
         self.remote_storage.is_some() && self.wal_backup_enabled
     }
@@ -124,6 +116,7 @@ impl SafeKeeperConf {
             pg_auth: None,
             pg_tenant_only_auth: None,
             http_auth: None,
+            sk_auth_token: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,

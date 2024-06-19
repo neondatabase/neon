@@ -45,6 +45,7 @@
  */
 #include "postgres.h"
 
+#include "access/parallel.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xlogdefs.h"
@@ -92,6 +93,10 @@ static char *hexdump_page(char *page);
 )
 
 const int	SmgrTrace = DEBUG5;
+
+#define NEON_PANIC_CONNECTION_STATE(shard_no, elvl, message, ...) \
+	neon_shard_log(shard_no, elvl, "Broken connection state: " message, \
+				   ##__VA_ARGS__)
 
 page_server_api *page_server;
 
@@ -525,6 +530,8 @@ prefetch_flush_requests(void)
  *
  * NOTE: this function may indirectly update MyPState->pfs_hash; which
  * invalidates any active pointers into the hash table.
+ * NOTE: callers should make sure they can handle query cancellations in this
+ * function's call path.
  */
 static bool
 prefetch_wait_for(uint64 ring_index)
@@ -560,6 +567,8 @@ prefetch_wait_for(uint64 ring_index)
  *
  * NOTE: this function may indirectly update MyPState->pfs_hash; which
  * invalidates any active pointers into the hash table.
+ *
+ * NOTE: this does IO, and can get canceled out-of-line.
  */
 static bool
 prefetch_read(PrefetchRequest *slot)
@@ -570,6 +579,14 @@ prefetch_read(PrefetchRequest *slot)
 	Assert(slot->status == PRFS_REQUESTED);
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_receive);
+
+	if (slot->status != PRFS_REQUESTED ||
+		slot->response != NULL ||
+		slot->my_ring_index != MyPState->ring_receive)
+		neon_shard_log(slot->shard_no, ERROR,
+					   "Incorrect prefetch read: status=%d response=%p my=%lu receive=%lu",
+					   slot->status, slot->response,
+					   (long)slot->my_ring_index, (long)MyPState->ring_receive);
 
 	old = MemoryContextSwitchTo(MyPState->errctx);
 	response = (NeonResponse *) page_server->receive(slot->shard_no);
@@ -588,6 +605,11 @@ prefetch_read(PrefetchRequest *slot)
 	}
 	else
 	{
+		neon_shard_log(slot->shard_no, LOG,
+					   "No response from reading prefetch entry %lu: %u/%u/%u.%u block %u. This can be caused by a concurrent disconnect",
+					   (long)slot->my_ring_index,
+					   RelFileInfoFmt(BufTagGetNRelFileInfo(slot->buftag)),
+					   slot->buftag.forkNum, slot->buftag.blockNum);
 		return false;
 	}
 }
@@ -602,6 +624,7 @@ void
 prefetch_on_ps_disconnect(void)
 {
 	MyPState->ring_flush = MyPState->ring_unused;
+
 	while (MyPState->ring_receive < MyPState->ring_unused)
 	{
 		PrefetchRequest *slot;
@@ -624,6 +647,7 @@ prefetch_on_ps_disconnect(void)
 		slot->status = PRFS_TAG_REMAINS;
 		MyPState->n_requests_inflight -= 1;
 		MyPState->ring_receive += 1;
+
 		prefetch_set_unused(ring_index);
 	}
 }
@@ -690,6 +714,8 @@ static void
 prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns)
 {
 	bool		found;
+	uint64		mySlotNo = slot->my_ring_index;
+
 	NeonGetPageRequest request = {
 		.req.tag = T_NeonGetPageRequest,
 		/* lsn and not_modified_since are filled in below */
@@ -697,6 +723,8 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 		.forknum = slot->buftag.forkNum,
 		.blkno = slot->buftag.blockNum,
 	};
+
+	Assert(mySlotNo == MyPState->ring_unused);
 
 	if (force_request_lsns)
 		slot->request_lsns = *force_request_lsns;
@@ -710,7 +738,11 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
 
-	while (!page_server->send(slot->shard_no, (NeonRequest *) &request));
+	while (!page_server->send(slot->shard_no, (NeonRequest *) &request))
+	{
+		Assert(mySlotNo == MyPState->ring_unused);
+		/* loop */
+	}
 
 	/* update prefetch state */
 	MyPState->n_requests_inflight += 1;
@@ -721,7 +753,6 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 
 	/* update slot state */
 	slot->status = PRFS_REQUESTED;
-
 	prfh_insert(MyPState->prf_hash, slot, &found);
 	Assert(!found);
 }
@@ -893,6 +924,10 @@ Retry:
 	return ring_index;
 }
 
+/*
+ * Note: this function can get canceled and use a long jump to the next catch
+ * context. Take care.
+ */
 static NeonResponse *
 page_server_request(void const *req)
 {
@@ -924,19 +959,38 @@ page_server_request(void const *req)
 	 * Current sharding model assumes that all metadata is present only at shard 0.
 	 * We still need to call get_shard_no() to check if shard map is up-to-date.
 	 */
-	if (((NeonRequest *) req)->tag != T_NeonGetPageRequest || ((NeonGetPageRequest *) req)->forknum != MAIN_FORKNUM)
+	if (((NeonRequest *) req)->tag != T_NeonGetPageRequest ||
+		((NeonGetPageRequest *) req)->forknum != MAIN_FORKNUM)
 	{
 		shard_no = 0;
 	}
 
 	do
 	{
-		while (!page_server->send(shard_no, (NeonRequest *) req) || !page_server->flush(shard_no));
-		consume_prefetch_responses();
-		resp = page_server->receive(shard_no);
-	} while (resp == NULL);
-	return resp;
+		PG_TRY();
+		{
+			while (!page_server->send(shard_no, (NeonRequest *) req)
+				   || !page_server->flush(shard_no))
+			{
+				/* do nothing */
+			}
+			consume_prefetch_responses();
+			resp = page_server->receive(shard_no);
+		}
+		PG_CATCH();
+		{
+			/*
+			 * Cancellation in this code needs to be handled better at some
+			 * point, but this currently seems fine for now.
+			 */
+			page_server->disconnect(shard_no);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
+	} while (resp == NULL);
+
+	return resp;
 }
 
 
@@ -1348,6 +1402,10 @@ PageIsEmptyHeapPage(char *buffer)
 	return memcmp(buffer, empty_page.data, BLCKSZ) == 0;
 }
 
+/*
+ * A page is being evicted from the shared buffer cache. Update the
+ * last-written LSN of the page, and WAL-log it if needed.
+ */
 static void
 #if PG_MAJORVERSION_NUM < 16
 neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool force)
@@ -1356,12 +1414,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 #endif
 {
 	XLogRecPtr	lsn = PageGetLSN((Page) buffer);
-
-	if (ShutdownRequestPending)
-		return;
-	/* Don't log any pages if we're not allowed to do so. */
-	if (!XLogInsertAllowed())
-		return;
+	bool		log_page;
 
 	/*
 	 * Whenever a VM or FSM page is evicted, WAL-log it. FSM and (some) VM
@@ -1370,9 +1423,21 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 	 * correctness, the non-logged updates are not critical. But we want to
 	 * have a reasonably up-to-date VM and FSM in the page server.
 	 */
-	if ((force || forknum == FSM_FORKNUM || forknum == VISIBILITYMAP_FORKNUM) && !RecoveryInProgress())
+	log_page = false;
+	if (force)
 	{
-		/* FSM is never WAL-logged and we don't care. */
+		Assert(XLogInsertAllowed());
+		log_page = true;
+	}
+	else if (XLogInsertAllowed() &&
+			 !ShutdownRequestPending &&
+			 (forknum == FSM_FORKNUM || forknum == VISIBILITYMAP_FORKNUM))
+	{
+		log_page = true;
+	}
+
+	if (log_page)
+	{
 		XLogRecPtr	recptr;
 
 		recptr = log_newpage_copy(&InfoFromSMgrRel(reln), forknum, blocknum,
@@ -1385,7 +1450,8 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 						RelFileInfoFmt(InfoFromSMgrRel(reln)),
 						forknum, LSN_FORMAT_ARGS(lsn))));
 	}
-	else if (lsn == InvalidXLogRecPtr)
+
+	if (lsn == InvalidXLogRecPtr)
 	{
 		/*
 		 * When PostgreSQL extends a relation, it calls smgrextend() with an
@@ -1421,19 +1487,31 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
 		}
-		else
+		else if (forknum != FSM_FORKNUM && forknum != VISIBILITYMAP_FORKNUM)
 		{
-			ereport(PANIC,
+			/*
+			 * Its a bad sign if there is a page with zero LSN in the buffer
+			 * cache in a standby, too. However, PANICing seems like a cure
+			 * worse than the disease, as the damage has likely already been
+			 * done in the primary. So in a standby, make this an assertion,
+			 * and in a release build just LOG the error and soldier on. We
+			 * update the last-written LSN of the page with a conservative
+			 * value in that case, which is the last replayed LSN.
+			 */
+			ereport(RecoveryInProgress() ? LOG : PANIC,
 					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
 							blocknum,
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
+			Assert(false);
+
+			lsn = GetXLogReplayRecPtr(NULL); /* in standby mode, soldier on */
 		}
 	}
 	else
 	{
 		ereport(SmgrTrace,
-				(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is already wal logged at lsn=%X/%X",
+				(errmsg(NEON_TAG "Evicting page %u of relation %u/%u/%u.%u with lsn=%X/%X",
 						blocknum,
 						RelFileInfoFmt(InfoFromSMgrRel(reln)),
 						forknum, LSN_FORMAT_ARGS(lsn))));
@@ -1526,8 +1604,92 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno)
 
 	if (RecoveryInProgress())
 	{
-		/* Request the page at the last replayed LSN. */
-		result.request_lsn = GetXLogReplayRecPtr(NULL);
+		/*---
+		 * In broad strokes, a replica always requests the page at the current
+		 * replay LSN. But looking closer, what exactly is the replay LSN? Is
+		 * it the last replayed record, or the record being replayed? And does
+		 * the startup process performing the replay need to do something
+		 * differently than backends running queries? Let's take a closer look
+		 * at the different scenarios:
+		 *
+		 * 1. Startup process reads a page, last_written_lsn is old.
+		 *
+		 * Read the old version of the page. We will apply the WAL record on
+		 * it to bring it up-to-date.
+		 *
+		 * We could read the new version, with the changes from this WAL
+		 * record already applied, to offload the work of replaying the record
+		 * to the pageserver. The pageserver might not have received the WAL
+		 * record yet, though, so a read of the old page version and applying
+		 * the record ourselves is likely faster. Also, the redo function
+		 * might be surprised if the changes have already applied. That's
+		 * normal during crash recovery, but not in hot standby.
+		 *
+		 * 2. Startup process reads a page, last_written_lsn == record we're
+		 *    replaying.
+		 *
+		 * Can this happen? There are a few theoretical cases when it might:
+		 *
+		 * A) The redo function reads the same page twice. We had already read
+		 *    and applied the changes once, and now we're reading it for the
+		 *    second time.  That would be a rather silly thing for a redo
+		 *    function to do, and I'm not aware of any that would do it.
+		 *
+		 * B) The redo function modifies multiple pages, and it already
+		 *    applied the changes to one of the pages, released the lock on
+		 *    it, and is now reading a second page.  Furthermore, the first
+		 *    page was already evicted from the buffer cache, and also from
+		 *    the last-written LSN cache, so that the per-relation or global
+		 *    last-written LSN was already updated. All the WAL redo functions
+		 *    hold the locks on pages that they modify, until all the changes
+		 *    have been modified (?), which would make that impossible.
+		 *    However, we skip the locking, if the page isn't currently in the
+		 *    page cache (see neon_redo_read_buffer_filter below).
+		 *
+		 * Even if the one of the above cases were possible in theory, they
+		 * would also require the pages being modified by the redo function to
+		 * be immediately evicted from the page cache.
+		 *
+		 * So this probably does not happen in practice. But if it does, we
+		 * request the new version, including the changes from the record
+		 * being replayed. That seems like the correct behavior in any case.
+		 *
+		 * 3. Backend process reads a page with old last-written LSN
+		 *
+		 * Nothing special here. Read the old version.
+		 *
+		 * 4. Backend process reads a page with last_written_lsn == record being replayed
+		 *
+		 * This can happen, if the redo function has started to run, and saw
+		 * that the page isn't present in the page cache (see
+		 * neon_redo_read_buffer_filter below).  Normally, in a normal
+		 * Postgres server, the redo function would hold a lock on the page,
+		 * so we would get blocked waiting the redo function to release the
+		 * lock. To emulate that, wait for the WAL replay of the record to
+		 * finish.
+		 */
+		/* Request the page at the end of the last fully replayed LSN. */
+		XLogRecPtr replay_lsn = GetXLogReplayRecPtr(NULL);
+
+		if (last_written_lsn > replay_lsn)
+		{
+			/* GetCurrentReplayRecPtr was introduced in v15 */
+#if PG_VERSION_NUM >= 150000
+			Assert(last_written_lsn == GetCurrentReplayRecPtr(NULL));
+#endif
+
+			/*
+			 * Cases 2 and 4. If this is a backend (case 4), the
+			 * neon_read_at_lsn() call later will wait for the WAL record to be
+			 * fully replayed.
+			 */
+			result.request_lsn = last_written_lsn;
+		}
+		else
+		{
+			/* cases 1 and 3 */
+			result.request_lsn = replay_lsn;
+		}
 		result.not_modified_since = last_written_lsn;
 		result.effective_request_lsn = result.request_lsn;
 		Assert(last_written_lsn <= result.request_lsn);
@@ -1796,7 +1958,9 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_exists", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected Exists (0x%02x) or Error (0x%02x) response to ExistsRequest, but got 0x%02x",
+										T_NeonExistsResponse, T_NeonErrorResponse, resp->tag);
 	}
 	pfree(resp);
 	return exists;
@@ -2248,7 +2412,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	/*
 	 * Try to find prefetched page in the list of received pages.
 	 */
-  Retry:
+Retry:
 	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
 
 	if (entry != NULL)
@@ -2334,7 +2498,9 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_read_at_lsn", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(slot->shard_no, PANIC,
+										"Expected GetPage (0x%02x) or Error (0x%02x) response to GetPageRequest, but got 0x%02x",
+										T_NeonGetPageResponse, T_NeonErrorResponse, resp->tag);
 	}
 
 	/* buffer was used, clean up for later reuse */
@@ -2605,7 +2771,9 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_nblocks", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected Nblocks (0x%02x) or Error (0x%02x) response to NblocksRequest, but got 0x%02x",
+										T_NeonNblocksResponse, T_NeonErrorResponse, resp->tag);
 	}
 	update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
 
@@ -2658,7 +2826,9 @@ neon_dbsize(Oid dbNode)
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_dbsize", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected DbSize (0x%02x) or Error (0x%02x) response to DbSizeRequest, but got 0x%02x",
+										T_NeonDbSizeResponse, T_NeonErrorResponse, resp->tag);
 	}
 
 	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
@@ -2822,10 +2992,14 @@ neon_start_unlogged_build(SMgrRelation reln)
 	reln->smgr_relpersistence = RELPERSISTENCE_UNLOGGED;
 
 	/*
+	 * Create the local file. In a parallel build, the leader is expected to
+	 * call this first and do it.
+	 *
 	 * FIXME: should we pass isRedo true to create the tablespace dir if it
 	 * doesn't exist? Is it needed?
 	 */
-	mdcreate(reln, MAIN_FORKNUM, false);
+	if (!IsParallelWorker())
+		mdcreate(reln, MAIN_FORKNUM, false);
 }
 
 /*
@@ -2849,7 +3023,17 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 	Assert(unlogged_build_phase == UNLOGGED_BUILD_PHASE_1);
 	Assert(reln->smgr_relpersistence == RELPERSISTENCE_UNLOGGED);
 
-	unlogged_build_phase = UNLOGGED_BUILD_PHASE_2;
+	/*
+	 * In a parallel build, (only) the leader process performs the 2nd
+	 * phase.
+	 */
+	if (IsParallelWorker())
+	{
+		unlogged_build_rel = NULL;
+		unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+	}
+	else
+		unlogged_build_phase = UNLOGGED_BUILD_PHASE_2;
 }
 
 /*
@@ -2928,12 +3112,12 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 		request_lsn = UINT64_MAX;
 
 	/*
-	 * GetRedoStartLsn() returns LSN of basebackup. We know that the SLRU
+	 * GetRedoStartLsn() returns LSN of the basebackup. We know that the SLRU
 	 * segment has not changed since the basebackup, because in order to
 	 * modify it, we would have had to download it already. And once
 	 * downloaded, we never evict SLRU segments from local disk.
 	 */
-	not_modified_since = GetRedoStartLsn();
+	not_modified_since = nm_adjust_lsn(GetRedoStartLsn());
 
 	SlruKind kind;
 
@@ -2983,7 +3167,9 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 			break;
 
 		default:
-			neon_log(ERROR, "unexpected response from page server with tag 0x%02x in neon_read_slru_segment", resp->tag);
+			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+										"Expected GetSlruSegment (0x%02x) or Error (0x%02x) response to GetSlruSegmentRequest, but got 0x%02x",
+										T_NeonGetSlruSegmentResponse, T_NeonErrorResponse, resp->tag);
 	}
 	pfree(resp);
 
@@ -3201,7 +3387,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	BufferTag	tag;
 	uint32		hash;
 	LWLock	   *partitionLock;
-	Buffer		buffer;
+	int			buf_id;
 	bool		no_redo_needed;
 
 	if (old_redo_read_buffer_filter && old_redo_read_buffer_filter(record, block_id))
@@ -3239,20 +3425,20 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	else
 	{
 		/* Try to find the relevant buffer */
-		buffer = BufTableLookup(&tag, hash);
+		buf_id = BufTableLookup(&tag, hash);
 
-		no_redo_needed = buffer < 0;
+		no_redo_needed = buf_id < 0;
 	}
-	/* In both cases st lwlsn past this WAL record */
-	SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
 
 	/*
 	 * we don't have the buffer in memory, update lwLsn past this record, also
 	 * evict page from file cache
 	 */
 	if (no_redo_needed)
+	{
+		SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
 		lfc_evict(rinfo, forknum, blkno);
-
+	}
 
 	LWLockRelease(partitionLock);
 

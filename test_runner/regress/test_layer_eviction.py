@@ -272,14 +272,14 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
             resident_physical_size_metric == 0
         ), "ensure that resident_physical_size metric is zero"
         assert resident_physical_size_metric == sum(
-            layer.layer_file_size or 0 for layer in info.historic_layers if not layer.remote
+            layer.layer_file_size for layer in info.historic_layers if not layer.remote
         ), "ensure that resident_physical_size metric corresponds to layer map dump"
 
         remote_physical_size_metric = ps_http.get_timeline_metric(
             tenant_id, timeline_id, "pageserver_remote_physical_size"
         )
         assert remote_physical_size_metric == sum(
-            layer.layer_file_size or 0 for layer in info.historic_layers if layer.remote
+            layer.layer_file_size for layer in info.historic_layers if layer.remote
         ), "ensure that remote_physical_size metric corresponds to layer map dump"
 
     log.info("before runnning GC, ensure that remote_physical size is zero")

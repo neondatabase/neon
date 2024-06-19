@@ -4,7 +4,7 @@ use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::{ShardIndex, TenantShardId};
+use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use tracing::Instrument;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
-use utils::sync::heavier_once_cell;
+use utils::sync::{gate, heavier_once_cell};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -23,10 +23,10 @@ use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self, DeltaEntry};
-use super::image_layer;
+use super::image_layer::{self};
 use super::{
-    AsLayerDesc, LayerAccessStats, LayerAccessStatsReset, LayerName, PersistentLayerDesc,
-    ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
+    AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
+    PersistentLayerDesc, ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
 };
 
 use utils::generation::Generation;
@@ -161,7 +161,7 @@ impl Layer {
             timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
-            metadata.file_size(),
+            metadata.file_size,
         );
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
@@ -194,7 +194,7 @@ impl Layer {
             timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
-            metadata.file_size(),
+            metadata.file_size,
         );
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
@@ -227,7 +227,7 @@ impl Layer {
 
         timeline
             .metrics
-            .resident_physical_size_add(metadata.file_size());
+            .resident_physical_size_add(metadata.file_size);
 
         ResidentLayer { downloaded, owner }
     }
@@ -277,9 +277,10 @@ impl Layer {
 
         let downloaded = resident.expect("just initialized");
 
-        // if the rename works, the path is as expected
-        // TODO: sync system call
-        std::fs::rename(temp_path, owner.local_path())
+        // We never want to overwrite an existing file, so we use `RENAME_NOREPLACE`.
+        // TODO: this leaves the temp file in place if the rename fails, risking us running
+        // out of space. Should we clean it up here or does the calling context deal with this?
+        utils::fs_ext::rename_noreplace(temp_path.as_std_path(), owner.local_path().as_std_path())
             .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
 
         Ok(ResidentLayer { downloaded, owner })
@@ -366,7 +367,10 @@ impl Layer {
             .0
             .get_or_maybe_download(true, Some(ctx))
             .await
-            .map_err(|err| GetVectoredError::Other(anyhow::anyhow!(err)))?;
+            .map_err(|err| match err {
+                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                other => GetVectoredError::Other(anyhow::anyhow!(other)),
+            })?;
 
         self.0
             .access_stats
@@ -382,6 +386,23 @@ impl Layer {
                 ),
                 err => err,
             })
+    }
+
+    /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
+    #[cfg(test)]
+    pub(crate) async fn load_key_values(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
+        let layer = self
+            .0
+            .get_or_maybe_download(true, Some(ctx))
+            .await
+            .map_err(|err| match err {
+                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                other => GetVectoredError::Other(anyhow::anyhow!(other)),
+            })?;
+        layer.load_key_values(&self.0, ctx).await
     }
 
     /// Download the layer if evicted.
@@ -1108,6 +1129,7 @@ impl LayerInner {
             .download_layer_file(
                 &self.desc.layer_name(),
                 &self.metadata(),
+                &self.path,
                 &timeline.cancel,
                 ctx,
             )
@@ -1156,6 +1178,11 @@ impl LayerInner {
             Err(e) => {
                 let consecutive_failures =
                     1 + self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+
+                if timeline.cancel.is_cancelled() {
+                    // If we're shutting down, drop out before logging the error
+                    return Err(e);
+                }
 
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
 
@@ -1263,6 +1290,7 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
+                l0: crate::tenant::layer_map::LayerMap::is_l0(self.layer_desc()),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
@@ -1331,7 +1359,7 @@ impl LayerInner {
 
         is_good_to_continue(&rx.borrow_and_update())?;
 
-        let Ok(_gate) = timeline.gate.enter() else {
+        let Ok(gate) = timeline.gate.enter() else {
             return Err(EvictionCancelled::TimelineGone);
         };
 
@@ -1419,7 +1447,7 @@ impl LayerInner {
         Self::spawn_blocking(move || {
             let _span = span.entered();
 
-            let res = self.evict_blocking(&timeline, &permit);
+            let res = self.evict_blocking(&timeline, &gate, &permit);
 
             let waiters = self.inner.initializer_count();
 
@@ -1445,6 +1473,7 @@ impl LayerInner {
     fn evict_blocking(
         &self,
         timeline: &Timeline,
+        _gate: &gate::GateGuard,
         _permit: &heavier_once_cell::InitPermit,
     ) -> Result<(), EvictionCancelled> {
         // now accesses to `self.inner.get_or_init*` wait on the semaphore or the `_permit`
@@ -1745,6 +1774,20 @@ impl DownloadedLayer {
         }
     }
 
+    #[cfg(test)]
+    async fn load_key_values(
+        &self,
+        owner: &Arc<LayerInner>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
+        use LayerKind::*;
+
+        match self.get(owner, ctx).await? {
+            Delta(d) => d.load_key_values(ctx).await,
+            Image(i) => i.load_key_values(ctx).await,
+        }
+    }
+
     async fn dump(&self, owner: &Arc<LayerInner>, ctx: &RequestContext) -> anyhow::Result<()> {
         use LayerKind::*;
         match self.get(owner, ctx).await? {
@@ -1799,21 +1842,37 @@ impl ResidentLayer {
         use LayerKind::*;
 
         let owner = &self.owner.0;
-
         match self.downloaded.get(owner, ctx).await? {
             Delta(ref d) => {
+                // this is valid because the DownloadedLayer::kind is a OnceCell, not a
+                // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
+                // while it's being held.
                 owner
                     .access_stats
                     .record_access(LayerAccessKind::KeyIter, ctx);
 
-                // this is valid because the DownloadedLayer::kind is a OnceCell, not a
-                // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
-                // while it's being held.
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await
                     .with_context(|| format!("Layer index is corrupted for {self}"))
             }
             Image(_) => anyhow::bail!(format!("cannot load_keys on a image layer {self}")),
+        }
+    }
+
+    /// Read all they keys in this layer which match the ShardIdentity, and write them all to
+    /// the provided writer.  Return the number of keys written.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(layer=%self))]
+    pub(crate) async fn filter<'a>(
+        &'a self,
+        shard_identity: &ShardIdentity,
+        writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<usize> {
+        use LayerKind::*;
+
+        match self.downloaded.get(&self.owner.0, ctx).await? {
+            Delta(_) => anyhow::bail!(format!("cannot filter() on a delta layer {self}")),
+            Image(i) => i.filter(shard_identity, writer, ctx).await,
         }
     }
 

@@ -7,11 +7,10 @@ use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
 use tracing::{error, info, instrument, Instrument};
-use utils::{crashsafe, fs_ext, id::TimelineId};
+use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
 
 use crate::{
     config::PageServerConf,
-    deletion_queue::DeletionQueueClient,
     task_mgr::{self, TaskKind},
     tenant::{
         metadata::TimelineMetadata,
@@ -263,7 +262,6 @@ impl DeleteTimelineFlow {
         timeline_id: TimelineId,
         local_metadata: &TimelineMetadata,
         remote_client: RemoteTimelineClient,
-        deletion_queue_client: DeletionQueueClient,
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
         // RemoteTimelineClient is the only functioning part.
@@ -274,12 +272,13 @@ impl DeleteTimelineFlow {
                 None, // Ancestor is not needed for deletion.
                 TimelineResources {
                     remote_client,
-                    deletion_queue_client,
                     timeline_get_throttle: tenant.timeline_get_throttle.clone(),
                 },
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
+                // Aux file policy is not needed for deletion, assuming deletion does not read aux keyspace
+                None,
             )
             .context("create_timeline_struct")?;
 

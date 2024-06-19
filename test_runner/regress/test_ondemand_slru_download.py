@@ -129,3 +129,33 @@ def test_ondemand_download_replica(neon_env_builder: NeonEnvBuilder, shard_count
     cur_replica = conn_replica.cursor()
     cur_replica.execute("SELECT * FROM clogtest")
     assert cur_replica.fetchall() == [(1,), (3,)]
+
+
+def test_ondemand_download_after_wal_switch(neon_env_builder: NeonEnvBuilder):
+    """
+    Test on-demand SLRU download on standby, when starting right after
+    WAL segment switch.
+
+    This is a repro for a bug in how the LSN at WAL page/segment
+    boundary was handled (https://github.com/neondatabase/neon/issues/8030)
+    """
+
+    tenant_conf = {
+        "lazy_slru_download": "true",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
+
+    endpoint = env.endpoints.create_start("main")
+    pg_conn = endpoint.connect()
+    cur = pg_conn.cursor()
+
+    # Create a test table
+    cur.execute("CREATE TABLE clogtest (id integer)")
+    cur.execute("INSERT INTO clogtest VALUES (1)")
+
+    # Start standby at WAL segment boundary
+    cur.execute("SELECT pg_switch_wal()")
+    lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_insert_lsn()"))
+    _endpoint_at_lsn = env.endpoints.create_start(
+        branch_name="main", endpoint_id="ep-at-lsn", lsn=lsn
+    )

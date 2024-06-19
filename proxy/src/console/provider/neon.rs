@@ -13,7 +13,7 @@ use crate::{
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::EndpointRateLimiter,
-    scram, EndpointCacheKey, Normalize,
+    scram, EndpointCacheKey,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
@@ -94,12 +94,14 @@ impl Api {
             let body = match parse_body::<GetRoleSecret>(response).await {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
-                Err(e) => match e.http_status_code() {
-                    Some(http::StatusCode::NOT_FOUND) => {
+                // TODO(anna): retry
+                Err(e) => {
+                    if e.get_reason().is_not_found() {
                         return Ok(AuthInfo::default());
+                    } else {
+                        return Err(e.into());
                     }
-                    _otherwise => return Err(e.into()),
-                },
+                }
             };
 
             let secret = if body.role_secret.is_empty() {
@@ -281,14 +283,6 @@ impl super::Api for Api {
             return Ok(cached);
         }
 
-        // check rate limit
-        if !self
-            .wake_compute_endpoint_rate_limiter
-            .check(user_info.endpoint.normalize().into(), 1)
-        {
-            return Err(WakeComputeError::TooManyConnections);
-        }
-
         let permit = self.locks.get_permit(&key).await?;
 
         // after getting back a permit - it's possible the cache was filled
@@ -301,7 +295,16 @@ impl super::Api for Api {
             }
         }
 
-        let mut node = self.do_wake_compute(ctx, user_info).await?;
+        // check rate limit
+        if !self
+            .wake_compute_endpoint_rate_limiter
+            .check(user_info.endpoint.normalize_intern(), 1)
+        {
+            info!(key = &*key, "found cached compute node info");
+            return Err(WakeComputeError::TooManyConnections);
+        }
+
+        let mut node = permit.release_result(self.do_wake_compute(ctx, user_info).await)?;
         ctx.set_project(node.aux.clone());
         let cold_start_info = node.aux.cold_start_info;
         info!("woken up a compute node");
@@ -327,19 +330,24 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
         info!("request succeeded, processing the body");
         return Ok(response.json().await?);
     }
+    let s = response.bytes().await?;
+    // Log plaintext to be able to detect, whether there are some cases not covered by the error struct.
+    info!("response_error plaintext: {:?}", s);
 
     // Don't throw an error here because it's not as important
     // as the fact that the request itself has failed.
-    let body = response.json().await.unwrap_or_else(|e| {
+    let mut body = serde_json::from_slice(&s).unwrap_or_else(|e| {
         warn!("failed to parse error body: {e}");
         ConsoleError {
             error: "reason unclear (malformed error message)".into(),
+            http_status_code: status,
+            status: None,
         }
     });
+    body.http_status_code = status;
 
-    let text = body.error;
-    error!("console responded with an error ({status}): {text}");
-    Err(ApiError::Console { status, text })
+    error!("console responded with an error ({status}): {body:?}");
+    Err(ApiError::Console(body))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {

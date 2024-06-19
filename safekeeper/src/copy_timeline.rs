@@ -15,10 +15,10 @@ use crate::{
     control_file::{FileStorage, Storage},
     pull_timeline::{create_temp_timeline_dir, load_temp_timeline, validate_temp_timeline},
     state::TimelinePersistentState,
-    timeline::{Timeline, TimelineError},
+    timeline::{FullAccessTimeline, Timeline, TimelineError},
     wal_backup::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
-    GlobalTimelines, SafeKeeperConf,
+    GlobalTimelines,
 };
 
 // we don't want to have more than 10 segments on disk after copy, because they take space
@@ -46,12 +46,14 @@ pub async fn handle_request(request: Request) -> Result<()> {
         }
     }
 
+    let source_tli = request.source.full_access_guard().await?;
+
     let conf = &GlobalTimelines::get_global_config();
     let ttid = request.destination_ttid;
 
     let (_tmp_dir, tli_dir_path) = create_temp_timeline_dir(conf, ttid).await?;
 
-    let (mem_state, state) = request.source.get_state().await;
+    let (mem_state, state) = source_tli.get_state().await;
     let start_lsn = state.timeline_start_lsn;
     if start_lsn == Lsn::INVALID {
         bail!("timeline is not initialized");
@@ -60,7 +62,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
 
     {
         let commit_lsn = mem_state.commit_lsn;
-        let flush_lsn = request.source.get_flush_lsn().await;
+        let flush_lsn = source_tli.get_flush_lsn().await;
 
         info!(
             "collected info about source timeline: start_lsn={}, backup_lsn={}, commit_lsn={}, flush_lsn={}",
@@ -127,10 +129,8 @@ pub async fn handle_request(request: Request) -> Result<()> {
     .await?;
 
     copy_disk_segments(
-        conf,
-        &state,
+        &source_tli,
         wal_seg_size,
-        &request.source.ttid,
         new_backup_lsn,
         request.until_lsn,
         &tli_dir_path,
@@ -159,21 +159,13 @@ pub async fn handle_request(request: Request) -> Result<()> {
 }
 
 async fn copy_disk_segments(
-    conf: &SafeKeeperConf,
-    persisted_state: &TimelinePersistentState,
+    tli: &FullAccessTimeline,
     wal_seg_size: usize,
-    source_ttid: &TenantTimelineId,
     start_lsn: Lsn,
     end_lsn: Lsn,
     tli_dir_path: &Utf8PathBuf,
 ) -> Result<()> {
-    let mut wal_reader = WalReader::new(
-        conf.workdir.clone(),
-        conf.timeline_dir(source_ttid),
-        persisted_state,
-        start_lsn,
-        true,
-    )?;
+    let mut wal_reader = tli.get_walreader(start_lsn).await?;
 
     let mut buf = [0u8; MAX_SEND_SIZE];
 

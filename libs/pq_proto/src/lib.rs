@@ -7,8 +7,9 @@ pub mod framed;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::HashMap, fmt, io, str};
+use std::{borrow::Cow, fmt, io, str};
 
 // re-export for use in utils pageserver_feedback.rs
 pub use postgres_protocol::PG_EPOCH;
@@ -50,15 +51,37 @@ pub enum FeStartupPacket {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
+pub struct StartupMessageParamsBuilder {
+    params: BytesMut,
+}
+
+impl StartupMessageParamsBuilder {
+    /// Set parameter's value by its name.
+    /// name and value must not contain a \0 byte
+    pub fn insert(&mut self, name: &str, value: &str) {
+        self.params.put(name.as_bytes());
+        self.params.put(&b"\0"[..]);
+        self.params.put(value.as_bytes());
+        self.params.put(&b"\0"[..]);
+    }
+
+    pub fn freeze(self) -> StartupMessageParams {
+        StartupMessageParams {
+            params: self.params.freeze(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct StartupMessageParams {
-    params: HashMap<String, String>,
+    params: Bytes,
 }
 
 impl StartupMessageParams {
     /// Get parameter's value by its name.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.params.get(name).map(|s| s.as_str())
+        self.iter().find_map(|(k, v)| (k == name).then_some(v))
     }
 
     /// Split command-line options according to PostgreSQL's logic,
@@ -112,15 +135,19 @@ impl StartupMessageParams {
 
     /// Iterate through key-value pairs in an arbitrary order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.params.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+        let params =
+            std::str::from_utf8(&self.params).expect("should be validated as utf8 already");
+        params.split_terminator('\0').tuples()
     }
 
     // This function is mostly useful in tests.
     #[doc(hidden)]
     pub fn new<'a, const N: usize>(pairs: [(&'a str, &'a str); N]) -> Self {
-        Self {
-            params: pairs.map(|(k, v)| (k.to_owned(), v.to_owned())).into(),
+        let mut b = StartupMessageParamsBuilder::default();
+        for (k, v) in pairs {
+            b.insert(k, v)
         }
+        b.freeze()
     }
 }
 
@@ -345,35 +372,21 @@ impl FeStartupPacket {
             (major_version, minor_version) => {
                 // StartupMessage
 
-                // Parse pairs of null-terminated strings (key, value).
-                // See `postgres: ProcessStartupPacket, build_startup_packet`.
-                let mut tokens = str::from_utf8(&msg)
-                    .map_err(|_e| {
-                        ProtocolError::BadMessage("StartupMessage params: invalid utf-8".to_owned())
-                    })?
-                    .strip_suffix('\0') // drop packet's own null
-                    .ok_or_else(|| {
-                        ProtocolError::Protocol(
-                            "StartupMessage params: missing null terminator".to_string(),
-                        )
-                    })?
-                    .split_terminator('\0');
-
-                let mut params = HashMap::new();
-                while let Some(name) = tokens.next() {
-                    let value = tokens.next().ok_or_else(|| {
-                        ProtocolError::Protocol(
-                            "StartupMessage params: key without value".to_string(),
-                        )
-                    })?;
-
-                    params.insert(name.to_owned(), value.to_owned());
-                }
+                let s = str::from_utf8(&msg).map_err(|_e| {
+                    ProtocolError::BadMessage("StartupMessage params: invalid utf-8".to_owned())
+                })?;
+                let s = s.strip_suffix('\0').ok_or_else(|| {
+                    ProtocolError::Protocol(
+                        "StartupMessage params: missing null terminator".to_string(),
+                    )
+                })?;
 
                 FeStartupPacket::StartupMessage {
                     major_version,
                     minor_version,
-                    params: StartupMessageParams { params },
+                    params: StartupMessageParams {
+                        params: msg.slice_ref(s.as_bytes()),
+                    },
                 }
             }
         };

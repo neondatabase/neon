@@ -21,7 +21,6 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
-use crate::tenant::storage_layer::layer::local_layer_path;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
 use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
@@ -29,6 +28,7 @@ use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode, RemotePath};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
+use utils::pausable_failpoint;
 
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{
@@ -50,19 +50,13 @@ pub async fn download_layer_file<'a>(
     timeline_id: TimelineId,
     layer_file_name: &'a LayerName,
     layer_metadata: &'a LayerFileMetadata,
+    local_path: &Utf8Path,
     cancel: &CancellationToken,
     ctx: &RequestContext,
 ) -> Result<u64, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     let timeline_path = conf.timeline_path(&tenant_shard_id, &timeline_id);
-    let local_path = local_layer_path(
-        conf,
-        &tenant_shard_id,
-        &timeline_id,
-        layer_file_name,
-        &layer_metadata.generation,
-    );
 
     let remote_path = remote_layer_path(
         &tenant_shard_id.tenant_id,
@@ -82,7 +76,7 @@ pub async fn download_layer_file<'a>(
     // For more context about durable_rename check this email from postgres mailing list:
     // https://www.postgresql.org/message-id/56583BDD.9060302@2ndquadrant.com
     // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
-    let temp_file_path = path_with_suffix_extension(&local_path, TEMP_DOWNLOAD_EXTENSION);
+    let temp_file_path = path_with_suffix_extension(local_path, TEMP_DOWNLOAD_EXTENSION);
 
     let bytes_amount = download_retry(
         || async { download_object(storage, &remote_path, &temp_file_path, cancel, ctx).await },
@@ -91,7 +85,7 @@ pub async fn download_layer_file<'a>(
     )
     .await?;
 
-    let expected = layer_metadata.file_size();
+    let expected = layer_metadata.file_size;
     if expected != bytes_amount {
         return Err(DownloadError::Other(anyhow!(
             "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file {temp_file_path:?}",
@@ -159,6 +153,8 @@ async fn download_object<'a>(
 
                 let download = storage.download(src_path, cancel).await?;
 
+                pausable_failpoint!("before-downloading-layer-stream-pausable");
+
                 let mut buf_writer =
                     tokio::io::BufWriter::with_capacity(super::BUFFER_SIZE, destination_file);
 
@@ -205,6 +201,8 @@ async fn download_object<'a>(
                     .map_err(DownloadError::Other)?;
 
                 let mut download = storage.download(src_path, cancel).await?;
+
+                pausable_failpoint!("before-downloading-layer-stream-pausable");
 
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored() on the stream.

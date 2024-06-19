@@ -3,11 +3,12 @@
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
+use hyper::StatusCode;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::LocationConfigMode;
 use pageserver_api::shard::{
-    ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId,
+    ShardCount, ShardIdentity, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId,
 };
 use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::{distributions::Alphanumeric, Rng};
@@ -16,10 +17,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use sysinfo::SystemExt;
 use tokio::fs;
-use utils::timeout::{timeout_cancellable, TimeoutCancellableError};
 
 use anyhow::Context;
 use once_cell::sync::Lazy;
@@ -46,7 +46,7 @@ use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::timeline::ShutdownMode;
-use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
+use crate::tenant::{AttachedTenantConf, GcError, SpawnMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -55,6 +55,7 @@ use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 
 use super::delete::DeleteTenantError;
+use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
 use super::timeline::detach_ancestor::PreparedTimelineDetach;
 use super::TenantSharedResources;
@@ -119,6 +120,7 @@ pub(crate) enum TenantsMapRemoveResult {
 
 /// When resolving a TenantId to a shard, we may be looking for the 0th
 /// shard, or we might be looking for whichever shard holds a particular page.
+#[derive(Copy, Clone)]
 pub(crate) enum ShardSelector {
     /// Only return the 0th shard, if it is present.  If a non-0th shard is present,
     /// ignore it.
@@ -127,6 +129,8 @@ pub(crate) enum ShardSelector {
     First,
     /// Pick the shard that holds this key
     Page(Key),
+    /// The shard ID is known: pick the given shard
+    Known(ShardIndex),
 }
 
 /// A convenience for use with the re_attach ControlPlaneClient function: rather
@@ -169,6 +173,14 @@ impl TenantStartupMode {
     }
 }
 
+/// Result type for looking up a TenantId to a specific shard
+pub(crate) enum ShardResolveResult {
+    NotFound,
+    Found(Arc<Tenant>),
+    // Wait for this barrrier, then query again
+    InProgress(utils::completion::Barrier),
+}
+
 impl TenantsMap {
     /// Convenience function for typical usage, where we want to get a `Tenant` object, for
     /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
@@ -178,51 +190,6 @@ impl TenantsMap {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 m.get(tenant_shard_id).and_then(|slot| slot.get_attached())
-            }
-        }
-    }
-
-    /// A page service client sends a TenantId, and to look up the correct Tenant we must
-    /// resolve this to a fully qualified TenantShardId.
-    fn resolve_attached_shard(
-        &self,
-        tenant_id: &TenantId,
-        selector: ShardSelector,
-    ) -> Option<TenantShardId> {
-        let mut want_shard = None;
-        match self {
-            TenantsMap::Initializing => None,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
-                for slot in m.range(TenantShardId::tenant_range(*tenant_id)) {
-                    // Ignore all slots that don't contain an attached tenant
-                    let tenant = match &slot.1 {
-                        TenantSlot::Attached(t) => t,
-                        _ => continue,
-                    };
-
-                    match selector {
-                        ShardSelector::First => return Some(*slot.0),
-                        ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
-                            return Some(*slot.0)
-                        }
-                        ShardSelector::Page(key) => {
-                            // First slot we see for this tenant, calculate the expected shard number
-                            // for the key: we will use this for checking if this and subsequent
-                            // slots contain the key, rather than recalculating the hash each time.
-                            if want_shard.is_none() {
-                                want_shard = Some(tenant.shard_identity.get_shard_number(&key));
-                            }
-
-                            if Some(tenant.shard_identity.number) == want_shard {
-                                return Some(*slot.0);
-                            }
-                        }
-                        _ => continue,
-                    }
-                }
-
-                // Fall through: we didn't find an acceptable shard
-                None
             }
         }
     }
@@ -1404,7 +1371,7 @@ impl TenantManager {
         &self,
         tenant_shard_id: TenantShardId,
         activation_timeout: Duration,
-    ) -> Result<(), DeleteTenantError> {
+    ) -> Result<StatusCode, DeleteTenantError> {
         super::span::debug_assert_current_span_has_tenant_id();
         // We acquire a SlotGuard during this function to protect against concurrent
         // changes while the ::prepare phase of DeleteTenantFlow executes, but then
@@ -1417,18 +1384,79 @@ impl TenantManager {
         //
         // See https://github.com/neondatabase/neon/issues/5080
 
-        let slot_guard =
-            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
+        // Tenant deletion can happen two ways:
+        // - Legacy: called on an attached location. The attached Tenant object stays alive in Stopping
+        //   state until deletion is complete.
+        // - New: called on a pageserver without an attached location.  We proceed with deletion from
+        //   remote storage.
+        //
+        // See https://github.com/neondatabase/neon/issues/5080 for more context on this transition.
 
-        // unwrap is safe because we used MustExist mode when acquiring
-        let tenant = match slot_guard.get_old_value().as_ref().unwrap() {
-            TenantSlot::Attached(tenant) => tenant.clone(),
-            _ => {
-                // Express "not attached" as equivalent to "not found"
-                return Err(DeleteTenantError::NotAttached);
+        let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        match &slot_guard.old_value {
+            Some(TenantSlot::Attached(tenant)) => {
+                // Legacy deletion flow: the tenant remains attached, goes to Stopping state, and
+                // deletion will be resumed across restarts.
+                let tenant = tenant.clone();
+                return self
+                    .delete_tenant_attached(slot_guard, tenant, activation_timeout)
+                    .await;
             }
+            Some(TenantSlot::Secondary(secondary_tenant)) => {
+                secondary_tenant.shutdown().await;
+                let local_tenant_directory = self.conf.tenant_path(&tenant_shard_id);
+                let tmp_dir = safe_rename_tenant_dir(&local_tenant_directory)
+                    .await
+                    .with_context(|| {
+                        format!("local tenant directory {local_tenant_directory:?} rename")
+                    })?;
+                spawn_background_purge(tmp_dir);
+            }
+            Some(TenantSlot::InProgress(_)) => unreachable!(),
+            None => {}
         };
 
+        // Fall through: local state for this tenant is no longer present, proceed with remote delete
+        let remote_path = remote_tenant_path(&tenant_shard_id);
+        let keys = match self
+            .resources
+            .remote_storage
+            .list(
+                Some(&remote_path),
+                remote_storage::ListingMode::NoDelimiter,
+                None,
+                &self.cancel,
+            )
+            .await
+        {
+            Ok(listing) => listing.keys,
+            Err(remote_storage::DownloadError::Cancelled) => {
+                return Err(DeleteTenantError::Cancelled)
+            }
+            Err(remote_storage::DownloadError::NotFound) => return Ok(StatusCode::NOT_FOUND),
+            Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
+        };
+
+        if keys.is_empty() {
+            tracing::info!("Remote storage already deleted");
+        } else {
+            tracing::info!("Deleting {} keys from remote storage", keys.len());
+            self.resources
+                .remote_storage
+                .delete_objects(&keys, &self.cancel)
+                .await?;
+        }
+
+        // Callers use 404 as success for deletions, for historical reasons.
+        Ok(StatusCode::NOT_FOUND)
+    }
+
+    async fn delete_tenant_attached(
+        &self,
+        slot_guard: SlotGuard,
+        tenant: Arc<Tenant>,
+        activation_timeout: Duration,
+    ) -> Result<StatusCode, DeleteTenantError> {
         match tenant.current_state() {
             TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                 // If deletion is already in progress, return success (the semantics of this
@@ -1438,7 +1466,7 @@ impl TenantManager {
                     // The `delete_progress` lock is held: deletion is already happening
                     // in the bacckground
                     slot_guard.revert();
-                    return Ok(());
+                    return Ok(StatusCode::ACCEPTED);
                 }
             }
             _ => {
@@ -1471,7 +1499,8 @@ impl TenantManager {
 
         // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
         slot_guard.revert();
-        result
+        let () = result?;
+        Ok(StatusCode::ACCEPTED)
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant.get_tenant_shard_id().tenant_id, shard_id=%tenant.get_tenant_shard_id().shard_slug(), new_shard_count=%new_shard_count.literal()))]
@@ -2053,6 +2082,77 @@ impl TenantManager {
 
         Ok(reparented)
     }
+
+    /// A page service client sends a TenantId, and to look up the correct Tenant we must
+    /// resolve this to a fully qualified TenantShardId.
+    ///
+    /// During shard splits: we shall see parent shards in InProgress state and skip them, and
+    /// instead match on child shards which should appear in Attached state.  Very early in a shard
+    /// split, or in other cases where a shard is InProgress, we will return our own InProgress result
+    /// to instruct the caller to wait for that to finish before querying again.
+    pub(crate) fn resolve_attached_shard(
+        &self,
+        tenant_id: &TenantId,
+        selector: ShardSelector,
+    ) -> ShardResolveResult {
+        let tenants = self.tenants.read().unwrap();
+        let mut want_shard = None;
+        let mut any_in_progress = None;
+
+        match &*tenants {
+            TenantsMap::Initializing => ShardResolveResult::NotFound,
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
+                for slot in m.range(TenantShardId::tenant_range(*tenant_id)) {
+                    // Ignore all slots that don't contain an attached tenant
+                    let tenant = match &slot.1 {
+                        TenantSlot::Attached(t) => t,
+                        TenantSlot::InProgress(barrier) => {
+                            // We might still find a usable shard, but in case we don't, remember that
+                            // we saw at least one InProgress slot, so that we can distinguish this case
+                            // from a simple NotFound in our return value.
+                            any_in_progress = Some(barrier.clone());
+                            continue;
+                        }
+                        _ => continue,
+                    };
+
+                    match selector {
+                        ShardSelector::First => return ShardResolveResult::Found(tenant.clone()),
+                        ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
+                            return ShardResolveResult::Found(tenant.clone())
+                        }
+                        ShardSelector::Page(key) => {
+                            // First slot we see for this tenant, calculate the expected shard number
+                            // for the key: we will use this for checking if this and subsequent
+                            // slots contain the key, rather than recalculating the hash each time.
+                            if want_shard.is_none() {
+                                want_shard = Some(tenant.shard_identity.get_shard_number(&key));
+                            }
+
+                            if Some(tenant.shard_identity.number) == want_shard {
+                                return ShardResolveResult::Found(tenant.clone());
+                            }
+                        }
+                        ShardSelector::Known(shard)
+                            if tenant.shard_identity.shard_index() == shard =>
+                        {
+                            return ShardResolveResult::Found(tenant.clone());
+                        }
+                        _ => continue,
+                    }
+                }
+
+                // Fall through: we didn't find a slot that was in Attached state & matched our selector.  If
+                // we found one or more InProgress slot, indicate to caller that they should retry later.  Otherwise
+                // this requested shard simply isn't found.
+                if let Some(barrier) = any_in_progress {
+                    ShardResolveResult::InProgress(barrier)
+                } else {
+                    ShardResolveResult::NotFound
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2099,105 +2199,6 @@ pub(crate) enum GetActiveTenantError {
     /// never happen.
     #[error("Tenant is broken: {0}")]
     Broken(String),
-}
-
-/// Get a [`Tenant`] in its active state. If the tenant_id is currently in [`TenantSlot::InProgress`]
-/// state, then wait for up to `timeout`.  If the [`Tenant`] is not currently in [`TenantState::Active`],
-/// then wait for up to `timeout` (minus however long we waited for the slot).
-pub(crate) async fn get_active_tenant_with_timeout(
-    tenant_id: TenantId,
-    shard_selector: ShardSelector,
-    timeout: Duration,
-    cancel: &CancellationToken,
-) -> Result<Arc<Tenant>, GetActiveTenantError> {
-    enum WaitFor {
-        Barrier(utils::completion::Barrier),
-        Tenant(Arc<Tenant>),
-    }
-
-    let wait_start = Instant::now();
-    let deadline = wait_start + timeout;
-
-    let (wait_for, tenant_shard_id) = {
-        let locked = TENANTS.read().unwrap();
-
-        // Resolve TenantId to TenantShardId
-        let tenant_shard_id = locked
-            .resolve_attached_shard(&tenant_id, shard_selector)
-            .ok_or(GetActiveTenantError::NotFound(GetTenantError::NotFound(
-                tenant_id,
-            )))?;
-
-        let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)
-            .map_err(GetTenantError::MapState)?;
-        match peek_slot {
-            Some(TenantSlot::Attached(tenant)) => {
-                match tenant.current_state() {
-                    TenantState::Active => {
-                        // Fast path: we don't need to do any async waiting.
-                        return Ok(tenant.clone());
-                    }
-                    _ => {
-                        tenant.activate_now();
-                        (WaitFor::Tenant(tenant.clone()), tenant_shard_id)
-                    }
-                }
-            }
-            Some(TenantSlot::Secondary(_)) => {
-                return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
-                    tenant_shard_id,
-                )))
-            }
-            Some(TenantSlot::InProgress(barrier)) => {
-                (WaitFor::Barrier(barrier.clone()), tenant_shard_id)
-            }
-            None => {
-                return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
-                    tenant_id,
-                )))
-            }
-        }
-    };
-
-    let tenant = match wait_for {
-        WaitFor::Barrier(barrier) => {
-            tracing::debug!("Waiting for tenant InProgress state to pass...");
-            timeout_cancellable(
-                deadline.duration_since(Instant::now()),
-                cancel,
-                barrier.wait(),
-            )
-            .await
-            .map_err(|e| match e {
-                TimeoutCancellableError::Timeout => GetActiveTenantError::WaitForActiveTimeout {
-                    latest_state: None,
-                    wait_time: wait_start.elapsed(),
-                },
-                TimeoutCancellableError::Cancelled => GetActiveTenantError::Cancelled,
-            })?;
-            {
-                let locked = TENANTS.read().unwrap();
-                let peek_slot =
-                    tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)
-                        .map_err(GetTenantError::MapState)?;
-                match peek_slot {
-                    Some(TenantSlot::Attached(tenant)) => tenant.clone(),
-                    _ => {
-                        return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
-                            tenant_shard_id,
-                        )))
-                    }
-                }
-            }
-        }
-        WaitFor::Tenant(tenant) => tenant,
-    };
-
-    tracing::debug!("Waiting for tenant to enter active state...");
-    tenant
-        .wait_to_become_active(deadline.duration_since(Instant::now()))
-        .await?;
-    Ok(tenant)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2896,7 +2897,13 @@ pub(crate) async fn immediate_gc(
         }
     }
 
-    result.map_err(ApiError::InternalServerError)
+    result.map_err(|e| match e {
+        GcError::TenantCancelled | GcError::TimelineCancelled => ApiError::ShuttingDown,
+        GcError::TimelineNotFound => {
+            ApiError::NotFound(anyhow::anyhow!("Timeline not found").into())
+        }
+        other => ApiError::InternalServerError(anyhow::anyhow!(other)),
+    })
 }
 
 #[cfg(test)]
