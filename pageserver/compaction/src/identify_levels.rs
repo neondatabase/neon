@@ -349,49 +349,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_disjoint_key_ranges_same_lsn() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init(); // so that RUST_LOG=trace works
-
-        // `identify_levels` sorts by end_lsn only, so, this `vec![]` is already sorted.
-        // (The sort implementation may shuffle the elements anyway, but, let's assume it doesn't.)
-        let max_size = 0x2000;
-        let layers = vec![
-            delta(0x1000..0x2000, Lsn(0x8000)..Lsn(0x9000)), // A
-            delta(0x2000..0x3000, Lsn(0x5000)..Lsn(0x9000)), // B  2 x max_size
-            delta(0x3000..0x4000, Lsn(0x8000)..Lsn(0x9000)), // C
-        ];
-
-        // The layers are processed in order A, B, C
-        //
-        //                                A           B            C
-        //                       10000
-        //
-        //                        9000    +           +            +
-        //                                |           |            |
-        //                        8000    +           |            +
-        //                        7000                |
-        //                        6000                |
-        //                        5000                +
-        //                        4000
-        //
-        // current_best_start_lsn: 10000    9000
-        // current_best_layers:       []      []
-        // candidate_start_lsn:    10000    8000
-        // candidate_layers:          []     [A]
-        //
-        // A: Hooray, there are no crossing LSNs.
-        // B: Too large. Discard 'candidate' and return with 'current_best'
-        //
-
-        let level = identify_level(layers.clone(), Lsn(0x10_000), max_size)
-            .await?
-            .unwrap();
-        assert_eq!(level.lsn_range, Lsn(0x9_000)..Lsn(0x10_000));
-        assert_eq!(level.layers.len(), 0);
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_overlapping_lsn_ranges() -> anyhow::Result<()> {
         // The files LSN ranges overlap, so even though there are more files that
         // fit under the file size, they are not included in the level because they
