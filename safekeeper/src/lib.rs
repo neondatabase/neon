@@ -28,6 +28,8 @@ pub mod safekeeper;
 pub mod send_wal;
 pub mod state;
 pub mod timeline;
+pub mod timeline_access;
+pub mod timeline_eviction;
 pub mod timeline_manager;
 pub mod timelines_set;
 pub mod wal_backup;
@@ -85,6 +87,8 @@ pub struct SafeKeeperConf {
     pub partial_backup_enabled: bool,
     pub partial_backup_timeout: Duration,
     pub disable_periodic_broker_push: bool,
+    pub enable_offload: bool,
+    pub delete_offloaded_wal: bool,
 }
 
 impl SafeKeeperConf {
@@ -124,6 +128,8 @@ impl SafeKeeperConf {
             partial_backup_enabled: false,
             partial_backup_timeout: Duration::from_secs(0),
             disable_periodic_broker_push: false,
+            enable_offload: false,
+            delete_offloaded_wal: false,
         }
     }
 }

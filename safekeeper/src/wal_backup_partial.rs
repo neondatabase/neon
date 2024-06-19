@@ -72,7 +72,7 @@ pub struct State {
 
 impl State {
     /// Find an Uploaded segment. There should be only one Uploaded segment at a time.
-    fn uploaded_segment(&self) -> Option<PartialRemoteSegment> {
+    pub(crate) fn uploaded_segment(&self) -> Option<PartialRemoteSegment> {
         self.segments
             .iter()
             .find(|seg| seg.status == UploadStatus::Uploaded)

@@ -182,6 +182,12 @@ struct Args {
     /// be used in tests.
     #[arg(long)]
     disable_periodic_broker_push: bool,
+    /// Enable automatic switching to offloaded state.
+    #[arg(long)]
+    enable_offload: bool,
+    /// Delete local WAL files after offloading. When disabled, they will be left on disk.
+    #[arg(long)]
+    delete_offloaded_wal: bool,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -332,6 +338,8 @@ async fn main() -> anyhow::Result<()> {
         partial_backup_enabled: true,
         partial_backup_timeout: args.partial_backup_timeout,
         disable_periodic_broker_push: args.disable_periodic_broker_push,
+        enable_offload: args.enable_offload,
+        delete_offloaded_wal: args.delete_offloaded_wal,
     };
 
     // initialize sentry if SENTRY_DSN is provided

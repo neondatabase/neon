@@ -32,9 +32,11 @@ use crate::safekeeper::{
 };
 use crate::send_wal::WalSenders;
 use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, TimelineState};
+use crate::timeline_access::AccessGuard;
 use crate::timeline_manager::ManagerCtl;
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self};
+use crate::wal_backup_partial::PartialRemoteSegment;
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::{FullTimelineInfo, WalStorageMetrics};
@@ -827,11 +829,11 @@ impl Timeline {
 /// All tasks that are using the disk should use this guard.
 pub struct FullAccessTimeline {
     pub tli: Arc<Timeline>,
-    _guard: timeline_manager::AccessGuard,
+    _guard: AccessGuard,
 }
 
 impl FullAccessTimeline {
-    pub fn new(tli: Arc<Timeline>, _guard: timeline_manager::AccessGuard) -> Self {
+    pub fn new(tli: Arc<Timeline>, _guard: AccessGuard) -> Self {
         FullAccessTimeline { tli, _guard }
     }
 }
@@ -942,28 +944,66 @@ impl ManagerTimeline {
         &self.tli.timeline_dir
     }
 
-    pub(crate) async fn is_offloaded(&self) -> bool {
-        matches!(
-            self.read_shared_state().await.sk.state().eviction_state,
+    pub(crate) async fn bootstrap_mgr(&self) -> (bool, Option<PartialRemoteSegment>) {
+        let shared_state = self.read_shared_state().await;
+        let is_offloaded = matches!(
+            shared_state.sk.state().eviction_state,
             EvictionState::Offloaded(_)
-        )
+        );
+        let partial_backup_uploaded = shared_state.sk.state().partial_backup.uploaded_segment();
+
+        (is_offloaded, partial_backup_uploaded)
     }
 
-    pub(crate) async fn switch_to_offloaded(&self, flush_lsn: &Lsn) -> anyhow::Result<()> {
+    pub(crate) async fn switch_to_offloaded(
+        &self,
+        partial: &PartialRemoteSegment,
+    ) -> anyhow::Result<()> {
         let mut shared = self.write_shared_state().await;
 
         // updating control file
         let mut pstate = shared.sk.state_mut().start_change();
-        assert!(matches!(pstate.eviction_state, EvictionState::Present));
-        assert!(shared.sk.flush_lsn() == *flush_lsn);
+
+        if !matches!(pstate.eviction_state, EvictionState::Present) {
+            bail!(
+                "cannot switch to offloaded state, current state is {:?}",
+                pstate.eviction_state
+            );
+        }
+
+        if partial.flush_lsn != shared.sk.flush_lsn() {
+            bail!(
+                "flush_lsn mismatch in partial backup, expected {}, got {}",
+                shared.sk.flush_lsn(),
+                partial.flush_lsn
+            );
+        }
+
+        if partial.commit_lsn != pstate.commit_lsn {
+            bail!(
+                "commit_lsn mismatch in partial backup, expected {}, got {}",
+                pstate.commit_lsn,
+                partial.commit_lsn
+            );
+        }
+
+        if partial.term != pstate.acceptor_state.term {
+            bail!(
+                "term mismatch in partial backup, expected {}, got {}",
+                pstate.acceptor_state.term,
+                partial.term
+            );
+        }
+
         pstate.eviction_state = EvictionState::Offloaded(shared.sk.flush_lsn());
         shared.sk.state_mut().finish_change(&pstate).await?;
+        // control file is now switched to Offloaded state
 
         // now we can switch shared.sk to Offloaded, shouldn't fail
         let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
         let cfile_state = prev_sk.take_state();
-
         shared.sk = StateSK::Offloaded(cfile_state);
+
         Ok(())
     }
 
@@ -981,7 +1021,22 @@ impl ManagerTimeline {
 
         // updating control file
         let mut pstate = shared.sk.state_mut().start_change();
-        assert!(matches!(pstate.eviction_state, EvictionState::Offloaded(_)));
+
+        if !matches!(pstate.eviction_state, EvictionState::Offloaded(_)) {
+            bail!(
+                "cannot switch to present state, current state is {:?}",
+                pstate.eviction_state
+            );
+        }
+
+        if wal_store.flush_lsn() != shared.sk.flush_lsn() {
+            bail!(
+                "flush_lsn mismatch in restored WAL, expected {}, got {}",
+                shared.sk.flush_lsn(),
+                wal_store.flush_lsn()
+            );
+        }
+
         pstate.eviction_state = EvictionState::Present;
         shared.sk.state_mut().finish_change(&pstate).await?;
 
