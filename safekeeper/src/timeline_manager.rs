@@ -19,7 +19,6 @@ use utils::lsn::Lsn;
 use crate::{
     control_file::{FileStorage, Storage},
     metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
-    receive_wal::WalReceivers,
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
     safekeeper::Term,
@@ -166,7 +165,6 @@ pub(crate) struct Manager {
     pub(crate) conf: SafeKeeperConf,
     pub(crate) wal_seg_size: usize,
     pub(crate) walsenders: Arc<WalSenders>,
-    pub(crate) walreceivers: Arc<WalReceivers>,
 
     // current state
     pub(crate) state_version_rx: tokio::sync::watch::Receiver<usize>,
@@ -229,7 +227,8 @@ pub async fn main_task(
             mgr.update_wal_removal(&state_snapshot).await;
             mgr.update_partial_backup(&state_snapshot).await;
 
-            if mgr.ready_for_eviction(&next_cfile_save, &state_snapshot) {
+            if mgr.conf.enable_offload && mgr.ready_for_eviction(&next_cfile_save, &state_snapshot)
+            {
                 mgr.evict_timeline().await;
             }
 
@@ -320,7 +319,6 @@ impl Manager {
             conf,
             wal_seg_size: tli.get_wal_seg_size().await,
             walsenders: tli.get_walsenders().clone(),
-            walreceivers: tli.get_walreceivers().clone(),
             state_version_rx: tli.get_state_version_rx(),
             num_computes_rx: tli.get_walreceivers().get_num_rx(),
             tli_broker_active: broker_active_set.guard(tli.clone()),

@@ -2180,7 +2180,11 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
     do_something()
 
 
-def test_s3_eviction(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("delete_offloaded_wal", [False, True])
+@pytest.mark.parametrize("restart_chance", [0.0, 0.2])
+def test_s3_eviction(
+    neon_env_builder: NeonEnvBuilder, delete_offloaded_wal: bool, restart_chance: float
+):
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start(
@@ -2189,7 +2193,14 @@ def test_s3_eviction(neon_env_builder: NeonEnvBuilder):
         }
     )
 
-    n_timelines = 10
+    extra_opts = ["--enable-offload"]
+    if delete_offloaded_wal:
+        extra_opts.append("--delete-offloaded-wal")
+
+    for sk in env.safekeepers:
+        sk.stop().start(extra_opts=extra_opts)
+
+    n_timelines = 5
 
     branch_names = [f"branch{tlin}" for tlin in range(n_timelines)]
 
@@ -2204,7 +2215,7 @@ def test_s3_eviction(neon_env_builder: NeonEnvBuilder):
 
     check_values = [0] * n_timelines
 
-    n_iters = 50
+    n_iters = 20
     for _ in range(n_iters):
         i = random.randint(0, n_timelines - 1)
         log.info(f"Starting endpoint {i}")
@@ -2213,6 +2224,11 @@ def test_s3_eviction(neon_env_builder: NeonEnvBuilder):
         res = endpoints[i].safe_psql("UPDATE t SET i = i + 1 RETURNING i")
         assert res[0][0] == check_values[i]
         endpoints[i].stop()
+
+        # restarting random safekeepers
+        for sk in env.safekeepers:
+            if random.random() < restart_chance:
+                sk.stop().start(extra_opts=extra_opts)
         time.sleep(0.5)
 
     # TODO: check logs for successful eviction
