@@ -3,14 +3,14 @@ description: 'Create Branch using API'
 
 inputs:
   api_key:
-    desctiption: 'Neon API key'
+    description: 'Neon API key'
     required: true
   project_id:
-    desctiption: 'ID of the Project to create Branch in'
+    description: 'ID of the Project to create Branch in'
     required: true
   api_host:
-    desctiption: 'Neon API host'
-    default: console.stage.neon.tech
+    description: 'Neon API host'
+    default: console-stage.neon.build
 outputs:
   dsn:
     description: 'Created Branch DSN (for main database)'

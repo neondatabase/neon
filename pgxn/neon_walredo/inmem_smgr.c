@@ -18,10 +18,12 @@
  */
 #include "postgres.h"
 
+#include "../neon/neon_pgversioncompat.h"
+
 #include "access/xlog.h"
 #include "storage/block.h"
 #include "storage/buf_internals.h"
-#include "storage/relfilenode.h"
+#include RELFILEINFO_HDR
 #include "storage/smgr.h"
 
 #if PG_VERSION_NUM >= 150000
@@ -43,10 +45,12 @@ static int	used_pages;
 static int
 locate_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno)
 {
+	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
+
 	/* We only hold a small number of pages, so linear search */
 	for (int i = 0; i < used_pages; i++)
 	{
-		if (RelFileNodeEquals(reln->smgr_rnode.node, page_tag[i].rnode)
+		if (RelFileInfoEquals(rinfo, BufTagGetNRelFileInfo(page_tag[i]))
 			&& forknum == page_tag[i].forkNum
 			&& blkno == page_tag[i].blockNum)
 		{
@@ -63,15 +67,26 @@ static void inmem_open(SMgrRelation reln);
 static void inmem_close(SMgrRelation reln, ForkNumber forknum);
 static void inmem_create(SMgrRelation reln, ForkNumber forknum, bool isRedo);
 static bool inmem_exists(SMgrRelation reln, ForkNumber forknum);
-static void inmem_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo);
-static void inmem_extend(SMgrRelation reln, ForkNumber forknum,
-						 BlockNumber blocknum, char *buffer, bool skipFsync);
+static void inmem_unlink(NRelFileInfoBackend rinfo, ForkNumber forknum, bool isRedo);
 static bool inmem_prefetch(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber blocknum);
+#if PG_MAJORVERSION_NUM < 16
+static void inmem_extend(SMgrRelation reln, ForkNumber forknum,
+						 BlockNumber blocknum, char *buffer, bool skipFsync);
 static void inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					   char *buffer);
 static void inmem_write(SMgrRelation reln, ForkNumber forknum,
 						BlockNumber blocknum, char *buffer, bool skipFsync);
+#else
+static void inmem_extend(SMgrRelation reln, ForkNumber forknum,
+						 BlockNumber blocknum, const void *buffer, bool skipFsync);
+static void inmem_zeroextend(SMgrRelation reln, ForkNumber forknum,
+							 BlockNumber blocknum, int nblocks, bool skipFsync);
+static void inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+					   void *buffer);
+static void inmem_write(SMgrRelation reln, ForkNumber forknum,
+						BlockNumber blocknum, const void *buffer, bool skipFsync);
+#endif
 static void inmem_writeback(SMgrRelation reln, ForkNumber forknum,
 							BlockNumber blocknum, BlockNumber nblocks);
 static BlockNumber inmem_nblocks(SMgrRelation reln, ForkNumber forknum);
@@ -95,9 +110,11 @@ inmem_init(void)
 static bool
 inmem_exists(SMgrRelation reln, ForkNumber forknum)
 {
+	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
+
 	for (int i = 0; i < used_pages; i++)
 	{
-		if (RelFileNodeEquals(reln->smgr_rnode.node, page_tag[i].rnode)
+		if (RelFileInfoEquals(rinfo, BufTagGetNRelFileInfo(page_tag[i]))
 			&& forknum == page_tag[i].forkNum)
 		{
 			return true;
@@ -120,7 +137,7 @@ inmem_create(SMgrRelation reln, ForkNumber forknum, bool isRedo)
  *	inmem_unlink() -- Unlink a relation.
  */
 static void
-inmem_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo)
+inmem_unlink(NRelFileInfoBackend rinfo, ForkNumber forknum, bool isRedo)
 {
 }
 
@@ -135,11 +152,27 @@ inmem_unlink(RelFileNodeBackend rnode, ForkNumber forknum, bool isRedo)
  */
 static void
 inmem_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
+#if PG_MAJORVERSION_NUM < 16
 			 char *buffer, bool skipFsync)
+#else
+			 const void *buffer, bool skipFsync)
+#endif
 {
 	/* same as smgwrite() for us */
 	inmem_write(reln, forknum, blkno, buffer, skipFsync);
 }
+
+#if PG_MAJORVERSION_NUM >= 16
+static void
+inmem_zeroextend(SMgrRelation reln, ForkNumber forknum,
+				 BlockNumber blocknum, int nblocks, bool skipFsync)
+{
+	char buffer[BLCKSZ] = {0};
+
+	for (int i = 0; i < nblocks; i++)
+		inmem_extend(reln, forknum, blocknum + i, buffer, skipFsync);
+}
+#endif
 
 /*
  *  inmem_open() -- Initialize newly-opened relation.
@@ -180,7 +213,11 @@ inmem_writeback(SMgrRelation reln, ForkNumber forknum,
  */
 static void
 inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
+#if PG_MAJORVERSION_NUM < 16
 		   char *buffer)
+#else
+		   void *buffer)
+#endif
 {
 	int			pg;
 
@@ -200,7 +237,11 @@ inmem_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
  */
 static void
 inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+#if PG_MAJORVERSION_NUM < 16
 			char *buffer, bool skipFsync)
+#else
+			const void *buffer, bool skipFsync)
+#endif
 {
 	int			pg;
 
@@ -216,9 +257,7 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 */
 		elog(used_pages >= WARN_PAGES ? WARNING : DEBUG1,
 			 "inmem_write() called for %u/%u/%u.%u blk %u: used_pages %u",
-			 reln->smgr_rnode.node.spcNode,
-			 reln->smgr_rnode.node.dbNode,
-			 reln->smgr_rnode.node.relNode,
+			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 			 forknum,
 			 blocknum,
 			 used_pages);
@@ -227,14 +266,13 @@ inmem_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 		pg = used_pages;
 		used_pages++;
-		INIT_BUFFERTAG(page_tag[pg], reln->smgr_rnode.node, forknum, blocknum);
+
+		InitBufferTag(&page_tag[pg], &InfoFromSMgrRel(reln), forknum, blocknum);
 	}
 	else
 	{
 		elog(DEBUG1, "inmem_write() called for %u/%u/%u.%u blk %u: found at %u",
-			 reln->smgr_rnode.node.spcNode,
-			 reln->smgr_rnode.node.dbNode,
-			 reln->smgr_rnode.node.relNode,
+			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 			 forknum,
 			 blocknum,
 			 used_pages);
@@ -287,6 +325,9 @@ static const struct f_smgr inmem_smgr =
 	.smgr_exists = inmem_exists,
 	.smgr_unlink = inmem_unlink,
 	.smgr_extend = inmem_extend,
+#if PG_MAJORVERSION_NUM >= 16
+	.smgr_zeroextend = inmem_zeroextend,
+#endif
 	.smgr_prefetch = inmem_prefetch,
 	.smgr_read = inmem_read,
 	.smgr_write = inmem_write,
@@ -297,11 +338,11 @@ static const struct f_smgr inmem_smgr =
 };
 
 const f_smgr *
-smgr_inmem(BackendId backend, RelFileNode rnode)
+smgr_inmem(BackendId backend, NRelFileInfo rinfo)
 {
 	Assert(InRecovery);
 	if (backend != InvalidBackendId)
-		return smgr_standard(backend, rnode);
+		return smgr_standard(backend, rinfo);
 	else
 		return &inmem_smgr;
 }

@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::spec::ComputeSpec;
+use crate::spec::{ComputeSpec, Database, Role};
 
 #[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
@@ -52,6 +52,10 @@ pub enum ComputeStatus {
     // compute will exit soon or is waiting for
     // control-plane to terminate it.
     Failed,
+    // Termination requested
+    TerminationPending,
+    // Terminated Postgres
+    Terminated,
 }
 
 fn rfc3339_serialize<S>(x: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>
@@ -68,11 +72,51 @@ where
 /// Response of the /metrics.json API
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ComputeMetrics {
+    /// Time spent waiting in pool
     pub wait_for_spec_ms: u64,
+
+    /// Time spent checking if safekeepers are synced
+    pub sync_sk_check_ms: u64,
+
+    /// Time spent syncing safekeepers (walproposer.c).
+    /// In most cases this should be zero.
     pub sync_safekeepers_ms: u64,
+
+    /// Time it took to establish a pg connection to the pageserver.
+    /// This is two roundtrips, so it's a good proxy for compute-pageserver
+    /// latency. The latency is usually 0.2ms, but it's not safe to assume
+    /// that.
+    pub pageserver_connect_micros: u64,
+
+    /// Time to get basebackup from pageserver and write it to disk.
     pub basebackup_ms: u64,
+
+    /// Compressed size of basebackup received.
+    pub basebackup_bytes: u64,
+
+    /// Time spent starting potgres. This includes initialization of shared
+    /// buffers, preloading extensions, and other pg operations.
+    pub start_postgres_ms: u64,
+
+    /// Time spent applying pg catalog updates that were made in the console
+    /// UI. This should be 0 when startup time matters, since cplane tries
+    /// to do these updates eagerly, and passes the skip_pg_catalog_updates
+    /// when it's safe to skip this step.
     pub config_ms: u64,
+
+    /// Total time, from when we receive the spec to when we're ready to take
+    /// pg connections.
     pub total_startup_ms: u64,
+    pub load_ext_ms: u64,
+    pub num_ext_downloaded: u64,
+    pub largest_ext_size: u64, // these are measured in bytes
+    pub total_ext_download_size: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CatalogObjects {
+    pub roles: Vec<Role>,
+    pub databases: Vec<Database>,
 }
 
 /// Response of the `/computes/{compute_id}/spec` control-plane API.

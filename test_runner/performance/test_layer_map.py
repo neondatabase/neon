@@ -17,10 +17,10 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             "gc_period": "0s",
-            "checkpoint_distance": "8192",
+            "checkpoint_distance": "16384",
             "compaction_period": "1 s",
             "compaction_threshold": "1",
-            "compaction_target_size": "8192",
+            "compaction_target_size": "16384",
         }
     )
 
@@ -28,7 +28,7 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     endpoint = env.endpoints.create_start("test_layer_map", tenant_id=tenant)
     cur = endpoint.connect().cursor()
     cur.execute("create table t(x integer)")
-    for i in range(n_iters):
+    for _ in range(n_iters):
         cur.execute(f"insert into t values (generate_series(1,{n_records}))")
         time.sleep(1)
 

@@ -3,7 +3,7 @@
 ### By default, the binaries inside the image have some mock parameters and can start, but are not intended to be used
 ### inside this image in the real deployments.
 ARG REPOSITORY=neondatabase
-ARG IMAGE=rust
+ARG IMAGE=build-tools
 ARG TAG=pinned
 
 # Build Postgres
@@ -12,6 +12,7 @@ WORKDIR /home/nonroot
 
 COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
 COPY --chown=nonroot vendor/postgres-v15 vendor/postgres-v15
+COPY --chown=nonroot vendor/postgres-v16 vendor/postgres-v16
 COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
@@ -26,6 +27,7 @@ RUN set -e \
 FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
+ARG BUILD_TAG
 
 # Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
 # Set up cachepot to use an AWS S3 bucket for cache results, to reuse it between `docker build` invocations.
@@ -39,18 +41,21 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
+COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_install/v16/include/postgresql/server
 COPY --chown=nonroot . .
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
-    && mold -run cargo build  \
+    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment" cargo build  \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
       --bin safekeeper  \
       --bin storage_broker  \
+      --bin storage_controller  \
       --bin proxy  \
+      --bin neon_local \
       --locked --release \
     && cachepot -s
 
@@ -64,7 +69,6 @@ RUN set -e \
     && apt install -y \
         libreadline-dev \
         libseccomp-dev \
-        openssl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && useradd -d /data neon \
@@ -74,11 +78,14 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/pg_sni_router  
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pagectl             /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker         /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker      /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_controller  /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
+COPY --from=pg-build /home/nonroot/pg_install/v16 /usr/local/v16/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
@@ -90,6 +97,11 @@ RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
        -c "pg_distrib_dir='/usr/local/'" \
        -c "listen_pg_addr='0.0.0.0:6400'" \
        -c "listen_http_addr='0.0.0.0:9898'"
+
+# When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
+# that want a particular postgres version will select it explicitly: this is just a default.
+ENV LD_LIBRARY_PATH /usr/local/v16/lib
+
 
 VOLUME ["/data"]
 USER neon

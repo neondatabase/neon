@@ -1,0 +1,19 @@
+commit b3ea51ee158f113f2f82d0b97c12c54343c9a695 (HEAD -> master)
+Author: Alexey Masterov <alexeymasterov@neon.tech>
+Date:   Fri Jun 7 19:23:42 2024 +0000
+
+    Disable REGRESS_OPTIONS causing initdb
+
+diff --git a/ext-src/pg_cron-src/Makefile b/ext-src/pg_cron-src/Makefile
+index 053314c..fbd5fb5 100644
+--- a/ext-src/pg_cron-src/Makefile
++++ b/ext-src/pg_cron-src/Makefile
+@@ -5,7 +5,7 @@ EXTENSION = pg_cron
+ DATA_built = $(EXTENSION)--1.0.sql
+ DATA = $(wildcard $(EXTENSION)--*--*.sql)
+ 
+-REGRESS_OPTS =--temp-config=./pg_cron.conf --temp-instance=./tmp_check
++#REGRESS_OPTS =--temp-config=./pg_cron.conf --temp-instance=./tmp_check
+ REGRESS = pg_cron-test 
+ 
+ # compilation configuration

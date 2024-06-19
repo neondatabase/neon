@@ -1,8 +1,8 @@
-use super::AuthSuccess;
 use crate::{
     auth, compute,
     console::{self, provider::NodeInfo},
-    error::UserFacingError,
+    context::RequestMonitoring,
+    error::{ReportableError, UserFacingError},
     stream::PqStream,
     waiters,
 };
@@ -14,10 +14,6 @@ use tracing::{info, info_span};
 
 #[derive(Debug, Error)]
 pub enum LinkAuthError {
-    /// Authentication error reported by the console.
-    #[error("Authentication failed: {0}")]
-    AuthFailed(String),
-
     #[error(transparent)]
     WaiterRegister(#[from] waiters::RegisterError),
 
@@ -30,10 +26,16 @@ pub enum LinkAuthError {
 
 impl UserFacingError for LinkAuthError {
     fn to_string_client(&self) -> String {
-        use LinkAuthError::*;
+        "Internal error".to_string()
+    }
+}
+
+impl ReportableError for LinkAuthError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            AuthFailed(_) => self.to_string(),
-            _ => "Internal error".to_string(),
+            LinkAuthError::WaiterRegister(_) => crate::error::ErrorKind::Service,
+            LinkAuthError::WaiterWait(_) => crate::error::ErrorKind::Service,
+            LinkAuthError::Io(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }
 }
@@ -55,27 +57,37 @@ pub fn new_psql_session_id() -> String {
 }
 
 pub(super) async fn authenticate(
+    ctx: &mut RequestMonitoring,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<NodeInfo>> {
-    let psql_session_id = new_psql_session_id();
+) -> auth::Result<NodeInfo> {
+    ctx.set_auth_method(crate::context::AuthMethod::Web);
+
+    // registering waiter can fail if we get unlucky with rng.
+    // just try again.
+    let (psql_session_id, waiter) = loop {
+        let psql_session_id = new_psql_session_id();
+
+        match console::mgmt::get_waiter(&psql_session_id) {
+            Ok(waiter) => break (psql_session_id, waiter),
+            Err(_e) => continue,
+        }
+    };
+
     let span = info_span!("link", psql_session_id = &psql_session_id);
     let greeting = hello_message(link_uri, &psql_session_id);
 
-    let db_info = console::mgmt::with_waiter(psql_session_id, |waiter| async {
-        // Give user a URL to spawn a new database.
-        info!(parent: &span, "sending the auth URL to the user");
-        client
-            .write_message_noflush(&Be::AuthenticationOk)?
-            .write_message_noflush(&Be::CLIENT_ENCODING)?
-            .write_message(&Be::NoticeResponse(&greeting))
-            .await?;
+    // Give user a URL to spawn a new database.
+    info!(parent: &span, "sending the auth URL to the user");
+    client
+        .write_message_noflush(&Be::AuthenticationOk)?
+        .write_message_noflush(&Be::CLIENT_ENCODING)?
+        .write_message(&Be::NoticeResponse(&greeting))
+        .await?;
 
-        // Wait for web console response (see `mgmt`).
-        info!(parent: &span, "waiting for console's reply...");
-        waiter.await?.map_err(LinkAuthError::AuthFailed)
-    })
-    .await?;
+    // Wait for web console response (see `mgmt`).
+    info!(parent: &span, "waiting for console's reply...");
+    let db_info = waiter.await.map_err(LinkAuthError::from)?;
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
@@ -87,6 +99,11 @@ pub(super) async fn authenticate(
         .port(db_info.port)
         .dbname(&db_info.dbname)
         .user(&db_info.user);
+
+    ctx.set_dbname(db_info.dbname.into());
+    ctx.set_user(db_info.user.into());
+    ctx.set_project(db_info.aux.clone());
+    info!("woken up a compute node");
 
     // Backwards compatibility. pg_sni_proxy uses "--" in domain names
     // while direct connections do not. Once we migrate to pg_sni_proxy
@@ -102,12 +119,9 @@ pub(super) async fn authenticate(
         config.password(password.as_ref());
     }
 
-    Ok(AuthSuccess {
-        reported_auth_ok: true,
-        value: NodeInfo {
-            config,
-            aux: db_info.aux.into(),
-            allow_self_signed_compute: false, // caller may override
-        },
+    Ok(NodeInfo {
+        config,
+        aux: db_info.aux,
+        allow_self_signed_compute: false, // caller may override
     })
 }

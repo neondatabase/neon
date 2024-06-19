@@ -3,18 +3,22 @@
 //! Currently it only analyzes holes, which are regions within the layer range that the layer contains no updates for. In the future it might do more analysis (maybe key quantiles?) but it should never return sensitive data.
 
 use anyhow::Result;
+use camino::{Utf8Path, Utf8PathBuf};
+use pageserver::context::{DownloadBehavior, RequestContext};
+use pageserver::task_mgr::TaskKind;
+use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
-use std::{fs, path::Path, str};
+use std::{fs, str};
 
-use pageserver::page_cache::PAGE_SZ;
+use pageserver::page_cache::{self, PAGE_SZ};
 use pageserver::repository::{Key, KEY_SIZE};
-use pageserver::tenant::block_io::{BlockReader, FileBlockReader};
+use pageserver::tenant::block_io::FileBlockReader;
 use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
 use pageserver::tenant::storage_layer::delta_layer::{Summary, DELTA_KEY_SIZE};
 use pageserver::tenant::storage_layer::range_overlaps;
-use pageserver::virtual_file::VirtualFile;
+use pageserver::virtual_file::{self, VirtualFile};
 
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
@@ -95,57 +99,63 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
 }
 
 // Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
-fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
-    let file = FileBlockReader::new(VirtualFile::open(path)?);
-    let summary_blk = file.read_blk(0)?;
+async fn get_holes(path: &Utf8Path, max_holes: usize, ctx: &RequestContext) -> Result<Vec<Hole>> {
+    let file = VirtualFile::open(path, ctx).await?;
+    let file_id = page_cache::next_file_id();
+    let block_reader = FileBlockReader::new(&file, file_id);
+    let summary_blk = block_reader.read_blk(0, ctx).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,
         actual_summary.index_root_blk,
-        file,
+        block_reader,
     );
     // min-heap (reserve space for one more element added before eviction)
     let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
     let mut prev_key: Option<Key> = None;
-    tree_reader.visit(
-        &[0u8; DELTA_KEY_SIZE],
-        VisitDirection::Forwards,
-        |key, _value| {
-            let curr = Key::from_slice(&key[..KEY_SIZE]);
-            if let Some(prev) = prev_key {
-                if curr.to_i128() - prev.to_i128() >= MIN_HOLE_LENGTH {
-                    heap.push(Hole(prev..curr));
-                    if heap.len() > max_holes {
-                        heap.pop(); // remove smallest hole
+    tree_reader
+        .visit(
+            &[0u8; DELTA_KEY_SIZE],
+            VisitDirection::Forwards,
+            |key, _value| {
+                let curr = Key::from_slice(&key[..KEY_SIZE]);
+                if let Some(prev) = prev_key {
+                    if curr.to_i128() - prev.to_i128() >= MIN_HOLE_LENGTH {
+                        heap.push(Hole(prev..curr));
+                        if heap.len() > max_holes {
+                            heap.pop(); // remove smallest hole
+                        }
                     }
                 }
-            }
-            prev_key = Some(curr.next());
-            true
-        },
-    )?;
+                prev_key = Some(curr.next());
+                true
+            },
+            ctx,
+        )
+        .await?;
     let mut holes = heap.into_vec();
     holes.sort_by_key(|hole| hole.0.start);
     Ok(holes)
 }
 
-pub(crate) fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
+pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let storage_path = &cmd.path;
     let max_holes = cmd.max_holes.unwrap_or(DEFAULT_MAX_HOLES);
+    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
-    pageserver::virtual_file::init(10);
+    pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
     pageserver::page_cache::init(100);
 
     let mut total_delta_layers = 0usize;
     let mut total_image_layers = 0usize;
     let mut total_excess_layers = 0usize;
-    for tenant in fs::read_dir(storage_path.join("tenants"))? {
+    for tenant in fs::read_dir(storage_path.join(TENANTS_SEGMENT_NAME))? {
         let tenant = tenant?;
         if !tenant.file_type()?.is_dir() {
             continue;
         }
-        for timeline in fs::read_dir(tenant.path().join("timelines"))? {
+        for timeline in fs::read_dir(tenant.path().join(TIMELINES_SEGMENT_NAME))? {
             let timeline = timeline?;
             if !timeline.file_type()?.is_dir() {
                 continue;
@@ -160,7 +170,9 @@ pub(crate) fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
                     parse_filename(&layer.file_name().into_string().unwrap())
                 {
                     if layer_file.is_delta {
-                        layer_file.holes = get_holes(&layer.path(), max_holes)?;
+                        let layer_path =
+                            Utf8PathBuf::from_path_buf(layer.path()).expect("non-Unicode path");
+                        layer_file.holes = get_holes(&layer_path, max_holes, &ctx).await?;
                         n_deltas += 1;
                     }
                     layers.push(layer_file);

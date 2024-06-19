@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
-use postgres_ffi::relfile_utils::forknumber_to_name;
+use postgres_ffi::relfile_utils::{forkname_to_number, forknumber_to_name, MAIN_FORKNUM};
 use postgres_ffi::Oid;
 
 ///
@@ -22,15 +22,18 @@ use postgres_ffi::Oid;
 /// [See more related comments here](https:///github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/relfilenode.h#L57).
 ///
 // FIXME: should move 'forknum' as last field to keep this consistent with Postgres.
-// Then we could replace the custo Ord and PartialOrd implementations below with
-// deriving them.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
+// Then we could replace the custom Ord and PartialOrd implementations below with
+// deriving them. This will require changes in walredoproc.c.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize)]
 pub struct RelTag {
     pub forknum: u8,
     pub spcnode: Oid,
     pub dbnode: Oid,
     pub relnode: Oid,
 }
+
+/// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
+pub type BlockNumber = u32;
 
 impl PartialOrd for RelTag {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -40,28 +43,17 @@ impl PartialOrd for RelTag {
 
 impl Ord for RelTag {
     fn cmp(&self, other: &Self) -> Ordering {
-        let mut cmp = self.spcnode.cmp(&other.spcnode);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        cmp = self.dbnode.cmp(&other.dbnode);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        cmp = self.relnode.cmp(&other.relnode);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        cmp = self.forknum.cmp(&other.forknum);
-
-        cmp
+        // Custom ordering where we put forknum to the end of the list
+        let other_tup = (other.spcnode, other.dbnode, other.relnode, other.forknum);
+        (self.spcnode, self.dbnode, self.relnode, self.forknum).cmp(&other_tup)
     }
 }
 
 /// Display RelTag in the same format that's used in most PostgreSQL debug messages:
 ///
+/// ```text
 /// <spcnode>/<dbnode>/<relnode>[_fsm|_vm|_init]
-///
+/// ```
 impl fmt::Display for RelTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(forkname) = forknumber_to_name(self.forknum) {
@@ -73,6 +65,57 @@ impl fmt::Display for RelTag {
         } else {
             write!(f, "{}/{}/{}", self.spcnode, self.dbnode, self.relnode)
         }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ParseRelTagError {
+    #[error("invalid forknum")]
+    InvalidForknum(#[source] std::num::ParseIntError),
+    #[error("missing triplet member {}", .0)]
+    MissingTripletMember(usize),
+    #[error("invalid triplet member {}", .0)]
+    InvalidTripletMember(usize, #[source] std::num::ParseIntError),
+}
+
+impl std::str::FromStr for RelTag {
+    type Err = ParseRelTagError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use ParseRelTagError::*;
+
+        // FIXME: in postgres logs this separator is dot
+        // Example:
+        //     could not read block 2 in rel 1663/208101/2620.1 from page server at lsn 0/2431E6F0
+        // with a regex we could get this more painlessly
+        let (triplet, forknum) = match s.split_once('_').or_else(|| s.split_once('.')) {
+            Some((t, f)) => {
+                let forknum = forkname_to_number(Some(f));
+                let forknum = if let Ok(f) = forknum {
+                    f
+                } else {
+                    f.parse::<u8>().map_err(InvalidForknum)?
+                };
+
+                (t, Some(forknum))
+            }
+            None => (s, None),
+        };
+
+        let mut split = triplet
+            .splitn(3, '/')
+            .enumerate()
+            .map(|(i, s)| s.parse::<u32>().map_err(|e| InvalidTripletMember(i, e)));
+        let spcnode = split.next().ok_or(MissingTripletMember(0))??;
+        let dbnode = split.next().ok_or(MissingTripletMember(1))??;
+        let relnode = split.next().ok_or(MissingTripletMember(2))??;
+
+        Ok(RelTag {
+            spcnode,
+            forknum: forknum.unwrap_or(MAIN_FORKNUM),
+            dbnode,
+            relnode,
+        })
     }
 }
 
@@ -119,9 +162,24 @@ impl RelTag {
 /// These files are divided into segments, which are divided into
 /// pages of the same BLCKSZ as used for relation files.
 ///
-#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Hash,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    strum_macros::EnumIter,
+    strum_macros::FromRepr,
+    enum_map::Enum,
+)]
+#[repr(u8)]
 pub enum SlruKind {
-    Clog,
+    Clog = 0,
     MultiXactMembers,
     MultiXactOffsets,
 }

@@ -5,29 +5,35 @@ use std::fs::DirEntry;
 use std::io::BufReader;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use anyhow::bail;
 use anyhow::Result;
+use camino::Utf8Path;
+use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use postgres_ffi::XLogSegNo;
+use postgres_ffi::MAX_SEND_SIZE;
 use serde::Deserialize;
 use serde::Serialize;
 
-use serde_with::{serde_as, DisplayFromStr};
+use sha2::{Digest, Sha256};
 use utils::id::NodeId;
 use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
-use crate::safekeeper::SafeKeeperState;
-use crate::safekeeper::SafekeeperMemState;
 use crate::safekeeper::TermHistory;
+use crate::send_wal::WalSenderState;
+use crate::state::TimelineMemState;
+use crate::state::TimelinePersistentState;
+use crate::timeline::get_timeline_dir;
+use crate::timeline::FullAccessTimeline;
+use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 
-use crate::send_wal::WalSenderState;
-use crate::GlobalTimelines;
-
 /// Various filters that influence the resulting JSON output.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Args {
     /// Dump all available safekeeper state. False by default.
     pub dump_all: bool,
@@ -52,13 +58,82 @@ pub struct Args {
 }
 
 /// Response for debug dump request.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct Response {
     pub start_time: DateTime<Utc>,
     pub finish_time: DateTime<Utc>,
-    pub timelines: Vec<Timeline>,
+    pub timelines: Vec<TimelineDumpSer>,
     pub timelines_count: usize,
     pub config: Config,
+}
+
+pub struct TimelineDumpSer {
+    pub tli: Arc<crate::timeline::Timeline>,
+    pub args: Args,
+    pub timeline_dir: Utf8PathBuf,
+    pub runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl std::fmt::Debug for TimelineDumpSer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimelineDumpSer")
+            .field("tli", &self.tli.ttid)
+            .field("args", &self.args)
+            .finish()
+    }
+}
+
+impl Serialize for TimelineDumpSer {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let dump = self.runtime.block_on(build_from_tli_dump(
+            &self.tli,
+            &self.args,
+            &self.timeline_dir,
+        ));
+        dump.serialize(serializer)
+    }
+}
+
+async fn build_from_tli_dump(
+    timeline: &Arc<crate::timeline::Timeline>,
+    args: &Args,
+    timeline_dir: &Utf8Path,
+) -> Timeline {
+    let control_file = if args.dump_control_file {
+        let mut state = timeline.get_state().await.1;
+        if !args.dump_term_history {
+            state.acceptor_state.term_history = TermHistory(vec![]);
+        }
+        Some(state)
+    } else {
+        None
+    };
+
+    let memory = if args.dump_memory {
+        Some(timeline.memory_dump().await)
+    } else {
+        None
+    };
+
+    let disk_content = if args.dump_disk_content {
+        // build_disk_content can fail, but we don't want to fail the whole
+        // request because of that.
+        // Note: timeline can be in offloaded state, this is not a problem.
+        build_disk_content(timeline_dir).ok()
+    } else {
+        None
+    };
+
+    Timeline {
+        tenant_id: timeline.ttid.tenant_id,
+        timeline_id: timeline.ttid.timeline_id,
+        control_file,
+        memory,
+        disk_content,
+    }
 }
 
 /// Safekeeper configuration.
@@ -73,14 +148,11 @@ pub struct Config {
     pub wal_backup_enabled: bool,
 }
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Timeline {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
-    pub control_file: Option<SafeKeeperState>,
+    pub control_file: Option<TimelinePersistentState>,
     pub memory: Option<Memory>,
     pub disk_content: Option<DiskContent>,
 }
@@ -95,7 +167,7 @@ pub struct Memory {
     pub num_computes: u32,
     pub last_removed_segno: XLogSegNo,
     pub epoch_start_lsn: Lsn,
-    pub mem_state: SafekeeperMemState,
+    pub mem_state: TimelineMemState,
 
     // PhysicalStorage state.
     pub write_lsn: Lsn,
@@ -124,6 +196,7 @@ pub struct FileInfo {
 pub async fn build(args: Args) -> Result<Response> {
     let start_time = Utc::now();
     let timelines_count = GlobalTimelines::timelines_count();
+    let config = GlobalTimelines::get_global_config();
 
     let ptrs_snapshot = if args.tenant_id.is_some() && args.timeline_id.is_some() {
         // If both tenant_id and timeline_id are specified, we can just get the
@@ -139,8 +212,12 @@ pub async fn build(args: Args) -> Result<Response> {
         GlobalTimelines::get_all()
     };
 
-    // TODO: return Stream instead of Vec
     let mut timelines = Vec::new();
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap(),
+    );
     for tli in ptrs_snapshot {
         let ttid = tli.ttid;
         if let Some(tenant_id) = args.tenant_id {
@@ -154,41 +231,13 @@ pub async fn build(args: Args) -> Result<Response> {
             }
         }
 
-        let control_file = if args.dump_control_file {
-            let mut state = tli.get_state().await.1;
-            if !args.dump_term_history {
-                state.acceptor_state.term_history = TermHistory(vec![]);
-            }
-            Some(state)
-        } else {
-            None
-        };
-
-        let memory = if args.dump_memory {
-            Some(tli.memory_dump().await)
-        } else {
-            None
-        };
-
-        let disk_content = if args.dump_disk_content {
-            // build_disk_content can fail, but we don't want to fail the whole
-            // request because of that.
-            build_disk_content(&tli.timeline_dir).ok()
-        } else {
-            None
-        };
-
-        let timeline = Timeline {
-            tenant_id: ttid.tenant_id,
-            timeline_id: ttid.timeline_id,
-            control_file,
-            memory,
-            disk_content,
-        };
-        timelines.push(timeline);
+        timelines.push(TimelineDumpSer {
+            tli,
+            args: args.clone(),
+            timeline_dir: get_timeline_dir(&config, &ttid),
+            runtime: runtime.clone(),
+        });
     }
-
-    let config = GlobalTimelines::get_global_config();
 
     Ok(Response {
         start_time,
@@ -201,7 +250,7 @@ pub async fn build(args: Args) -> Result<Response> {
 
 /// Builds DiskContent from a directory path. It can fail if the directory
 /// is deleted between the time we get the path and the time we try to open it.
-fn build_disk_content(path: &std::path::Path) -> Result<DiskContent> {
+fn build_disk_content(path: &Utf8Path) -> Result<DiskContent> {
     let mut files = Vec::new();
     for entry in fs::read_dir(path)? {
         if entry.is_err() {
@@ -256,11 +305,56 @@ fn build_file_info(entry: DirEntry) -> Result<FileInfo> {
 fn build_config(config: SafeKeeperConf) -> Config {
     Config {
         id: config.my_id,
-        workdir: config.workdir,
+        workdir: config.workdir.into(),
         listen_pg_addr: config.listen_pg_addr,
         listen_http_addr: config.listen_http_addr,
         no_sync: config.no_sync,
         max_offloader_lag_bytes: config.max_offloader_lag_bytes,
         wal_backup_enabled: config.wal_backup_enabled,
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TimelineDigestRequest {
+    pub from_lsn: Lsn,
+    pub until_lsn: Lsn,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimelineDigest {
+    pub sha256: String,
+}
+
+pub async fn calculate_digest(
+    tli: &FullAccessTimeline,
+    request: TimelineDigestRequest,
+) -> Result<TimelineDigest> {
+    if request.from_lsn > request.until_lsn {
+        bail!("from_lsn is greater than until_lsn");
+    }
+
+    let (_, persisted_state) = tli.get_state().await;
+    if persisted_state.timeline_start_lsn > request.from_lsn {
+        bail!("requested LSN is before the start of the timeline");
+    }
+
+    let mut wal_reader = tli.get_walreader(request.from_lsn).await?;
+
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; MAX_SEND_SIZE];
+
+    let mut bytes_left = (request.until_lsn.0 - request.from_lsn.0) as usize;
+    while bytes_left > 0 {
+        let bytes_to_read = std::cmp::min(buf.len(), bytes_left);
+        let bytes_read = wal_reader.read(&mut buf[..bytes_to_read]).await?;
+        if bytes_read == 0 {
+            bail!("wal_reader.read returned 0 bytes");
+        }
+        hasher.update(&buf[..bytes_read]);
+        bytes_left -= bytes_read;
+    }
+
+    let digest = hasher.finalize();
+    let digest = hex::encode(digest);
+    Ok(TimelineDigest { sha256: digest })
 }

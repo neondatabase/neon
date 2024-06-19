@@ -1,5 +1,5 @@
+import concurrent.futures
 import os
-import shutil
 import time
 from contextlib import closing
 from datetime import datetime
@@ -8,41 +8,41 @@ from pathlib import Path
 from typing import List
 
 import pytest
+import requests
+from fixtures.common_types import Lsn, TenantId
 from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
     PAGESERVER_PER_TENANT_METRICS,
-    PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     parse_metrics,
 )
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
-    available_remote_storages,
+    wait_for_last_flush_lsn,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.pageserver.http import PageserverApiException
+from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until_tenant_active
+from fixtures.pg_version import PgVersion
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
 
 def test_tenant_creation_fails(neon_simple_env: NeonEnv):
-    tenants_dir = Path(neon_simple_env.repo_dir) / "tenants"
+    tenants_dir = neon_simple_env.pageserver.tenant_dir()
     initial_tenants = sorted(
         map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
     )
-    initial_tenant_dirs = [d for d in tenants_dir.iterdir()]
+    [d for d in tenants_dir.iterdir()]
 
-    neon_simple_env.pageserver.allowed_errors.extend(
-        [
-            ".*Failed to create directory structure for tenant .*, cleaning tmp data.*",
-            ".*Failed to fsync removed temporary tenant directory .*",
-        ]
-    )
+    error_regexes = [".*tenant-config-before-write.*"]
+    neon_simple_env.pageserver.allowed_errors.extend(error_regexes)
+    neon_simple_env.storage_controller.allowed_errors.extend(error_regexes)
 
     pageserver_http = neon_simple_env.pageserver.http_client()
-    pageserver_http.configure_failpoints(("tenant-creation-before-tmp-rename", "return"))
-    with pytest.raises(Exception, match="tenant-creation-before-tmp-rename"):
+    pageserver_http.configure_failpoints(("tenant-config-before-write", "return"))
+    with pytest.raises(Exception, match="tenant-config-before-write"):
         _ = neon_simple_env.neon_cli.create_tenant()
 
     new_tenants = sorted(
@@ -50,10 +50,10 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     )
     assert initial_tenants == new_tenants, "should not create new tenants"
 
-    new_tenant_dirs = [d for d in tenants_dir.iterdir()]
-    assert (
-        new_tenant_dirs == initial_tenant_dirs
-    ), "pageserver should clean its temp tenant dirs on tenant creation failure"
+    # Any files left behind on disk during failed creation do not prevent
+    # a retry from succeeding.
+    pageserver_http.configure_failpoints(("tenant-config-before-write", "off"))
+    neon_simple_env.neon_cli.create_tenant()
 
 
 def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
@@ -212,37 +212,30 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
 
     # Test (a subset of) pageserver global metrics
     for metric in PAGESERVER_GLOBAL_METRICS:
+        if metric.startswith("pageserver_remote"):
+            continue
+
         ps_samples = ps_metrics.query_all(metric, {})
-        assert len(ps_samples) > 0
+        assert len(ps_samples) > 0, f"expected at least one sample for {metric}"
         for sample in ps_samples:
             labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
             log.info(f"{sample.name}{{{labels}}} {sample.value}")
 
-    # Test that we gather tenant create metric
+    # Test that we gather tenant operations metrics
     storage_operation_metrics = [
         "pageserver_storage_operations_seconds_global_bucket",
         "pageserver_storage_operations_seconds_global_sum",
         "pageserver_storage_operations_seconds_global_count",
     ]
     for metric in storage_operation_metrics:
-        value = ps_metrics.query_all(metric, filter={"operation": "create tenant"})
+        value = ps_metrics.query_all(metric, filter={"operation": "layer flush"})
         assert value
 
 
-@pytest.mark.parametrize(
-    "remote_storage_kind",
-    # exercise both the code paths where remote_storage=None and remote_storage=Some(...)
-    [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3],
-)
-def test_pageserver_metrics_removed_after_detach(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
+def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilder):
     """Tests that when a tenant is detached, the tenant specific metrics are not left behind"""
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_pageserver_metrics_removed_after_detach",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     neon_env_builder.num_safekeepers = 3
 
@@ -282,9 +275,6 @@ def test_pageserver_metrics_removed_after_detach(
     for tenant in [tenant_1, tenant_2]:
         pre_detach_samples = set([x.name for x in get_ps_metric_samples_for_tenant(tenant)])
         expected = set(PAGESERVER_PER_TENANT_METRICS)
-        if remote_storage_kind == RemoteStorageKind.NOOP:
-            # if there's no remote storage configured, we don't expose the remote timeline client metrics
-            expected -= set(PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS)
         assert pre_detach_samples == expected
 
         env.pageserver.http_client().tenant_detach(tenant)
@@ -293,39 +283,22 @@ def test_pageserver_metrics_removed_after_detach(
         assert post_detach_samples == set()
 
 
-# Check that empty tenants work with or without the remote storage
-@pytest.mark.parametrize(
-    "remote_storage_kind", available_remote_storages() + [RemoteStorageKind.NOOP]
-)
-def test_pageserver_with_empty_tenants(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_pageserver_with_empty_tenants",
-    )
-
+def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*load failed.*list timelines directory.*",
+        ]
     )
-    env.pageserver.allowed_errors.append(".*load failed.*list timelines directory.*")
 
     client = env.pageserver.http_client()
 
-    tenant_with_empty_timelines = TenantId.generate()
-    client.tenant_create(tenant_with_empty_timelines)
-    temp_timelines = client.timeline_list(tenant_with_empty_timelines)
-    for temp_timeline in temp_timelines:
-        client.timeline_delete(
-            tenant_with_empty_timelines, TimelineId(temp_timeline["timeline_id"])
-        )
+    tenant_with_empty_timelines = env.initial_tenant
+    timeline_delete_wait_completed(client, tenant_with_empty_timelines, env.initial_timeline)
+
     files_in_timelines_dir = sum(
-        1
-        for _p in Path.iterdir(
-            Path(env.repo_dir) / "tenants" / str(tenant_with_empty_timelines) / "timelines"
-        )
+        1 for _p in Path.iterdir(env.pageserver.timeline_dir(tenant_with_empty_timelines))
     )
     assert (
         files_in_timelines_dir == 0
@@ -335,33 +308,18 @@ def test_pageserver_with_empty_tenants(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    tenant_without_timelines_dir = env.initial_tenant
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
-
     env.pageserver.start()
 
     client = env.pageserver.http_client()
 
-    def not_loading():
+    def not_attaching():
         tenants = client.tenant_list()
-        assert len(tenants) == 2
-        assert all(t["state"]["slug"] != "Loading" for t in tenants)
+        assert len(tenants) == 1
+        assert all(t["state"]["slug"] != "Attaching" for t in tenants)
 
-    wait_until(10, 0.2, not_loading)
+    wait_until(10, 0.2, not_attaching)
 
     tenants = client.tenant_list()
-
-    [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
-    assert (
-        broken_tenant["state"]["slug"] == "Broken"
-    ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
-
-    broken_tenant_status = client.tenant_status(tenant_without_timelines_dir)
-    assert (
-        broken_tenant_status["state"]["slug"] == "Broken"
-    ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
-
-    assert env.pageserver.log_contains(".*load failed, setting tenant state to Broken:.*")
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines)]
     assert (
@@ -376,12 +334,7 @@ def test_pageserver_with_empty_tenants(
     time.sleep(1)  # to allow metrics propagation
 
     ps_metrics = client.get_metrics()
-    broken_tenants_metric_filter = {
-        "tenant_id": str(tenant_without_timelines_dir),
-        "state": "Broken",
-    }
     active_tenants_metric_filter = {
-        "tenant_id": str(tenant_with_empty_timelines),
         "state": "Active",
     }
 
@@ -395,12 +348,122 @@ def test_pageserver_with_empty_tenants(
         tenant_active_count == 1
     ), f"Tenant {tenant_with_empty_timelines} should have metric as active"
 
-    tenant_broken_count = int(
-        ps_metrics.query_one(
-            "pageserver_tenant_states_count", filter=broken_tenants_metric_filter
-        ).value
+
+def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
+    """
+    Probabilistic stress test for the pageserver's handling of tenant requests
+    across a restart. This is intended to catch things like:
+    - Bad response codes during shutdown (e.g. returning 500 instead of 503)
+    - Issues where a tenant is still starting up while we receive a request for it
+    - Issues with interrupting/resuming tenant/timeline creation in shutdown
+    """
+    env = neon_env_builder.init_configs()
+    env.start()
+    tenant_id: TenantId = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Multiple creation requests which race will generate this error
+    env.pageserver.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
+
+    # Tenant creation requests which arrive out of order will generate complaints about
+    # generation nubmers out of order.
+    env.pageserver.allowed_errors.append(".*Generation .+ is less than existing .+")
+
+    # Our multiple creation requests will advance generation quickly, and when we skip
+    # a generation number we can generate these warnings
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates for tenant .+")
+
+    # Timeline::flush_and_shutdown cannot tell if it is hitting a failure because of
+    # an incomplete attach, or some other problem.  In the field this should be rare,
+    # so we allow it to log at WARN, even if it is occasionally a false positive.
+    env.pageserver.allowed_errors.append(".*failed to freeze and flush.*")
+
+    def create_bg(delay_ms):
+        time.sleep(delay_ms / 1000.0)
+        try:
+            env.pageserver.tenant_create(tenant_id=tenant_id)
+            env.pageserver.http_client().timeline_create(
+                PgVersion.NOT_SET, tenant_id, new_timeline_id=timeline_id
+            )
+        except PageserverApiException as e:
+            if e.status_code == 409:
+                log.info(f"delay_ms={delay_ms} 409")
+                pass
+            elif e.status_code == 429:
+                log.info(f"delay_ms={delay_ms} 429")
+                pass
+            elif e.status_code == 400:
+                if "is less than existing" in e.message:
+                    # We send creation requests very close together in time: it is expected that these
+                    # race, and sometimes chigher-generation'd requests arrive first.  The pageserver rightly
+                    # rejects any attempt to make a generation number go backwards.
+                    pass
+                else:
+                    raise
+            else:
+                raise
+        except requests.exceptions.ConnectionError:
+            # Our requests might arrive during shutdown and be cut off at the transport level
+            pass
+
+    for _ in range(0, 10):
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futs = []
+            for delay_ms in (0, 1, 10, 50, 100, 200, 500, 800):
+                f = executor.submit(create_bg, delay_ms)
+                futs.append(f)
+            env.pageserver.stop()
+            env.pageserver.start()
+
+            for f in futs:
+                f.result(timeout=10)
+
+    # The tenant should end up active
+    wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)
+
+
+def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
+    """Test for the directory_entries_count metric"""
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+
+    endpoint_tenant = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+
+    # Not sure why but this many tables creates more relations than our limit
+    TABLE_COUNT = 1600
+    COUNT_AT_LEAST_EXPECTED = 5500
+
+    with endpoint_tenant.connect() as conn:
+        with conn.cursor() as cur:
+            # Wrapping begin; commit; around this and the loop below keeps the reproduction
+            # but it also doesn't have a performance benefit
+            cur.execute("CREATE TABLE template_tbl(key int primary key, value text);")
+            for i in range(TABLE_COUNT):
+                cur.execute(f"CREATE TABLE tbl_{i}(like template_tbl INCLUDING ALL);")
+    wait_for_last_flush_lsn(env, endpoint_tenant, env.initial_tenant, env.initial_timeline)
+    endpoint_tenant.stop()
+
+    m = ps_http.get_metrics()
+    directory_entries_count_metric = m.query_all(
+        "pageserver_directory_entries_count", {"tenant_id": str(env.initial_tenant)}
     )
 
-    assert (
-        tenant_broken_count == 1
-    ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"
+    def only_int(samples: List[Sample]) -> int:
+        assert len(samples) == 1
+        return int(samples[0].value)
+
+    directory_entries_count = only_int(directory_entries_count_metric)
+
+    log.info(f"pageserver_directory_entries_count metric value: {directory_entries_count}")
+
+    assert directory_entries_count > COUNT_AT_LEAST_EXPECTED
+
+    timeline_detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    counts = timeline_detail["directory_entries_counts"]
+    assert counts
+    log.info(f"directory counts: {counts}")
+    assert counts[2] > COUNT_AT_LEAST_EXPECTED

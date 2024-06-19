@@ -31,7 +31,7 @@ impl<'a> FirstMessage<'a> {
 
 /// A single SASL message.
 /// This struct is deliberately decoupled from lower-level
-/// [`BeAuthenticationSaslMessage`](pq_proto::BeAuthenticationSaslMessage).
+/// [`BeAuthenticationSaslMessage`].
 #[derive(Debug)]
 pub(super) enum ServerMessage<T> {
     /// We expect to see more steps.

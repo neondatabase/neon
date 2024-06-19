@@ -1,0 +1,29 @@
+name: Notify Slack channel about upcoming release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    branches:
+      - release
+    types:
+      # Default types that triggers a workflow:
+      # - https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request
+      - opened
+      - synchronize
+      - reopened
+      # Additional types that we want to handle:
+      - closed
+
+jobs:
+  notify:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: neondatabase/dev-actions/release-pr-notify@main
+        with:
+          slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          slack-channel-id: ${{ vars.SLACK_UPCOMING_RELEASE_CHANNEL_ID || 'C05QQ9J1BRC' }} # if not set, then `#test-release-notifications`
+          github-token: ${{ secrets.GITHUB_TOKEN }}

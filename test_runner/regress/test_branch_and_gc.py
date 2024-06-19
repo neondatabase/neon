@@ -2,9 +2,10 @@ import threading
 import time
 
 import pytest
+from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.types import Lsn
+from fixtures.pageserver.http import TimelineCreate406
 from fixtures.utils import query_scalar
 
 
@@ -45,7 +46,10 @@ from fixtures.utils import query_scalar
 # Because the delta layer D covering lsn1 is corrupted, creating a branch
 # starting from lsn1 should return an error as follows:
 #     could not find data for key ... at LSN ..., for request at LSN ...
-def test_branch_and_gc(neon_simple_env: NeonEnv):
+def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
+    if build_type == "debug":
+        pytest.skip("times out in debug builds")
+
     env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
 
@@ -116,12 +120,12 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
 
-    env.pageserver.allowed_errors.extend(
-        [
-            ".*invalid branch start lsn: less than latest GC cutoff.*",
-            ".*invalid branch start lsn: less than planned GC cutoff.*",
-        ]
-    )
+    error_regexes = [
+        ".*invalid branch start lsn: less than latest GC cutoff.*",
+        ".*invalid branch start lsn: less than planned GC cutoff.*",
+    ]
+    env.pageserver.allowed_errors.extend(error_regexes)
+    env.storage_controller.allowed_errors.extend(error_regexes)
 
     # Disable background GC but set the `pitr_interval` to be small, so GC can delete something
     tenant, _ = env.neon_cli.create_tenant(
@@ -173,5 +177,12 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     # The starting LSN is invalid as the corresponding record is scheduled to be removed by in-queue GC.
     with pytest.raises(Exception, match="invalid branch start lsn: .*"):
         env.neon_cli.create_branch("b1", "b0", tenant_id=tenant, ancestor_start_lsn=lsn)
+    # retry the same with the HTTP API, so that we can inspect the status code
+    with pytest.raises(TimelineCreate406):
+        new_timeline_id = TimelineId.generate()
+        log.info(
+            f"Expecting failure for branch behind gc'ing LSN, new_timeline_id={new_timeline_id}"
+        )
+        pageserver_http_client.timeline_create(env.pg_version, tenant, new_timeline_id, b0, lsn)
 
     thread.join()

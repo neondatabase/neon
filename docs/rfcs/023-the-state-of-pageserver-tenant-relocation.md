@@ -75,7 +75,7 @@ sequenceDiagram
 ```
 
 At this point it is not possible to restore the state from index, it contains L2 which
-is no longer available in s3 and doesnt contain L3 added by compaction by the
+is no longer available in s3 and doesn't contain L3 added by compaction by the
 first pageserver. So if any of the pageservers restart, initial sync will fail
 (or in on-demand world it will fail a bit later during page request from
 missing layer)
@@ -171,13 +171,13 @@ sequenceDiagram
 
 Another problem is a possibility of concurrent branch creation calls.
 
-I e during migration create_branch can be called on old pageserver and newly created branch wont be seen on new pageserver. Prior art includes prototyping an approach of trying to mirror such branches, but currently it lost its importance, because now attach is fast because we dont need to download all data, and additionally to the best of my knowledge of control plane internals (cc @ololobus to confirm) operations on one project are executed sequentially, so it is not possible to have such case. So branch create operation will be executed only when relocation is completed. As a safety measure we can forbid branch creation for tenants that are in readonly remote state.
+I e during migration create_branch can be called on old pageserver and newly created branch wont be seen on new pageserver. Prior art includes prototyping an approach of trying to mirror such branches, but currently it lost its importance, because now attach is fast because we don't need to download all data, and additionally to the best of my knowledge of control plane internals (cc @ololobus to confirm) operations on one project are executed sequentially, so it is not possible to have such case. So branch create operation will be executed only when relocation is completed. As a safety measure we can forbid branch creation for tenants that are in readonly remote state.
 
 ## Simplistic approach
 
 The difference of simplistic approach from one described above is that it calls ignore on source tenant first and then calls attach on target pageserver. Approach above does it in opposite order thus opening a possibility for race conditions we strive to avoid.
 
-The approach largely follows this guide: <https://github.com/neondatabase/cloud/wiki/Cloud:-Ad-hoc-tenant-relocation>
+The approach largely follows this guide: <https://www.notion.so/neondatabase/Cloud-Ad-hoc-tenant-relocation-f687474f7bfc42269e6214e3acba25c7>
 
 The happy path sequence:
 

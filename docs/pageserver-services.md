@@ -96,6 +96,17 @@ prefix_in_bucket = '/test_prefix/'
 
 `AWS_SECRET_ACCESS_KEY` and `AWS_ACCESS_KEY_ID` env variables can be used to specify the S3 credentials if needed.
 
+or
+
+```toml
+[remote_storage]
+container_name = 'some-container-name'
+storage_account = 'somestorageaccnt'
+container_region = 'us-east'
+prefix_in_container = '/test-prefix/'
+```
+
+The `AZURE_STORAGE_ACCESS_KEY` env variable can be used to specify the azure credentials if needed.
 
 ## Repository background tasks
 

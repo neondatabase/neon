@@ -10,27 +10,25 @@
 //! This module is responsible for creation of such tarball
 //! from data stored in object storage.
 //!
-use anyhow::{anyhow, bail, ensure, Context};
-use bytes::{BufMut, BytesMut};
+use anyhow::{anyhow, Context};
+use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
+use pageserver_api::key::Key;
+use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
 use tokio::io;
 use tokio::io::AsyncWrite;
 use tracing::*;
 
-/// NB: This relies on a modified version of tokio_tar that does *not* write the
-/// end-of-archive marker (1024 zero bytes), when the Builder struct is dropped
-/// without explicitly calling 'finish' or 'into_inner'!
-///
-/// See https://github.com/neondatabase/tokio-tar/pull/1
-///
 use tokio_tar::{Builder, EntryType, Header};
 
 use crate::context::RequestContext;
+use crate::pgdatadir_mapping::Version;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
+use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
 use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
@@ -39,6 +37,14 @@ use postgres_ffi::XLogFileName;
 use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
+
+#[derive(Debug, thiserror::Error)]
+pub enum BasebackupError {
+    #[error("basebackup pageserver error {0:#}")]
+    Server(#[from] anyhow::Error),
+    #[error("basebackup client error {0:#}")]
+    Client(#[source] io::Error),
+}
 
 /// Create basebackup with non-rel data in it.
 /// Only include relational data if 'full_backup' is true.
@@ -55,7 +61,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     prev_lsn: Option<Lsn>,
     full_backup: bool,
     ctx: &'a RequestContext,
-) -> anyhow::Result<()>
+) -> Result<(), BasebackupError>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
@@ -94,8 +100,10 @@ where
 
     // Consolidate the derived and the provided prev_lsn values
     let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
-        if backup_prev != Lsn(0) {
-            ensure!(backup_prev == provided_prev_lsn);
+        if backup_prev != Lsn(0) && backup_prev != provided_prev_lsn {
+            return Err(BasebackupError::Server(anyhow!(
+                "backup_prev {backup_prev} != provided_prev_lsn {provided_prev_lsn}"
+            )));
         }
         provided_prev_lsn
     } else {
@@ -136,12 +144,116 @@ where
     ctx: &'a RequestContext,
 }
 
+/// A sink that accepts SLRU blocks ordered by key and forwards
+/// full segments to the archive.
+struct SlruSegmentsBuilder<'a, 'b, W>
+where
+    W: AsyncWrite + Send + Sync + Unpin,
+{
+    ar: &'a mut Builder<&'b mut W>,
+    buf: Vec<u8>,
+    current_segment: Option<(SlruKind, u32)>,
+    total_blocks: usize,
+}
+
+impl<'a, 'b, W> SlruSegmentsBuilder<'a, 'b, W>
+where
+    W: AsyncWrite + Send + Sync + Unpin,
+{
+    fn new(ar: &'a mut Builder<&'b mut W>) -> Self {
+        Self {
+            ar,
+            buf: Vec::new(),
+            current_segment: None,
+            total_blocks: 0,
+        }
+    }
+
+    async fn add_block(&mut self, key: &Key, block: Bytes) -> Result<(), BasebackupError> {
+        let (kind, segno, _) = key.to_slru_block()?;
+
+        match kind {
+            SlruKind::Clog => {
+                if !(block.len() == BLCKSZ as usize || block.len() == BLCKSZ as usize + 8) {
+                    return Err(BasebackupError::Server(anyhow!(
+                        "invalid SlruKind::Clog record: block.len()={}",
+                        block.len()
+                    )));
+                }
+            }
+            SlruKind::MultiXactMembers | SlruKind::MultiXactOffsets => {
+                if block.len() != BLCKSZ as usize {
+                    return Err(BasebackupError::Server(anyhow!(
+                        "invalid {:?} record: block.len()={}",
+                        kind,
+                        block.len()
+                    )));
+                }
+            }
+        }
+
+        let segment = (kind, segno);
+        match self.current_segment {
+            None => {
+                self.current_segment = Some(segment);
+                self.buf
+                    .extend_from_slice(block.slice(..BLCKSZ as usize).as_ref());
+            }
+            Some(current_seg) if current_seg == segment => {
+                self.buf
+                    .extend_from_slice(block.slice(..BLCKSZ as usize).as_ref());
+            }
+            Some(_) => {
+                self.flush().await?;
+
+                self.current_segment = Some(segment);
+                self.buf
+                    .extend_from_slice(block.slice(..BLCKSZ as usize).as_ref());
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result<(), BasebackupError> {
+        let nblocks = self.buf.len() / BLCKSZ as usize;
+        let (kind, segno) = self.current_segment.take().unwrap();
+        let segname = format!("{}/{:>04X}", kind.to_str(), segno);
+        let header = new_tar_header(&segname, self.buf.len() as u64)?;
+        self.ar
+            .append(&header, self.buf.as_slice())
+            .await
+            .map_err(BasebackupError::Client)?;
+
+        self.total_blocks += nblocks;
+        debug!("Added to basebackup slru {} relsize {}", segname, nblocks);
+
+        self.buf.clear();
+
+        Ok(())
+    }
+
+    async fn finish(mut self) -> Result<(), BasebackupError> {
+        let res = if self.current_segment.is_none() || self.buf.is_empty() {
+            Ok(())
+        } else {
+            self.flush().await
+        };
+
+        info!("Collected {} SLRU blocks", self.total_blocks);
+
+        res
+    }
+}
+
 impl<'a, W> Basebackup<'a, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
-    async fn send_tarball(mut self) -> anyhow::Result<()> {
+    async fn send_tarball(mut self) -> Result<(), BasebackupError> {
         // TODO include checksum
+
+        let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
 
         // Create pgdata subdirs structure
         for dir in PGDATA_SUBDIRS.iter() {
@@ -169,25 +281,42 @@ where
                     .context("could not add config file to basebackup tarball")?;
             }
         }
-
-        // Gather non-relational files from object storage pages.
-        for kind in [
-            SlruKind::Clog,
-            SlruKind::MultiXactOffsets,
-            SlruKind::MultiXactMembers,
-        ] {
-            for segno in self
+        if !lazy_slru_download {
+            // Gather non-relational files from object storage pages.
+            let slru_partitions = self
                 .timeline
-                .list_slru_segments(kind, self.lsn, self.ctx)
-                .await?
-            {
-                self.add_slru_segment(kind, segno).await?;
+                .get_slru_keyspace(Version::Lsn(self.lsn), self.ctx)
+                .await
+                .map_err(|e| BasebackupError::Server(e.into()))?
+                .partition(
+                    self.timeline.get_shard_identity(),
+                    Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+                );
+
+            let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
+
+            for part in slru_partitions.parts {
+                let blocks = self
+                    .timeline
+                    .get_vectored(part, self.lsn, self.ctx)
+                    .await
+                    .map_err(|e| BasebackupError::Server(e.into()))?;
+
+                for (key, block) in blocks {
+                    let block = block.map_err(|e| BasebackupError::Server(e.into()))?;
+                    slru_builder.add_block(&key, block).await?;
+                }
             }
+            slru_builder.finish().await?;
         }
 
+        let mut min_restart_lsn: Lsn = Lsn::MAX;
         // Create tablespace directories
-        for ((spcnode, dbnode), has_relmap_file) in
-            self.timeline.list_dbdirs(self.lsn, self.ctx).await?
+        for ((spcnode, dbnode), has_relmap_file) in self
+            .timeline
+            .list_dbdirs(self.lsn, self.ctx)
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?
         {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
@@ -195,8 +324,9 @@ where
             // Otherwise only include init forks of unlogged relations.
             let rels = self
                 .timeline
-                .list_rels(spcnode, dbnode, self.lsn, self.ctx)
-                .await?;
+                .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                .await
+                .map_err(|e| BasebackupError::Server(e.into()))?;
             for &rel in rels.iter() {
                 // Send init fork as main fork to provide well formed empty
                 // contents of UNLOGGED relations. Postgres copies it in
@@ -218,38 +348,111 @@ where
                     self.add_rel(rel, rel).await?;
                 }
             }
+
+            for (path, content) in self
+                .timeline
+                .list_aux_files(self.lsn, self.ctx)
+                .await
+                .map_err(|e| BasebackupError::Server(e.into()))?
+            {
+                if path.starts_with("pg_replslot") {
+                    let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
+                    let restart_lsn = Lsn(u64::from_le_bytes(
+                        content[offs..offs + 8].try_into().unwrap(),
+                    ));
+                    info!("Replication slot {} restart LSN={}", path, restart_lsn);
+                    min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                } else if path == "pg_logical/replorigin_checkpoint" {
+                    // replorigin_checkoint is written only on compute shutdown, so it contains
+                    // deteriorated values. So we generate our own version of this file for the particular LSN
+                    // based on information about replorigins extracted from transaction commit records.
+                    // In future we will not generate AUX record for "pg_logical/replorigin_checkpoint" at all,
+                    // but now we should handle (skip) it for backward compatibility.
+                    continue;
+                }
+                let header = new_tar_header(&path, content.len() as u64)?;
+                self.ar
+                    .append(&header, &*content)
+                    .await
+                    .context("could not add aux file to basebackup tarball")?;
+            }
+        }
+        if min_restart_lsn != Lsn::MAX {
+            info!(
+                "Min restart LSN for logical replication is {}",
+                min_restart_lsn
+            );
+            let data = min_restart_lsn.0.to_le_bytes();
+            let header = new_tar_header("restart.lsn", data.len() as u64)?;
+            self.ar
+                .append(&header, &data[..])
+                .await
+                .context("could not add restart.lsn file to basebackup tarball")?;
         }
         for xid in self
             .timeline
             .list_twophase_files(self.lsn, self.ctx)
-            .await?
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?
         {
             self.add_twophase_file(xid).await?;
         }
+        let repl_origins = self
+            .timeline
+            .get_replorigins(self.lsn, self.ctx)
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?;
+        let n_origins = repl_origins.len();
+        if n_origins != 0 {
+            //
+            // Construct "pg_logical/replorigin_checkpoint" file based on information about replication origins
+            // extracted from transaction commit record. We are using this file to pass information about replication
+            // origins to compute to allow logical replication to restart from proper point.
+            //
+            let mut content = Vec::with_capacity(n_origins * 16 + 8);
+            content.extend_from_slice(&pg_constants::REPLICATION_STATE_MAGIC.to_le_bytes());
+            for (origin_id, origin_lsn) in repl_origins {
+                content.extend_from_slice(&origin_id.to_le_bytes());
+                content.extend_from_slice(&[0u8; 6]); // align to 8 bytes
+                content.extend_from_slice(&origin_lsn.0.to_le_bytes());
+            }
+            let crc32 = crc32c::crc32c(&content);
+            content.extend_from_slice(&crc32.to_le_bytes());
+            let header = new_tar_header("pg_logical/replorigin_checkpoint", content.len() as u64)?;
+            self.ar.append(&header, &*content).await.context(
+                "could not add pg_logical/replorigin_checkpoint file to basebackup tarball",
+            )?;
+        }
 
         fail_point!("basebackup-before-control-file", |_| {
-            bail!("failpoint basebackup-before-control-file")
+            Err(BasebackupError::Server(anyhow!(
+                "failpoint basebackup-before-control-file"
+            )))
         });
 
         // Generate pg_control and bootstrap WAL segment.
         self.add_pgcontrol_file().await?;
-        self.ar.finish().await?;
+        self.ar.finish().await.map_err(BasebackupError::Client)?;
         debug!("all tarred up!");
         Ok(())
     }
 
     /// Add contents of relfilenode `src`, naming it as `dst`.
-    async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> anyhow::Result<()> {
+    async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> Result<(), BasebackupError> {
         let nblocks = self
             .timeline
-            .get_rel_size(src, self.lsn, false, self.ctx)
-            .await?;
+            .get_rel_size(src, Version::Lsn(self.lsn), self.ctx)
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?;
 
         // If the relation is empty, create an empty file
         if nblocks == 0 {
             let file_name = dst.to_segfile_name(0);
             let header = new_tar_header(&file_name, 0)?;
-            self.ar.append(&header, &mut io::empty()).await?;
+            self.ar
+                .append(&header, &mut io::empty())
+                .await
+                .map_err(BasebackupError::Client)?;
             return Ok(());
         }
 
@@ -263,52 +466,23 @@ where
             for blknum in startblk..endblk {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(src, blknum, self.lsn, false, self.ctx)
-                    .await?;
+                    .get_rel_page_at_lsn(src, blknum, Version::Lsn(self.lsn), self.ctx)
+                    .await
+                    .map_err(|e| BasebackupError::Server(e.into()))?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
             let file_name = dst.to_segfile_name(seg as u32);
             let header = new_tar_header(&file_name, segment_data.len() as u64)?;
-            self.ar.append(&header, segment_data.as_slice()).await?;
+            self.ar
+                .append(&header, segment_data.as_slice())
+                .await
+                .map_err(BasebackupError::Client)?;
 
             seg += 1;
             startblk = endblk;
         }
 
-        Ok(())
-    }
-
-    //
-    // Generate SLRU segment files from repository.
-    //
-    async fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
-        let nblocks = self
-            .timeline
-            .get_slru_segment_size(slru, segno, self.lsn, self.ctx)
-            .await?;
-
-        let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
-        for blknum in 0..nblocks {
-            let img = self
-                .timeline
-                .get_slru_page_at_lsn(slru, segno, blknum, self.lsn, self.ctx)
-                .await?;
-
-            if slru == SlruKind::Clog {
-                ensure!(img.len() == BLCKSZ as usize || img.len() == BLCKSZ as usize + 8);
-            } else {
-                ensure!(img.len() == BLCKSZ as usize);
-            }
-
-            slru_buf.extend_from_slice(&img[..BLCKSZ as usize]);
-        }
-
-        let segname = format!("{}/{:>04X}", slru.to_str(), segno);
-        let header = new_tar_header(&segname, slru_buf.len() as u64)?;
-        self.ar.append(&header, slru_buf.as_slice()).await?;
-
-        trace!("Added to basebackup slru {} relsize {}", segname, nblocks);
         Ok(())
     }
 
@@ -323,29 +497,48 @@ where
         spcnode: u32,
         dbnode: u32,
         has_relmap_file: bool,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), BasebackupError> {
         let relmap_img = if has_relmap_file {
             let img = self
                 .timeline
-                .get_relmap_file(spcnode, dbnode, self.lsn, self.ctx)
-                .await?;
-            ensure!(img.len() == 512);
+                .get_relmap_file(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                .await
+                .map_err(|e| BasebackupError::Server(e.into()))?;
+
+            if img.len()
+                != dispatch_pgversion!(self.timeline.pg_version, pgv::bindings::SIZEOF_RELMAPFILE)
+            {
+                return Err(BasebackupError::Server(anyhow!(
+                    "img.len() != SIZE_OF_RELMAPFILE, img.len()={}",
+                    img.len(),
+                )));
+            }
+
             Some(img)
         } else {
             None
         };
 
         if spcnode == GLOBALTABLESPACE_OID {
-            let pg_version_str = self.timeline.pg_version.to_string();
+            let pg_version_str = match self.timeline.pg_version {
+                14 | 15 => self.timeline.pg_version.to_string(),
+                ver => format!("{ver}\x0A"),
+            };
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
-            self.ar.append(&header, pg_version_str.as_bytes()).await?;
+            self.ar
+                .append(&header, pg_version_str.as_bytes())
+                .await
+                .map_err(BasebackupError::Client)?;
 
             info!("timeline.pg_version {}", self.timeline.pg_version);
 
             if let Some(img) = relmap_img {
                 // filenode map for global tablespace
                 let header = new_tar_header("global/pg_filenode.map", img.len() as u64)?;
-                self.ar.append(&header, &img[..]).await?;
+                self.ar
+                    .append(&header, &img[..])
+                    .await
+                    .map_err(BasebackupError::Client)?;
             } else {
                 warn!("global/pg_filenode.map is missing");
             }
@@ -363,30 +556,47 @@ where
             if !has_relmap_file
                 && self
                     .timeline
-                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
-                    .await?
+                    .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
+                    .await
+                    .map_err(|e| BasebackupError::Server(e.into()))?
                     .is_empty()
             {
                 return Ok(());
             }
             // User defined tablespaces are not supported
-            ensure!(spcnode == DEFAULTTABLESPACE_OID);
+            if spcnode != DEFAULTTABLESPACE_OID {
+                return Err(BasebackupError::Server(anyhow!(
+                    "spcnode != DEFAULTTABLESPACE_OID, spcnode={spcnode}"
+                )));
+            }
 
             // Append dir path for each database
             let path = format!("base/{}", dbnode);
             let header = new_tar_header_dir(&path)?;
-            self.ar.append(&header, &mut io::empty()).await?;
+            self.ar
+                .append(&header, &mut io::empty())
+                .await
+                .map_err(BasebackupError::Client)?;
 
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
 
-                let pg_version_str = self.timeline.pg_version.to_string();
+                let pg_version_str = match self.timeline.pg_version {
+                    14 | 15 => self.timeline.pg_version.to_string(),
+                    ver => format!("{ver}\x0A"),
+                };
                 let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
-                self.ar.append(&header, pg_version_str.as_bytes()).await?;
+                self.ar
+                    .append(&header, pg_version_str.as_bytes())
+                    .await
+                    .map_err(BasebackupError::Client)?;
 
                 let relmap_path = format!("base/{}/pg_filenode.map", dbnode);
                 let header = new_tar_header(&relmap_path, img.len() as u64)?;
-                self.ar.append(&header, &img[..]).await?;
+                self.ar
+                    .append(&header, &img[..])
+                    .await
+                    .map_err(BasebackupError::Client)?;
             }
         };
         Ok(())
@@ -395,11 +605,12 @@ where
     //
     // Extract twophase state files
     //
-    async fn add_twophase_file(&mut self, xid: TransactionId) -> anyhow::Result<()> {
+    async fn add_twophase_file(&mut self, xid: TransactionId) -> Result<(), BasebackupError> {
         let img = self
             .timeline
             .get_twophase_file(xid, self.lsn, self.ctx)
-            .await?;
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?;
 
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&img[..]);
@@ -407,7 +618,10 @@ where
         buf.put_u32_le(crc);
         let path = format!("pg_twophase/{:>08X}", xid);
         let header = new_tar_header(&path, buf.len() as u64)?;
-        self.ar.append(&header, &buf[..]).await?;
+        self.ar
+            .append(&header, &buf[..])
+            .await
+            .map_err(BasebackupError::Client)?;
 
         Ok(())
     }
@@ -416,24 +630,28 @@ where
     // Add generated pg_control file and bootstrap WAL segment.
     // Also send zenith.signal file with extra bootstrap data.
     //
-    async fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
+    async fn add_pgcontrol_file(&mut self) -> Result<(), BasebackupError> {
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
-            if self.lsn == self.timeline.get_ancestor_lsn() {
-                write!(zenith_signal, "PREV LSN: none")?;
+            if self.timeline.is_ancestor_lsn(self.lsn) {
+                write!(zenith_signal, "PREV LSN: none")
+                    .map_err(|e| BasebackupError::Server(e.into()))?;
             } else {
-                write!(zenith_signal, "PREV LSN: invalid")?;
+                write!(zenith_signal, "PREV LSN: invalid")
+                    .map_err(|e| BasebackupError::Server(e.into()))?;
             }
         } else {
-            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
+            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)
+                .map_err(|e| BasebackupError::Server(e.into()))?;
         }
         self.ar
             .append(
                 &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
                 zenith_signal.as_bytes(),
             )
-            .await?;
+            .await
+            .map_err(BasebackupError::Client)?;
 
         let checkpoint_bytes = self
             .timeline
@@ -455,7 +673,10 @@ where
 
         //send pg_control
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
-        self.ar.append(&header, &pg_control_bytes[..]).await?;
+        self.ar
+            .append(&header, &pg_control_bytes[..])
+            .await
+            .map_err(BasebackupError::Client)?;
 
         //send wal segment
         let segno = self.lsn.segment_number(WAL_SEGMENT_SIZE);
@@ -470,8 +691,16 @@ where
             self.lsn,
         )
         .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
-        ensure!(wal_seg.len() == WAL_SEGMENT_SIZE);
-        self.ar.append(&header, &wal_seg[..]).await?;
+        if wal_seg.len() != WAL_SEGMENT_SIZE {
+            return Err(BasebackupError::Server(anyhow!(
+                "wal_seg.len() != WAL_SEGMENT_SIZE, wal_seg.len()={}",
+                wal_seg.len()
+            )));
+        }
+        self.ar
+            .append(&header, &wal_seg[..])
+            .await
+            .map_err(BasebackupError::Client)?;
         Ok(())
     }
 }

@@ -1,0 +1,27 @@
+[package]
+name = "pagebench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow.workspace = true
+camino.workspace = true
+clap.workspace = true
+futures.workspace = true
+hdrhistogram.workspace = true
+humantime.workspace = true
+humantime-serde.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+pageserver_client.workspace = true
+pageserver_api.workspace = true
+utils = { path = "../../libs/utils/" }
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }

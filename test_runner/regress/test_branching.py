@@ -1,14 +1,24 @@
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 import pytest
+from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnv, PgBin
-from fixtures.types import Lsn
+from fixtures.neon_fixtures import (
+    Endpoint,
+    NeonEnv,
+    NeonEnvBuilder,
+    PgBin,
+)
+from fixtures.pageserver.http import PageserverApiException
+from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
+from requests import RequestException
+from requests.exceptions import RetryError
 
 
 # Test branch creation
@@ -75,11 +85,11 @@ def test_branching_with_pgbench(
             threads = []
 
         if ty == "cascade":
-            env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(i), tenant_id=tenant)
+            env.neon_cli.create_branch(f"b{i + 1}", f"b{i}", tenant_id=tenant)
         else:
-            env.neon_cli.create_branch("b{}".format(i + 1), "b0", tenant_id=tenant)
+            env.neon_cli.create_branch(f"b{i + 1}", "b0", tenant_id=tenant)
 
-        endpoints.append(env.endpoints.create_start("b{}".format(i + 1), tenant_id=tenant))
+        endpoints.append(env.endpoints.create_start(f"b{i + 1}", tenant_id=tenant))
 
         threads.append(
             threading.Thread(target=run_pgbench, args=(endpoints[-1].connstr(),), daemon=True)
@@ -128,3 +138,303 @@ def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBi
     endpoint1 = env.endpoints.create_start("b1")
 
     pg_bin.run_capture(["pgbench", "-i", endpoint1.connstr()])
+
+
+def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonEnvBuilder):
+    """
+    Endpoint should not be possible to create because branch has not been uploaded.
+    """
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
+            ".*page_service_conn_main.*: query handler for 'basebackup .* is not active, state: Loading",
+        ]
+    )
+    ps_http = env.pageserver.http_client()
+
+    # pause all uploads
+    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
+    env.pageserver.tenant_create(env.initial_tenant)
+
+    initial_branch = "initial_branch"
+
+    def start_creating_timeline():
+        with pytest.raises(RequestException):
+            ps_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
+            )
+
+    t = threading.Thread(target=start_creating_timeline)
+    try:
+        t.start()
+
+        wait_until_paused(env, "before-upload-index-pausable")
+
+        env.neon_cli.map_branch(initial_branch, env.initial_tenant, env.initial_timeline)
+
+        with pytest.raises(RuntimeError, match="is not active, state: Loading"):
+            env.endpoints.create_start(initial_branch, tenant_id=env.initial_tenant)
+    finally:
+        # FIXME: paused uploads bother shutdown
+        env.pageserver.stop(immediate=True)
+
+        t.join()
+
+
+def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder):
+    """
+    Branch should not be possible to create because ancestor has not been uploaded.
+    """
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    env.pageserver.allowed_errors.append(
+        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
+    )
+    ps_http = env.pageserver.http_client()
+
+    # pause all uploads
+    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
+    env.pageserver.tenant_create(env.initial_tenant)
+
+    def start_creating_timeline():
+        with pytest.raises(RequestException):
+            ps_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
+            )
+
+    t = threading.Thread(target=start_creating_timeline)
+    try:
+        t.start()
+
+        wait_until_paused(env, "before-upload-index-pausable")
+
+        branch_id = TimelineId.generate()
+
+        with pytest.raises(RetryError, match="too many 503 error responses"):
+            ps_http.timeline_create(
+                env.pg_version,
+                env.initial_tenant,
+                branch_id,
+                ancestor_timeline_id=env.initial_timeline,
+            )
+
+        with pytest.raises(
+            PageserverApiException,
+            match=f"NotFound: Timeline {env.initial_tenant}/{branch_id} was not found",
+        ):
+            ps_http.timeline_detail(env.initial_tenant, branch_id)
+            # important to note that a task might still be in progress to complete
+            # the work, but will never get to that because we have the pause
+            # failpoint
+    finally:
+        # FIXME: paused uploads bother shutdown
+        env.pageserver.stop(immediate=True)
+
+        t.join()
+
+
+def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that a timeline is deleted locally on subsequent restart if it never successfully uploaded during creation.
+    """
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
+            ".*Failed to load index_part from remote storage.*",
+            # On a fast restart, there may be an initdb still running in a basebackup...__temp directory
+            ".*Failed to purge.*Directory not empty.*",
+        ]
+    )
+    ps_http = env.pageserver.http_client()
+
+    env.pageserver.tenant_create(env.initial_tenant)
+
+    # Create a timeline whose creation will succeed.  The tenant will need at least one
+    # timeline to be loadable.
+    success_timeline = TimelineId.generate()
+    log.info(f"Creating timeline {success_timeline}")
+    ps_http.timeline_create(env.pg_version, env.initial_tenant, success_timeline, timeout=60)
+
+    # Create a timeline whose upload to remote storage will be blocked
+    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
+
+    def start_creating_timeline():
+        log.info(f"Creating (expect failure) timeline {env.initial_timeline}")
+        with pytest.raises(RequestException):
+            ps_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
+            )
+
+    t = threading.Thread(target=start_creating_timeline)
+    try:
+        t.start()
+
+        wait_until_paused(env, "before-upload-index-pausable")
+    finally:
+        # FIXME: paused uploads bother shutdown
+        env.pageserver.stop(immediate=True)
+        t.join()
+
+    # now without a failpoint
+    env.pageserver.start()
+
+    wait_until_tenant_active(ps_http, env.initial_tenant)
+
+    with pytest.raises(PageserverApiException, match="not found"):
+        ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    # The one successfully created timeline should still be there.
+    assert len(ps_http.timeline_list(tenant_id=env.initial_tenant)) == 1
+
+
+def test_non_uploaded_branch_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that a timeline is deleted locally on subsequent restart if it never successfully uploaded during creation.
+    """
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    env.pageserver.allowed_errors.append(
+        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
+    )
+    ps_http = env.pageserver.http_client()
+
+    env.pageserver.tenant_create(env.initial_tenant)
+    ps_http.timeline_create(env.pg_version, env.initial_tenant, env.initial_timeline)
+
+    # pause all uploads
+    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
+    branch_id = TimelineId.generate()
+
+    def start_creating_timeline():
+        with pytest.raises(RequestException):
+            ps_http.timeline_create(
+                env.pg_version,
+                env.initial_tenant,
+                branch_id,
+                ancestor_timeline_id=env.initial_timeline,
+                timeout=60,
+            )
+
+    t = threading.Thread(target=start_creating_timeline)
+    try:
+        t.start()
+
+        wait_until_paused(env, "before-upload-index-pausable")
+    finally:
+        # FIXME: paused uploads bother shutdown
+        env.pageserver.stop(immediate=True)
+        t.join()
+
+    # now without a failpoint
+    env.pageserver.start()
+
+    wait_until_tenant_active(ps_http, env.initial_tenant)
+
+    ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    with pytest.raises(PageserverApiException, match="not found"):
+        ps_http.timeline_detail(env.initial_tenant, branch_id)
+
+
+def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_configs()
+    env.start()
+    env.pageserver.tenant_create(env.initial_tenant)
+
+    success_timeline = TimelineId.generate()
+    log.info(f"Creating timeline {success_timeline}")
+    ps_http = env.pageserver.http_client()
+    success_result = ps_http.timeline_create(
+        env.pg_version, env.initial_tenant, success_timeline, timeout=60
+    )
+
+    ps_http.configure_failpoints(("timeline-creation-after-uninit", "pause"))
+
+    def start_creating_timeline():
+        log.info(f"Creating (expect failure) timeline {env.initial_timeline}")
+        with pytest.raises(RequestException):
+            ps_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
+            )
+
+    t = threading.Thread(target=start_creating_timeline)
+    try:
+        t.start()
+
+        wait_until_paused(env, "timeline-creation-after-uninit")
+
+        # While timeline creation is in progress, trying to create a timeline
+        # again with the same ID should return 409
+        with pytest.raises(
+            PageserverApiException, match="creation of timeline with the given ID is in progress"
+        ):
+            ps_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
+            )
+
+        # Creation of a timeline already successfully created is idempotent, and is not impeded by some
+        # other timeline creation with a different TimelineId being stuck.
+        repeat_result = ps_http.timeline_create(
+            env.pg_version, env.initial_tenant, success_timeline, timeout=60
+        )
+        assert repeat_result == success_result
+    finally:
+        env.pageserver.stop(immediate=True)
+        t.join()
+
+    # now without a failpoint
+    env.pageserver.start()
+
+    wait_until_tenant_active(ps_http, env.initial_tenant)
+
+    with pytest.raises(PageserverApiException, match="not found"):
+        ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    # The one successfully created timeline should still be there.
+    assert len(ps_http.timeline_list(tenant_id=env.initial_tenant)) == 1
+
+
+def test_branching_while_stuck_find_gc_cutoffs(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    client = env.pageserver.http_client()
+
+    failpoint = "Timeline::find_gc_cutoffs-pausable"
+
+    client.configure_failpoints((failpoint, "pause"))
+
+    with ThreadPoolExecutor(max_workers=1) as exec:
+        completion = exec.submit(client.timeline_gc, env.initial_tenant, env.initial_timeline, None)
+
+        wait_until_paused(env, failpoint)
+
+        env.neon_cli.create_branch(
+            tenant_id=env.initial_tenant, ancestor_branch_name="main", new_branch_name="branch"
+        )
+
+        client.configure_failpoints((failpoint, "off"))
+
+        completion.result()
+
+
+def wait_until_paused(env: NeonEnv, failpoint: str):
+    found = False
+    msg = f"at failpoint {failpoint}"
+    for _ in range(20):
+        time.sleep(1)
+        found = env.pageserver.log_contains(msg) is not None
+        if found:
+            break
+    assert found

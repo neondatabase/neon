@@ -33,7 +33,7 @@ pub enum OtelName<'a> {
 /// directly into HTTP servers. However, I couldn't find one for Hyper,
 /// so I had to write our own. OpenTelemetry website has a registry of
 /// instrumentation libraries at:
-/// https://opentelemetry.io/registry/?language=rust&component=instrumentation
+/// <https://opentelemetry.io/registry/?language=rust&component=instrumentation>
 /// If a Hyper crate appears, consider switching to that.
 pub async fn tracing_handler<F, R>(
     req: Request<Body>,

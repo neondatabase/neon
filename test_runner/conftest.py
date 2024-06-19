@@ -1,6 +1,8 @@
 pytest_plugins = (
     "fixtures.pg_version",
-    "fixtures.allure",
+    "fixtures.parametrize",
+    "fixtures.httpserver",
+    "fixtures.compute_reconfigure",
     "fixtures.neon_fixtures",
     "fixtures.benchmark_fixture",
     "fixtures.pg_stats",

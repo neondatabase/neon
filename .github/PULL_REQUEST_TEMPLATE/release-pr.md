@@ -3,7 +3,7 @@
 **NB: this PR must be merged only by 'Create a merge commit'!**
 
 ### Checklist when preparing for release
-- [ ] Read or refresh [the release flow guide](https://github.com/neondatabase/cloud/wiki/Release:-general-flow)
+- [ ] Read or refresh [the release flow guide](https://www.notion.so/neondatabase/Release-general-flow-61f2e39fd45d4d14a70c7749604bd70b)
 - [ ] Ask in the [cloud Slack channel](https://neondb.slack.com/archives/C033A2WE6BZ) that you are going to rollout the release. Any blockers?
 - [ ] Does this release contain any db migrations? Destructive ones? What is the rollback plan?
 

@@ -1,4 +1,3 @@
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 
 
@@ -13,15 +12,10 @@ def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
     env.neon_cli.create_branch("test_subxacts", "empty")
     endpoint = env.endpoints.create_start("test_subxacts")
 
-    log.info("postgres is running on 'test_subxacts' branch")
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
-    cur.execute(
-        """
-        CREATE TABLE t1(i int, j int);
-    """
-    )
+    cur.execute("CREATE TABLE t1(i int, j int);")
 
     cur.execute("select pg_switch_wal();")
 
@@ -33,8 +27,4 @@ def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
             cur.execute(f"insert into t1 values ({i}, {j})")
         cur.execute("commit")
 
-    # force wal flush
-    cur.execute("checkpoint")
-
-    # Check that we can restore the content of the datadir correctly
     check_restored_datadir_content(test_output_dir, env, endpoint)

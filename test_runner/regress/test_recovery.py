@@ -10,20 +10,24 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 #
 def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     # Override default checkpointer settings to run it more often
-    neon_env_builder.pageserver_config_override = "tenant_config={checkpoint_distance = 1048576}"
-
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "checkpoint_distance": "1048576",
+        }
+    )
     env.pageserver.is_testing_enabled_or_skip()
 
-    # These warnings are expected, when the pageserver is restarted abruptly
-    env.pageserver.allowed_errors.append(".*found future delta layer.*")
-    env.pageserver.allowed_errors.append(".*found future image layer.*")
+    # We expect the pageserver to exit, which will cause storage storage controller
+    # requests to fail and warn.
+    env.storage_controller.allowed_errors.append(".*management API still failed.*")
+    env.storage_controller.allowed_errors.append(
+        ".*Reconcile error.*error sending request for url.*"
+    )
 
     # Create a branch for us
     env.neon_cli.create_branch("test_pageserver_recovery", "main")
 
     endpoint = env.endpoints.create_start("test_pageserver_recovery")
-    log.info("postgres is running on 'test_pageserver_recovery' branch")
 
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
@@ -38,8 +42,8 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
                 # Configure failpoints
                 pageserver_http.configure_failpoints(
                     [
-                        ("flush-frozen-before-sync", "sleep(2000)"),
-                        ("checkpoint-after-sync", "exit"),
+                        ("flush-frozen-pausable", "sleep(2000)"),
+                        ("flush-frozen-exit", "exit"),
                     ]
                 )
 

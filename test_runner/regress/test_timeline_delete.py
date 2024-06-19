@@ -1,39 +1,52 @@
+import enum
 import os
 import queue
 import shutil
 import threading
-from pathlib import Path
-from typing import Optional
 
 import pytest
 import requests
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
-    S3Storage,
-    available_remote_storages,
+    PgBin,
+    last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
-    assert_timeline_detail_404,
+    MANY_SMALL_LAYERS_TENANT_CONFIG,
+    assert_prefix_empty,
+    assert_prefix_not_empty,
+    poll_for_remote_storage_iterations,
+    timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_timeline_detail_404,
     wait_until_tenant_active,
     wait_until_timeline_state,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import query_scalar, wait_until
+from fixtures.remote_storage import (
+    LocalFsStorage,
+    RemoteStorageKind,
+    s3_storage,
+)
+from fixtures.utils import query_scalar, run_pg_bench_small, wait_until
+from urllib3.util.retry import Retry
 
 
 def test_timeline_delete(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    env.pageserver.allowed_errors.append(".*Timeline .* was not found.*")
-    env.pageserver.allowed_errors.append(".*timeline not found.*")
-    env.pageserver.allowed_errors.append(".*Cannot delete timeline which has child timelines.*")
-    env.pageserver.allowed_errors.append(".*Precondition failed: Requested tenant is missing.*")
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Timeline .* was not found.*",
+            ".*timeline not found.*",
+            ".*Cannot delete timeline which has child timelines.*",
+            ".*Precondition failed: Requested tenant is missing.*",
+        ]
+    )
 
     ps_http = env.pageserver.http_client()
 
@@ -61,9 +74,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         "test_ancestor_branch_delete_branch1", "test_ancestor_branch_delete_parent"
     )
 
-    timeline_path = (
-        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(parent_timeline_id)
-    )
+    timeline_path = env.pageserver.timeline_dir(env.initial_tenant, parent_timeline_id)
 
     with pytest.raises(
         PageserverApiException, match="Cannot delete timeline which has child timelines"
@@ -74,16 +85,15 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     assert exc.value.status_code == 412
 
-    timeline_path = (
-        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
-    )
+    timeline_path = env.pageserver.timeline_dir(env.initial_tenant, leaf_timeline_id)
     assert timeline_path.exists()
 
     # retry deletes when compaction or gc is running in pageserver
+    # TODO: review whether this wait_until is actually necessary, we do an await() internally
     wait_until(
         number_of_iterations=3,
         interval=0.2,
-        func=lambda: ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id),
+        func=lambda: timeline_delete_wait_completed(ps_http, env.initial_tenant, leaf_timeline_id),
     )
 
     assert not timeline_path.exists()
@@ -94,20 +104,22 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
     ) as exc:
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
-
-        # FIXME leaves tenant without timelines, should we prevent deletion of root timeline?
-        wait_until(
-            number_of_iterations=3,
-            interval=0.2,
-            func=lambda: ps_http.timeline_delete(env.initial_tenant, parent_timeline_id),
-        )
-
     assert exc.value.status_code == 404
+
+    wait_until(
+        number_of_iterations=3,
+        interval=0.2,
+        func=lambda: timeline_delete_wait_completed(
+            ps_http, env.initial_tenant, parent_timeline_id
+        ),
+    )
 
     # Check that we didn't pick up the timeline again after restart.
     # See https://github.com/neondatabase/neon/issues/3560
     env.pageserver.stop(immediate=True)
     env.pageserver.start()
+
+    wait_until_tenant_active(ps_http, env.initial_tenant)
 
     with pytest.raises(
         PageserverApiException,
@@ -116,72 +128,176 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
 
 
+class Check(enum.Enum):
+    RETRY_WITHOUT_RESTART = enum.auto()
+    RETRY_WITH_RESTART = enum.auto()
+
+
+DELETE_FAILPOINTS = [
+    "timeline-delete-before-index-deleted-at",
+    "timeline-delete-before-schedule",
+    "timeline-delete-before-rm",
+    "timeline-delete-after-rm",
+    "timeline-delete-before-index-delete",
+    "timeline-delete-after-index-delete",
+]
+
+
 # cover the two cases: remote storage configured vs not configured
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_delete_timeline_post_rm_failure(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+@pytest.mark.parametrize("failpoint", DELETE_FAILPOINTS)
+@pytest.mark.parametrize("check", list(Check))
+def test_delete_timeline_exercise_crash_safety_failpoints(
+    neon_env_builder: NeonEnvBuilder,
+    failpoint: str,
+    check: Check,
+    pg_bin: PgBin,
 ):
     """
-    If there is a failure after removing the timeline directory, the delete operation
-    should be retryable.
+    If there is a failure during deletion in one of the associated failpoints (or crash restart happens at this point) the delete operation
+    should be retryable and should be successfully resumed.
+
+    We iterate over failpoints list, changing failpoint to the next one.
+
+    1. Set settings to generate many layers
+    2. Create branch.
+    3. Insert something
+    4. Go with the test.
+    5. Iterate over failpoints
+    6. Execute delete for each failpoint
+    7. Ensure failpoint is hit
+    8. Retry or restart without the failpoint and check the result.
     """
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_delete_timeline_post_rm_failure"
-        )
-
-    env = neon_env_builder.init_start()
-    assert env.initial_timeline
-
-    env.pageserver.allowed_errors.append(".*Error: failpoint: timeline-delete-after-rm")
-    env.pageserver.allowed_errors.append(".*Ignoring state update Stopping for broken timeline")
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            "checkpoint_distance": f"{1024 ** 2}",
+            "image_creation_threshold": "100",
+        }
+    )
 
     ps_http = env.pageserver.http_client()
 
-    failpoint_name = "timeline-delete-after-rm"
-    ps_http.configure_failpoints((failpoint_name, "return"))
+    timeline_id = env.neon_cli.create_timeline("delete")
+    with env.endpoints.create_start("delete") as endpoint:
+        # generate enough layers
+        run_pg_bench_small(pg_bin, endpoint.connstr())
 
-    ps_http.timeline_delete(env.initial_tenant, env.initial_timeline)
+        last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
 
-    timeline_info = wait_until_timeline_state(
-        pageserver_http=ps_http,
-        tenant_id=env.initial_tenant,
-        timeline_id=env.initial_timeline,
-        expected_state="Broken",
-        iterations=2,  # effectively try immediately and retry once in one second
+        assert_prefix_not_empty(
+            neon_env_builder.pageserver_remote_storage,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(env.initial_tenant),
+                    "timelines",
+                    str(timeline_id),
+                )
+            ),
+        )
+
+    env.pageserver.allowed_errors.extend(
+        [
+            f".*{timeline_id}.*failpoint: {failpoint}",
+            # It appears when we stopped flush loop during deletion and then pageserver is stopped
+            ".*shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            # This happens when we fail before scheduling background operation.
+            # Timeline is left in stopping state and retry tries to stop it again.
+            ".*Ignoring new state, equal to the existing one: Stopping",
+            # This happens when we retry delete requests for broken timelines
+            ".*Ignoring state update Stopping for broken timeline",
+            # This happens when timeline remains are cleaned up during loading
+            ".*Timeline dir entry become invalid.*",
+            # In one of the branches we poll for tenant to become active. Polls can generate this log message:
+            f".*Tenant {env.initial_tenant} is not active.*",
+            # an on-demand is cancelled by shutdown
+            ".*initial size calculation failed: downloading failed, possibly for shutdown",
+        ]
     )
 
-    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
+    ps_http.configure_failpoints((failpoint, "return"))
 
-    at_failpoint_log_message = f".*{env.initial_timeline}.*at failpoint {failpoint_name}.*"
-    env.pageserver.allowed_errors.append(at_failpoint_log_message)
-    env.pageserver.allowed_errors.append(
-        f".*DELETE.*{env.initial_timeline}.*InternalServerError.*{failpoint_name}"
-    )
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
-    # retry without failpoint, it should succeed
-    ps_http.configure_failpoints((failpoint_name, "off"))
+    # These failpoints are earlier than background task is spawned.
+    # so they result in api request failure.
+    if failpoint in (
+        "timeline-delete-before-index-deleted-at",
+        "timeline-delete-before-schedule",
+    ):
+        with pytest.raises(PageserverApiException, match=failpoint):
+            ps_http.timeline_delete(env.initial_tenant, timeline_id)
 
-    # this should succeed
-    # this also checks that delete can be retried even when timeline is in Broken state
-    ps_http.timeline_delete(env.initial_tenant, env.initial_timeline, timeout=2)
-    with pytest.raises(PageserverApiException) as e:
-        ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+    else:
+        ps_http.timeline_delete(env.initial_tenant, timeline_id)
+        timeline_info = wait_until_timeline_state(
+            pageserver_http=ps_http,
+            tenant_id=env.initial_tenant,
+            timeline_id=timeline_id,
+            expected_state="Broken",
+            iterations=iterations,
+        )
 
-    assert e.value.status_code == 404
+        reason = timeline_info["state"]["Broken"]["reason"]
+        log.info(f"timeline broken: {reason}")
 
-    env.pageserver.allowed_errors.append(f".*NotFound: Timeline.*{env.initial_timeline}.*")
-    env.pageserver.allowed_errors.append(
-        f".*{env.initial_timeline}.*timeline directory not found, proceeding anyway.*"
-    )
+        # failpoint may not be the only error in the stack
+        assert reason.endswith(f"failpoint: {failpoint}"), reason
+
+    if check is Check.RETRY_WITH_RESTART:
+        env.pageserver.stop()
+        env.pageserver.start()
+
+        wait_until_tenant_active(ps_http, env.initial_tenant, iterations=iterations)
+
+        if failpoint == "timeline-delete-before-index-deleted-at":
+            # We crashed before persisting this to remote storage, need to retry delete request
+            timeline_delete_wait_completed(ps_http, env.initial_tenant, timeline_id)
+        else:
+            # Pageserver should've resumed deletion after restart.
+            wait_timeline_detail_404(
+                ps_http, env.initial_tenant, timeline_id, iterations=iterations
+            )
+
+    elif check is Check.RETRY_WITHOUT_RESTART:
+        # this should succeed
+        # this also checks that delete can be retried even when timeline is in Broken state
+        ps_http.configure_failpoints((failpoint, "off"))
+
+        timeline_delete_wait_completed(
+            ps_http, env.initial_tenant, timeline_id, iterations=iterations
+        )
+
+    # Check remote is empty
+    if remote_storage_kind is RemoteStorageKind.MOCK_S3:
+        assert_prefix_empty(
+            neon_env_builder.pageserver_remote_storage,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(env.initial_tenant),
+                    "timelines",
+                    str(timeline_id),
+                )
+            ),
+        )
+
+    timeline_dir = env.pageserver.timeline_dir(env.initial_tenant, timeline_id)
+
+    # Check local is empty
+    assert (not timeline_dir.exists()) or len(os.listdir(timeline_dir)) == 0
+
+    # Check no delete mark present
+    assert not (timeline_dir.parent / f"{timeline_id}.___deleted").exists()
 
 
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 @pytest.mark.parametrize("fill_branch", [True, False])
 def test_timeline_resurrection_on_attach(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
     fill_branch: bool,
 ):
     """
@@ -190,19 +306,14 @@ def test_timeline_resurrection_on_attach(
     Original issue: https://github.com/neondatabase/neon/issues/3560
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_resurrection_on_attach",
-    )
-
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
     ps_http = env.pageserver.http_client()
     pg = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    main_timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    main_timeline_id = env.initial_timeline
 
     with pg.cursor() as cur:
         cur.execute("CREATE TABLE f (i integer);")
@@ -247,26 +358,20 @@ def test_timeline_resurrection_on_attach(
         pass
 
     # delete new timeline
-    ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=branch_timeline_id)
-
-    env.pageserver.allowed_errors.append(
-        f".*Timeline {tenant_id}/{branch_timeline_id} was not found.*"
-    )
-
-    wait_until(2, 0.5, lambda: assert_timeline_detail_404(ps_http, tenant_id, branch_timeline_id))
+    timeline_delete_wait_completed(ps_http, tenant_id=tenant_id, timeline_id=branch_timeline_id)
 
     ##### Stop the pageserver instance, erase all its data
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
     ##### Second start, restore the data and ensure that we see only timeline that wasnt deleted
     env.pageserver.start()
 
-    ps_http.tenant_attach(tenant_id=tenant_id)
+    env.pageserver.tenant_attach(tenant_id=tenant_id)
 
     wait_until_tenant_active(ps_http, tenant_id=tenant_id, iterations=10, period=0.5)
 
@@ -277,26 +382,6 @@ def test_timeline_resurrection_on_attach(
     assert all([tl["state"] == "Active" for tl in timelines])
 
 
-def assert_prefix_empty(neon_env_builder: NeonEnvBuilder, prefix: Optional[str] = None):
-    # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
-    assert neon_env_builder.remote_storage_kind in (
-        RemoteStorageKind.MOCK_S3,
-        RemoteStorageKind.REAL_S3,
-    )
-    # For mypy
-    assert isinstance(neon_env_builder.remote_storage, S3Storage)
-
-    # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
-    response = neon_env_builder.remote_storage_client.list_objects_v2(
-        Bucket=neon_env_builder.remote_storage.bucket_name,
-        Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
-    )
-    objects = response.get("Contents")
-    assert (
-        response["KeyCount"] == 0
-    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
-
-
 def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):
     """
     When deleting a timeline, if we succeed in setting the deleted flag remotely
@@ -304,20 +389,17 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     the deletion of the local state.
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_timeline_delete_fail_before_local_delete",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.append(".*failpoint: timeline-delete-before-rm")
-    env.pageserver.allowed_errors.append(
-        ".*Ignoring new state, equal to the existing one: Stopping"
-    )
-    # this happens, because the stuck timeline is visible to shutdown
-    env.pageserver.allowed_errors.append(
-        ".*freeze_and_flush_on_shutdown.+: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*failpoint: timeline-delete-before-rm",
+            ".*Ignoring new state, equal to the existing one: Stopping",
+            # this happens, because the stuck timeline is visible to shutdown
+            ".*shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+        ]
     )
 
     ps_http = env.pageserver.http_client()
@@ -333,12 +415,9 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         "test_timeline_delete_fail_before_local_delete",
     )
 
-    leaf_timeline_path = (
-        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
-    )
+    leaf_timeline_path = env.pageserver.timeline_dir(env.initial_tenant, leaf_timeline_id)
 
     ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
-
     timeline_info = wait_until_timeline_state(
         pageserver_http=ps_http,
         tenant_id=env.initial_tenant,
@@ -347,7 +426,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         iterations=2,  # effectively try immediately and retry once in one second
     )
 
-    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
+    assert timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-before-rm"
 
     assert leaf_timeline_path.exists(), "the failpoint didn't work"
 
@@ -357,12 +436,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     # Wait for tenant to finish loading.
     wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=1)
 
-    env.pageserver.allowed_errors.append(
-        f".*Timeline {env.initial_tenant}/{leaf_timeline_id} was not found.*"
-    )
-    wait_until(
-        2, 0.5, lambda: assert_timeline_detail_404(ps_http, env.initial_tenant, leaf_timeline_id)
-    )
+    wait_timeline_detail_404(ps_http, env.initial_tenant, leaf_timeline_id, iterations=4)
 
     assert (
         not leaf_timeline_path.exists()
@@ -375,7 +449,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     assert all([tl["state"] == "Active" for tl in timelines])
 
     assert_prefix_empty(
-        neon_env_builder,
+        neon_env_builder.pageserver_remote_storage,
         prefix="/".join(
             (
                 "tenants",
@@ -386,20 +460,13 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         ),
     )
 
-    assert env.initial_timeline is not None
-
     for timeline_id in (intermediate_timeline_id, env.initial_timeline):
-        ps_http.timeline_delete(env.initial_tenant, timeline_id)
-
-        env.pageserver.allowed_errors.append(
-            f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
-        )
-        wait_until(
-            2, 0.5, lambda: assert_timeline_detail_404(ps_http, env.initial_tenant, timeline_id)
+        timeline_delete_wait_completed(
+            ps_http, tenant_id=env.initial_tenant, timeline_id=timeline_id
         )
 
         assert_prefix_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -415,28 +482,29 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     wait_until(
         2,
         0.5,
-        lambda: assert_prefix_empty(neon_env_builder),
+        lambda: assert_prefix_empty(neon_env_builder.pageserver_remote_storage),
     )
 
 
-def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
-    neon_env_builder: NeonEnvBuilder,
+@pytest.mark.parametrize(
+    "stuck_failpoint",
+    ["persist_deleted_index_part", "in_progress_delete"],
+)
+def test_concurrent_timeline_delete_stuck_on(
+    neon_env_builder: NeonEnvBuilder, stuck_failpoint: str
 ):
     """
-    If we're stuck uploading the index file with the is_delete flag,
-    eventually console will hand up and retry.
-    If we're still stuck at the retry time, ensure that the retry
-    fails with status 500, signalling to console that it should retry
-    later.
-    Ideally, timeline_delete should return 202 Accepted and require
-    console to poll for completion, but, that would require changing
-    the API contract.
+    If delete is stuck console will eventually retry deletion.
+    So we need to be sure that these requests wont interleave with each other.
+    In this tests we check two places where we can spend a lot of time.
+    This is a regression test because there was a bug when DeletionGuard wasnt propagated
+    to the background task.
+
+    Ensure that when retry comes if we're still stuck request will get an immediate error response,
+    signalling to console that it should retry later.
     """
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_concurrent_timeline_delete_if_first_stuck_at_index_upload",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     env = neon_env_builder.init_start()
 
@@ -445,13 +513,14 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
     ps_http = env.pageserver.http_client()
 
     # make the first call sleep practically forever
-    failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-    ps_http.configure_failpoints((failpoint_name, "pause"))
+    ps_http.configure_failpoints((stuck_failpoint, "pause"))
 
     def first_call(result_queue):
         try:
             log.info("first call start")
-            ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=10)
+            timeline_delete_wait_completed(
+                ps_http, env.initial_tenant, child_timeline_id, timeout=20
+            )
             log.info("first call success")
             result_queue.put("success")
         except Exception:
@@ -465,27 +534,33 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
     try:
 
         def first_call_hit_failpoint():
-            assert env.pageserver.log_contains(
-                f".*{child_timeline_id}.*at failpoint {failpoint_name}"
+            env.pageserver.assert_log_contains(
+                f".*{child_timeline_id}.*at failpoint {stuck_failpoint}"
             )
 
         wait_until(50, 0.1, first_call_hit_failpoint)
 
         # make the second call and assert behavior
         log.info("second call start")
-        error_msg_re = "timeline deletion is already in progress"
+        error_msg_re = "Timeline deletion is already in progress"
         with pytest.raises(PageserverApiException, match=error_msg_re) as second_call_err:
             ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
-        assert second_call_err.value.status_code == 500
-        env.pageserver.allowed_errors.append(f".*{child_timeline_id}.*{error_msg_re}.*")
-        # the second call will try to transition the timeline into Stopping state as well
-        env.pageserver.allowed_errors.append(
-            f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
+        assert second_call_err.value.status_code == 409
+        env.pageserver.allowed_errors.extend(
+            [
+                f".*{child_timeline_id}.*{error_msg_re}.*",
+                # the second call will try to transition the timeline into Stopping state as well
+                f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping",
+            ]
         )
         log.info("second call failed as expected")
 
+        # ensure it is not 404 and stopping
+        detail = ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
+        assert detail["state"] == "Stopping"
+
         # by now we know that the second call failed, let's ensure the first call will finish
-        ps_http.configure_failpoints((failpoint_name, "off"))
+        ps_http.configure_failpoints((stuck_failpoint, "off"))
 
         result = first_call_result.get()
         assert result == "success"
@@ -498,34 +573,39 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
 
 def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     """
-    If the client hangs up before we start the index part upload but after we mark it
+    If the client hangs up before we start the index part upload but after deletion is scheduled
+    we mark it
     deleted in local memory, a subsequent delete_timeline call should be able to do
+
     another delete timeline operation.
 
     This tests cancel safety up to the given failpoint.
     """
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_delete_timeline_client_hangup",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
 
     env = neon_env_builder.init_start()
 
     child_timeline_id = env.neon_cli.create_branch("child", "main")
 
-    ps_http = env.pageserver.http_client()
+    ps_http = env.pageserver.http_client(retries=Retry(0, read=False))
 
-    failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
+    failpoint_name = "persist_deleted_index_part"
     ps_http.configure_failpoints((failpoint_name, "pause"))
 
     with pytest.raises(requests.exceptions.Timeout):
+        ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
+
+    env.pageserver.allowed_errors.append(
+        f".*{child_timeline_id}.*Timeline deletion is already in progress.*"
+    )
+    with pytest.raises(PageserverApiException, match="Timeline deletion is already in progress"):
         ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
 
     # make sure the timeout was due to the failpoint
     at_failpoint_log_message = f".*{child_timeline_id}.*at failpoint {failpoint_name}.*"
 
     def hit_failpoint():
-        assert env.pageserver.log_contains(at_failpoint_log_message)
+        env.pageserver.assert_log_contains(at_failpoint_log_message)
 
     wait_until(50, 0.1, hit_failpoint)
 
@@ -535,7 +615,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(hangup_log_message)
 
     def got_hangup_log_message():
-        assert env.pageserver.log_contains(hangup_log_message)
+        env.pageserver.assert_log_contains(hangup_log_message)
 
     wait_until(50, 0.1, got_hangup_log_message)
 
@@ -547,54 +627,31 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     def first_request_finished():
         message = f".*DELETE.*{child_timeline_id}.*Cancelled request finished"
-        assert env.pageserver.log_contains(message)
+        env.pageserver.assert_log_contains(message)
 
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    notfound_message = f"Timeline {env.initial_tenant}/{child_timeline_id} was not found"
-    env.pageserver.allowed_errors.append(".*" + notfound_message)
-    with pytest.raises(PageserverApiException, match=notfound_message) as exc:
-        ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
-
-    assert exc.value.status_code == 404
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=2)
 
 
-@pytest.mark.parametrize(
-    "remote_storage_kind",
-    list(
-        filter(
-            lambda s: s in (RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3),
-            available_remote_storages(),
-        )
-    ),
-)
 def test_timeline_delete_works_for_remote_smoke(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_delete_works_for_remote_smoke",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
     env = neon_env_builder.init_start()
 
     ps_http = env.pageserver.http_client()
     pg = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    main_timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
-
-    assert tenant_id == env.initial_tenant
-    assert main_timeline_id == env.initial_timeline
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     timeline_ids = [env.initial_timeline]
     for i in range(2):
         branch_timeline_id = env.neon_cli.create_branch(f"new{i}", "main")
-        pg = env.endpoints.create_start(f"new{i}")
-
-        with pg.cursor() as cur:
+        with env.endpoints.create_start(f"new{i}") as pg, pg.cursor() as cur:
             cur.execute("CREATE TABLE f (i integer);")
             cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -609,22 +666,29 @@ def test_timeline_delete_works_for_remote_smoke(
             log.info("waiting for checkpoint upload")
             wait_for_upload(ps_http, tenant_id, branch_timeline_id, current_lsn)
             log.info("upload of checkpoint is done")
-            timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
-        timeline_ids.append(timeline_id)
+        timeline_ids.append(branch_timeline_id)
+
+    for timeline_id in timeline_ids:
+        assert_prefix_not_empty(
+            neon_env_builder.pageserver_remote_storage,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(env.initial_tenant),
+                    "timelines",
+                    str(timeline_id),
+                )
+            ),
+        )
 
     for timeline_id in reversed(timeline_ids):
         # note that we need to finish previous deletion before scheduling next one
         # otherwise we can get an "HasChildren" error if deletion is not fast enough (real_s3)
-        ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id)
-
-        env.pageserver.allowed_errors.append(
-            f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
-        )
-        wait_until(2, 0.5, lambda: assert_timeline_detail_404(ps_http, tenant_id, timeline_id))
+        timeline_delete_wait_completed(ps_http, tenant_id=tenant_id, timeline_id=timeline_id)
 
         assert_prefix_empty(
-            neon_env_builder,
+            neon_env_builder.pageserver_remote_storage,
             prefix="/".join(
                 (
                     "tenants",
@@ -636,9 +700,181 @@ def test_timeline_delete_works_for_remote_smoke(
         )
 
     # for some reason the check above doesnt immediately take effect for the below.
-    # Assume it is mock server incosistency and check twice.
-    wait_until(
-        2,
-        0.5,
-        lambda: assert_prefix_empty(neon_env_builder),
+    # Assume it is mock server inconsistency and check twice.
+    wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder.pageserver_remote_storage))
+
+
+def test_delete_orphaned_objects(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    remote_storage_kind = RemoteStorageKind.LOCAL_FS
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            "checkpoint_distance": f"{1024 ** 2}",
+            "image_creation_threshold": "100",
+        }
+    )
+
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    ps_http = env.pageserver.http_client()
+
+    timeline_id = env.neon_cli.create_timeline("delete")
+    with env.endpoints.create_start("delete") as endpoint:
+        # generate enough layers
+        run_pg_bench_small(pg_bin, endpoint.connstr())
+        last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
+
+    # write orphaned file that is missing from the index
+    remote_timeline_path = env.pageserver_remote_storage.timeline_path(
+        env.initial_tenant, timeline_id
+    )
+    orphans = [remote_timeline_path / f"orphan_{i}" for i in range(3)]
+    for orphan in orphans:
+        orphan.write_text("I shouldnt be there")
+
+    # trigger failpoint after orphaned file deletion to check that index_part is not deleted as well.
+    failpoint = "timeline-delete-before-index-delete"
+    ps_http.configure_failpoints((failpoint, "return"))
+
+    env.pageserver.allowed_errors.append(f".*failpoint: {failpoint}")
+
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
+
+    ps_http.timeline_delete(env.initial_tenant, timeline_id)
+    timeline_info = wait_until_timeline_state(
+        pageserver_http=ps_http,
+        tenant_id=env.initial_tenant,
+        timeline_id=timeline_id,
+        expected_state="Broken",
+        iterations=iterations,
+    )
+
+    reason = timeline_info["state"]["Broken"]["reason"]
+    assert reason.endswith(f"failpoint: {failpoint}"), reason
+
+    ps_http.deletion_queue_flush(execute=True)
+
+    for orphan in orphans:
+        assert not orphan.exists()
+        env.pageserver.assert_log_contains(
+            f"deleting a file not referenced from index_part.json name={orphan.stem}"
+        )
+
+    assert env.pageserver_remote_storage.index_path(env.initial_tenant, timeline_id).exists()
+
+
+def test_timeline_delete_resumed_on_attach(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+
+    tenant_id = env.initial_tenant
+
+    ps_http = env.pageserver.http_client()
+
+    timeline_id = env.neon_cli.create_timeline("delete")
+    with env.endpoints.create_start("delete") as endpoint:
+        # generate enough layers
+        run_pg_bench_small(pg_bin, endpoint.connstr())
+        last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
+
+        assert_prefix_not_empty(
+            neon_env_builder.pageserver_remote_storage,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(env.initial_tenant),
+                    "timelines",
+                    str(timeline_id),
+                )
+            ),
+        )
+
+    # failpoint before we remove index_part from s3
+    failpoint = "timeline-delete-after-rm"
+    ps_http.configure_failpoints((failpoint, "return"))
+
+    env.pageserver.allowed_errors.extend(
+        (
+            # allow errors caused by failpoints
+            f".*failpoint: {failpoint}",
+            # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
+            ".*shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            # error from http response is also logged
+            ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
+            # Polling after attach may fail with this
+            ".*Resource temporarily unavailable.*Tenant not yet active",
+            '.*shutdown_pageserver{exit_code=0}: stopping left-over name="remote upload".*',
+        )
+    )
+
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
+
+    ps_http.timeline_delete(tenant_id, timeline_id)
+
+    timeline_info = wait_until_timeline_state(
+        pageserver_http=ps_http,
+        tenant_id=env.initial_tenant,
+        timeline_id=timeline_id,
+        expected_state="Broken",
+        iterations=iterations,
+    )
+
+    reason = timeline_info["state"]["Broken"]["reason"]
+    log.info(f"timeline broken: {reason}")
+
+    # failpoint may not be the only error in the stack
+    assert reason.endswith(f"failpoint: {failpoint}"), reason
+
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+                "timelines",
+                str(timeline_id),
+            )
+        ),
+    )
+
+    # now we stop pageserver and remove local tenant state
+    env.endpoints.stop_all()
+    env.pageserver.stop()
+
+    dir_to_clear = env.pageserver.tenant_dir()
+    shutil.rmtree(dir_to_clear)
+    os.mkdir(dir_to_clear)
+
+    env.pageserver.start()
+
+    # now we call attach
+    env.pageserver.tenant_attach(tenant_id=tenant_id)
+
+    # delete should be resumed
+    wait_timeline_detail_404(ps_http, env.initial_tenant, timeline_id, iterations=iterations)
+
+    tenant_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
+    assert not tenant_path.exists()
+
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(
+            (
+                "tenants",
+                str(timeline_id),
+                "timelines",
+                str(timeline_id),
+            )
+        ),
     )

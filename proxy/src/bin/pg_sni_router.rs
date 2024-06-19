@@ -5,19 +5,25 @@
 /// the outside. Similar to an ingress controller for HTTPS.
 use std::{net::SocketAddr, sync::Arc};
 
+use futures::future::Either;
+use itertools::Itertools;
+use proxy::config::TlsServerEndPoint;
+use proxy::context::RequestMonitoring;
+use proxy::metrics::{Metrics, ThreadPoolMetrics};
+use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled};
+use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
-use clap::{self, Arg};
+use clap::Arg;
 use futures::TryFutureExt;
-use proxy::console::messages::MetricsAuxInfo;
 use proxy::stream::{PqStream, Stream};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use utils::{project_git_version, sentry_init::init_sentry};
 
-use tracing::{error, info, warn, Instrument};
+use tracing::{error, info, Instrument};
 
 project_git_version!(GIT_VERSION);
 
@@ -60,44 +66,55 @@ async fn main() -> anyhow::Result<()> {
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
+    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
+
     let args = cli().get_matches();
     let destination: String = args.get_one::<String>("dest").unwrap().parse()?;
 
     // Configure TLS
-    let tls_config: Arc<rustls::ServerConfig> = match (
+    let (tls_config, tls_server_end_point): (Arc<rustls::ServerConfig>, TlsServerEndPoint) = match (
         args.get_one::<String>("tls-key"),
         args.get_one::<String>("tls-cert"),
     ) {
         (Some(key_path), Some(cert_path)) => {
             let key = {
                 let key_bytes = std::fs::read(key_path).context("TLS key file")?;
-                let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
-                    .context(format!("Failed to read TLS keys at '{key_path}'"))?;
+
+                let mut keys =
+                    rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..]).collect_vec();
 
                 ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
-                keys.pop().map(rustls::PrivateKey).unwrap()
+                PrivateKeyDer::Pkcs8(
+                    keys.pop()
+                        .unwrap()
+                        .context(format!("Failed to read TLS keys at '{key_path}'"))?,
+                )
             };
 
             let cert_chain_bytes = std::fs::read(cert_path)
                 .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
 
-            let cert_chain = {
+            let cert_chain: Vec<_> = {
                 rustls_pemfile::certs(&mut &cert_chain_bytes[..])
-                    .context(format!(
-                        "Failed to read TLS certificate chain from bytes from file at '{cert_path}'."
-                    ))?
-                    .into_iter()
-                    .map(rustls::Certificate)
-                    .collect()
+                .try_collect()
+                .with_context(|| {
+                    format!("Failed to read TLS certificate chain from bytes from file at '{cert_path}'.")
+                })?
             };
 
-            rustls::ServerConfig::builder()
-                .with_safe_default_cipher_suites()
-                .with_safe_default_kx_groups()
-                .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
-                .with_no_client_auth()
-                .with_single_cert(cert_chain, key)?
-                .into()
+            // needed for channel bindings
+            let first_cert = cert_chain.first().context("missing certificate")?;
+            let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
+
+            let tls_config = rustls::ServerConfig::builder_with_protocol_versions(&[
+                &rustls::version::TLS13,
+                &rustls::version::TLS12,
+            ])
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)?
+            .into();
+
+            (tls_config, tls_server_end_point)
         }
         _ => bail!("tls-key and tls-cert must be specified"),
     };
@@ -109,25 +126,32 @@ async fn main() -> anyhow::Result<()> {
 
     let cancellation_token = CancellationToken::new();
 
-    let main = proxy::flatten_err(tokio::spawn(task_main(
+    let main = tokio::spawn(task_main(
         Arc::new(destination),
         tls_config,
+        tls_server_end_point,
         proxy_listener,
         cancellation_token.clone(),
-    )));
-    let signals_task = proxy::flatten_err(tokio::spawn(proxy::handle_signals(cancellation_token)));
+    ));
+    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token));
 
-    tokio::select! {
-        res = main => { res?; },
-        res = signals_task => { res?; },
-    }
+    // the signal task cant ever succeed.
+    // the main task can error, or can succeed on cancellation.
+    // we want to immediately exit on either of these cases
+    let signal = match futures::future::select(signals_task, main).await {
+        Either::Left((res, _)) => proxy::flatten_err(res)?,
+        Either::Right((res, _)) => return proxy::flatten_err(res),
+    };
 
-    Ok(())
+    // maintenance tasks return `Infallible` success values, this is an impossible value
+    // so this match statically ensures that there are no possibilities for that value
+    match signal {}
 }
 
 async fn task_main(
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
+    tls_server_end_point: TlsServerEndPoint,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -135,49 +159,45 @@ async fn task_main(
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
-    let mut connections = tokio::task::JoinSet::new();
+    let connections = tokio_util::task::task_tracker::TaskTracker::new();
 
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                let (socket, peer_addr) = accept_result?;
+    while let Some(accept_result) =
+        run_until_cancelled(listener.accept(), &cancellation_token).await
+    {
+        let (socket, peer_addr) = accept_result?;
 
-                let session_id = uuid::Uuid::new_v4();
-                let tls_config = Arc::clone(&tls_config);
-                let dest_suffix = Arc::clone(&dest_suffix);
+        let session_id = uuid::Uuid::new_v4();
+        let tls_config = Arc::clone(&tls_config);
+        let dest_suffix = Arc::clone(&dest_suffix);
 
-                connections.spawn(
-                    async move {
-                        socket
-                            .set_nodelay(true)
-                            .context("failed to set socket option")?;
+        connections.spawn(
+            async move {
+                socket
+                    .set_nodelay(true)
+                    .context("failed to set socket option")?;
 
-                        info!(%peer_addr, "serving");
-                        handle_client(dest_suffix, tls_config, socket).await
-                    }
-                    .unwrap_or_else(|e| {
-                        // Acknowledge that the task has finished with an error.
-                        error!("per-client task finished with an error: {e:#}");
-                    })
-                    .instrument(tracing::info_span!("handle_client", ?session_id))
+                info!(%peer_addr, "serving");
+                let ctx = RequestMonitoring::new(
+                    session_id,
+                    peer_addr.ip(),
+                    proxy::metrics::Protocol::SniRouter,
+                    "sni",
                 );
+                handle_client(ctx, dest_suffix, tls_config, tls_server_end_point, socket).await
             }
-            _ = cancellation_token.cancelled() => {
-                drop(listener);
-                break;
-            }
-        }
+            .unwrap_or_else(|e| {
+                // Acknowledge that the task has finished with an error.
+                error!("per-client task finished with an error: {e:#}");
+            })
+            .instrument(tracing::info_span!("handle_client", ?session_id)),
+        );
     }
 
-    // Drain connections
-    info!("waiting for all client connections to finish");
-    while let Some(res) = connections.join_next().await {
-        if let Err(e) = res {
-            if !e.is_panic() && !e.is_cancelled() {
-                warn!("unexpected error from joined connection task: {e:?}");
-            }
-        }
-    }
+    connections.close();
+    drop(listener);
+
+    connections.wait().await;
+
     info!("all client connections have finished");
     Ok(())
 }
@@ -185,8 +205,10 @@ async fn task_main(
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    ctx: &mut RequestMonitoring,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
+    tls_server_end_point: TlsServerEndPoint,
 ) -> anyhow::Result<Stream<S>> {
     let mut stream = PqStream::new(Stream::from_raw(raw_stream));
 
@@ -211,24 +233,35 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             if !read_buf.is_empty() {
                 bail!("data is sent before server replied with EncryptionResponse");
             }
-            Ok(raw.upgrade(tls_config).await?)
+
+            Ok(Stream::Tls {
+                tls: Box::new(
+                    raw.upgrade(tls_config, !ctx.has_private_peer_addr())
+                        .await?,
+                ),
+                tls_server_end_point,
+            })
         }
         unexpected => {
             info!(
                 ?unexpected,
                 "unexpected startup packet, rejecting connection"
             );
-            stream.throw_error_str(ERR_INSECURE_CONNECTION).await?
+            stream
+                .throw_error_str(ERR_INSECURE_CONNECTION, proxy::error::ErrorKind::User)
+                .await?
         }
     }
 }
 
 async fn handle_client(
+    mut ctx: RequestMonitoring,
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
+    tls_server_end_point: TlsServerEndPoint,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
-    let tls_stream = ssl_handshake(stream, tls_config).await?;
+    let mut tls_stream = ssl_handshake(&mut ctx, stream, tls_config, tls_server_end_point).await?;
 
     // Cut off first part of the SNI domain
     // We receive required destination details in the format of
@@ -245,8 +278,15 @@ async fn handle_client(
 
     info!("destination: {}", destination);
 
-    let client = tokio::net::TcpStream::connect(destination).await?;
+    let mut client = tokio::net::TcpStream::connect(destination).await?;
 
-    let metrics_aux: MetricsAuxInfo = Default::default();
-    proxy::proxy::proxy_pass(tls_stream, client, &metrics_aux).await
+    // doesn't yet matter as pg-sni-router doesn't report analytics logs
+    ctx.set_success();
+    ctx.log_connect();
+
+    // Starting from here we only proxy the client's traffic.
+    info!("performing the proxy pass...");
+    let _ = copy_bidirectional_client_compute(&mut tls_stream, &mut client).await?;
+
+    Ok(())
 }

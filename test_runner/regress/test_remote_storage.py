@@ -1,33 +1,39 @@
-# It's possible to run any regular test with the local fs remote storage via
-# env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
-
 import os
 import queue
 import shutil
 import threading
 import time
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnvBuilder,
-    RemoteStorageKind,
-    available_remote_storages,
     wait_for_last_flush_lsn,
 )
+from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
-    assert_timeline_detail_404,
+    timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_active,
     wait_until_tenant_state,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import print_gc_result, query_scalar, wait_until
+from fixtures.remote_storage import (
+    LocalFsStorage,
+    RemoteStorageKind,
+    available_remote_storages,
+)
+from fixtures.utils import (
+    assert_eq,
+    assert_ge,
+    assert_gt,
+    print_gc_result,
+    query_scalar,
+    wait_until,
+)
 from requests import ReadTimeout
 
 
@@ -49,18 +55,15 @@ from requests import ReadTimeout
 #
 # The tests are done for all types of remote storage pageserver supports.
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+@pytest.mark.parametrize("generations", [True, False])
 def test_remote_storage_backup_and_restore(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind, generations: bool
 ):
     # Use this test to check more realistic SK ids: some etcd key parsing bugs were related,
     # and this test needs SK to write data to pageserver, so it will be visible
     neon_env_builder.safekeepers_id_start = 12
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
@@ -73,27 +76,30 @@ def test_remote_storage_backup_and_restore(
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Failed to get local tenant state.*",
+            # FIXME retry downloads without throwing errors
+            ".*failed to load remote timeline.*",
+            # we have a bunch of pytest.raises for these below
+            ".*tenant .*? already exists, state:.*",
+            ".*tenant directory already exists.*",
+            ".*simulated failure of remote operation.*",
+        ]
     )
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
-
-    env.pageserver.allowed_errors.append(".*Failed to get local tenant state.*")
-    # FIXME retry downloads without throwing errors
-    env.pageserver.allowed_errors.append(".*failed to load remote timeline.*")
-    # we have a bunch of pytest.raises for these below
-    env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    env.pageserver.allowed_errors.append(".*simulated failure of remote operation.*")
 
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Thats because of UnreliableWrapper's injected failures
+    env.pageserver.allowed_errors.append(
+        f".*failed to fetch tenant deletion mark at tenants/{tenant_id}/deleted attempt 1.*"
+    )
 
     checkpoint_numbers = range(1, 3)
 
@@ -119,10 +125,10 @@ def test_remote_storage_backup_and_restore(
         log.info(f"upload of checkpoint {checkpoint_number} is done")
 
     # Check that we had to retry the uploads
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadLayer.*, will retry.*"
     )
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadMetadata.*, will retry.*"
     )
 
@@ -130,7 +136,7 @@ def test_remote_storage_backup_and_restore(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
@@ -140,14 +146,17 @@ def test_remote_storage_backup_and_restore(
     # Introduce failpoint in list remote timelines code path to make tenant_attach fail.
     # This is before the failures injected by test_remote_failures, so it's a permanent error.
     pageserver_http.configure_failpoints(("storage-sync-list-remote-timelines", "return"))
-    env.pageserver.allowed_errors.append(
-        ".*attach failed.*: storage-sync-list-remote-timelines",
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*attach failed.*: storage-sync-list-remote-timelines",
+            ".*Tenant state is Broken: storage-sync-list-remote-timelines.*",
+        ]
     )
     # Attach it. This HTTP request will succeed and launch a
     # background task to load the tenant. In that background task,
     # listing the remote timelines will fail because of the failpoint,
     # and the tenant will be marked as Broken.
-    client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
     assert tenant_info["attachment_status"] == {
@@ -155,9 +164,13 @@ def test_remote_storage_backup_and_restore(
         "data": {"reason": "storage-sync-list-remote-timelines"},
     }
 
-    # Ensure that even though the tenant is broken, we can't attach it again.
-    with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
-        client.tenant_attach(tenant_id)
+    # Ensure that even though the tenant is broken, retrying the attachment fails
+    with pytest.raises(Exception, match="Tenant state is Broken"):
+        # Use same generation as in previous attempt
+        gen_state = env.storage_controller.inspect(tenant_id)
+        assert gen_state is not None
+        generation = gen_state[0]
+        env.pageserver.tenant_attach(tenant_id, generation=generation)
 
     # Restart again, this implicitly clears the failpoint.
     # test_remote_failures=1 remains active, though, as it's in the pageserver config.
@@ -166,18 +179,14 @@ def test_remote_storage_backup_and_restore(
     #
     # The initiated attach operation should survive the restart, and continue from where it was.
     env.pageserver.stop()
-    layer_download_failed_regex = (
-        r"download.*[0-9A-F]+-[0-9A-F]+.*open a download stream for layer.*simulated failure"
-    )
+    layer_download_failed_regex = r"Failed to download a remote file: simulated failure of remote operation Download.*[0-9A-F]+-[0-9A-F]+"
     assert not env.pageserver.log_contains(
         layer_download_failed_regex
     ), "we shouldn't have tried any layer downloads yet since list remote timelines has a failpoint"
     env.pageserver.start()
 
-    # Ensure that the pageserver remembers that the tenant was attaching, by
-    # trying to attach it again. It should fail.
-    with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
-        client.tenant_attach(tenant_id)
+    # The attach should have got far enough that it recovers on restart (i.e. tenant's
+    # config was written to local storage).
     log.info("waiting for tenant to become active. this should be quick with on-demand download")
 
     wait_until_tenant_active(
@@ -201,7 +210,7 @@ def test_remote_storage_backup_and_restore(
                 == f"{data}|{checkpoint_number}"
             )
 
-    log.info("ensure that we neede to retry downloads due to test_remote_failures=1")
+    log.info("ensure that we needed to retry downloads due to test_remote_failures=1")
     assert env.pageserver.log_contains(layer_download_failed_regex)
 
 
@@ -212,15 +221,10 @@ def test_remote_storage_backup_and_restore(
 # - Disable failpoints
 # - Wait for all uploads to finish
 # - Verify that remote is consistent and up-to-date (=all retries were done and succeeded)
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_remote_storage_upload_queue_retries(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_upload_queue_retries",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -229,9 +233,9 @@ def test_remote_storage_upload_queue_retries(
     tenant_id, timeline_id = env.neon_cli.create_tenant(
         conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
-            "checkpoint_distance": f"{128 * 1024}",
+            "checkpoint_distance": f"{64 * 1024}",
             "compaction_threshold": "1",
-            "compaction_target_size": f"{128 * 1024}",
+            "compaction_target_size": f"{64 * 1024}",
             # no PITR horizon, we specify the horizon when we request on-demand GC
             "pitr_interval": "0s",
             # disable background compaction and GC. We invoke it manually when we want it to happen.
@@ -239,6 +243,7 @@ def test_remote_storage_upload_queue_retries(
             "compaction_period": "0s",
             # create image layers eagerly, so that GC can remove some layers
             "image_creation_threshold": "1",
+            "image_layer_creation_check_threshold": "0",
         }
     )
 
@@ -257,33 +262,30 @@ def test_remote_storage_upload_queue_retries(
             ]
         )
 
+    FOO_ROWS_COUNT = 4000
+
     def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
         # create initial set of layers & upload them with failpoints configured
-        endpoint.safe_psql_many(
-            [
-                f"""
-               INSERT INTO foo (id, val)
-               SELECT g, '{data}'
-               FROM generate_series(1, 10000) g
-               ON CONFLICT (id) DO UPDATE
-               SET val = EXCLUDED.val
-               """,
-                # to ensure that GC can actually remove some layers
-                "VACUUM foo",
-            ]
-        )
+        for _v in range(2):
+            endpoint.safe_psql_many(
+                [
+                    f"""
+                    INSERT INTO foo (id, val)
+                    SELECT g, '{data}'
+                    FROM generate_series(1, {FOO_ROWS_COUNT}) g
+                    ON CONFLICT (id) DO UPDATE
+                    SET val = EXCLUDED.val
+                    """,
+                    # to ensure that GC can actually remove some layers
+                    "VACUUM foo",
+                ]
+            )
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     def get_queued_count(file_kind, op_kind):
-        val = client.get_remote_timeline_client_metric(
-            "pageserver_remote_timeline_client_calls_unfinished",
-            tenant_id,
-            timeline_id,
-            file_kind,
-            op_kind,
+        return client.get_remote_timeline_client_queue_count(
+            tenant_id, timeline_id, file_kind, op_kind
         )
-        assert val is not None, "expecting metric to be present"
-        return int(val)
 
     # create some layers & wait for uploads to finish
     overwrite_data_and_wait_for_it_to_arrive_at_pageserver("a")
@@ -296,9 +298,9 @@ def test_remote_storage_upload_queue_retries(
     print_gc_result(gc_result)
     assert gc_result["layers_removed"] > 0
 
-    wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-    wait_until(2, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
-    wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
+    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
+    wait_until(2, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # let all future operations queue up
     configure_storage_sync_failpoints("return")
@@ -326,21 +328,22 @@ def test_remote_storage_upload_queue_retries(
     churn_while_failpoints_active_thread.start()
 
     # wait for churn thread's data to get stuck in the upload queue
-    wait_until(10, 0.1, lambda: get_queued_count(file_kind="layer", op_kind="upload") > 0)
-    wait_until(10, 0.1, lambda: get_queued_count(file_kind="index", op_kind="upload") >= 2)
-    wait_until(10, 0.1, lambda: get_queued_count(file_kind="layer", op_kind="delete") > 0)
+    # Exponential back-off in upload queue, so, gracious timeouts.
+
+    wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(30, 1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 2))
+    wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # unblock churn operations
     configure_storage_sync_failpoints("off")
 
-    # ... and wait for them to finish. Exponential back-off in upload queue, so, gracious timeouts.
-    wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-    wait_until(30, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
-    wait_until(30, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
+    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="upload"), 0))
+    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="index", op_kind="upload"), 0))
+    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # The churn thread doesn't make progress once it blocks on the first wait_completion() call,
     # so, give it some time to wrap up.
-    churn_while_failpoints_active_thread.join(30)
+    churn_while_failpoints_active_thread.join(60)
     assert not churn_while_failpoints_active_thread.is_alive()
     assert churn_thread_result[0]
 
@@ -351,41 +354,42 @@ def test_remote_storage_upload_queue_retries(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    # We are about to forcibly drop local dirs.  Storage controller will increment generation in re-attach before
+    # we later increment when actually attaching it again, leading to skipping a generation and potentially getting
+    # these warnings if there was a durable but un-executed deletion list at time of restart.
+    env.pageserver.allowed_errors.extend(
+        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
+    )
+
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     wait_until_tenant_active(client, tenant_id)
 
     log.info("restarting postgres to validate")
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with endpoint.cursor() as cur:
-        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
+        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == FOO_ROWS_COUNT
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_remote_timeline_client_calls_started_metric(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_timeline_client_metrics",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start()
-
-    # create tenant with config that will determinstically allow
-    # compaction and gc
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
-        conf={
+    # thinking about using a shared environment? the test assumes that global
+    # metrics are for single tenant.
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
             "checkpoint_distance": f"{128 * 1024}",
+            # ensure each timeline_checkpoint() calls creates L1s
             "compaction_threshold": "1",
             "compaction_target_size": f"{128 * 1024}",
             # no PITR horizon, we specify the horizon when we request on-demand GC
@@ -393,10 +397,11 @@ def test_remote_timeline_client_calls_started_metric(
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
-            # create image layers eagerly, so that GC can remove some layers
-            "image_creation_threshold": "1",
         }
     )
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     client = env.pageserver.http_client()
 
@@ -411,7 +416,7 @@ def test_remote_timeline_client_calls_started_metric(
                 f"""
                INSERT INTO foo (id, val)
                SELECT g, '{data}'
-               FROM generate_series(1, 10000) g
+               FROM generate_series(1, 20000) g
                ON CONFLICT (id) DO UPDATE
                SET val = EXCLUDED.val
                """,
@@ -419,6 +424,7 @@ def test_remote_timeline_client_calls_started_metric(
                 "VACUUM foo",
             ]
         )
+        assert timeline_id is not None
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     calls_started: Dict[Tuple[str, str], List[int]] = {
@@ -428,13 +434,14 @@ def test_remote_timeline_client_calls_started_metric(
     }
 
     def fetch_calls_started():
+        assert timeline_id is not None
         for (file_kind, op_kind), observations in calls_started.items():
-            val = client.get_remote_timeline_client_metric(
-                "pageserver_remote_timeline_client_calls_started_count",
-                tenant_id,
-                timeline_id,
-                file_kind,
-                op_kind,
+            val = client.get_metric_value(
+                name="pageserver_remote_timeline_client_calls_started_total",
+                filter={
+                    "file_kind": str(file_kind),
+                    "op_kind": str(op_kind),
+                },
             )
             assert val is not None, f"expecting metric to be present: {file_kind} {op_kind}"
             val = int(val)
@@ -448,12 +455,17 @@ def test_remote_timeline_client_calls_started_metric(
             ), f"observations for {file_kind} {op_kind} did not grow monotonically: {observations}"
 
     def churn(data_pass1, data_pass2):
+        # overwrite the same data in place, vacuum inbetween, and
+        # and create image layers; then run a gc().
+        # this should
+        # - create new layers
+        # - delete some layers
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass1)
-        client.timeline_checkpoint(tenant_id, timeline_id)
-        client.timeline_compact(tenant_id, timeline_id)
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass2)
-        client.timeline_checkpoint(tenant_id, timeline_id)
-        client.timeline_compact(tenant_id, timeline_id)
+        client.timeline_checkpoint(tenant_id, timeline_id, force_image_layer_creation=True)
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass1)
+        overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data_pass2)
+        client.timeline_checkpoint(tenant_id, timeline_id, force_image_layer_creation=True)
         gc_result = client.timeline_gc(tenant_id, timeline_id, 0)
         print_gc_result(gc_result)
         assert gc_result["layers_removed"] > 0
@@ -486,21 +498,21 @@ def test_remote_timeline_client_calls_started_metric(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
     env.pageserver.start()
     client = env.pageserver.http_client()
 
-    client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     wait_until_tenant_active(client, tenant_id)
 
     log.info("restarting postgres to validate")
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with endpoint.cursor() as cur:
-        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
+        assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 20000
 
     # ensure that we updated the calls_started download metric
     fetch_calls_started()
@@ -508,22 +520,13 @@ def test_remote_timeline_client_calls_started_metric(
 
 
 # Test that we correctly handle timeline with layers stuck in upload queue
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_timeline_deletion_with_files_stuck_in_upload_queue(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_deletion_with_files_stuck_in_upload_queue",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start()
-
-    # create tenant with config that will determinstically allow
-    # compaction and gc
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
-        conf={
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
             # small checkpointing and compaction targets to ensure we generate many operations
             "checkpoint_distance": f"{64 * 1024}",
             "compaction_threshold": "1",
@@ -535,19 +538,12 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             "pitr_interval": "0s",
         }
     )
-    timeline_path = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
 
     client = env.pageserver.http_client()
-
-    def get_queued_count(file_kind, op_kind):
-        val = client.get_remote_timeline_client_metric(
-            "pageserver_remote_timeline_client_calls_unfinished",
-            tenant_id,
-            timeline_id,
-            file_kind,
-            op_kind,
-        )
-        return int(val) if val is not None else val
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
@@ -582,7 +578,10 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     def assert_compacted_and_uploads_queued():
         assert timeline_path.exists()
         assert len(list(timeline_path.glob("*"))) >= 8
-        assert get_queued_count(file_kind="index", op_kind="upload") > 0
+        assert (
+            get_queued_count(client, tenant_id, timeline_id, file_kind="index", op_kind="upload")
+            > 0
+        )
 
     wait_until(20, 0.1, assert_compacted_and_uploads_queued)
 
@@ -594,30 +593,36 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     # checkpoint operations. Hence, checkpoint is allowed to fail now.
     log.info("sending delete request")
     checkpoint_allowed_to_fail.set()
-    env.pageserver.allowed_errors.append(
-        ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
-    )
-    client.timeline_delete(tenant_id, timeline_id)
-
-    env.pageserver.allowed_errors.append(f".*Timeline {tenant_id}/{timeline_id} was not found.*")
-    env.pageserver.allowed_errors.append(
-        ".*files not bound to index_file.json, proceeding with their deletion.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".* ERROR .*Error processing HTTP request: InternalServerError\\(The timeline or pageserver is shutting down",
+            ".* ERROR .*queue is in state Stopped.*",
+            ".* ERROR .*[Cc]ould not flush frozen layer.*",
+        ]
     )
 
-    wait_until(2, 0.5, lambda: assert_timeline_detail_404(client, tenant_id, timeline_id))
+    # Generous timeout, because currently deletions can get blocked waiting for compaction
+    # This can be reduced when https://github.com/neondatabase/neon/issues/4998 is fixed.
+    timeline_delete_wait_completed(client, tenant_id, timeline_id, iterations=30, interval=1)
 
     assert not timeline_path.exists()
 
     # to please mypy
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    remote_timeline_path = (
-        env.remote_storage.root / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-    )
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+    remote_timeline_path = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id)
 
-    assert not list(remote_timeline_path.iterdir())
+    filtered = [
+        path
+        for path in remote_timeline_path.iterdir()
+        if not (path.name.endswith("initdb.tar.zst"))
+    ]
+    assert len(filtered) == 0
 
     # timeline deletion should kill ongoing uploads, so, the metric will be gone
-    assert get_queued_count(file_kind="index", op_kind="upload") is None
+    assert (
+        get_queued_count(client, tenant_id, timeline_id, file_kind="index", op_kind="upload")
+        is None
+    )
 
     # timeline deletion should be unblocking checkpoint ops
     checkpoint_thread.join(2.0)
@@ -632,15 +637,8 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 
 # Branches off a root branch, but does not write anything to the new branch, so it has a metadata file only.
 # Ensures that such branch is still persisted on the remote storage, and can be restored during tenant (re)attach.
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_empty_branch_remote_storage_upload(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_empty_branch_remote_storage_upload",
-    )
+def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
@@ -661,7 +659,7 @@ def test_empty_branch_remote_storage_upload(
     ), f"Expected to have an initial timeline and the branch timeline only, but got {timelines_before_detach}"
 
     client.tenant_detach(env.initial_tenant)
-    client.tenant_attach(env.initial_tenant)
+    env.pageserver.tenant_attach(env.initial_tenant)
     wait_until_tenant_state(client, env.initial_tenant, "Active", 5)
 
     timelines_after_detach = set(
@@ -676,11 +674,7 @@ def test_empty_branch_remote_storage_upload(
     ), f"Expected to have same timelines after reattach, but got {timelines_after_detach}"
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_empty_branch_remote_storage_upload_on_restart(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
-):
+def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnvBuilder):
     """
     Branches off a root branch, but does not write anything to the new branch, so
     it has a metadata file only.
@@ -689,10 +683,7 @@ def test_empty_branch_remote_storage_upload_on_restart(
     — the upload should be scheduled by load, and create_timeline should await
     for it even though it gets 409 Conflict.
     """
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_empty_branch_remote_storage_upload_on_restart",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
@@ -717,15 +708,14 @@ def test_empty_branch_remote_storage_upload_on_restart(
     # index upload is now hitting the failpoint, it should block the shutdown
     env.pageserver.stop(immediate=True)
 
-    timeline_path = (
-        Path("tenants") / str(env.initial_tenant) / "timelines" / str(new_branch_timeline_id)
+    timeline_dir = env.pageserver.timeline_dir(env.initial_tenant, new_branch_timeline_id)
+    assert timeline_dir.is_dir()
+
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    new_branch_on_remote_storage = env.pageserver_remote_storage.timeline_path(
+        env.initial_tenant, new_branch_timeline_id
     )
-
-    local_metadata = env.repo_dir / timeline_path / "metadata"
-    assert local_metadata.is_file()
-
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    new_branch_on_remote_storage = env.remote_storage.root / timeline_path
     assert (
         not new_branch_on_remote_storage.exists()
     ), "failpoint should had prohibited index_part.json upload"
@@ -744,6 +734,10 @@ def test_empty_branch_remote_storage_upload_on_restart(
     def create_in_background():
         barrier.wait()
         try:
+            # retrying this kind of query makes no sense in real life as we do
+            # not lock in the lsn. with the immediate stop, we could in real
+            # life revert back the ancestor in startup, but most likely the lsn
+            # would still be branchable.
             client.timeline_create(
                 tenant_id=env.initial_tenant,
                 ancestor_timeline_id=env.initial_timeline,
@@ -764,20 +758,132 @@ def test_empty_branch_remote_storage_upload_on_restart(
         assert not new_branch_on_remote_storage.exists(), "failpoint should had stopped uploading"
 
         client.configure_failpoints(("before-upload-index", "off"))
-        conflict = q.get()
+        exception = q.get()
 
-        assert conflict, "create_timeline should not have succeeded"
         assert (
-            conflict.status_code == 409
-        ), "timeline was created before restart, and uploads scheduled during initial load, so we expect 409 conflict"
+            exception is None
+        ), "create_timeline should have succeeded, because we deleted unuploaded local state"
 
+        # this is because creating a timeline always awaits for the uploads to complete
         assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
-        assert (
-            new_branch_on_remote_storage / "index_part.json"
+        assert env.pageserver_remote_storage.index_path(
+            env.initial_tenant, new_branch_timeline_id
         ).is_file(), "uploads scheduled during initial load should had been awaited for"
     finally:
+        barrier.abort()
         create_thread.join()
+
+
+def test_compaction_waits_for_upload(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    This test forces a race between upload and compaction.
+    """
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # Set a small compaction threshold
+            "compaction_threshold": "3",
+            # Disable GC
+            "gc_period": "0s",
+            # disable PITR
+            "pitr_interval": "0s",
+        }
+    )
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    client = env.pageserver.http_client()
+    layers_at_creation = client.layer_map_info(tenant_id, timeline_id)
+    deltas_at_creation = len(layers_at_creation.delta_layers())
+    assert (
+        deltas_at_creation == 1
+    ), "are you fixing #5863? make sure we end up with 2 deltas at the end of endpoint lifecycle"
+
+    # Make new layer uploads get stuck.
+    # Note that timeline creation waits for the initial layers to reach remote storage.
+    # So at this point, the `layers_at_creation` are in remote storage.
+    client.configure_failpoints(("before-upload-layer-pausable", "pause"))
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        # Build two tables with some data inside
+        endpoint.safe_psql("CREATE TABLE foo AS SELECT x FROM generate_series(1, 10000) g(x)")
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+        client.timeline_checkpoint(tenant_id, timeline_id)
+        deltas_at_first = len(client.layer_map_info(tenant_id, timeline_id).delta_layers())
+        assert (
+            deltas_at_first == 2
+        ), "are you fixing #5863? just add one more checkpoint after 'CREATE TABLE bar ...' statement."
+
+        endpoint.safe_psql("CREATE TABLE bar AS SELECT x FROM generate_series(1, 10000) g(x)")
+        endpoint.safe_psql("UPDATE foo SET x = 0 WHERE x = 1")
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    layers_before_last_checkpoint = client.layer_map_info(tenant_id, timeline_id).historic_by_name()
+    upload_stuck_layers = layers_before_last_checkpoint - layers_at_creation.historic_by_name()
+
+    assert len(upload_stuck_layers) > 0
+
+    for name in upload_stuck_layers:
+        assert env.pageserver.layer_exists(
+            tenant_id, timeline_id, parse_layer_file_name(name)
+        ), "while uploads are stuck the layers should be present on disk"
+
+    # now this will do the L0 => L1 compaction and want to remove
+    # upload_stuck_layers and the original initdb L0
+    client.timeline_checkpoint(tenant_id, timeline_id)
+
+    # as uploads are paused, the upload_stuck_layers should still be with us
+    for name in upload_stuck_layers:
+        assert env.pageserver.layer_exists(
+            tenant_id, timeline_id, parse_layer_file_name(name)
+        ), "uploads are stuck still over compaction"
+
+    compacted_layers = client.layer_map_info(tenant_id, timeline_id).historic_by_name()
+    overlap = compacted_layers.intersection(upload_stuck_layers)
+    assert len(overlap) == 0, "none of the L0's should remain after L0 => L1 compaction"
+    assert (
+        len(compacted_layers) == 1
+    ), "there should be one L1 after L0 => L1 compaction (without #5863 being fixed)"
+
+    def layer_deletes_completed():
+        m = client.get_metric_value("pageserver_layer_completed_deletes_total")
+        if m is None:
+            return 0
+        return int(m)
+
+    # if initdb created an initial delta layer, it might already be gc'd
+    # because it was uploaded before the failpoint was enabled. however, the
+    # deletion is not guaranteed to be complete.
+    assert layer_deletes_completed() <= 1
+
+    client.configure_failpoints(("before-upload-layer-pausable", "off"))
+
+    # Ensure that this actually terminates
+    wait_upload_queue_empty(client, tenant_id, timeline_id)
+
+    def until_layer_deletes_completed():
+        deletes = layer_deletes_completed()
+        log.info(f"layer_deletes: {deletes}")
+        # ensure that initdb delta layer AND the previously stuck are now deleted
+        assert deletes >= len(upload_stuck_layers) + 1
+
+    wait_until(10, 1, until_layer_deletes_completed)
+
+    for name in upload_stuck_layers:
+        assert not env.pageserver.layer_exists(
+            tenant_id, timeline_id, parse_layer_file_name(name)
+        ), "l0 should now be removed because of L0 => L1 compaction and completed uploads"
+
+    # We should not have hit the error handling path in uploads where a uploaded file is gone
+    assert not env.pageserver.log_contains(
+        "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more."
+    )
 
 
 def wait_upload_queue_empty(
@@ -786,26 +892,23 @@ def wait_upload_queue_empty(
     wait_until(
         2,
         1,
-        lambda: get_queued_count(
-            client, tenant_id, timeline_id, file_kind="layer", op_kind="upload"
-        )
-        == 0,
+        lambda: assert_eq(
+            get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="upload"), 0
+        ),
     )
     wait_until(
         2,
         1,
-        lambda: get_queued_count(
-            client, tenant_id, timeline_id, file_kind="index", op_kind="upload"
-        )
-        == 0,
+        lambda: assert_eq(
+            get_queued_count(client, tenant_id, timeline_id, file_kind="index", op_kind="upload"), 0
+        ),
     )
     wait_until(
         2,
         1,
-        lambda: get_queued_count(
-            client, tenant_id, timeline_id, file_kind="layer", op_kind="delete"
-        )
-        == 0,
+        lambda: assert_eq(
+            get_queued_count(client, tenant_id, timeline_id, file_kind="layer", op_kind="delete"), 0
+        ),
     )
 
 
@@ -816,16 +919,8 @@ def get_queued_count(
     file_kind: str,
     op_kind: str,
 ):
-    val = client.get_remote_timeline_client_metric(
-        "pageserver_remote_timeline_client_calls_unfinished",
-        tenant_id,
-        timeline_id,
-        file_kind,
-        op_kind,
-    )
-    if val is None:
-        return val
-    return int(val)
+    """The most important aspect of this function is shorter name & no return type so asserts are more concise."""
+    return client.get_remote_timeline_client_queue_count(tenant_id, timeline_id, file_kind, op_kind)
 
 
 def assert_nothing_to_upload(

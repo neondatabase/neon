@@ -1,14 +1,13 @@
 use std::sync::Arc;
 use std::thread;
 
-use anyhow::Result;
 use tracing::{error, info, instrument};
 
 use compute_api::responses::ComputeStatus;
 
 use crate::compute::ComputeNode;
 
-#[instrument(skip(compute))]
+#[instrument(skip_all)]
 fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     info!("waiting for reconfiguration requests");
     loop {
@@ -42,13 +41,14 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     }
 }
 
-pub fn launch_configurator(compute: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
+pub fn launch_configurator(compute: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
     let compute = Arc::clone(compute);
 
-    Ok(thread::Builder::new()
+    thread::Builder::new()
         .name("compute-configurator".into())
         .spawn(move || {
             configurator_main_loop(&compute);
             info!("configurator thread is exited");
-        })?)
+        })
+        .expect("cannot launch configurator thread")
 }

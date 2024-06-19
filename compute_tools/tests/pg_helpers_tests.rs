@@ -28,7 +28,7 @@ mod pg_helpers_tests {
         assert_eq!(
             spec.cluster.settings.as_pg_settings(),
             r#"fsync = off
-wal_level = replica
+wal_level = logical
 hot_standby = on
 neon.safekeepers = '127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501'
 wal_log_hints = on
@@ -88,5 +88,13 @@ test.escaping = 'here''s a backslash \\ and a quote '' and a double-quote " hoor
         assert_eq!(none_generic_options.find("present_value"), None);
         assert_eq!(none_generic_options.find("missed_value"), None);
         assert_eq!(none_generic_options.find("invalid_value"), None);
+    }
+
+    #[test]
+    fn test_escape_literal() {
+        assert_eq!(escape_literal("test"), "'test'");
+        assert_eq!(escape_literal("test'"), "'test'''");
+        assert_eq!(escape_literal("test\\'"), "E'test\\\\'''");
+        assert_eq!(escape_literal("test\\'\\'"), "E'test\\\\''\\\\'''");
     }
 }

@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 use anyhow::{bail, Context};
 use itertools::Itertools;
 use std::borrow::Cow;
@@ -161,8 +163,25 @@ impl PgConnectionConfig {
     }
 
     /// Connect using postgres protocol with TLS disabled.
-    pub fn connect_no_tls(&self) -> Result<postgres::Client, postgres::Error> {
-        postgres::Config::from(self.to_tokio_postgres_config()).connect(postgres::NoTls)
+    pub async fn connect_no_tls(
+        &self,
+    ) -> Result<
+        (
+            tokio_postgres::Client,
+            tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
+        ),
+        postgres::Error,
+    > {
+        self.to_tokio_postgres_config()
+            .connect(postgres::NoTls)
+            .await
+    }
+}
+
+impl fmt::Display for PgConnectionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // The password is intentionally hidden and not part of this display string.
+        write!(f, "postgresql://{}:{}", self.host, self.port)
     }
 }
 

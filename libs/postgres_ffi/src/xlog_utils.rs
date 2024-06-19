@@ -119,11 +119,6 @@ pub fn generate_pg_control(
     // Generate new pg_control needed for bootstrap
     checkpoint.redo = normalize_lsn(lsn, WAL_SEGMENT_SIZE).0;
 
-    //reset some fields we don't want to preserve
-    //TODO Check this.
-    //We may need to determine the value from twophase data.
-    checkpoint.oldestActiveXid = 0;
-
     //save new values in pg_control
     pg_control.checkPoint = 0;
     pg_control.checkPointCopy = checkpoint;
@@ -136,20 +131,41 @@ pub fn get_current_timestamp() -> TimestampTz {
     to_pg_timestamp(SystemTime::now())
 }
 
-pub fn to_pg_timestamp(time: SystemTime) -> TimestampTz {
-    const UNIX_EPOCH_JDATE: u64 = 2440588; /* == date2j(1970, 1, 1) */
-    const POSTGRES_EPOCH_JDATE: u64 = 2451545; /* == date2j(2000, 1, 1) */
+// Module to reduce the scope of the constants
+mod timestamp_conversions {
+    use std::time::Duration;
+
+    use super::*;
+
+    const UNIX_EPOCH_JDATE: u64 = 2440588; // == date2j(1970, 1, 1)
+    const POSTGRES_EPOCH_JDATE: u64 = 2451545; // == date2j(2000, 1, 1)
     const SECS_PER_DAY: u64 = 86400;
     const USECS_PER_SEC: u64 = 1000000;
-    match time.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(n) => {
-            ((n.as_secs() - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY))
-                * USECS_PER_SEC
-                + n.subsec_micros() as u64) as i64
+    const SECS_DIFF_UNIX_TO_POSTGRES_EPOCH: u64 =
+        (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY;
+
+    pub fn to_pg_timestamp(time: SystemTime) -> TimestampTz {
+        match time.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(n) => {
+                ((n.as_secs() - SECS_DIFF_UNIX_TO_POSTGRES_EPOCH) * USECS_PER_SEC
+                    + n.subsec_micros() as u64) as i64
+            }
+            Err(_) => panic!("SystemTime before UNIX EPOCH!"),
         }
-        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }
+
+    pub fn from_pg_timestamp(time: TimestampTz) -> SystemTime {
+        let time: u64 = time
+            .try_into()
+            .expect("timestamp before millenium (postgres epoch)");
+        let since_unix_epoch = time + SECS_DIFF_UNIX_TO_POSTGRES_EPOCH * USECS_PER_SEC;
+        SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_micros(since_unix_epoch))
+            .expect("SystemTime overflow")
     }
 }
+
+pub use timestamp_conversions::{from_pg_timestamp, to_pg_timestamp};
 
 // Returns (aligned) end_lsn of the last record in data_dir with WAL segments.
 // start_lsn must point to some previously known record boundary (beginning of
@@ -186,10 +202,16 @@ pub fn find_end_of_wal(
                 let seg_offs = curr_lsn.segment_offset(wal_seg_size);
                 segment.seek(SeekFrom::Start(seg_offs as u64))?;
                 // loop inside segment
-                loop {
+                while curr_lsn.segment_number(wal_seg_size) == segno {
                     let bytes_read = segment.read(&mut buf)?;
                     if bytes_read == 0 {
-                        break; // EOF
+                        debug!(
+                            "find_end_of_wal reached end at {:?}, EOF in segment {:?} at offset {}",
+                            result,
+                            seg_file_path,
+                            curr_lsn.segment_offset(wal_seg_size)
+                        );
+                        return Ok(result);
                     }
                     curr_lsn += bytes_read as u64;
                     decoder.feed_bytes(&buf[0..bytes_read]);
@@ -308,8 +330,11 @@ impl CheckPoint {
     ///
     /// Returns 'true' if the XID was updated.
     pub fn update_next_xid(&mut self, xid: u32) -> bool {
-        // nextXid should nw greater than any XID in WAL, so increment provided XID and check for wraparround.
-        let mut new_xid = std::cmp::max(xid + 1, pg_constants::FIRST_NORMAL_TRANSACTION_ID);
+        // nextXid should be greater than any XID in WAL, so increment provided XID and check for wraparround.
+        let mut new_xid = std::cmp::max(
+            xid.wrapping_add(1),
+            pg_constants::FIRST_NORMAL_TRANSACTION_ID,
+        );
         // To reduce number of metadata checkpoints, we forward align XID on XID_CHECKPOINT_INTERVAL.
         // XID_CHECKPOINT_INTERVAL should not be larger than BLCKSZ*CLOG_XACTS_PER_BYTE
         new_xid =
@@ -345,8 +370,16 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
     let seg_off = lsn.segment_offset(WAL_SEGMENT_SIZE);
 
     let first_page_only = seg_off < XLOG_BLCKSZ;
-    let (shdr_rem_len, infoflags) = if first_page_only {
-        (seg_off, pg_constants::XLP_FIRST_IS_CONTRECORD)
+    // If first records starts in the middle of the page, pretend in page header
+    // there is a fake record which ends where first real record starts. This
+    // makes pg_waldump etc happy.
+    let (shdr_rem_len, infoflags) = if first_page_only && seg_off > 0 {
+        assert!(seg_off >= XLOG_SIZE_OF_XLOG_LONG_PHD);
+        // xlp_rem_len doesn't include page header, hence the subtraction.
+        (
+            seg_off - XLOG_SIZE_OF_XLOG_LONG_PHD,
+            pg_constants::XLP_FIRST_IS_CONTRECORD,
+        )
     } else {
         (0, 0)
     };
@@ -375,20 +408,22 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 
     if !first_page_only {
         let block_offset = lsn.page_offset_in_segment(WAL_SEGMENT_SIZE) as usize;
+        // see comments above about XLP_FIRST_IS_CONTRECORD and xlp_rem_len.
+        let (xlp_rem_len, xlp_info) = if page_off > 0 {
+            assert!(page_off >= XLOG_SIZE_OF_XLOG_SHORT_PHD as u64);
+            (
+                (page_off - XLOG_SIZE_OF_XLOG_SHORT_PHD as u64) as u32,
+                pg_constants::XLP_FIRST_IS_CONTRECORD,
+            )
+        } else {
+            (0, 0)
+        };
         let header = XLogPageHeaderData {
             xlp_magic: XLOG_PAGE_MAGIC as u16,
-            xlp_info: if page_off >= pg_constants::SIZE_OF_PAGE_HEADER as u64 {
-                pg_constants::XLP_FIRST_IS_CONTRECORD
-            } else {
-                0
-            },
+            xlp_info,
             xlp_tli: PG_TLI,
             xlp_pageaddr: lsn.page_lsn().0,
-            xlp_rem_len: if page_off >= pg_constants::SIZE_OF_PAGE_HEADER as u64 {
-                page_off as u32
-            } else {
-                0u32
-            },
+            xlp_rem_len,
             ..Default::default() // Put 0 in padding fields.
         };
         let hdr_bytes = header.encode()?;
@@ -404,11 +439,11 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 
 #[repr(C)]
 #[derive(Serialize)]
-struct XlLogicalMessage {
-    db_id: Oid,
-    transactional: uint32, // bool, takes 4 bytes due to alignment in C structures
-    prefix_size: uint64,
-    message_size: uint64,
+pub struct XlLogicalMessage {
+    pub db_id: Oid,
+    pub transactional: uint32, // bool, takes 4 bytes due to alignment in C structures
+    pub prefix_size: uint64,
+    pub message_size: uint64,
 }
 
 impl XlLogicalMessage {
@@ -481,4 +516,24 @@ pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
     wal
 }
 
-// If you need to craft WAL and write tests for this module, put it at wal_craft crate.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ts_conversion() {
+        let now = SystemTime::now();
+        let round_trip = from_pg_timestamp(to_pg_timestamp(now));
+
+        let now_since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let round_trip_since = round_trip.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(now_since.as_micros(), round_trip_since.as_micros());
+
+        let now_pg = get_current_timestamp();
+        let round_trip_pg = to_pg_timestamp(from_pg_timestamp(now_pg));
+
+        assert_eq!(now_pg, round_trip_pg);
+    }
+
+    // If you need to craft WAL and write tests for this module, put it at wal_craft crate.
+}

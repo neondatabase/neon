@@ -7,6 +7,11 @@ Below you will find a brief overview of each subdir in the source tree in alphab
 Neon storage broker, providing messaging between safekeepers and pageservers.
 [storage_broker.md](./storage_broker.md)
 
+`storage_controller`:
+
+Neon storage controller, manages a cluster of pageservers and exposes an API that enables
+managing a many-sharded tenant as a single entity.
+
 `/control_plane`:
 
 Local control plane.
@@ -129,13 +134,13 @@ Run `poetry shell` to activate the virtual environment.
 Alternatively, use `poetry run` to run a single command in the venv, e.g. `poetry run pytest`.
 
 ### Obligatory checks
-We force code formatting via `black`, `ruff`, and type hints via `mypy`.
+We force code formatting via `ruff`, and type hints via `mypy`.
 Run the following commands in the repository's root (next to `pyproject.toml`):
 
 ```bash
-poetry run black .  # All code is reformatted
-poetry run ruff .  # Python linter
-poetry run mypy .  # Ensure there are no typing errors
+poetry run ruff format . # All code is reformatted
+poetry run ruff check .  # Python linter
+poetry run mypy .        # Ensure there are no typing errors
 ```
 
 **WARNING**: do not run `mypy` from a directory other than the root of the repository.

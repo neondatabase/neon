@@ -1,8 +1,8 @@
 use bytes::Bytes;
+use camino::Utf8PathBuf;
 use std::{
     fs::{create_dir_all, File},
     io::{BufWriter, Write},
-    path::PathBuf,
 };
 
 pub struct Tracer {
@@ -16,7 +16,7 @@ impl Drop for Tracer {
 }
 
 impl Tracer {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: Utf8PathBuf) -> Self {
         let parent = path.parent().expect("failed to parse parent path");
         create_dir_all(parent).expect("failed to create trace dir");
 

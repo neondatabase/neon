@@ -10,6 +10,8 @@
  */
 #include "postgres.h"
 
+#include "../neon/neon_pgversioncompat.h"
+
 #include "access/relation.h"
 #include "access/xact.h"
 #include "access/xlog.h"
@@ -19,10 +21,12 @@
 #include "miscadmin.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
+#include "storage/fd.h"
 #include "utils/builtins.h"
 #include "utils/pg_lsn.h"
 #include "utils/rel.h"
 #include "utils/varlena.h"
+#include "utils/wait_event.h"
 #include "../neon/pagestore_client.h"
 
 PG_MODULE_MAGIC;
@@ -30,6 +34,9 @@ PG_MODULE_MAGIC;
 extern void _PG_init(void);
 
 PG_FUNCTION_INFO_V1(test_consume_xids);
+PG_FUNCTION_INFO_V1(test_consume_cpu);
+PG_FUNCTION_INFO_V1(test_consume_memory);
+PG_FUNCTION_INFO_V1(test_release_memory);
 PG_FUNCTION_INFO_V1(clear_buffer_cache);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn_ex);
@@ -39,8 +46,13 @@ PG_FUNCTION_INFO_V1(neon_xlogflush);
  * Linkage to functions in neon module.
  * The signature here would need to be updated whenever function parameters change in pagestore_smgr.c
  */
-typedef void (*neon_read_at_lsn_type) (RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
-									   XLogRecPtr request_lsn, bool request_latest, char *buffer);
+#if PG_MAJORVERSION_NUM < 16
+typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+									   neon_request_lsns request_lsns, char *buffer);
+#else
+typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+									   neon_request_lsns request_lsns, void *buffer);
+#endif
 
 static neon_read_at_lsn_type neon_read_at_lsn_ptr;
 
@@ -90,6 +102,117 @@ test_consume_xids(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+
+/*
+ * test_consume_cpu(seconds int). Keeps one CPU busy for the given number of seconds.
+ */
+Datum
+test_consume_cpu(PG_FUNCTION_ARGS)
+{
+	int32		seconds = PG_GETARG_INT32(0);
+	TimestampTz start;
+	uint64		total_iterations = 0;
+
+	start = GetCurrentTimestamp();
+
+	for (;;)
+	{
+		TimestampTz elapsed;
+
+		elapsed = GetCurrentTimestamp() - start;
+		if (elapsed > (TimestampTz) seconds * USECS_PER_SEC)
+			break;
+
+		/* keep spinning */
+		for (int i = 0; i < 1000000; i++)
+			total_iterations++;
+		elog(DEBUG2, "test_consume_cpu(): %lu iterations in total", total_iterations);
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	PG_RETURN_VOID();
+}
+
+static MemoryContext consume_cxt = NULL;
+static slist_head consumed_memory_chunks;
+static int64 num_memory_chunks;
+
+/*
+ * test_consume_memory(megabytes int).
+ *
+ * Consume given amount of memory. The allocation is made in TopMemoryContext,
+ * so it outlives the function, until you call test_release_memory to
+ * explicitly release it, or close the session.
+ */
+Datum
+test_consume_memory(PG_FUNCTION_ARGS)
+{
+	int32		megabytes = PG_GETARG_INT32(0);
+
+	/*
+	 * Consume the memory in a new memory context, so that it's convenient to
+	 * release and to display it separately in a possible memory context dump.
+	 */
+	if (consume_cxt == NULL)
+		consume_cxt = AllocSetContextCreate(TopMemoryContext,
+											"test_consume_memory",
+											ALLOCSET_DEFAULT_SIZES);
+
+	for (int32 i = 0; i < megabytes; i++)
+	{
+		char	   *p;
+
+		p = MemoryContextAllocZero(consume_cxt, 1024 * 1024);
+
+		/* touch the memory, so that it's really allocated by the kernel */
+		for (int j = 0; j < 1024 * 1024; j += 1024)
+			p[j] = j % 0xFF;
+
+		slist_push_head(&consumed_memory_chunks, (slist_node *) p);
+		num_memory_chunks++;
+	}
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * test_release_memory(megabytes int). NULL releases all
+ */
+Datum
+test_release_memory(PG_FUNCTION_ARGS)
+{
+	if (PG_ARGISNULL(0))
+	{
+		if (consume_cxt)
+		{
+			MemoryContextDelete(consume_cxt);
+			consume_cxt = NULL;
+			num_memory_chunks = 0;
+		}
+	}
+	else
+	{
+		int32		chunks_to_release = PG_GETARG_INT32(0);
+
+		if (chunks_to_release > num_memory_chunks)
+		{
+			elog(WARNING, "only %lu MB is consumed, releasing it all", num_memory_chunks);
+			chunks_to_release = num_memory_chunks;
+		}
+
+		for (int32 i = 0; i < chunks_to_release; i++)
+		{
+			slist_node *chunk = slist_pop_head_node(&consumed_memory_chunks);
+
+			pfree(chunk);
+			num_memory_chunks--;
+		}
+	}
+
+	PG_RETURN_VOID();
+}
+
 /*
  * Flush the buffer cache, evicting all pages that are not currently pinned.
  */
@@ -115,7 +238,7 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 			uint32		buf_state;
 			Buffer		bufferid;
 			bool		isvalid;
-			RelFileNode rnode;
+			NRelFileInfo rinfo;
 			ForkNumber	forknum;
 			BlockNumber blocknum;
 
@@ -128,7 +251,7 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 			else
 				isvalid = false;
 			bufferid = BufferDescriptorGetBuffer(bufHdr);
-			rnode = bufHdr->tag.rnode;
+			rinfo = BufTagGetNRelFileInfo(bufHdr->tag);
 			forknum = bufHdr->tag.forkNum;
 			blocknum = bufHdr->tag.blockNum;
 
@@ -141,7 +264,7 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 			 */
 			if (isvalid)
 			{
-				if (ReadRecentBuffer(rnode, forknum, blocknum, bufferid))
+				if (ReadRecentBuffer(rinfo, forknum, blocknum, bufferid))
 					ReleaseBuffer(bufferid);
 			}
 		}
@@ -175,9 +298,10 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	text	   *relname;
 	text	   *forkname;
 	uint32		blkno;
+	neon_request_lsns	request_lsns;
 
-	bool		request_latest = PG_ARGISNULL(3);
-	uint64		read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(3);
+	if (PG_NARGS() != 5)
+		elog(ERROR, "unexpected number of arguments in SQL function signature");
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
 		PG_RETURN_NULL();
@@ -185,6 +309,16 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	relname = PG_GETARG_TEXT_PP(0);
 	forkname = PG_GETARG_TEXT_PP(1);
 	blkno = PG_GETARG_UINT32(2);
+
+	request_lsns.request_lsn = PG_ARGISNULL(3) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(3);
+	request_lsns.not_modified_since = PG_ARGISNULL(4) ? request_lsns.request_lsn : PG_GETARG_LSN(4);
+	/*
+	 * For the time being, use the same LSN for request and
+	 * effective request LSN. If any test needed to use UINT64_MAX
+	 * as the request LSN, we'd need to add effective_request_lsn
+	 * as a new argument.
+	 */
+	request_lsns.effective_request_lsn = request_lsns.request_lsn;
 
 	if (!superuser())
 		ereport(ERROR,
@@ -238,7 +372,8 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 	raw_page_data = VARDATA(raw_page);
 
-	neon_read_at_lsn(rel->rd_node, forknum, blkno, read_lsn, request_latest, raw_page_data);
+	neon_read_at_lsn(InfoFromRelation(rel), forknum, blkno, request_lsns,
+					 raw_page_data);
 
 	relation_close(rel, AccessShareLock);
 
@@ -257,6 +392,9 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 {
 	char	   *raw_page_data;
 
+	if (PG_NARGS() != 7)
+		elog(ERROR, "unexpected number of arguments in SQL function signature");
+
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
@@ -267,24 +405,39 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	{
-		RelFileNode rnode = {
+		NRelFileInfo rinfo = {
+#if PG_MAJORVERSION_NUM < 16
 			.spcNode = PG_GETARG_OID(0),
 			.dbNode = PG_GETARG_OID(1),
-		.relNode = PG_GETARG_OID(2)};
+			.relNode = PG_GETARG_OID(2)
+#else
+			.spcOid = PG_GETARG_OID(0),
+			.dbOid = PG_GETARG_OID(1),
+			.relNumber = PG_GETARG_OID(2)
+#endif
+		};
 
 		ForkNumber	forknum = PG_GETARG_UINT32(3);
-
 		uint32		blkno = PG_GETARG_UINT32(4);
-		bool		request_latest = PG_ARGISNULL(5);
-		uint64		read_lsn = request_latest ? GetXLogInsertRecPtr() : PG_GETARG_INT64(5);
+		neon_request_lsns	request_lsns;
 
 		/* Initialize buffer to copy to */
 		bytea	   *raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
 
+		request_lsns.request_lsn = PG_ARGISNULL(5) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(5);
+		request_lsns.not_modified_since = PG_ARGISNULL(6) ? request_lsns.request_lsn : PG_GETARG_LSN(6);
+		/*
+		 * For the time being, use the same LSN for request
+		 * and effective request LSN. If any test needed to
+		 * use UINT64_MAX as the request LSN, we'd need to add
+		 * effective_request_lsn as a new argument.
+		 */
+		request_lsns.effective_request_lsn = request_lsns.request_lsn;
+
 		SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 		raw_page_data = VARDATA(raw_page);
 
-		neon_read_at_lsn(rnode, forknum, blkno, read_lsn, request_latest, raw_page_data);
+		neon_read_at_lsn(rinfo, forknum, blkno, request_lsns, raw_page_data);
 		PG_RETURN_BYTEA_P(raw_page);
 	}
 }

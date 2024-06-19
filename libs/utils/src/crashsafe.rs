@@ -1,14 +1,14 @@
 use std::{
     borrow::Cow,
-    ffi::OsStr,
     fs::{self, File},
-    io,
-    path::{Path, PathBuf},
+    io::{self, Write},
 };
+
+use camino::{Utf8Path, Utf8PathBuf};
 
 /// Similar to [`std::fs::create_dir`], except we fsync the
 /// created directory and its parent.
-pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
+pub fn create_dir(path: impl AsRef<Utf8Path>) -> io::Result<()> {
     let path = path.as_ref();
 
     fs::create_dir(path)?;
@@ -18,7 +18,7 @@ pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
 
 /// Similar to [`std::fs::create_dir_all`], except we fsync all
 /// newly created directories and the pre-existing parent.
-pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+pub fn create_dir_all(path: impl AsRef<Utf8Path>) -> io::Result<()> {
     let mut path = path.as_ref();
 
     let mut dirs_to_create = Vec::new();
@@ -30,7 +30,7 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
             Ok(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
-                    format!("non-directory found in path: {}", path.display()),
+                    format!("non-directory found in path: {path}"),
                 ));
             }
             Err(ref e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -44,7 +44,7 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("can't find parent of path '{}'", path.display()).as_str(),
+                    format!("can't find parent of path '{path}'"),
                 ));
             }
         }
@@ -70,21 +70,18 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 
 /// Adds a suffix to the file(directory) name, either appending the suffix to the end of its extension,
 /// or if there's no extension, creates one and puts a suffix there.
-pub fn path_with_suffix_extension(original_path: impl AsRef<Path>, suffix: &str) -> PathBuf {
-    let new_extension = match original_path
-        .as_ref()
-        .extension()
-        .map(OsStr::to_string_lossy)
-    {
+pub fn path_with_suffix_extension(
+    original_path: impl AsRef<Utf8Path>,
+    suffix: &str,
+) -> Utf8PathBuf {
+    let new_extension = match original_path.as_ref().extension() {
         Some(extension) => Cow::Owned(format!("{extension}.{suffix}")),
         None => Cow::Borrowed(suffix),
     };
-    original_path
-        .as_ref()
-        .with_extension(new_extension.as_ref())
+    original_path.as_ref().with_extension(new_extension)
 }
 
-pub fn fsync_file_and_parent(file_path: &Path) -> io::Result<()> {
+pub fn fsync_file_and_parent(file_path: &Utf8Path) -> io::Result<()> {
     let parent = file_path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::Other,
@@ -97,7 +94,7 @@ pub fn fsync_file_and_parent(file_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn fsync(path: &Path) -> io::Result<()> {
+pub fn fsync(path: &Utf8Path) -> io::Result<()> {
     File::open(path)
         .map_err(|e| io::Error::new(e.kind(), format!("Failed to open the file {path:?}: {e}")))
         .and_then(|file| {
@@ -111,15 +108,109 @@ pub fn fsync(path: &Path) -> io::Result<()> {
         .map_err(|e| io::Error::new(e.kind(), format!("Failed to fsync file {path:?}: {e}")))
 }
 
+pub async fn fsync_async(path: impl AsRef<Utf8Path>) -> Result<(), std::io::Error> {
+    tokio::fs::File::open(path.as_ref()).await?.sync_all().await
+}
+
+pub async fn fsync_async_opt(
+    path: impl AsRef<Utf8Path>,
+    do_fsync: bool,
+) -> Result<(), std::io::Error> {
+    if do_fsync {
+        fsync_async(path.as_ref()).await?;
+    }
+    Ok(())
+}
+
+/// Like postgres' durable_rename, renames file issuing fsyncs do make it
+/// durable. After return, file and rename are guaranteed to be persisted.
+///
+/// Unlike postgres, it only does fsyncs to 1) file to be renamed to make
+/// contents durable; 2) its directory entry to make rename durable 3) again to
+/// already renamed file, which is not required by standards but postgres does
+/// it, let's stick to that. Postgres additionally fsyncs newpath *before*
+/// rename if it exists to ensure that at least one of the files survives, but
+/// current callers don't need that.
+///
+/// virtual_file.rs has similar code, but it doesn't use vfs.
+///
+/// Useful links: <https://lwn.net/Articles/457667/>
+/// <https://www.postgresql.org/message-id/flat/56583BDD.9060302%402ndquadrant.com>
+/// <https://thunk.org/tytso/blog/2009/03/15/dont-fear-the-fsync/>
+pub async fn durable_rename(
+    old_path: impl AsRef<Utf8Path>,
+    new_path: impl AsRef<Utf8Path>,
+    do_fsync: bool,
+) -> io::Result<()> {
+    // first fsync the file
+    fsync_async_opt(old_path.as_ref(), do_fsync).await?;
+
+    // Time to do the real deal.
+    tokio::fs::rename(old_path.as_ref(), new_path.as_ref()).await?;
+
+    // Postgres'ish fsync of renamed file.
+    fsync_async_opt(new_path.as_ref(), do_fsync).await?;
+
+    // Now fsync the parent
+    let parent = match new_path.as_ref().parent() {
+        Some(p) => p,
+        None => Utf8Path::new("./"), // assume current dir if there is no parent
+    };
+    fsync_async_opt(parent, do_fsync).await?;
+
+    Ok(())
+}
+
+/// Writes a file to the specified `final_path` in a crash safe fasion, using [`std::fs`].
+///
+/// The file is first written to the specified `tmp_path`, and in a second
+/// step, the `tmp_path` is renamed to the `final_path`. Intermediary fsync
+/// and atomic rename guarantee that, if we crash at any point, there will never
+/// be a partially written file at `final_path` (but maybe at `tmp_path`).
+///
+/// Callers are responsible for serializing calls of this function for a given `final_path`.
+/// If they don't, there may be an error due to conflicting `tmp_path`, or there will
+/// be no error and the content of `final_path` will be the "winner" caller's `content`.
+/// I.e., the atomticity guarantees still hold.
+pub fn overwrite(
+    final_path: &Utf8Path,
+    tmp_path: &Utf8Path,
+    content: &[u8],
+) -> std::io::Result<()> {
+    let Some(final_path_parent) = final_path.parent() else {
+        return Err(std::io::Error::from_raw_os_error(
+            nix::errno::Errno::EINVAL as i32,
+        ));
+    };
+    std::fs::remove_file(tmp_path).or_else(crate::fs_ext::ignore_not_found)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        // Use `create_new` so that, if we race with ourselves or something else,
+        // we bail out instead of causing damage.
+        .create_new(true)
+        .open(tmp_path)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    drop(file); // don't keep the fd open for longer than we have to
+
+    std::fs::rename(tmp_path, final_path)?;
+
+    let final_parent_dirfd = std::fs::OpenOptions::new()
+        .read(true)
+        .open(final_path_parent)?;
+
+    final_parent_dirfd.sync_all()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
 
     use super::*;
 
     #[test]
     fn test_create_dir_fsyncd() {
-        let dir = tempdir().unwrap();
+        let dir = camino_tempfile::tempdir().unwrap();
 
         let existing_dir_path = dir.path();
         let err = create_dir(existing_dir_path).unwrap_err();
@@ -135,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_create_dir_all_fsyncd() {
-        let dir = tempdir().unwrap();
+        let dir = camino_tempfile::tempdir().unwrap();
 
         let existing_dir_path = dir.path();
         create_dir_all(existing_dir_path).unwrap();
@@ -162,29 +253,29 @@ mod tests {
 
     #[test]
     fn test_path_with_suffix_extension() {
-        let p = PathBuf::from("/foo/bar");
+        let p = Utf8PathBuf::from("/foo/bar");
         assert_eq!(
-            &path_with_suffix_extension(p, "temp").to_string_lossy(),
+            &path_with_suffix_extension(p, "temp").to_string(),
             "/foo/bar.temp"
         );
-        let p = PathBuf::from("/foo/bar");
+        let p = Utf8PathBuf::from("/foo/bar");
         assert_eq!(
-            &path_with_suffix_extension(p, "temp.temp").to_string_lossy(),
+            &path_with_suffix_extension(p, "temp.temp").to_string(),
             "/foo/bar.temp.temp"
         );
-        let p = PathBuf::from("/foo/bar.baz");
+        let p = Utf8PathBuf::from("/foo/bar.baz");
         assert_eq!(
-            &path_with_suffix_extension(p, "temp.temp").to_string_lossy(),
+            &path_with_suffix_extension(p, "temp.temp").to_string(),
             "/foo/bar.baz.temp.temp"
         );
-        let p = PathBuf::from("/foo/bar.baz");
+        let p = Utf8PathBuf::from("/foo/bar.baz");
         assert_eq!(
-            &path_with_suffix_extension(p, ".temp").to_string_lossy(),
+            &path_with_suffix_extension(p, ".temp").to_string(),
             "/foo/bar.baz..temp"
         );
-        let p = PathBuf::from("/foo/bar/dir/");
+        let p = Utf8PathBuf::from("/foo/bar/dir/");
         assert_eq!(
-            &path_with_suffix_extension(p, ".temp").to_string_lossy(),
+            &path_with_suffix_extension(p, ".temp").to_string(),
             "/foo/bar/dir..temp"
         );
     }

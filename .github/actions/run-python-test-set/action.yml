@@ -44,6 +44,10 @@ inputs:
     description: 'Postgres version to use for tests'
     required: false
     default: 'v14'
+  benchmark_durations:
+    description: 'benchmark durations JSON'
+    required: false
+    default: '{}'
 
 runs:
   using: "composite"
@@ -70,20 +74,22 @@ runs:
         name: compatibility-snapshot-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
         path: /tmp/compatibility_snapshot_pg${{ inputs.pg_version }}
         prefix: latest
+        # The lack of compatibility snapshot (for example, for the new Postgres version)
+        # shouldn't fail the whole job. Only relevant test should fail.
+        skip-if-does-not-exist: true
 
     - name: Checkout
       if: inputs.needs_postgres_source == 'true'
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         submodules: true
         fetch-depth: 1
 
     - name: Cache poetry deps
-      id: cache_poetry
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pypoetry/virtualenvs
-        key: v1-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
+        key: v2-${{ runner.os }}-python-deps-${{ hashFiles('poetry.lock') }}
 
     - name: Install Python deps
       shell: bash -euxo pipefail {0}
@@ -145,9 +151,21 @@ runs:
 
         if [ "${RERUN_FLAKY}" == "true" ]; then
           mkdir -p $TEST_OUTPUT
-          poetry run ./scripts/flaky_tests.py "${TEST_RESULT_CONNSTR}" --days 10 --output "$TEST_OUTPUT/flaky.json"
+          poetry run ./scripts/flaky_tests.py "${TEST_RESULT_CONNSTR}" \
+                                              --days 7 \
+                                              --output "$TEST_OUTPUT/flaky.json" \
+                                              --pg-version "${DEFAULT_PG_VERSION}" \
+                                              --build-type "${BUILD_TYPE}"
 
           EXTRA_PARAMS="--flaky-tests-json $TEST_OUTPUT/flaky.json $EXTRA_PARAMS"
+        fi
+
+        # We use pytest-split plugin to run benchmarks in parallel on different CI runners
+        if [ "${TEST_SELECTION}" = "test_runner/performance" ] && [ "${{ inputs.build_type }}" != "remote" ]; then
+          mkdir -p $TEST_OUTPUT
+          echo '${{ inputs.benchmark_durations || '{}' }}' > $TEST_OUTPUT/benchmark_durations.json
+
+          EXTRA_PARAMS="--durations-path $TEST_OUTPUT/benchmark_durations.json $EXTRA_PARAMS"
         fi
 
         if [[ "${{ inputs.build_type }}" == "debug" ]]; then
@@ -201,4 +219,4 @@ runs:
       uses: ./.github/actions/allure-report-store
       with:
         report-dir: /tmp/test_output/allure/results
-        unique-key: ${{ inputs.build_type }}
+        unique-key: ${{ inputs.build_type }}-${{ inputs.pg_version }}

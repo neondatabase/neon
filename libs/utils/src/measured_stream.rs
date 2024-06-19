@@ -1,4 +1,5 @@
 use pin_project_lite::pin_project;
+use std::io::Read;
 use std::pin::Pin;
 use std::{io, task};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -73,5 +74,36 @@ impl<S: AsyncWrite + Unpin, R, W: FnMut(usize)> AsyncWrite for MeasuredStream<S,
         context: &mut task::Context<'_>,
     ) -> task::Poll<io::Result<()>> {
         self.project().stream.poll_shutdown(context)
+    }
+}
+
+/// Wrapper for a reader that counts bytes read.
+///
+/// Similar to MeasuredStream but it's one way and it's sync
+pub struct MeasuredReader<R: Read> {
+    inner: R,
+    byte_count: usize,
+}
+
+impl<R: Read> MeasuredReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            inner: reader,
+            byte_count: 0,
+        }
+    }
+
+    pub fn get_byte_count(&self) -> usize {
+        self.byte_count
+    }
+}
+
+impl<R: Read> Read for MeasuredReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let result = self.inner.read(buf);
+        if let Ok(n_bytes) = result {
+            self.byte_count += n_bytes
+        }
+        result
     }
 }

@@ -35,19 +35,26 @@ use tracing::*;
 use utils::signals::ShutdownSignals;
 
 use metrics::{Encoder, TextEncoder};
-use storage_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
+use storage_broker::metrics::{
+    BROADCASTED_MESSAGES_TOTAL, BROADCAST_DROPPED_MESSAGES_TOTAL, NUM_PUBS, NUM_SUBS_ALL,
+    NUM_SUBS_TIMELINE, PROCESSED_MESSAGES_TOTAL, PUBLISHED_ONEOFF_MESSAGES_TOTAL,
+};
 use storage_broker::proto::broker_service_server::{BrokerService, BrokerServiceServer};
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
-use storage_broker::proto::{SafekeeperTimelineInfo, SubscribeSafekeeperInfoRequest};
+use storage_broker::proto::{
+    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
+    SafekeeperTimelineInfo, SubscribeByFilterRequest, SubscribeSafekeeperInfoRequest, TypedMessage,
+};
 use storage_broker::{
     parse_proto_ttid, EitherBody, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR,
 };
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
-use utils::project_git_version;
 use utils::sentry_init::init_sentry;
+use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 const DEFAULT_CHAN_SIZE: usize = 32;
 const DEFAULT_ALL_KEYS_CHAN_SIZE: usize = 16384;
@@ -72,8 +79,103 @@ struct Args {
     log_format: String,
 }
 
-type PubId = u64; // id of publisher for registering in maps
-type SubId = u64; // id of subscriber for registering in maps
+/// Id of publisher for registering in maps
+type PubId = u64;
+
+/// Id of subscriber for registering in maps
+type SubId = u64;
+
+/// Single enum type for all messages.
+#[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)]
+enum Message {
+    SafekeeperTimelineInfo(SafekeeperTimelineInfo),
+    SafekeeperDiscoveryRequest(SafekeeperDiscoveryRequest),
+    SafekeeperDiscoveryResponse(SafekeeperDiscoveryResponse),
+}
+
+impl Message {
+    /// Convert proto message to internal message.
+    pub fn from(proto_msg: TypedMessage) -> Result<Self, Status> {
+        match proto_msg.r#type() {
+            MessageType::SafekeeperTimelineInfo => Ok(Message::SafekeeperTimelineInfo(
+                proto_msg.safekeeper_timeline_info.ok_or_else(|| {
+                    Status::new(Code::InvalidArgument, "missing safekeeper_timeline_info")
+                })?,
+            )),
+            MessageType::SafekeeperDiscoveryRequest => Ok(Message::SafekeeperDiscoveryRequest(
+                proto_msg.safekeeper_discovery_request.ok_or_else(|| {
+                    Status::new(
+                        Code::InvalidArgument,
+                        "missing safekeeper_discovery_request",
+                    )
+                })?,
+            )),
+            MessageType::SafekeeperDiscoveryResponse => Ok(Message::SafekeeperDiscoveryResponse(
+                proto_msg.safekeeper_discovery_response.ok_or_else(|| {
+                    Status::new(
+                        Code::InvalidArgument,
+                        "missing safekeeper_discovery_response",
+                    )
+                })?,
+            )),
+            MessageType::Unknown => Err(Status::new(
+                Code::InvalidArgument,
+                format!("invalid message type: {:?}", proto_msg.r#type),
+            )),
+        }
+    }
+
+    /// Get the tenant_timeline_id from the message.
+    pub fn tenant_timeline_id(&self) -> Result<Option<TenantTimelineId>, Status> {
+        match self {
+            Message::SafekeeperTimelineInfo(msg) => Ok(msg
+                .tenant_timeline_id
+                .as_ref()
+                .map(parse_proto_ttid)
+                .transpose()?),
+            Message::SafekeeperDiscoveryRequest(msg) => Ok(msg
+                .tenant_timeline_id
+                .as_ref()
+                .map(parse_proto_ttid)
+                .transpose()?),
+            Message::SafekeeperDiscoveryResponse(msg) => Ok(msg
+                .tenant_timeline_id
+                .as_ref()
+                .map(parse_proto_ttid)
+                .transpose()?),
+        }
+    }
+
+    /// Convert internal message to the protobuf struct.
+    pub fn as_typed_message(&self) -> TypedMessage {
+        let mut res = TypedMessage {
+            r#type: self.message_type() as i32,
+            ..Default::default()
+        };
+        match self {
+            Message::SafekeeperTimelineInfo(msg) => {
+                res.safekeeper_timeline_info = Some(msg.clone())
+            }
+            Message::SafekeeperDiscoveryRequest(msg) => {
+                res.safekeeper_discovery_request = Some(msg.clone())
+            }
+            Message::SafekeeperDiscoveryResponse(msg) => {
+                res.safekeeper_discovery_response = Some(msg.clone())
+            }
+        }
+        res
+    }
+
+    /// Get the message type.
+    pub fn message_type(&self) -> MessageType {
+        match self {
+            Message::SafekeeperTimelineInfo(_) => MessageType::SafekeeperTimelineInfo,
+            Message::SafekeeperDiscoveryRequest(_) => MessageType::SafekeeperDiscoveryRequest,
+            Message::SafekeeperDiscoveryResponse(_) => MessageType::SafekeeperDiscoveryResponse,
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug)]
 enum SubscriptionKey {
@@ -82,7 +184,7 @@ enum SubscriptionKey {
 }
 
 impl SubscriptionKey {
-    // Parse protobuf subkey (protobuf doesn't have fixed size bytes, we get vectors).
+    /// Parse protobuf subkey (protobuf doesn't have fixed size bytes, we get vectors).
     pub fn from_proto_subscription_key(key: ProtoSubscriptionKey) -> Result<Self, Status> {
         match key {
             ProtoSubscriptionKey::All(_) => Ok(SubscriptionKey::All),
@@ -91,14 +193,34 @@ impl SubscriptionKey {
             }
         }
     }
+
+    /// Parse from FilterTenantTimelineId
+    pub fn from_proto_filter_tenant_timeline_id(
+        opt: Option<&FilterTenantTimelineId>,
+    ) -> Result<Self, Status> {
+        if opt.is_none() {
+            return Ok(SubscriptionKey::All);
+        }
+
+        let f = opt.unwrap();
+        if !f.enabled {
+            return Ok(SubscriptionKey::All);
+        }
+
+        let ttid =
+            parse_proto_ttid(f.tenant_timeline_id.as_ref().ok_or_else(|| {
+                Status::new(Code::InvalidArgument, "missing tenant_timeline_id")
+            })?)?;
+        Ok(SubscriptionKey::Timeline(ttid))
+    }
 }
 
-// Channel to timeline subscribers.
+/// Channel to timeline subscribers.
 struct ChanToTimelineSub {
-    chan: broadcast::Sender<SafekeeperTimelineInfo>,
-    // Tracked separately to know when delete the shmem entry. receiver_count()
-    // is unhandy for that as unregistering and dropping the receiver side
-    // happens at different moments.
+    chan: broadcast::Sender<Message>,
+    /// Tracked separately to know when delete the shmem entry. receiver_count()
+    /// is unhandy for that as unregistering and dropping the receiver side
+    /// happens at different moments.
     num_subscribers: u64,
 }
 
@@ -109,7 +231,7 @@ struct SharedState {
     num_subs_to_timelines: i64,
     chans_to_timeline_subs: HashMap<TenantTimelineId, ChanToTimelineSub>,
     num_subs_to_all: i64,
-    chan_to_all_subs: broadcast::Sender<SafekeeperTimelineInfo>,
+    chan_to_all_subs: broadcast::Sender<Message>,
 }
 
 impl SharedState {
@@ -145,7 +267,7 @@ impl SharedState {
         &mut self,
         sub_key: SubscriptionKey,
         timeline_chan_size: usize,
-    ) -> (SubId, broadcast::Receiver<SafekeeperTimelineInfo>) {
+    ) -> (SubId, broadcast::Receiver<Message>) {
         let sub_id = self.next_sub_id;
         self.next_sub_id += 1;
         let sub_rx = match sub_key {
@@ -261,6 +383,29 @@ impl Registry {
             subscriber.id, subscriber.key, subscriber.remote_addr
         );
     }
+
+    /// Send msg to relevant subscribers.
+    pub fn send_msg(&self, msg: &Message) -> Result<(), Status> {
+        PROCESSED_MESSAGES_TOTAL.inc();
+
+        // send message to subscribers for everything
+        let shared_state = self.shared_state.read();
+        // Err means there is no subscribers, it is fine.
+        shared_state.chan_to_all_subs.send(msg.clone()).ok();
+
+        // send message to per timeline subscribers, if there is ttid
+        let ttid = msg.tenant_timeline_id()?;
+        if let Some(ttid) = ttid {
+            if let Some(subs) = shared_state.chans_to_timeline_subs.get(&ttid) {
+                // Err can't happen here, as tx is destroyed only after removing
+                // from the map the last subscriber along with tx.
+                subs.chan
+                    .send(msg.clone())
+                    .expect("rx is still in the map with zero subscribers");
+            }
+        }
+        Ok(())
+    }
 }
 
 // Private subscriber state.
@@ -268,7 +413,7 @@ struct Subscriber {
     id: SubId,
     key: SubscriptionKey,
     // Subscriber receives messages from publishers here.
-    sub_rx: broadcast::Receiver<SafekeeperTimelineInfo>,
+    sub_rx: broadcast::Receiver<Message>,
     // to unregister itself from shared state in Drop
     registry: Registry,
     // for logging
@@ -290,26 +435,9 @@ struct Publisher {
 }
 
 impl Publisher {
-    // Send msg to relevant subscribers.
-    pub fn send_msg(&mut self, msg: &SafekeeperTimelineInfo) -> Result<(), Status> {
-        // send message to subscribers for everything
-        let shared_state = self.registry.shared_state.read();
-        // Err means there is no subscribers, it is fine.
-        shared_state.chan_to_all_subs.send(msg.clone()).ok();
-
-        // send message to per timeline subscribers
-        let ttid =
-            parse_proto_ttid(msg.tenant_timeline_id.as_ref().ok_or_else(|| {
-                Status::new(Code::InvalidArgument, "missing tenant_timeline_id")
-            })?)?;
-        if let Some(subs) = shared_state.chans_to_timeline_subs.get(&ttid) {
-            // Err can't happen here, as tx is destroyed only after removing
-            // from the map the last subscriber along with tx.
-            subs.chan
-                .send(msg.clone())
-                .expect("rx is still in the map with zero subscribers");
-        }
-        Ok(())
+    /// Send msg to relevant subscribers.
+    pub fn send_msg(&mut self, msg: &Message) -> Result<(), Status> {
+        self.registry.send_msg(msg)
     }
 }
 
@@ -338,7 +466,7 @@ impl BrokerService for Broker {
 
         loop {
             match stream.next().await {
-                Some(Ok(msg)) => publisher.send_msg(&msg)?,
+                Some(Ok(msg)) => publisher.send_msg(&Message::SafekeeperTimelineInfo(msg))?,
                 Some(Err(e)) => return Err(e), // grpc error from the stream
                 None => break,                 // closed stream
             }
@@ -370,8 +498,15 @@ impl BrokerService for Broker {
             let mut missed_msgs: u64 = 0;
             loop {
                 match subscriber.sub_rx.recv().await {
-                    Ok(info) => yield info,
+                    Ok(info) => {
+                        match info {
+                            Message::SafekeeperTimelineInfo(info) => yield info,
+                            _ => {},
+                        }
+                        BROADCASTED_MESSAGES_TOTAL.inc();
+                    },
                     Err(RecvError::Lagged(skipped_msg)) => {
+                        BROADCAST_DROPPED_MESSAGES_TOTAL.inc_by(skipped_msg);
                         missed_msgs += skipped_msg;
                         if (futures::poll!(Box::pin(warn_interval.tick()))).is_ready() {
                             warn!("subscription id={}, key={:?} addr={:?} dropped {} messages, channel is full",
@@ -390,6 +525,75 @@ impl BrokerService for Broker {
         Ok(Response::new(
             Box::pin(output) as Self::SubscribeSafekeeperInfoStream
         ))
+    }
+
+    type SubscribeByFilterStream =
+        Pin<Box<dyn Stream<Item = Result<TypedMessage, Status>> + Send + 'static>>;
+
+    /// Subscribe to all messages, limited by a filter.
+    async fn subscribe_by_filter(
+        &self,
+        request: Request<SubscribeByFilterRequest>,
+    ) -> std::result::Result<Response<Self::SubscribeByFilterStream>, Status> {
+        let remote_addr = request
+            .remote_addr()
+            .expect("TCPConnectInfo inserted by handler");
+        let proto_filter = request.into_inner();
+        let ttid_filter = proto_filter.tenant_timeline_id.as_ref();
+
+        let sub_key = SubscriptionKey::from_proto_filter_tenant_timeline_id(ttid_filter)?;
+        let types_set = proto_filter
+            .types
+            .iter()
+            .map(|t| t.r#type)
+            .collect::<std::collections::HashSet<_>>();
+
+        let mut subscriber = self.registry.register_subscriber(sub_key, remote_addr);
+
+        // transform rx into stream with item = Result, as method result demands
+        let output = async_stream::try_stream! {
+            let mut warn_interval = time::interval(Duration::from_millis(1000));
+            let mut missed_msgs: u64 = 0;
+            loop {
+                match subscriber.sub_rx.recv().await {
+                    Ok(msg) => {
+                        let msg_type = msg.message_type() as i32;
+                        if types_set.contains(&msg_type) {
+                            yield msg.as_typed_message();
+                            BROADCASTED_MESSAGES_TOTAL.inc();
+                        }
+                    },
+                    Err(RecvError::Lagged(skipped_msg)) => {
+                        BROADCAST_DROPPED_MESSAGES_TOTAL.inc_by(skipped_msg);
+                        missed_msgs += skipped_msg;
+                        if (futures::poll!(Box::pin(warn_interval.tick()))).is_ready() {
+                            warn!("subscription id={}, key={:?} addr={:?} dropped {} messages, channel is full",
+                                subscriber.id, subscriber.key, subscriber.remote_addr, missed_msgs);
+                            missed_msgs = 0;
+                        }
+                    }
+                    Err(RecvError::Closed) => {
+                        // can't happen, we never drop the channel while there is a subscriber
+                        Err(Status::new(Code::Internal, "channel unexpectantly closed"))?;
+                    }
+                }
+            }
+        };
+
+        Ok(Response::new(
+            Box::pin(output) as Self::SubscribeByFilterStream
+        ))
+    }
+
+    /// Publish one message.
+    async fn publish_one(
+        &self,
+        request: Request<TypedMessage>,
+    ) -> std::result::Result<Response<()>, Status> {
+        let msg = Message::from(request.into_inner())?;
+        PUBLISHED_ONEOFF_MESSAGES_TOTAL.inc();
+        self.registry.send_msg(&msg)?;
+        Ok(Response::new(()))
     }
 }
 
@@ -433,12 +637,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     logging::init(
         LogFormat::from_config(&args.log_format)?,
         logging::TracingErrorLayerEnablement::Disabled,
+        logging::Output::Stdout,
     )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
     info!("version: {GIT_VERSION}");
-    ::metrics::set_build_info_metric(GIT_VERSION);
+    info!("build_tag: {BUILD_TAG}");
+    metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     // On any shutdown signal, log receival and exit.
     std::thread::spawn(move || {
@@ -512,13 +718,14 @@ mod tests {
     use tokio::sync::broadcast::error::TryRecvError;
     use utils::id::{TenantId, TimelineId};
 
-    fn msg(timeline_id: Vec<u8>) -> SafekeeperTimelineInfo {
-        SafekeeperTimelineInfo {
+    fn msg(timeline_id: Vec<u8>) -> Message {
+        Message::SafekeeperTimelineInfo(SafekeeperTimelineInfo {
             safekeeper_id: 1,
             tenant_timeline_id: Some(ProtoTenantTimelineId {
                 tenant_id: vec![0x00; 16],
                 timeline_id,
             }),
+            term: 0,
             last_log_term: 0,
             flush_lsn: 1,
             commit_lsn: 2,
@@ -526,9 +733,11 @@ mod tests {
             remote_consistent_lsn: 4,
             peer_horizon_lsn: 5,
             safekeeper_connstr: "neon-1-sk-1.local:7676".to_owned(),
+            http_connstr: "neon-1-sk-1.local:7677".to_owned(),
             local_start_lsn: 0,
             availability_zone: None,
-        }
+            standby_horizon: 0,
+        })
     }
 
     fn tli_from_u64(i: u64) -> Vec<u8> {

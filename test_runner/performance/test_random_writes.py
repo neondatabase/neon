@@ -77,8 +77,8 @@ def test_random_writes(neon_with_baseline: PgCompare):
 
             # Update random keys
             with env.record_duration("run"):
-                for it in range(n_iterations):
-                    for i in range(n_writes):
+                for _ in range(n_iterations):
+                    for _ in range(n_writes):
                         key = random.randint(1, n_rows)
                         cur.execute(f"update Big set count=count+1 where pk={key}")
                     env.flush()

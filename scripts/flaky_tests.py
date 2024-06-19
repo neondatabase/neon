@@ -3,34 +3,24 @@
 import argparse
 import json
 import logging
+import os
 from collections import defaultdict
-from typing import DefaultDict, Dict
+from typing import Any, DefaultDict, Dict, Optional
 
 import psycopg2
 import psycopg2.extras
+import toml
 
-# We call the test "flaky" if it failed at least once on the main branch in the last N=10 days.
 FLAKY_TESTS_QUERY = """
     SELECT
-        DISTINCT parent_suite, suite, test
-    FROM
-        (
-            SELECT
-                revision,
-                jsonb_array_elements(data -> 'children') -> 'name' as parent_suite,
-                jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'name' as suite,
-                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'name' as test,
-                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'status' as status,
-                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'retriesStatusChange' as retries_status_change,
-                to_timestamp((jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'time' -> 'start')::bigint / 1000)::date as timestamp
-            FROM
-                regress_test_results
-            WHERE
-                reference = 'refs/heads/main'
-        ) data
+        DISTINCT parent_suite, suite, name
+    FROM results
     WHERE
-        timestamp > CURRENT_DATE - INTERVAL '%s' day
-        AND (status::text IN ('"failed"', '"broken"') OR retries_status_change::boolean)
+        started_at > CURRENT_DATE - INTERVAL '%s' day
+        AND (
+            (status IN ('failed', 'broken') AND reference = 'refs/heads/main')
+            OR flaky
+        )
     ;
 """
 
@@ -39,6 +29,9 @@ def main(args: argparse.Namespace):
     connstr = args.connstr
     interval_days = args.days
     output = args.output
+
+    build_type = args.build_type
+    pg_version = args.pg_version
 
     res: DefaultDict[str, DefaultDict[str, Dict[str, bool]]]
     res = defaultdict(lambda: defaultdict(dict))
@@ -54,9 +47,54 @@ def main(args: argparse.Namespace):
         logging.error("cannot fetch flaky tests from the DB due to an error", exc)
         rows = []
 
+    # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_ENGINE (i.e. not empty, not tokio-epoll-uring),
+    # use it to parametrize test name along with build_type and pg_version
+    #
+    # See test_runner/fixtures/parametrize.py for details
+    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in (
+        "",
+        "tokio-epoll-uring",
+    ):
+        pageserver_virtual_file_io_engine_parameter = f"-{io_engine}"
+    else:
+        pageserver_virtual_file_io_engine_parameter = ""
+
+    # re-use existing records of flaky tests from before parametrization by compaction_algorithm
+    def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+        """Duplicated from parametrize.py"""
+        toml_table = os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
+        if toml_table is None:
+            return None
+        v = toml.loads(toml_table)
+        assert isinstance(v, dict)
+        return v
+
+    pageserver_default_tenant_config_compaction_algorithm_parameter = ""
+    if (
+        explicit_default := get_pageserver_default_tenant_config_compaction_algorithm()
+    ) is not None:
+        pageserver_default_tenant_config_compaction_algorithm_parameter = (
+            f"-{explicit_default['kind']}"
+        )
+
     for row in rows:
-        logging.info(f"\t{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{row['test']}")
-        res[row["parent_suite"]][row["suite"]][row["test"]] = True
+        # We don't want to automatically rerun tests in a performance suite
+        if row["parent_suite"] != "test_runner.regress":
+            continue
+
+        if row["name"].endswith("]"):
+            parametrized_test = row["name"].replace(
+                "[",
+                f"[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}-",
+            )
+        else:
+            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}]"
+
+        res[row["parent_suite"]][row["suite"]][parametrized_test] = True
+
+        logging.info(
+            f"\t{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{parametrized_test}"
+        )
 
     logging.info(f"saving results to {output.name}")
     json.dump(res, output, indent=2)
@@ -76,6 +114,18 @@ if __name__ == "__main__":
         default=10,
         type=int,
         help="how many days to look back for flaky tests (default: 10)",
+    )
+    parser.add_argument(
+        "--build-type",
+        required=True,
+        type=str,
+        help="for which build type to create list of flaky tests (debug or release)",
+    )
+    parser.add_argument(
+        "--pg-version",
+        required=True,
+        type=int,
+        help="for which Postgres version to create list of flaky tests (14, 15, etc.)",
     )
     parser.add_argument(
         "connstr",

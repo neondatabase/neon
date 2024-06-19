@@ -2,67 +2,82 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import toml
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pg_version import PgVersion
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
 
-# test that we cannot override node id after init
-def test_pageserver_init_node_id(
-    neon_simple_env: NeonEnv, neon_binpath: Path, pg_distrib_dir: Path
-):
-    repo_dir = neon_simple_env.repo_dir
-    pageserver_config = repo_dir / "pageserver.toml"
+def test_pageserver_init_node_id(neon_simple_env: NeonEnv, neon_binpath: Path):
+    """
+    NB: The neon_local doesn't use `--init` mode anymore, but our production
+    deployment still does => https://github.com/neondatabase/aws/pull/1322
+    """
+    workdir = neon_simple_env.pageserver.workdir
+    pageserver_config = workdir / "pageserver.toml"
     pageserver_bin = neon_binpath / "pageserver"
 
     def run_pageserver(args):
         return subprocess.run(
-            [str(pageserver_bin), "-D", str(repo_dir), *args],
+            [str(pageserver_bin), "-D", str(workdir), *args],
             check=False,
             universal_newlines=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
 
-    # remove initial config and stop existing pageserver
-    pageserver_config.unlink()
     neon_simple_env.pageserver.stop()
 
-    bad_init = run_pageserver(["--init", "-c", f'pg_distrib_dir="{pg_distrib_dir}"'])
+    with open(neon_simple_env.pageserver.config_toml_path, "r") as f:
+        ps_config = toml.load(f)
+
+    required_config_keys = [
+        "pg_distrib_dir",
+        "listen_pg_addr",
+        "listen_http_addr",
+        "pg_auth_type",
+        "http_auth_type",
+        # TODO: only needed for NEON_PAGESERVER_PANIC_ON_UNSPECIFIED_COMPACTION_ALGORITHM in https://github.com/neondatabase/neon/pull/7748
+        # "tenant_config",
+    ]
+    required_config_overrides = [
+        f"--config-override={toml.dumps({k: ps_config[k]})}" for k in required_config_keys
+    ]
+
+    pageserver_config.unlink()
+
+    bad_init = run_pageserver(["--init", *required_config_overrides])
     assert (
         bad_init.returncode == 1
     ), "pageserver should not be able to init new config without the node id"
-    assert "missing id" in bad_init.stderr
+    assert 'missing config value "id"' in bad_init.stderr
     assert not pageserver_config.exists(), "config file should not be created after init error"
 
-    completed_init = run_pageserver(
-        ["--init", "-c", "id = 12345", "-c", f'pg_distrib_dir="{pg_distrib_dir}"']
-    )
+    good_init_cmd = [
+        "--init",
+        f"--config-override=id={ps_config['id']}",
+        *required_config_overrides,
+    ]
+    completed_init = run_pageserver(good_init_cmd)
     assert (
         completed_init.returncode == 0
     ), "pageserver should be able to create a new config with the node id given"
     assert pageserver_config.exists(), "config file should be created successfully"
 
-    bad_reinit = run_pageserver(
-        ["--init", "-c", "id = 12345", "-c", f'pg_distrib_dir="{pg_distrib_dir}"']
-    )
-    assert (
-        bad_reinit.returncode == 1
-    ), "pageserver should not be able to init new config without the node id"
-    assert "already exists, cannot init it" in bad_reinit.stderr
-
-    bad_update = run_pageserver(["--update-config", "-c", "id = 3"])
-    assert bad_update.returncode == 1, "pageserver should not allow updating node id"
-    assert "has node id already, it cannot be overridden" in bad_update.stderr
+    bad_reinit = run_pageserver(good_init_cmd)
+    assert bad_reinit.returncode == 1, "pageserver refuses to init if already exists"
+    assert "config file already exists" in bad_reinit.stderr
 
 
-def check_client(pg_version: PgVersion, client: PageserverHttpClient, initial_tenant: TenantId):
+def check_client(env: NeonEnv, client: PageserverHttpClient):
+    pg_version = env.pg_version
+    initial_tenant = env.initial_tenant
+
     client.check_status()
 
     # check initial tenant is there
@@ -70,7 +85,9 @@ def check_client(pg_version: PgVersion, client: PageserverHttpClient, initial_te
 
     # create new tenant and check it is also there
     tenant_id = TenantId.generate()
-    client.tenant_create(tenant_id)
+    client.tenant_create(
+        tenant_id, generation=env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id)
+    )
     assert tenant_id in {TenantId(t["id"]) for t in client.tenant_list()}
 
     timelines = client.timeline_list(tenant_id)
@@ -141,8 +158,7 @@ def expect_updated_msg_lsn(
     last_msg_lsn = Lsn(timeline_details["last_received_msg_lsn"])
     assert (
         prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn
-    ), f"the last received message's LSN {last_msg_lsn} hasn't been updated \
-        compared to the previous message's LSN {prev_msg_lsn}"
+    ), f"the last received message's LSN {last_msg_lsn} hasn't been updated compared to the previous message's LSN {prev_msg_lsn}"
 
     return last_msg_lsn
 
@@ -157,6 +173,8 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         tenant_id, timeline_id = env.neon_cli.create_tenant()
         endpoint = env.endpoints.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
+        # insert something to force sk -> ps message
+        endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
         # Wait to make sure that we get a latest WAL receiver data.
         # We need to wait here because it's possible that we don't have access to
         # the latest WAL yet, when the `timeline_detail` API is first called.
@@ -168,7 +186,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         )
 
         # Make a DB modification then expect getting a new WAL receiver's data.
-        endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
+        endpoint.safe_psql("INSERT INTO t VALUES (1, 'hey')")
         wait_until(
             number_of_iterations=5,
             interval=1,
@@ -179,7 +197,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
 def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
-        check_client(env.pg_version, client, env.initial_tenant)
+        check_client(env, client)
 
 
 def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilder):
@@ -189,4 +207,4 @@ def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilde
     pageserver_token = env.auth_keys.generate_pageserver_token()
 
     with env.pageserver.http_client(auth_token=pageserver_token) as client:
-        check_client(env.pg_version, client, env.initial_tenant)
+        check_client(env, client)

@@ -21,7 +21,7 @@ use crate::{SegmentMethod, SegmentSizeResult, SizeResult, StorageModel};
 // 2. D+C+a+b
 // 3. D+A+B
 
-/// [`Segment`] which has had it's size calculated.
+/// `Segment` which has had its size calculated.
 #[derive(Clone, Debug)]
 struct SegmentSize {
     method: SegmentMethod,

@@ -1,6 +1,11 @@
 from contextlib import closing
 
-from fixtures.compare_fixtures import PgCompare
+import pytest
+from fixtures.benchmark_fixture import MetricReport
+from fixtures.common_types import Lsn
+from fixtures.compare_fixtures import NeonCompare, PgCompare
+from fixtures.pageserver.utils import wait_tenant_status_404
+from fixtures.pg_version import PgVersion
 
 
 #
@@ -13,8 +18,11 @@ from fixtures.compare_fixtures import PgCompare
 # 3. Disk space used
 # 4. Peak memory usage
 #
+@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/7124")
 def test_bulk_insert(neon_with_baseline: PgCompare):
     env = neon_with_baseline
+
+    start_lsn = Lsn(env.pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0])
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
@@ -28,3 +36,44 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
 
             env.report_peak_memory_use()
             env.report_size()
+
+    # Report amount of wal written. Useful for comparing vanilla wal format vs
+    # neon wal format, measuring neon write amplification, etc.
+    end_lsn = Lsn(env.pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0])
+    wal_written_bytes = end_lsn - start_lsn
+    wal_written_mb = round(wal_written_bytes / (1024 * 1024))
+    env.zenbenchmark.record("wal_written", wal_written_mb, "MB", MetricReport.TEST_PARAM)
+
+    # When testing neon, also check how long it takes the pageserver to reingest the
+    # wal from safekeepers. If this number is close to total runtime, then the pageserver
+    # is the bottleneck.
+    if isinstance(env, NeonCompare):
+        measure_recovery_time(env)
+
+
+def measure_recovery_time(env: NeonCompare):
+    client = env.env.pageserver.http_client()
+    pg_version = PgVersion(client.timeline_detail(env.tenant, env.timeline)["pg_version"])
+
+    # Delete the Tenant in the pageserver: this will drop local and remote layers, such that
+    # when we "create" the Tenant again, we will replay the WAL from the beginning.
+    #
+    # This is a "weird" thing to do, and can confuse the storage controller as we're re-using
+    # the same tenant ID for a tenant that is logically different from the pageserver's point
+    # of view, but the same as far as the safekeeper/WAL is concerned.  To work around that,
+    # we will explicitly create the tenant in the same generation that it was previously
+    # attached in.
+    attach_status = env.env.storage_controller.inspect(tenant_shard_id=env.tenant)
+    assert attach_status is not None
+    (attach_gen, _) = attach_status
+
+    client.tenant_delete(env.tenant)
+    wait_tenant_status_404(client, env.tenant, iterations=60, interval=0.5)
+    env.env.pageserver.tenant_create(tenant_id=env.tenant, generation=attach_gen)
+
+    # Measure recovery time
+    with env.record_duration("wal_recovery"):
+        client.timeline_create(pg_version, env.tenant, env.timeline)
+
+        # Flush, which will also wait for lsn to catch up
+        env.flush()

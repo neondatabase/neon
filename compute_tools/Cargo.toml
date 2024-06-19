@@ -6,10 +6,14 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-compression.workspace = true
 chrono.workspace = true
+cfg-if.workspace = true
 clap.workspace = true
+flate2.workspace = true
 futures.workspace = true
 hyper = { workspace = true, features = ["full"] }
+nix.workspace = true
 notify.workspace = true
 num_cpus.workspace = true
 opentelemetry.workspace = true
@@ -17,16 +21,26 @@ postgres.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 tar.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
+thiserror.workspace = true
 url.workspace = true
 
 compute_api.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
+toml_edit.workspace = true
+remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
+vm_monitor = { version = "0.1", path = "../libs/vm_monitor/" }
+zstd = "0.13"
+bytes = "1.0"
+rust-ini = "0.20.0"

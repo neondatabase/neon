@@ -2,9 +2,10 @@
 //! To use, create PostgresBackend and run() it, passing the Handler
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
+#![deny(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 use anyhow::Context;
 use bytes::Bytes;
-use futures::pin_mut;
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -15,12 +16,12 @@ use std::{fmt, io};
 use std::{future::Future, str::FromStr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use pq_proto::framed::{ConnectionError, Framed, FramedReader, FramedWriter};
 use pq_proto::{
-    BeMessage, FeMessage, FeStartupPacket, ProtocolError, SQLSTATE_INTERNAL_ERROR,
-    SQLSTATE_SUCCESSFUL_COMPLETION,
+    BeMessage, FeMessage, FeStartupPacket, ProtocolError, SQLSTATE_ADMIN_SHUTDOWN,
+    SQLSTATE_INTERNAL_ERROR, SQLSTATE_SUCCESSFUL_COMPLETION,
 };
 
 /// An error, occurred during query processing:
@@ -30,6 +31,20 @@ pub enum QueryError {
     /// The connection was lost while processing the query.
     #[error(transparent)]
     Disconnected(#[from] ConnectionError),
+    /// We were instructed to shutdown while processing the query
+    #[error("Shutting down")]
+    Shutdown,
+    /// Query handler indicated that client should reconnect
+    #[error("Server requested reconnect")]
+    Reconnect,
+    /// Query named an entity that was not found
+    #[error("Not found: {0}")]
+    NotFound(std::borrow::Cow<'static, str>),
+    /// Authentication failure
+    #[error("Unauthorized: {0}")]
+    Unauthorized(std::borrow::Cow<'static, str>),
+    #[error("Simulated Connection Error")]
+    SimulatedConnectionError,
     /// Some other error
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -44,7 +59,9 @@ impl From<io::Error> for QueryError {
 impl QueryError {
     pub fn pg_error_code(&self) -> &'static [u8; 5] {
         match self {
-            Self::Disconnected(_) => b"08006",         // connection failure
+            Self::Disconnected(_) | Self::SimulatedConnectionError | Self::Reconnect => b"08006", // connection failure
+            Self::Shutdown => SQLSTATE_ADMIN_SHUTDOWN,
+            Self::Unauthorized(_) | Self::NotFound(_) => SQLSTATE_INTERNAL_ERROR,
             Self::Other(_) => SQLSTATE_INTERNAL_ERROR, // internal error
         }
     }
@@ -238,6 +255,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
         }
     }
 
+    /// Cancellation safe as long as the underlying IO is cancellation safe.
     async fn shutdown(&mut self) -> io::Result<()> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.shutdown().await,
@@ -359,8 +377,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let flush_fut = self.flush();
-        pin_mut!(flush_fut);
+        let flush_fut = std::pin::pin!(self.flush());
         flush_fut.poll(cx)
     }
 
@@ -389,14 +406,42 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         shutdown_watcher: F,
     ) -> Result<(), QueryError>
     where
-        F: Fn() -> S,
+        F: Fn() -> S + Clone,
         S: Future,
     {
-        let ret = self.run_message_loop(handler, shutdown_watcher).await;
-        // socket might be already closed, e.g. if previously received error,
-        // so ignore result.
-        self.framed.shutdown().await.ok();
-        ret
+        let ret = self
+            .run_message_loop(handler, shutdown_watcher.clone())
+            .await;
+
+        tokio::select! {
+            _ = shutdown_watcher() => {
+                // do nothing; we most likely got already stopped by shutdown and will log it next.
+            }
+            _ = self.framed.shutdown() => {
+                // socket might be already closed, e.g. if previously received error,
+                // so ignore result.
+            },
+        }
+
+        match ret {
+            Ok(()) => Ok(()),
+            Err(QueryError::Shutdown) => {
+                info!("Stopped due to shutdown");
+                Ok(())
+            }
+            Err(QueryError::Reconnect) => {
+                // Dropping out of this loop implicitly disconnects
+                info!("Stopped due to handler reconnect request");
+                Ok(())
+            }
+            Err(QueryError::Disconnected(e)) => {
+                info!("Disconnected ({e:#})");
+                // Disconnection is not an error: we just use it that way internally to drop
+                // out of loops.
+                Ok(())
+            }
+            e => e,
+        }
     }
 
     async fn run_message_loop<F, S>(
@@ -416,15 +461,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             _ = shutdown_watcher() => {
                 // We were requested to shut down.
                 tracing::info!("shutdown request received during handshake");
-                return Ok(())
+                return Err(QueryError::Shutdown)
             },
 
-            result = self.handshake(handler) => {
-                // Handshake complete.
-                result?;
-                if self.state == ProtoState::Closed {
-                    return Ok(()); // EOF during handshake
-                }
+            handshake_r = self.handshake(handler) => {
+                handshake_r?;
             }
         );
 
@@ -435,17 +476,34 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             _ = shutdown_watcher() => {
                 // We were requested to shut down.
                 tracing::info!("shutdown request received in run_message_loop");
-                Ok(None)
+                return Err(QueryError::Shutdown)
             },
             msg = self.read_message() => { msg },
         )? {
             trace!("got message {:?}", msg);
 
             let result = self.process_message(handler, msg, &mut query_string).await;
-            self.flush().await?;
+            tokio::select!(
+                biased;
+                _ = shutdown_watcher() => {
+                    // We were requested to shut down.
+                    tracing::info!("shutdown request received during response flush");
+
+                    // If we exited process_message with a shutdown error, there may be
+                    // some valid response content on in our transmit buffer: permit sending
+                    // this within a short timeout.  This is a best effort thing so we don't
+                    // care about the result.
+                    tokio::time::timeout(std::time::Duration::from_millis(500), self.flush()).await.ok();
+
+                    return Err(QueryError::Shutdown)
+                },
+                flush_r = self.flush() => {
+                    flush_r?;
+                }
+            );
+
             match result? {
                 ProcessMsgResult::Continue => {
-                    self.flush().await?;
                     continue;
                 }
                 ProcessMsgResult::Break => break,
@@ -550,7 +608,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                         self.peer_addr
                     );
                     self.state = ProtoState::Closed;
-                    return Ok(());
+                    return Err(QueryError::Disconnected(ConnectionError::Protocol(
+                        ProtocolError::Protocol("EOF during handshake".to_string()),
+                    )));
                 }
             }
         }
@@ -565,7 +625,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
                     if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
                         self.write_message_noflush(&BeMessage::ErrorResponse(
-                            &e.to_string(),
+                            &short_error(&e),
                             Some(e.pg_error_code()),
                         ))?;
                         return Err(e);
@@ -589,7 +649,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                         self.peer_addr
                     );
                     self.state = ProtoState::Closed;
-                    return Ok(());
+                    return Err(QueryError::Disconnected(ConnectionError::Protocol(
+                        ProtocolError::Protocol("EOF during auth".to_string()),
+                    )));
                 }
             }
         }
@@ -683,12 +745,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
                 trace!("got query {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
-                    log_query_error(query_string, &e);
-                    let short_error = short_error(&e);
-                    self.write_message_noflush(&BeMessage::ErrorResponse(
-                        &short_error,
-                        Some(e.pg_error_code()),
-                    ))?;
+                    match e {
+                        QueryError::Shutdown => return Ok(ProcessMsgResult::Break),
+                        QueryError::SimulatedConnectionError => {
+                            return Err(QueryError::SimulatedConnectionError)
+                        }
+                        e => {
+                            log_query_error(query_string, &e);
+                            let short_error = short_error(&e);
+                            self.write_message_noflush(&BeMessage::ErrorResponse(
+                                &short_error,
+                                Some(e.pg_error_code()),
+                            ))?;
+                        }
+                    }
                 }
                 self.write_message_noflush(&BeMessage::ReadyForQuery)?;
             }
@@ -750,10 +820,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         Ok(ProcessMsgResult::Continue)
     }
 
-    /// Log as info/error result of handling COPY stream and send back
-    /// ErrorResponse if that makes sense. Shutdown the stream if we got
-    /// Terminate. TODO: transition into waiting for Sync msg if we initiate the
-    /// close.
+    /// - Log as info/error result of handling COPY stream and send back
+    ///   ErrorResponse if that makes sense.
+    /// - Shutdown the stream if we got Terminate.
+    /// - Then close the connection because we don't handle exiting from COPY
+    ///   stream normally.
     pub async fn handle_copy_stream_end(&mut self, end: CopyStreamHandlerEnd) {
         use CopyStreamHandlerEnd::*;
 
@@ -777,10 +848,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             if let Err(e) = self.write_message(&BeMessage::CopyDone).await {
                 error!("failed to send CopyDone: {}", e);
             }
-        }
-
-        if let Terminate = &end {
-            self.state = ProtoState::Closed;
         }
 
         let err_to_send_and_errcode = match &end {
@@ -812,6 +879,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 error!("failed to send ErrorResponse: {}", ee);
             }
         }
+
+        // Proper COPY stream finishing to continue using the connection is not
+        // implemented at the server side (we don't need it so far). To prevent
+        // further usages of the connection, close it.
+        self.framed.shutdown().await.ok();
+        self.state = ProtoState::Closed;
     }
 }
 
@@ -913,6 +986,11 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'a, I
 pub fn short_error(e: &QueryError) -> String {
     match e {
         QueryError::Disconnected(connection_error) => connection_error.to_string(),
+        QueryError::Reconnect => "reconnect".to_string(),
+        QueryError::Shutdown => "shutdown".to_string(),
+        QueryError::NotFound(_) => "not found".to_string(),
+        QueryError::Unauthorized(_e) => "JWT authentication error".to_string(),
+        QueryError::SimulatedConnectionError => "simulated connection error".to_string(),
         QueryError::Other(e) => format!("{e:#}"),
     }
 }
@@ -928,6 +1006,21 @@ fn log_query_error(query: &str, e: &QueryError) {
         }
         QueryError::Disconnected(other_connection_error) => {
             error!("query handler for '{query}' failed with connection error: {other_connection_error:?}")
+        }
+        QueryError::SimulatedConnectionError => {
+            error!("query handler for query '{query}' failed due to a simulated connection error")
+        }
+        QueryError::Reconnect => {
+            info!("query handler for '{query}' requested client to reconnect")
+        }
+        QueryError::Shutdown => {
+            info!("query handler for '{query}' cancelled during tenant shutdown")
+        }
+        QueryError::NotFound(reason) => {
+            info!("query handler for '{query}' entity not found: {reason}")
+        }
+        QueryError::Unauthorized(e) => {
+            warn!("query handler for '{query}' failed with authentication error: {e}");
         }
         QueryError::Other(e) => {
             error!("query handler for '{query}' failed: {e:?}");

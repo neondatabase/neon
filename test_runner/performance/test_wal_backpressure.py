@@ -6,10 +6,10 @@ from typing import Any, Callable, List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import DEFAULT_BRANCH_NAME, NeonEnvBuilder, PgBin
-from fixtures.types import Lsn
 
 from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
 
@@ -32,8 +32,7 @@ def pg_compare(request) -> PgCompare:
     else:
         assert (
             len(x) == 2
-        ), f"request param ({request.param}) should have a format of \
-        `neon_{{safekeepers_enable_fsync}}`"
+        ), f"request param ({request.param}) should have a format of `neon_{{safekeepers_enable_fsync}}`"
 
         # `NeonCompare` interface
         neon_env_builder = request.getfixturevalue("neon_env_builder")
@@ -65,7 +64,7 @@ def start_heavy_write_workload(env: PgCompare, n_tables: int, scale: int, num_it
 
     def start_single_table_workload(table_id: int):
         for _ in range(num_iters):
-            with env.pg.connect().cursor() as cur:
+            with env.pg.connect(options="-cstatement_timeout=300s").cursor() as cur:
                 cur.execute(
                     f"INSERT INTO t{table_id} SELECT FROM generate_series(1,{new_rows_each_update})"
                 )

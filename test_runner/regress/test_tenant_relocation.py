@@ -7,87 +7,28 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    Endpoint,
-    NeonBroker,
-    NeonEnv,
-    NeonEnvBuilder,
-    PortDistributor,
-    RemoteStorageKind,
-    available_remote_storages,
-)
+from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder, NeonPageserver
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
-    tenant_exists,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_tenant_status_404,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.remote_storage import (
+    LocalFsStorage,
+    RemoteStorageKind,
+)
 from fixtures.utils import (
     query_scalar,
-    start_in_background,
-    subprocess_capture,
     wait_until,
-    wait_while,
 )
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
     assert abs(a - b) / a < margin_ratio, abs(a - b) / a
-
-
-@contextmanager
-def new_pageserver_service(
-    new_pageserver_dir: Path,
-    pageserver_bin: Path,
-    remote_storage_mock_path: Path,
-    pg_port: int,
-    http_port: int,
-    broker: Optional[NeonBroker],
-    pg_distrib_dir: Path,
-):
-    """
-    cannot use NeonPageserver yet because it depends on neon cli
-    which currently lacks support for multiple pageservers
-    """
-    # actually run new pageserver
-    cmd = [
-        str(pageserver_bin),
-        "--workdir",
-        str(new_pageserver_dir),
-        "--update-config",
-        f"-c listen_pg_addr='localhost:{pg_port}'",
-        f"-c listen_http_addr='localhost:{http_port}'",
-        f"-c pg_distrib_dir='{pg_distrib_dir}'",
-        "-c id=2",
-        f"-c remote_storage={{local_path='{remote_storage_mock_path}'}}",
-    ]
-    if broker is not None:
-        cmd.append(
-            f"-c broker_endpoint='{broker.client_url()}'",
-        )
-    pageserver_client = PageserverHttpClient(
-        port=http_port,
-        auth_token=None,
-        is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled
-    )
-    try:
-        pageserver_process = start_in_background(
-            cmd, new_pageserver_dir, "pageserver.log", pageserver_client.check_status
-        )
-    except Exception as e:
-        log.error(e)
-        pageserver_process.kill()
-        raise Exception(f"Failed to start pageserver as {cmd}, reason: {e}")
-
-    log.info("new pageserver started")
-    try:
-        yield pageserver_process
-    finally:
-        log.info("stopping new pageserver")
-        pageserver_process.kill()
 
 
 @contextmanager
@@ -124,6 +65,7 @@ def load(endpoint: Endpoint, stop_event: threading.Event, load_ok_event: threadi
                     log.info("successfully recovered %s", inserted_ctr)
                     failed = False
                     load_ok_event.set()
+
     log.info("load thread stopped")
 
 
@@ -199,33 +141,22 @@ def check_timeline_attached(
 
 
 def switch_pg_to_new_pageserver(
-    env: NeonEnv,
+    origin_ps: NeonPageserver,
     endpoint: Endpoint,
-    new_pageserver_port: int,
+    new_pageserver_id: int,
     tenant_id: TenantId,
     timeline_id: TimelineId,
 ) -> Path:
+    # We could reconfigure online with endpoint.reconfigure(), but this stop/start
+    # is needed to trigger the logic in load() to set its ok event after restart.
     endpoint.stop()
+    endpoint.start(pageserver_id=new_pageserver_id)
 
-    pg_config_file_path = Path(endpoint.config_file_path())
-    pg_config_file_path.open("a").write(
-        f"\nneon.pageserver_connstring = 'postgresql://no_user:@localhost:{new_pageserver_port}'"
-    )
-
-    endpoint.start()
-
-    timeline_to_detach_local_path = (
-        env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-    )
+    timeline_to_detach_local_path = origin_ps.timeline_dir(tenant_id, timeline_id)
     files_before_detach = os.listdir(timeline_to_detach_local_path)
     assert (
-        "metadata" in files_before_detach
-    ), f"Regular timeline {timeline_to_detach_local_path} should have the metadata file,\
-            but got: {files_before_detach}"
-    assert (
-        len(files_before_detach) >= 2
-    ), f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file,\
-            but got {files_before_detach}"
+        len(files_before_detach) >= 1
+    ), f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file, but got {files_before_detach}"
 
     return timeline_to_detach_local_path
 
@@ -251,45 +182,45 @@ def post_migration_check(endpoint: Endpoint, sum_before_migration: int, old_loca
         # A minor migration involves no storage breaking changes.
         # It is done by attaching the tenant to a new pageserver.
         "minor",
-        # A major migration involves exporting a postgres datadir
-        # basebackup and importing it into the new pageserver.
-        # This kind of migration can tolerate breaking changes
-        # to storage format
-        "major",
+        # In the unlikely and unfortunate event that we have to break
+        # the storage format, extend this test with the param below.
+        # "major",
     ],
 )
 @pytest.mark.parametrize("with_load", ["with_load", "without_load"])
 def test_tenant_relocation(
     neon_env_builder: NeonEnvBuilder,
-    port_distributor: PortDistributor,
-    test_output_dir: Path,
-    neon_binpath: Path,
-    base_dir: Path,
     method: str,
     with_load: str,
 ):
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+    neon_env_builder.num_pageservers = 2
 
     env = neon_env_builder.init_start()
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    tenant_id = env.initial_tenant
+
+    env.pageservers[0].allowed_errors.extend(
+        [
+            # Needed for detach polling on the original pageserver
+            f".*NotFound: tenant {tenant_id}.*",
+            # We will dual-attach in this test, so stale generations are expected
+            ".*Dropped remote consistent LSN updates.*",
+        ]
     )
 
-    # create folder for remote storage mock
-    remote_storage_mock_path = env.repo_dir / "local_fs_remote_storage"
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     # we use two branches to check that they are both relocated
     # first branch is used for load, compute for second one is used to
     # check that data is not lost
 
-    pageserver_http = env.pageserver.http_client()
+    origin_ps = env.pageservers[0]
+    destination_ps = env.pageservers[1]
+    origin_http = origin_ps.http_client()
+    destination_http = destination_ps.http_client()
 
-    tenant_id, initial_timeline_id = env.neon_cli.create_tenant(
-        TenantId("74ee8b079a0e437eb0afea7d26a07209")
-    )
-    log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, initial_timeline_id)
+    log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, env.initial_timeline)
 
     env.neon_cli.create_branch("test_tenant_relocation_main", tenant_id=tenant_id)
     ep_main = env.endpoints.create_start(
@@ -299,7 +230,7 @@ def test_tenant_relocation(
     timeline_id_main, current_lsn_main = populate_branch(
         ep_main,
         tenant_id=tenant_id,
-        ps_http=pageserver_http,
+        ps_http=origin_http,
         create_table=True,
         expected_sum=500500,
     )
@@ -317,17 +248,17 @@ def test_tenant_relocation(
     timeline_id_second, current_lsn_second = populate_branch(
         ep_second,
         tenant_id=tenant_id,
-        ps_http=pageserver_http,
+        ps_http=origin_http,
         create_table=False,
         expected_sum=1001000,
     )
 
     # wait until pageserver receives that data
-    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id_main, current_lsn_main)
-    timeline_detail_main = pageserver_http.timeline_detail(tenant_id, timeline_id_main)
+    wait_for_last_record_lsn(origin_http, tenant_id, timeline_id_main, current_lsn_main)
+    timeline_detail_main = origin_http.timeline_detail(tenant_id, timeline_id_main)
 
-    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id_second, current_lsn_second)
-    timeline_detail_second = pageserver_http.timeline_detail(tenant_id, timeline_id_second)
+    wait_for_last_record_lsn(origin_http, tenant_id, timeline_id_second, current_lsn_second)
+    timeline_detail_second = origin_http.timeline_detail(tenant_id, timeline_id_second)
 
     if with_load == "with_load":
         # create load table
@@ -347,175 +278,116 @@ def test_tenant_relocation(
     # if user creates a branch during migration
     # it wont appear on the new pageserver
     ensure_checkpoint(
-        pageserver_http=pageserver_http,
+        pageserver_http=origin_http,
         tenant_id=tenant_id,
         timeline_id=timeline_id_main,
         current_lsn=current_lsn_main,
     )
 
     ensure_checkpoint(
-        pageserver_http=pageserver_http,
+        pageserver_http=origin_http,
         tenant_id=tenant_id,
         timeline_id=timeline_id_second,
         current_lsn=current_lsn_second,
     )
 
-    log.info("inititalizing new pageserver")
-    # bootstrap second pageserver
-    new_pageserver_dir = env.repo_dir / "new_pageserver"
-    new_pageserver_dir.mkdir()
+    if method == "minor":
+        # call to attach timeline to new pageserver
+        destination_ps.tenant_attach(tenant_id)
 
-    new_pageserver_pg_port = port_distributor.get_port()
-    new_pageserver_http_port = port_distributor.get_port()
-    log.info("new pageserver ports pg %s http %s", new_pageserver_pg_port, new_pageserver_http_port)
-    pageserver_bin = neon_binpath / "pageserver"
+        # wait for tenant to finish attaching
+        wait_until(
+            number_of_iterations=10,
+            interval=1,
+            func=lambda: assert_tenant_state(destination_http, tenant_id, "Active"),
+        )
 
-    new_pageserver_http = PageserverHttpClient(
-        port=new_pageserver_http_port,
-        auth_token=None,
-        is_testing_enabled_or_skip=env.pageserver.is_testing_enabled_or_skip,
-    )
-
-    with new_pageserver_service(
-        new_pageserver_dir,
-        pageserver_bin,
-        remote_storage_mock_path,
-        new_pageserver_pg_port,
-        new_pageserver_http_port,
-        neon_env_builder.broker,
-        neon_env_builder.pg_distrib_dir,
-    ):
-        # Migrate either by attaching from s3 or import/export basebackup
-        if method == "major":
-            cmd = [
-                "poetry",
-                "run",
-                "python",
-                str(base_dir / "scripts/export_import_between_pageservers.py"),
-                "--tenant-id",
-                str(tenant_id),
-                "--from-host",
-                "localhost",
-                "--from-http-port",
-                str(pageserver_http.port),
-                "--from-pg-port",
-                str(env.pageserver.service_port.pg),
-                "--to-host",
-                "localhost",
-                "--to-http-port",
-                str(new_pageserver_http_port),
-                "--to-pg-port",
-                str(new_pageserver_pg_port),
-                "--pg-distrib-dir",
-                str(neon_env_builder.pg_distrib_dir),
-                "--work-dir",
-                str(test_output_dir),
-                "--tmp-pg-port",
-                str(port_distributor.get_port()),
-            ]
-            subprocess_capture(test_output_dir, cmd, check=True)
-        elif method == "minor":
-            # call to attach timeline to new pageserver
-            new_pageserver_http.tenant_attach(tenant_id)
-
-            # wait for tenant to finish attaching
-            tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
-            assert tenant_status["state"]["slug"] in ["Attaching", "Active"]
-            wait_until(
-                number_of_iterations=10,
-                interval=1,
-                func=lambda: assert_tenant_state(new_pageserver_http, tenant_id, "Active"),
-            )
-
-            check_timeline_attached(
-                new_pageserver_http,
-                tenant_id,
-                timeline_id_main,
-                timeline_detail_main,
-                current_lsn_main,
-            )
-
-            check_timeline_attached(
-                new_pageserver_http,
-                tenant_id,
-                timeline_id_second,
-                timeline_detail_second,
-                current_lsn_second,
-            )
-
-        # rewrite neon cli config to use new pageserver for basebackup to start new compute
-        lines = (env.repo_dir / "config").read_text().splitlines()
-        for i, line in enumerate(lines):
-            if line.startswith("listen_http_addr"):
-                lines[i] = f"listen_http_addr = 'localhost:{new_pageserver_http_port}'"
-            if line.startswith("listen_pg_addr"):
-                lines[i] = f"listen_pg_addr = 'localhost:{new_pageserver_pg_port}'"
-        (env.repo_dir / "config").write_text("\n".join(lines))
-
-        old_local_path_main = switch_pg_to_new_pageserver(
-            env,
-            ep_main,
-            new_pageserver_pg_port,
+        check_timeline_attached(
+            destination_http,
             tenant_id,
             timeline_id_main,
+            timeline_detail_main,
+            current_lsn_main,
         )
 
-        old_local_path_second = switch_pg_to_new_pageserver(
-            env,
-            ep_second,
-            new_pageserver_pg_port,
+        check_timeline_attached(
+            destination_http,
             tenant_id,
             timeline_id_second,
+            timeline_detail_second,
+            current_lsn_second,
         )
 
-        # detach tenant from old pageserver before we check
-        # that all the data is there to be sure that old pageserver
-        # is no longer involved, and if it is, we will see the error
-        pageserver_http.tenant_detach(tenant_id)
+    # rewrite neon cli config to use new pageserver for basebackup to start new compute
+    lines = (env.repo_dir / "config").read_text().splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("listen_http_addr"):
+            lines[i] = f"listen_http_addr = 'localhost:{destination_http.port}'"
+        if line.startswith("listen_pg_addr"):
+            lines[i] = f"listen_pg_addr = 'localhost:{destination_ps.service_port.pg}'"
+    (env.repo_dir / "config").write_text("\n".join(lines))
 
-        # Wait a little, so that the detach operation has time to finish.
-        wait_while(
-            number_of_iterations=100,
-            interval=1,
-            func=lambda: tenant_exists(pageserver_http, tenant_id),
+    old_local_path_main = switch_pg_to_new_pageserver(
+        origin_ps,
+        ep_main,
+        destination_ps.id,
+        tenant_id,
+        timeline_id_main,
+    )
+
+    old_local_path_second = switch_pg_to_new_pageserver(
+        origin_ps,
+        ep_second,
+        destination_ps.id,
+        tenant_id,
+        timeline_id_second,
+    )
+
+    # detach tenant from old pageserver before we check
+    # that all the data is there to be sure that old pageserver
+    # is no longer involved, and if it is, we will see the error
+    origin_http.tenant_detach(tenant_id)
+
+    # Wait a little, so that the detach operation has time to finish.
+    wait_tenant_status_404(origin_http, tenant_id, iterations=100, interval=1)
+
+    post_migration_check(ep_main, 500500, old_local_path_main)
+    post_migration_check(ep_second, 1001000, old_local_path_second)
+
+    # ensure that we can successfully read all relations on the new pageserver
+    with pg_cur(ep_second) as cur:
+        cur.execute(
+            """
+            DO $$
+            DECLARE
+            r RECORD;
+            BEGIN
+            FOR r IN
+            SELECT relname FROM pg_class WHERE relkind='r'
+            LOOP
+                RAISE NOTICE '%', r.relname;
+                EXECUTE 'SELECT count(*) FROM quote_ident($1)' USING r.relname;
+            END LOOP;
+            END$$;
+            """
         )
-        post_migration_check(ep_main, 500500, old_local_path_main)
-        post_migration_check(ep_second, 1001000, old_local_path_second)
 
-        # ensure that we can successfully read all relations on the new pageserver
-        with pg_cur(ep_second) as cur:
-            cur.execute(
-                """
-                DO $$
-                DECLARE
-                r RECORD;
-                BEGIN
-                FOR r IN
-                SELECT relname FROM pg_class WHERE relkind='r'
-                LOOP
-                    RAISE NOTICE '%', r.relname;
-                    EXECUTE 'SELECT count(*) FROM quote_ident($1)' USING r.relname;
-                END LOOP;
-                END$$;
-                """
-            )
+    if with_load == "with_load":
+        assert load_ok_event.wait(3)
+        log.info("stopping load thread")
+        load_stop_event.set()
+        load_thread.join(timeout=10)
+        log.info("load thread stopped")
 
-        if with_load == "with_load":
-            assert load_ok_event.wait(3)
-            log.info("stopping load thread")
-            load_stop_event.set()
-            load_thread.join(timeout=10)
-            log.info("load thread stopped")
-
-        # bring old pageserver back for clean shutdown via neon cli
-        # new pageserver will be shut down by the context manager
-        lines = (env.repo_dir / "config").read_text().splitlines()
-        for i, line in enumerate(lines):
-            if line.startswith("listen_http_addr"):
-                lines[i] = f"listen_http_addr = 'localhost:{env.pageserver.service_port.http}'"
-            if line.startswith("listen_pg_addr"):
-                lines[i] = f"listen_pg_addr = 'localhost:{env.pageserver.service_port.pg}'"
-        (env.repo_dir / "config").write_text("\n".join(lines))
+    # bring old pageserver back for clean shutdown via neon cli
+    # new pageserver will be shut down by the context manager
+    lines = (env.repo_dir / "config").read_text().splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("listen_http_addr"):
+            lines[i] = f"listen_http_addr = 'localhost:{origin_ps.service_port.http}'"
+        if line.startswith("listen_pg_addr"):
+            lines[i] = f"listen_pg_addr = 'localhost:{origin_ps.service_port.pg}'"
+    (env.repo_dir / "config").write_text("\n".join(lines))
 
 
 # Simulate hard crash of pageserver and re-attach a tenant with a branch
@@ -525,16 +397,9 @@ def test_tenant_relocation(
 # last-record LSN. We had a bug where GetPage incorrectly followed the
 # timeline to the ancestor without waiting for the missing WAL to
 # arrive.
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_emergency_relocate_with_branches_slow_replay(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_emergency_relocate_with_branches_slow_replay",
-    )
-
     env = neon_env_builder.init_start()
     env.pageserver.is_testing_enabled_or_skip()
     pageserver_http = env.pageserver.http_client()
@@ -566,7 +431,7 @@ def test_emergency_relocate_with_branches_slow_replay(
     # simpler than initializing a new one from scratch, but the effect on the single tenant
     # is the same.
     env.pageserver.stop(immediate=True)
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_id))
+    shutil.rmtree(env.pageserver.tenant_dir(tenant_id))
     env.pageserver.start()
 
     # This fail point will pause the WAL ingestion on the main branch, after the
@@ -576,7 +441,7 @@ def test_emergency_relocate_with_branches_slow_replay(
     # Attach and wait a few seconds to give it time to load the tenants, attach to the
     # safekeepers, and to stream and ingest the WAL up to the pause-point.
     before_attach_time = time.time()
-    pageserver_http.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
     time.sleep(3)
 
     # The wal ingestion on the main timeline should now be paused at the fail point.
@@ -589,7 +454,7 @@ def test_emergency_relocate_with_branches_slow_replay(
         assert cur.fetchall() == [("before pause",), ("after pause",)]
 
     # Sanity check that the failpoint was reached
-    assert env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
+    env.pageserver.assert_log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
     assert time.time() - before_attach_time > 5
 
     # Clean up
@@ -682,16 +547,9 @@ def test_emergency_relocate_with_branches_slow_replay(
 # exist. Update dbir" path (2), and inserts an entry in the
 # DbDirectory with 'false' to indicate there is no PG_VERSION file.
 #
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_emergency_relocate_with_branches_createdb(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_emergency_relocate_with_branches_createdb",
-    )
-
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
@@ -717,7 +575,7 @@ def test_emergency_relocate_with_branches_createdb(
 
     # Kill the pageserver, remove the tenant directory, and restart
     env.pageserver.stop(immediate=True)
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_id))
+    shutil.rmtree(env.pageserver.tenant_dir(tenant_id))
     env.pageserver.start()
 
     # Wait before ingesting the WAL for CREATE DATABASE on the main branch. The original
@@ -726,14 +584,14 @@ def test_emergency_relocate_with_branches_createdb(
     # ingest the WAL, but let's make this less dependent on accidental timing.
     pageserver_http.configure_failpoints([("wal-ingest-logical-message-sleep", "return(5000)")])
     before_attach_time = time.time()
-    pageserver_http.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     child_endpoint.start()
     with child_endpoint.cursor(dbname="neondb") as cur:
         assert query_scalar(cur, "SELECT count(*) FROM test_migrate_one") == 200
 
     # Sanity check that the failpoint was reached
-    assert env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
+    env.pageserver.assert_log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
     assert time.time() - before_attach_time > 5
 
     # Clean up

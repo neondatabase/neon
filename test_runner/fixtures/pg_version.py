@@ -1,12 +1,10 @@
 import enum
 import os
-from typing import Iterator, Optional
+from typing import Optional
 
 import pytest
+from _pytest.config import Config
 from _pytest.config.argparsing import Parser
-from pytest import FixtureRequest
-
-from fixtures.log_helper import log
 
 """
 This fixture is used to determine which version of Postgres to use for tests.
@@ -19,6 +17,7 @@ This fixture is used to determine which version of Postgres to use for tests.
 class PgVersion(str, enum.Enum):
     V14 = "14"
     V15 = "15"
+    V16 = "16"
     # Instead of making version an optional parameter in methods, we can use this fake entry
     # to explicitly rely on the default server version (could be different from pg_version fixture value)
     NOT_SET = "<-POSTRGRES VERSION IS NOT SET->"
@@ -53,7 +52,7 @@ class PgVersion(str, enum.Enum):
         return None
 
 
-DEFAULT_VERSION: PgVersion = PgVersion.V14
+DEFAULT_VERSION: PgVersion = PgVersion.V15
 
 
 def skip_on_postgres(version: PgVersion, reason: str):
@@ -75,18 +74,17 @@ def pytest_addoption(parser: Parser):
         "--pg-version",
         action="store",
         type=PgVersion,
-        help="Postgres version to use for tests",
+        help="DEPRECATED: Postgres version to use for tests",
     )
 
 
-@pytest.fixture(scope="session")
-def pg_version(request: FixtureRequest) -> Iterator[PgVersion]:
-    if v := request.config.getoption("--pg-version"):
-        version, source = v, "from --pg-version command-line argument"
-    elif v := os.environ.get("DEFAULT_PG_VERSION"):
-        version, source = PgVersion(v), "from DEFAULT_PG_VERSION environment variable"
-    else:
-        version, source = DEFAULT_VERSION, "default version"
+def run_only_on_default_postgres(reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is not DEFAULT_VERSION,
+        reason=reason,
+    )
 
-    log.info(f"pg_version is {version} ({source})")
-    yield version
+
+def pytest_configure(config: Config):
+    if config.getoption("--pg-version"):
+        raise Exception("--pg-version is deprecated, use DEFAULT_PG_VERSION env var instead")

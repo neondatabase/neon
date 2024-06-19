@@ -1,29 +1,37 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
 use tokio::runtime::Runtime;
 
-use std::path::PathBuf;
 use std::time::Duration;
 use storage_broker::Uri;
 
-use utils::id::{NodeId, TenantId, TenantTimelineId};
+use utils::{auth::SwappableJwtAuth, id::NodeId, logging::SecretString};
 
 mod auth;
 pub mod broker;
 pub mod control_file;
 pub mod control_file_upgrade;
+pub mod copy_timeline;
 pub mod debug_dump;
 pub mod handler;
 pub mod http;
 pub mod json_ctrl;
 pub mod metrics;
+pub mod patch_control_file;
 pub mod pull_timeline;
 pub mod receive_wal;
+pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
 pub mod send_wal;
+pub mod state;
 pub mod timeline;
+pub mod timeline_manager;
+pub mod timelines_set;
 pub mod wal_backup;
+pub mod wal_backup_partial;
 pub mod wal_service;
 pub mod wal_storage;
 
@@ -40,6 +48,7 @@ pub mod defaults {
 
     pub const DEFAULT_HEARTBEAT_TIMEOUT: &str = "5000ms";
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
+    pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
 }
 
 #[derive(Debug, Clone)]
@@ -50,31 +59,37 @@ pub struct SafeKeeperConf {
     // that during unit testing, because the current directory is global
     // to the process but different unit tests work on different
     // data directories to avoid clashing with each other.
-    pub workdir: PathBuf,
+    pub workdir: Utf8PathBuf,
     pub my_id: NodeId,
     pub listen_pg_addr: String,
+    pub listen_pg_addr_tenant_only: Option<String>,
     pub listen_http_addr: String,
+    pub advertise_pg_addr: Option<String>,
     pub availability_zone: Option<String>,
     pub no_sync: bool,
     pub broker_endpoint: Uri,
     pub broker_keepalive_interval: Duration,
     pub heartbeat_timeout: Duration,
+    pub peer_recovery_enabled: bool,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
     pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
-    pub auth: Option<Arc<JwtAuth>>,
+    pub pg_auth: Option<Arc<JwtAuth>>,
+    pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
+    pub http_auth: Option<Arc<SwappableJwtAuth>>,
+    /// JWT token to connect to other safekeepers with.
+    pub sk_auth_token: Option<SecretString>,
     pub current_thread_runtime: bool,
+    pub walsenders_keep_horizon: bool,
+    pub partial_backup_enabled: bool,
+    pub partial_backup_timeout: Duration,
+    pub disable_periodic_broker_push: bool,
 }
 
 impl SafeKeeperConf {
-    pub fn tenant_dir(&self, tenant_id: &TenantId) -> PathBuf {
-        self.workdir.join(tenant_id.to_string())
-    }
-
-    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> PathBuf {
-        self.tenant_dir(&ttid.tenant_id)
-            .join(ttid.timeline_id.to_string())
+    pub fn is_wal_backup_enabled(&self) -> bool {
+        self.remote_storage.is_some() && self.wal_backup_enabled
     }
 }
 
@@ -82,10 +97,12 @@ impl SafeKeeperConf {
     #[cfg(test)]
     fn dummy() -> Self {
         SafeKeeperConf {
-            workdir: PathBuf::from("./"),
+            workdir: Utf8PathBuf::from("./"),
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
+            listen_pg_addr_tenant_only: None,
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            advertise_pg_addr: None,
             availability_zone: None,
             remote_storage: None,
             my_id: NodeId(0),
@@ -93,12 +110,20 @@ impl SafeKeeperConf {
                 .parse()
                 .expect("failed to parse default broker endpoint"),
             broker_keepalive_interval: Duration::from_secs(5),
+            peer_recovery_enabled: true,
             wal_backup_enabled: true,
             backup_parallel_jobs: 1,
-            auth: None,
+            pg_auth: None,
+            pg_tenant_only_auth: None,
+            http_auth: None,
+            sk_auth_token: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,
+            walsenders_keep_horizon: false,
+            partial_backup_enabled: false,
+            partial_backup_timeout: Duration::from_secs(0),
+            disable_periodic_broker_push: false,
         }
     }
 }

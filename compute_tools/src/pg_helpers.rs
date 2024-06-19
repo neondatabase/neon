@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::fs::File;
@@ -5,29 +6,45 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
-use tracing::{debug, instrument};
+use tokio::io::AsyncBufReadExt;
+use tokio::time::timeout;
+use tokio_postgres::NoTls;
+use tracing::{debug, error, info, instrument};
 
 use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
-/// Escape a string for including it in a SQL literal
-fn escape_literal(s: &str) -> String {
-    s.replace('\'', "''").replace('\\', "\\\\")
+/// Escape a string for including it in a SQL literal. Wrapping the result
+/// with `E'{}'` or `'{}'` is not required, as it returns a ready-to-use
+/// SQL string literal, e.g. `'db'''` or `E'db\\'`.
+/// See <https://github.com/postgres/postgres/blob/da98d005cdbcd45af563d0c4ac86d0e9772cd15f/src/backend/utils/adt/quote.c#L47>
+/// for the original implementation.
+pub fn escape_literal(s: &str) -> String {
+    let res = s.replace('\'', "''").replace('\\', "\\\\");
+
+    if res.contains('\\') {
+        format!("E'{}'", res)
+    } else {
+        format!("'{}'", res)
+    }
 }
 
-/// Escape a string so that it can be used in postgresql.conf.
-/// Same as escape_literal, currently.
+/// Escape a string so that it can be used in postgresql.conf. Wrapping the result
+/// with `'{}'` is not required, as it returns a ready-to-use config string.
 pub fn escape_conf_value(s: &str) -> String {
-    s.replace('\'', "''").replace('\\', "\\\\")
+    let res = s.replace('\'', "''").replace('\\', "\\\\");
+    format!("'{}'", res)
 }
 
-trait GenericOptionExt {
+pub trait GenericOptionExt {
     fn to_pg_option(&self) -> String;
     fn to_pg_setting(&self) -> String;
 }
@@ -37,7 +54,7 @@ impl GenericOptionExt for GenericOption {
     fn to_pg_option(&self) -> String {
         if let Some(val) = &self.value {
             match self.vartype.as_ref() {
-                "string" => format!("{} '{}'", self.name, escape_literal(val)),
+                "string" => format!("{} {}", self.name, escape_literal(val)),
                 _ => format!("{} {}", self.name, val),
             }
         } else {
@@ -49,7 +66,7 @@ impl GenericOptionExt for GenericOption {
     fn to_pg_setting(&self) -> String {
         if let Some(val) = &self.value {
             match self.vartype.as_ref() {
-                "string" => format!("{} = '{}'", self.name, escape_conf_value(val)),
+                "string" => format!("{} = {}", self.name, escape_conf_value(val)),
                 _ => format!("{} = {}", self.name, val),
             }
         } else {
@@ -194,28 +211,43 @@ pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
 }
 
 /// Build a list of existing Postgres databases
-pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
-    let postgres_dbs = client
+pub fn get_existing_dbs(client: &mut Client) -> Result<HashMap<String, Database>> {
+    // `pg_database.datconnlimit = -2` means that the database is in the
+    // invalid state. See:
+    //   https://github.com/postgres/postgres/commit/a4b4cc1d60f7e8ccfcc8ff8cb80c28ee411ad9a9
+    let postgres_dbs: Vec<Database> = client
         .query(
-            "SELECT datname, datdba::regrole::text as owner
-               FROM pg_catalog.pg_database;",
+            "SELECT
+                datname AS name,
+                datdba::regrole::text AS owner,
+                NOT datallowconn AS restrict_conn,
+                datconnlimit = - 2 AS invalid
+            FROM
+                pg_catalog.pg_database;",
             &[],
         )?
         .iter()
         .map(|row| Database {
-            name: row.get("datname"),
+            name: row.get("name"),
             owner: row.get("owner"),
+            restrict_conn: row.get("restrict_conn"),
+            invalid: row.get("invalid"),
             options: None,
         })
         .collect();
 
-    Ok(postgres_dbs)
+    let dbs_map = postgres_dbs
+        .iter()
+        .map(|db| (db.name.clone(), db.clone()))
+        .collect::<HashMap<_, _>>();
+
+    Ok(dbs_map)
 }
 
 /// Wait for Postgres to become ready to accept connections. It's ready to
 /// accept connections when the state-field in `pgdata/postmaster.pid` says
 /// 'ready'.
-#[instrument(skip(pg))]
+#[instrument(skip_all, fields(pgdata = %pgdata.display()))]
 pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     let pid_path = pgdata.join("postmaster.pid");
 
@@ -232,9 +264,10 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     // case we miss some events for some reason. Not strictly necessary, but
     // better safe than sorry.
     let (tx, rx) = std::sync::mpsc::channel();
-    let (mut watcher, rx): (Box<dyn Watcher>, _) = match notify::recommended_watcher(move |res| {
+    let watcher_res = notify::recommended_watcher(move |res| {
         let _ = tx.send(res);
-    }) {
+    });
+    let (mut watcher, rx): (Box<dyn Watcher>, _) = match watcher_res {
         Ok(watcher) => (Box::new(watcher), rx),
         Err(e) => {
             match e.kind {
@@ -329,6 +362,175 @@ pub fn create_pgdata(pgdata: &str) -> Result<()> {
     let _ok = fs::remove_dir_all(pgdata);
     fs::create_dir(pgdata)?;
     fs::set_permissions(pgdata, fs::Permissions::from_mode(0o700))?;
+
+    Ok(())
+}
+
+/// Update pgbouncer.ini with provided options
+fn update_pgbouncer_ini(
+    pgbouncer_config: HashMap<String, String>,
+    pgbouncer_ini_path: &str,
+) -> Result<()> {
+    let mut conf = Ini::load_from_file(pgbouncer_ini_path)?;
+    let section = conf.section_mut(Some("pgbouncer")).unwrap();
+
+    for (option_name, value) in pgbouncer_config.iter() {
+        section.insert(option_name, value);
+        debug!(
+            "Updating pgbouncer.ini with new values {}={}",
+            option_name, value
+        );
+    }
+
+    conf.write_to_file(pgbouncer_ini_path)?;
+    Ok(())
+}
+
+/// Tune pgbouncer.
+/// 1. Apply new config using pgbouncer admin console
+/// 2. Add new values to pgbouncer.ini to preserve them after restart
+pub async fn tune_pgbouncer(pgbouncer_config: HashMap<String, String>) -> Result<()> {
+    let pgbouncer_connstr = if std::env::var_os("AUTOSCALING").is_some() {
+        // for VMs use pgbouncer specific way to connect to
+        // pgbouncer admin console without password
+        // when pgbouncer is running under the same user.
+        "host=/tmp port=6432 dbname=pgbouncer user=pgbouncer".to_string()
+    } else {
+        // for k8s use normal connection string with password
+        // to connect to pgbouncer admin console
+        let mut pgbouncer_connstr =
+            "host=localhost port=6432 dbname=pgbouncer user=postgres sslmode=disable".to_string();
+        if let Ok(pass) = std::env::var("PGBOUNCER_PASSWORD") {
+            pgbouncer_connstr.push_str(format!(" password={}", pass).as_str());
+        }
+        pgbouncer_connstr
+    };
+
+    info!(
+        "Connecting to pgbouncer with connection string: {}",
+        pgbouncer_connstr
+    );
+
+    // connect to pgbouncer, retrying several times
+    // because pgbouncer may not be ready yet
+    let mut retries = 3;
+    let client = loop {
+        match tokio_postgres::connect(&pgbouncer_connstr, NoTls).await {
+            Ok((client, connection)) => {
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        eprintln!("connection error: {}", e);
+                    }
+                });
+                break client;
+            }
+            Err(e) => {
+                if retries == 0 {
+                    return Err(e.into());
+                }
+                error!("Failed to connect to pgbouncer: pgbouncer_connstr {}", e);
+                retries -= 1;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    };
+
+    // Apply new config
+    for (option_name, value) in pgbouncer_config.iter() {
+        let query = format!("SET {}={}", option_name, value);
+        // keep this log line for debugging purposes
+        info!("Applying pgbouncer setting change: {}", query);
+
+        if let Err(err) = client.simple_query(&query).await {
+            // Don't fail on error, just print it into log
+            error!(
+                "Failed to apply pgbouncer setting change: {},  {}",
+                query, err
+            );
+        };
+    }
+
+    // save values to pgbouncer.ini
+    // so that they are preserved after pgbouncer restart
+    let pgbouncer_ini_path = if std::env::var_os("AUTOSCALING").is_some() {
+        // in VMs we use /etc/pgbouncer.ini
+        "/etc/pgbouncer.ini".to_string()
+    } else {
+        // in pods we use /var/db/postgres/pgbouncer/pgbouncer.ini
+        // this is a shared volume between pgbouncer and postgres containers
+        // FIXME: fix permissions for this file
+        "/var/db/postgres/pgbouncer/pgbouncer.ini".to_string()
+    };
+    update_pgbouncer_ini(pgbouncer_config, &pgbouncer_ini_path)?;
+
+    Ok(())
+}
+
+/// Spawn a thread that will read Postgres logs from `stderr`, join multiline logs
+/// and send them to the logger. In the future we may also want to add context to
+/// these logs.
+pub fn handle_postgres_logs(stderr: std::process::ChildStderr) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+
+        let res = runtime.block_on(async move {
+            let stderr = tokio::process::ChildStderr::from_std(stderr)?;
+            handle_postgres_logs_async(stderr).await
+        });
+        if let Err(e) = res {
+            tracing::error!("error while processing postgres logs: {}", e);
+        }
+    })
+}
+
+/// Read Postgres logs from `stderr` until EOF. Buffer is flushed on one of the following conditions:
+/// - next line starts with timestamp
+/// - EOF
+/// - no new lines were written for the last second
+async fn handle_postgres_logs_async(stderr: tokio::process::ChildStderr) -> Result<()> {
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    let timeout_duration = Duration::from_millis(100);
+    let ts_regex =
+        regex::Regex::new(r"^\d+-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").expect("regex is valid");
+
+    let mut buf = vec![];
+    loop {
+        let next_line = timeout(timeout_duration, lines.next_line()).await;
+
+        // we should flush lines from the buffer if we cannot continue reading multiline message
+        let should_flush_buf = match next_line {
+            // Flushing if new line starts with timestamp
+            Ok(Ok(Some(ref line))) => ts_regex.is_match(line),
+            // Flushing on EOF, timeout or error
+            _ => true,
+        };
+
+        if !buf.is_empty() && should_flush_buf {
+            // join multiline message into a single line, separated by unicode Zero Width Space.
+            // "PG:" suffix is used to distinguish postgres logs from other logs.
+            let combined = format!("PG:{}\n", buf.join("\u{200B}"));
+            buf.clear();
+
+            // sync write to stderr to avoid interleaving with other logs
+            use std::io::Write;
+            let res = std::io::stderr().lock().write_all(combined.as_bytes());
+            if let Err(e) = res {
+                tracing::error!("error while writing to stderr: {}", e);
+            }
+        }
+
+        // if not timeout, append line to the buffer
+        if next_line.is_ok() {
+            match next_line?? {
+                Some(line) => buf.push(line),
+                // EOF
+                None => break,
+            };
+        }
+    }
 
     Ok(())
 }

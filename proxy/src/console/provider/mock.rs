@@ -2,13 +2,22 @@
 
 use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
+    AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
 };
-use crate::{auth::ClientCredentials, compute, error::io_error, scram, url::ApiUrl};
-use async_trait::async_trait;
+use crate::context::RequestMonitoring;
+use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
+use crate::{auth::IpPattern, cache::Cached};
+use crate::{
+    console::{
+        messages::MetricsAuxInfo,
+        provider::{CachedAllowedIps, CachedRoleSecret},
+    },
+    BranchId, EndpointId, ProjectId,
+};
 use futures::TryFutureExt;
+use std::{str::FromStr, sync::Arc};
 use thiserror::Error;
-use tokio_postgres::config::SslMode;
+use tokio_postgres::{config::SslMode, Client};
 use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Debug, Error)]
@@ -45,9 +54,9 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        creds: &ClientCredentials<'_>,
-    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
-        async {
+        user_info: &ComputeUserInfo,
+    ) -> Result<AuthInfo, GetAuthInfoError> {
+        let (secret, allowed_ips) = async {
             // Perhaps we could persist this connection, but then we'd have to
             // write more code for reopening it if it got closed, which doesn't
             // seem worth it.
@@ -55,32 +64,51 @@ impl Api {
                 tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
 
             tokio::spawn(connection);
-            let query = "select rolpassword from pg_catalog.pg_authid where rolname = $1";
-            let rows = client.query(query, &[&creds.user]).await?;
-
-            // We can get at most one row, because `rolname` is unique.
-            let row = match rows.get(0) {
-                Some(row) => row,
-                // This means that the user doesn't exist, so there can be no secret.
-                // However, this is still a *valid* outcome which is very similar
-                // to getting `404 Not found` from the Neon console.
+            let secret = match get_execute_postgres_query(
+                &client,
+                "select rolpassword from pg_catalog.pg_authid where rolname = $1",
+                &[&&*user_info.user],
+                "rolpassword",
+            )
+            .await?
+            {
+                Some(entry) => {
+                    info!("got a secret: {entry}"); // safe since it's not a prod scenario
+                    let secret = scram::ServerSecret::parse(&entry).map(AuthSecret::Scram);
+                    secret.or_else(|| parse_md5(&entry).map(AuthSecret::Md5))
+                }
                 None => {
-                    warn!("user '{}' does not exist", creds.user);
-                    return Ok(None);
+                    warn!("user '{}' does not exist", user_info.user);
+                    None
                 }
             };
+            let allowed_ips = match get_execute_postgres_query(
+                &client,
+                "select allowed_ips from neon_control_plane.endpoints where endpoint_id = $1",
+                &[&user_info.endpoint.as_str()],
+                "allowed_ips",
+            )
+            .await?
+            {
+                Some(s) => {
+                    info!("got allowed_ips: {s}");
+                    s.split(',')
+                        .map(|s| IpPattern::from_str(s).unwrap())
+                        .collect()
+                }
+                None => vec![],
+            };
 
-            let entry = row
-                .try_get("rolpassword")
-                .map_err(MockApiError::PasswordNotSet)?;
-
-            info!("got a secret: {entry}"); // safe since it's not a prod scenario
-            let secret = scram::ServerSecret::parse(entry).map(AuthInfo::Scram);
-            Ok(secret.or_else(|| parse_md5(entry).map(AuthInfo::Md5)))
+            Ok((secret, allowed_ips))
         }
-        .map_err(crate::error::log_error)
+        .map_err(crate::error::log_error::<GetAuthInfoError>)
         .instrument(info_span!("postgres", url = self.endpoint.as_str()))
-        .await
+        .await?;
+        Ok(AuthInfo {
+            secret,
+            allowed_ips,
+            project_id: None,
+        })
     }
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
@@ -92,7 +120,12 @@ impl Api {
 
         let node = NodeInfo {
             config,
-            aux: Default::default(),
+            aux: MetricsAuxInfo {
+                endpoint_id: (&EndpointId::from("endpoint")).into(),
+                project_id: (&ProjectId::from("project")).into(),
+                branch_id: (&BranchId::from("branch")).into(),
+                cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+            },
             allow_self_signed_compute: false,
         };
 
@@ -100,26 +133,59 @@ impl Api {
     }
 }
 
-#[async_trait]
+async fn get_execute_postgres_query(
+    client: &Client,
+    query: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    idx: &str,
+) -> Result<Option<String>, GetAuthInfoError> {
+    let rows = client.query(query, params).await?;
+
+    // We can get at most one row, because `rolname` is unique.
+    let row = match rows.first() {
+        Some(row) => row,
+        // This means that the user doesn't exist, so there can be no secret.
+        // However, this is still a *valid* outcome which is very similar
+        // to getting `404 Not found` from the Neon console.
+        None => return Ok(None),
+    };
+
+    let entry = row.try_get(idx).map_err(MockApiError::PasswordNotSet)?;
+    Ok(Some(entry))
+}
+
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
-    async fn get_auth_info(
+    async fn get_role_secret(
         &self,
-        _extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
-    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
-        self.do_get_auth_info(creds).await
+        _ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        Ok(CachedRoleSecret::new_uncached(
+            self.do_get_auth_info(user_info).await?.secret,
+        ))
+    }
+
+    async fn get_allowed_ips_and_secret(
+        &self,
+        _ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
+        Ok((
+            Cached::new_uncached(Arc::new(
+                self.do_get_auth_info(user_info).await?.allowed_ips,
+            )),
+            None,
+        ))
     }
 
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        _extra: &ConsoleReqExtra<'_>,
-        _creds: &ClientCredentials<'_>,
+        _ctx: &mut RequestMonitoring,
+        _user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        self.do_wake_compute()
-            .map_ok(CachedNodeInfo::new_uncached)
-            .await
+        self.do_wake_compute().map_ok(Cached::new_uncached).await
     }
 }
 

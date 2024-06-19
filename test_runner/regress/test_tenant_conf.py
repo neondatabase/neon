@@ -1,30 +1,36 @@
 import json
 from contextlib import closing
+from typing import Any, Dict
 
 import psycopg2.extras
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnvBuilder,
-    RemoteStorageKind,
 )
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
-from fixtures.types import Lsn
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import wait_until
 
 
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     """Test per tenant configuration"""
-    # set some non-default global config
-    neon_env_builder.pageserver_config_override = """
-page_cache_size=444;
-wait_lsn_timeout='111 s';
-[tenant_config]
-checkpoint_distance = 10000
-compaction_target_size = 1048576
-evictions_low_residence_duration_metric_threshold = "2 days"
-eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold = "23 hours" }
-"""
+
+    def set_some_nondefault_global_config(ps_cfg: Dict[str, Any]):
+        ps_cfg["page_cache_size"] = 444
+        ps_cfg["wait_lsn_timeout"] = "111 s"
+
+        tenant_config = ps_cfg.setdefault("tenant_config", {})
+        tenant_config["checkpoint_distance"] = 10000
+        tenant_config["compaction_target_size"] = 1048576
+        tenant_config["evictions_low_residence_duration_metric_threshold"] = "2 days"
+        tenant_config["eviction_policy"] = {
+            "kind": "LayerAccessThreshold",
+            "period": "20s",
+            "threshold": "23 hours",
+        }
+
+    neon_env_builder.pageserver_config_override = set_some_nondefault_global_config
 
     env = neon_env_builder.init_start()
     # we configure eviction but no remote storage, there might be error lines
@@ -271,7 +277,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         "period": "20s",
         "threshold": "23h",
     }
-    assert final_effective_config["max_lsn_wal_lag"] == 10 * 1024 * 1024
+    assert final_effective_config["max_lsn_wal_lag"] == 1024 * 1024 * 1024
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
@@ -293,18 +299,14 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
 
 
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_creating_tenant_conf_after_attach",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     # tenant is created with defaults, as in without config file
     (tenant_id, timeline_id) = env.neon_cli.create_tenant()
-    config_path = env.repo_dir / "tenants" / str(tenant_id) / "config"
-    assert config_path.exists(), "config file is always initially created"
+    config_path = env.pageserver.tenant_dir(tenant_id) / "config-v1"
 
     http_client = env.pageserver.http_client()
 
@@ -318,7 +320,11 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 
     assert not config_path.exists(), "detach did not remove config file"
 
-    http_client.tenant_attach(tenant_id)
+    # The re-attach's increment of the generation number may invalidate deletion queue
+    # updates in flight from the previous attachment.
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
+
+    env.pageserver.tenant_attach(tenant_id)
     wait_until(
         number_of_iterations=5,
         interval=1,
@@ -338,15 +344,17 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     neon_env_builder: NeonEnvBuilder,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_live_reconfig_get_evictions_low_residence_duration_metric_threshold",
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # disable compaction so that it will not download the layer for repartitioning
+            "compaction_period": "0s"
+        }
     )
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    env = neon_env_builder.init_start()
-    assert isinstance(env.remote_storage, LocalFsStorage)
-
-    (tenant_id, timeline_id) = env.neon_cli.create_tenant()
+    (tenant_id, timeline_id) = env.initial_tenant, env.initial_timeline
     ps_http = env.pageserver.http_client()
 
     def get_metric():

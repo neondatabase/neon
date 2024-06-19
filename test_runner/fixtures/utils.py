@@ -1,19 +1,43 @@
 import contextlib
+import enum
 import json
 import os
 import re
 import subprocess
 import tarfile
+import threading
 import time
+from hashlib import sha256
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple, TypeVar
+from typing import (
+    IO,
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    TypeVar,
+    Union,
+)
 from urllib.parse import urlencode
 
 import allure
+import zstandard
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
-from fixtures.types import TimelineId
+from fixtures.pageserver.common_types import (
+    parse_delta_layer,
+    parse_image_layer,
+)
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import PgBin
+from fixtures.common_types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
@@ -23,48 +47,128 @@ def get_self_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def subprocess_capture(capture_dir: Path, cmd: List[str], **kwargs: Any) -> str:
-    """Run a process and capture its output
+def subprocess_capture(
+    capture_dir: Path,
+    cmd: List[str],
+    *,
+    check=False,
+    echo_stderr=False,
+    echo_stdout=False,
+    capture_stdout=False,
+    timeout=None,
+    with_command_header=True,
+    **popen_kwargs: Any,
+) -> Tuple[str, Optional[str], int]:
+    """Run a process and bifurcate its output to files and the `log` logger
 
-    Output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
+    stderr and stdout are always captured in files.  They are also optionally
+    echoed to the log (echo_stderr, echo_stdout), and/or captured and returned
+    (capture_stdout).
+
+    File output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
     where "cmd" is the name of the program and NNN is an incrementing
     counter.
 
     If those files already exist, we will overwrite them.
-    Returns basepath for files with captured output.
+
+    Returns 3-tuple of:
+     - The base path for output files
+     - Captured stdout, or None
+     - The exit status of the process
     """
     assert isinstance(cmd, list)
-    base = f"{os.path.basename(cmd[0])}_{global_counter()}"
+    base_cmd = os.path.basename(cmd[0])
+    base = f"{base_cmd}_{global_counter()}"
     basepath = os.path.join(capture_dir, base)
     stdout_filename = f"{basepath}.stdout"
     stderr_filename = f"{basepath}.stderr"
 
+    # Since we will stream stdout and stderr concurrently, need to do it in a thread.
+    class OutputHandler(threading.Thread):
+        def __init__(self, in_file, out_file, echo: bool, capture: bool):
+            super().__init__()
+            self.in_file = in_file
+            self.out_file = out_file
+            self.echo = echo
+            self.capture = capture
+            self.captured = ""
+
+        def run(self):
+            first = with_command_header
+            for line in self.in_file:
+                if first:
+                    # do this only after receiving any input so that we can
+                    # keep deleting empty files, or leave it out completly if
+                    # it was unwanted (using the file as input later for example)
+                    first = False
+                    # prefix the files with the command line so that we can
+                    # later understand which file is for what command
+                    self.out_file.write((f"# {' '.join(cmd)}\n\n").encode("utf-8"))
+
+                # Only bother decoding if we are going to do something more than stream to a file
+                if self.echo or self.capture:
+                    string = line.decode(encoding="utf-8", errors="replace")
+
+                    if self.echo:
+                        log.info(string.strip())
+
+                    if self.capture:
+                        self.captured += string
+
+                self.out_file.write(line)
+
+    captured = None
     try:
-        with open(stdout_filename, "w") as stdout_f:
-            with open(stderr_filename, "w") as stderr_f:
+        with open(stdout_filename, "wb") as stdout_f:
+            with open(stderr_filename, "wb") as stderr_f:
                 log.info(f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"')
-                subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+
+                p = subprocess.Popen(
+                    cmd,
+                    **popen_kwargs,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                stdout_handler = OutputHandler(
+                    p.stdout, stdout_f, echo=echo_stdout, capture=capture_stdout
+                )
+                stdout_handler.start()
+                stderr_handler = OutputHandler(p.stderr, stderr_f, echo=echo_stderr, capture=False)
+                stderr_handler.start()
+
+                r = p.wait(timeout=timeout)
+
+                stdout_handler.join()
+                stderr_handler.join()
+
+                if check and r != 0:
+                    raise subprocess.CalledProcessError(r, " ".join(cmd))
+
+                if capture_stdout:
+                    captured = stdout_handler.captured
     finally:
         # Remove empty files if there is no output
         for filename in (stdout_filename, stderr_filename):
             if os.stat(filename).st_size == 0:
                 os.remove(filename)
 
-    return basepath
+    return (basepath, captured, r)
 
 
 _global_counter = 0
+_global_counter_lock = threading.Lock()
 
 
 def global_counter() -> int:
-    """A really dumb global counter.
+    """A really dumb but thread-safe global counter.
 
     This is useful for giving output files a unique number, so if we run the
     same command multiple times we can keep their output separate.
     """
-    global _global_counter
-    _global_counter += 1
-    return _global_counter
+    global _global_counter, _global_counter_lock
+    with _global_counter_lock:
+        _global_counter += 1
+        return _global_counter
 
 
 def print_gc_result(row: Dict[str, Any]):
@@ -92,10 +196,10 @@ def query_scalar(cur: cursor, query: str) -> Any:
 
 
 # Traverse directory to get total size.
-def get_dir_size(path: str) -> int:
+def get_dir_size(path: Path) -> int:
     """Return size in bytes."""
     totalbytes = 0
-    for root, dirs, files in os.walk(path):
+    for root, _dirs, files in os.walk(path):
         for name in files:
             try:
                 totalbytes += os.path.getsize(os.path.join(root, name))
@@ -122,26 +226,6 @@ def get_timeline_dir_size(path: Path) -> int:
     return sz
 
 
-def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
-    """Parse an image layer file name. Return key start, key end, and snapshot lsn"""
-    parts = f_name.split("__")
-    key_parts = parts[0].split("-")
-    return int(key_parts[0], 16), int(key_parts[1], 16), int(parts[1], 16)
-
-
-def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
-    """Parse a delta layer file name. Return key start, key end, lsn start, and lsn end"""
-    parts = f_name.split("__")
-    key_parts = parts[0].split("-")
-    lsn_parts = parts[1].split("-")
-    return (
-        int(key_parts[0], 16),
-        int(key_parts[1], 16),
-        int(lsn_parts[0], 16),
-        int(lsn_parts[1], 16),
-    )
-
-
 def get_scale_for_db(size_mb: int) -> int:
     """Returns pgbench scale factor for given target db size in MB.
 
@@ -152,7 +236,7 @@ def get_scale_for_db(size_mb: int) -> int:
 
 
 ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html)"
+    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html|walredo)"
 )
 
 
@@ -161,25 +245,35 @@ def allure_attach_from_dir(dir: Path):
 
     for attachment in Path(dir).glob("**/*"):
         if ATTACHMENT_NAME_REGEX.fullmatch(attachment.name) and attachment.stat().st_size > 0:
-            source = str(attachment)
             name = str(attachment.relative_to(dir))
 
-            # compress files larger than 1Mb, they're hardly readable in a browser
-            if attachment.stat().st_size > 1024 * 1024:
-                source = f"{attachment}.tar.gz"
-                with tarfile.open(source, "w:gz") as tar:
-                    tar.add(attachment, arcname=attachment.name)
-                name = f"{name}.tar.gz"
+            # compress files that are larger than 1Mb, they're hardly readable in a browser
+            if attachment.stat().st_size > 1024**2:
+                compressed = attachment.with_suffix(".zst")
 
-            if source.endswith(".tar.gz"):
+                cctx = zstandard.ZstdCompressor()
+                with attachment.open("rb") as fin, compressed.open("wb") as fout:
+                    cctx.copy_stream(fin, fout)
+
+                name = f"{name}.zst"
+                attachment = compressed
+
+            source = str(attachment)
+            if source.endswith(".gz"):
                 attachment_type = "application/gzip"
-                extension = "tar.gz"
+                extension = "gz"
+            elif source.endswith(".zst"):
+                attachment_type = "application/zstd"
+                extension = "zst"
             elif source.endswith(".svg"):
                 attachment_type = "image/svg+xml"
                 extension = "svg"
             elif source.endswith(".html"):
                 attachment_type = "text/html"
                 extension = "html"
+            elif source.endswith(".walredo"):
+                attachment_type = "application/octet-stream"
+                extension = "walredo"
             else:
                 attachment_type = "text/plain"
                 extension = attachment.suffix.removeprefix(".")
@@ -282,7 +376,12 @@ def start_in_background(
         return spawned_process
 
 
-def wait_until(number_of_iterations: int, interval: float, func: Fn):
+WaitUntilRet = TypeVar("WaitUntilRet")
+
+
+def wait_until(
+    number_of_iterations: int, interval: float, func: Callable[[], WaitUntilRet]
+) -> WaitUntilRet:
     """
     Wait until 'func' returns successfully, without exception. Returns the
     last return value from the function.
@@ -300,17 +399,203 @@ def wait_until(number_of_iterations: int, interval: float, func: Fn):
     raise Exception("timed out while waiting for %s" % func) from last_exception
 
 
-def wait_while(number_of_iterations: int, interval: float, func):
+def assert_eq(a, b) -> None:
+    assert a == b
+
+
+def assert_gt(a, b) -> None:
+    assert a > b
+
+
+def assert_ge(a, b) -> None:
+    assert a >= b
+
+
+def run_pg_bench_small(pg_bin: "PgBin", connstr: str):
     """
-    Wait until 'func' returns false, or throws an exception.
+    Fast way to populate data.
+    For more layers consider combining with these tenant settings:
+    {
+        "checkpoint_distance": 1024 ** 2,
+        "image_creation_threshold": 100,
+    }
     """
-    for i in range(number_of_iterations):
-        try:
-            if not func():
-                return
-            log.info("waiting for %s iteration %s failed", func, i + 1)
-            time.sleep(interval)
+    pg_bin.run(["pgbench", "-i", "-I dtGvp", "-s1", connstr])
+
+
+def humantime_to_ms(humantime: str) -> float:
+    """
+    Converts Rust humantime's output string to milliseconds.
+
+    humantime_to_ms("1h 1ms 406us") -> 3600001.406
+    """
+
+    unit_multiplier_map = {
+        "ns": 1e-6,
+        "us": 1e-3,
+        "ms": 1,
+        "s": 1e3,
+        "m": 1e3 * 60,
+        "h": 1e3 * 60 * 60,
+    }
+    matcher = re.compile(rf"^(\d+)({'|'.join(unit_multiplier_map.keys())})$")
+    total_ms = 0.0
+
+    if humantime == "0":
+        return total_ms
+
+    for item in humantime.split():
+        if (match := matcher.search(item)) is not None:
+            n, unit = match.groups()
+            total_ms += int(n) * unit_multiplier_map[unit]
+        else:
+            raise ValueError(
+                f"can't parse '{item}' (from string '{humantime}'), known units are {', '.join(unit_multiplier_map.keys())}."
+            )
+
+    return round(total_ms, 3)
+
+
+def scan_log_for_errors(input: Iterable[str], allowed_errors: List[str]) -> List[Tuple[int, str]]:
+    # FIXME: this duplicates test_runner/fixtures/pageserver/allowed_errors.py
+    error_or_warn = re.compile(r"\s(ERROR|WARN)")
+    errors = []
+    for lineno, line in enumerate(input, start=1):
+        if len(line) == 0:
             continue
-        except Exception:
-            return
-    raise Exception("timed out while waiting for %s" % func)
+
+        if error_or_warn.search(line):
+            # Is this a torn log line?  This happens when force-killing a process and restarting
+            # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
+            if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
+                continue
+
+            # It's an ERROR or WARN. Is it in the allow-list?
+            for a in allowed_errors:
+                if re.match(a, line):
+                    break
+            else:
+                errors.append((lineno, line))
+    return errors
+
+
+def assert_no_errors(log_file, service, allowed_errors):
+    if not log_file.exists():
+        log.warning(f"Skipping {service} log check: {log_file} does not exist")
+        return
+
+    with log_file.open("r") as f:
+        errors = scan_log_for_errors(f, allowed_errors)
+
+    for _lineno, error in errors:
+        log.info(f"not allowed {service} error: {error.strip()}")
+
+    assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
+
+
+@enum.unique
+class AuxFileStore(str, enum.Enum):
+    V1 = "v1"
+    V2 = "v2"
+    CrossValidation = "cross-validation"
+
+    def __repr__(self) -> str:
+        return f"'aux-{self.value}'"
+
+    def __str__(self) -> str:
+        return f"'aux-{self.value}'"
+
+
+def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str]):
+    """
+    This is essentially:
+
+    lines=$(comm -3 \
+        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        | wc -l)
+    [ "$lines" = "0" ]
+
+    But in a more mac friendly fashion.
+    """
+    started_at = time.time()
+
+    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
+        assert reader is not None
+        digest = sha256(usedforsecurity=False)
+        while True:
+            buf = reader.read(64 * 1024)
+            if not buf:
+                break
+            digest.update(buf)
+        return digest.digest()
+
+    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
+        with tarfile.open(p) as f:
+            matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
+            ret = list(
+                map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files)
+            )
+            ret.sort(key=lambda t: t[0])
+            return ret
+
+    left_list, right_list = map(build_hash_list, [left, right])
+
+    assert len(left_list) == len(
+        right_list
+    ), f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
+
+    mismatching = set()
+
+    for left_tuple, right_tuple in zip(left_list, right_list):
+        left_path, left_hash = left_tuple
+        right_path, right_hash = right_tuple
+        assert (
+            left_path == right_path
+        ), f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        if left_hash != right_hash:
+            mismatching.add(left_path)
+
+    assert len(mismatching) == 0, f"files with hash mismatch: {mismatching}"
+
+    elapsed = time.time() - started_at
+    log.info(f"assert_pageserver_backups_equal completed in {elapsed}s")
+
+
+class PropagatingThread(threading.Thread):
+    _target: Any
+    _args: Any
+    _kwargs: Any
+    """
+    Simple Thread wrapper with join() propagating the possible exception in the thread.
+    """
+
+    def run(self):
+        self.exc = None
+        try:
+            self.ret = self._target(*self._args, **self._kwargs)
+        except BaseException as e:
+            self.exc = e
+
+    def join(self, timeout=None):
+        super(PropagatingThread, self).join(timeout)
+        if self.exc:
+            raise self.exc
+        return self.ret
+
+
+def human_bytes(amt: float) -> str:
+    """
+    Render a bytes amount into nice IEC bytes string.
+    """
+
+    suffixes = ["", "Ki", "Mi", "Gi"]
+
+    last = suffixes[-1]
+
+    for name in suffixes:
+        if amt < 1024 or name == last:
+            return f"{int(round(amt))} {name}B"
+        amt = amt / 1024
+
+    raise RuntimeError("unreachable")

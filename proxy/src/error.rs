@@ -1,5 +1,7 @@
 use std::{error::Error as StdError, fmt, io};
 
+use measured::FixedCardinalityLabel;
+
 /// Upcast (almost) any error into an opaque [`io::Error`].
 pub fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e)
@@ -17,7 +19,7 @@ pub fn log_error<E: fmt::Display>(e: E) -> E {
 /// NOTE: This trait should not be implemented for [`anyhow::Error`], since it
 /// is way too convenient and tends to proliferate all across the codebase,
 /// ultimately leading to accidental leaks of sensitive data.
-pub trait UserFacingError: fmt::Display {
+pub trait UserFacingError: ReportableError {
     /// Format the error for client, stripping all sensitive info.
     ///
     /// Although this might be a no-op for many types, it's highly
@@ -26,5 +28,66 @@ pub trait UserFacingError: fmt::Display {
     #[inline(always)]
     fn to_string_client(&self) -> String {
         self.to_string()
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, FixedCardinalityLabel)]
+#[label(singleton = "type")]
+pub enum ErrorKind {
+    /// Wrong password, unknown endpoint, protocol violation, etc...
+    User,
+
+    /// Network error between user and proxy. Not necessarily user error
+    #[label(rename = "clientdisconnect")]
+    ClientDisconnect,
+
+    /// Proxy self-imposed user rate limits
+    #[label(rename = "ratelimit")]
+    RateLimit,
+
+    /// Proxy self-imposed service-wise rate limits
+    #[label(rename = "serviceratelimit")]
+    ServiceRateLimit,
+
+    /// internal errors
+    Service,
+
+    /// Error communicating with control plane
+    #[label(rename = "controlplane")]
+    ControlPlane,
+
+    /// Postgres error
+    Postgres,
+
+    /// Error communicating with compute
+    Compute,
+}
+
+impl ErrorKind {
+    pub fn to_metric_label(&self) -> &'static str {
+        match self {
+            ErrorKind::User => "user",
+            ErrorKind::ClientDisconnect => "clientdisconnect",
+            ErrorKind::RateLimit => "ratelimit",
+            ErrorKind::ServiceRateLimit => "serviceratelimit",
+            ErrorKind::Service => "service",
+            ErrorKind::ControlPlane => "controlplane",
+            ErrorKind::Postgres => "postgres",
+            ErrorKind::Compute => "compute",
+        }
+    }
+}
+
+pub trait ReportableError: fmt::Display + Send + 'static {
+    fn get_error_kind(&self) -> ErrorKind;
+}
+
+impl ReportableError for tokio_postgres::error::Error {
+    fn get_error_kind(&self) -> ErrorKind {
+        if self.as_db_error().is_some() {
+            ErrorKind::Postgres
+        } else {
+            ErrorKind::Compute
+        }
     }
 }

@@ -48,6 +48,6 @@ def test_pg_clients(test_output_dir: Path, remote_pg: RemotePostgres, client: st
     subprocess_capture(test_output_dir, build_cmd, check=True)
 
     run_cmd = [docker_bin, "run", "--rm", "--env-file", env_file, image_tag]
-    basepath = subprocess_capture(test_output_dir, run_cmd, check=True)
+    _, output, _ = subprocess_capture(test_output_dir, run_cmd, check=True, capture_stdout=True)
 
-    assert Path(f"{basepath}.stdout").read_text().strip() == "1"
+    assert str(output).strip() == "1"

@@ -3,7 +3,6 @@ use std::time::{Duration, SystemTime};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use pq_proto::{read_cstr, PG_EPOCH};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use tracing::{trace, warn};
 
 use crate::lsn::Lsn;
@@ -15,30 +14,24 @@ use crate::lsn::Lsn;
 ///
 /// serde Serialize is used only for human readable dump to json (e.g. in
 /// safekeepers debug_dump).
-#[serde_as]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageserverFeedback {
     /// Last known size of the timeline. Used to enforce timeline size limit.
     pub current_timeline_size: u64,
     /// LSN last received and ingested by the pageserver. Controls backpressure.
-    #[serde_as(as = "DisplayFromStr")]
     pub last_received_lsn: Lsn,
     /// LSN up to which data is persisted by the pageserver to its local disc.
     /// Controls backpressure.
-    #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
     /// LSN up to which data is persisted by the pageserver on s3; safekeepers
     /// consider WAL before it can be removed.
-    #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
     // Serialize with RFC3339 format.
     #[serde(with = "serde_systemtime")]
     pub replytime: SystemTime,
+    /// Used to track feedbacks from different shards. Always zero for unsharded tenants.
+    pub shard_number: u32,
 }
-
-// NOTE: Do not forget to increment this number when adding new fields to PageserverFeedback.
-// Do not remove previously available fields because this might be backwards incompatible.
-pub const PAGESERVER_FEEDBACK_FIELDS_NUMBER: u8 = 5;
 
 impl PageserverFeedback {
     pub fn empty() -> PageserverFeedback {
@@ -48,6 +41,7 @@ impl PageserverFeedback {
             remote_consistent_lsn: Lsn::INVALID,
             disk_consistent_lsn: Lsn::INVALID,
             replytime: *PG_EPOCH,
+            shard_number: 0,
         }
     }
 
@@ -64,17 +58,26 @@ impl PageserverFeedback {
     //
     // TODO: change serialized fields names once all computes migrate to rename.
     pub fn serialize(&self, buf: &mut BytesMut) {
-        buf.put_u8(PAGESERVER_FEEDBACK_FIELDS_NUMBER); // # of keys
+        let buf_ptr = buf.len();
+        buf.put_u8(0); // # of keys, will be filled later
+        let mut nkeys = 0;
+
+        nkeys += 1;
         buf.put_slice(b"current_timeline_size\0");
         buf.put_i32(8);
         buf.put_u64(self.current_timeline_size);
 
+        nkeys += 1;
         buf.put_slice(b"ps_writelsn\0");
         buf.put_i32(8);
         buf.put_u64(self.last_received_lsn.0);
+
+        nkeys += 1;
         buf.put_slice(b"ps_flushlsn\0");
         buf.put_i32(8);
         buf.put_u64(self.disk_consistent_lsn.0);
+
+        nkeys += 1;
         buf.put_slice(b"ps_applylsn\0");
         buf.put_i32(8);
         buf.put_u64(self.remote_consistent_lsn.0);
@@ -85,9 +88,19 @@ impl PageserverFeedback {
             .expect("failed to serialize pg_replytime earlier than PG_EPOCH")
             .as_micros() as i64;
 
+        nkeys += 1;
         buf.put_slice(b"ps_replytime\0");
         buf.put_i32(8);
         buf.put_i64(timestamp);
+
+        if self.shard_number > 0 {
+            nkeys += 1;
+            buf.put_slice(b"shard_number\0");
+            buf.put_i32(4);
+            buf.put_u32(self.shard_number);
+        }
+
+        buf[buf_ptr] = nkeys;
     }
 
     // Deserialize PageserverFeedback message
@@ -127,6 +140,11 @@ impl PageserverFeedback {
                     } else {
                         rf.replytime = *PG_EPOCH - Duration::from_micros(-raw_time as u64);
                     }
+                }
+                b"shard_number" => {
+                    let len = buf.get_i32();
+                    assert_eq!(len, 4);
+                    rf.shard_number = buf.get_u32();
                 }
                 _ => {
                     let len = buf.get_i32();
@@ -199,10 +217,7 @@ mod tests {
         rf.serialize(&mut data);
 
         // Add an extra field to the buffer and adjust number of keys
-        if let Some(first) = data.first_mut() {
-            *first = PAGESERVER_FEEDBACK_FIELDS_NUMBER + 1;
-        }
-
+        data[0] += 1;
         data.put_slice(b"new_field_one\0");
         data.put_i32(8);
         data.put_u64(42);

@@ -1,217 +1,612 @@
-//! Periodically collect proxy consumption metrics
-//! and push them to a HTTP endpoint.
-use crate::{config::MetricCollectionConfig, http};
-use chrono::{DateTime, Utc};
-use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
-use serde::Serialize;
-use std::collections::HashMap;
-use tracing::{error, info, instrument, trace, warn};
+use std::sync::{Arc, OnceLock};
 
-const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
+use lasso::ThreadedRodeo;
+use measured::{
+    label::{FixedCardinalitySet, LabelName, LabelSet, LabelValue, StaticLabelSet},
+    metric::{histogram::Thresholds, name::MetricName},
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
+    LabelGroup, MetricGroup,
+};
+use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 
-///
-/// Key that uniquely identifies the object, this metric describes.
-/// Currently, endpoint_id is enough, but this may change later,
-/// so keep it in a named struct.
-///
-/// Both the proxy and the ingestion endpoint will live in the same region (or cell)
-/// so while the project-id is unique across regions the whole pipeline will work correctly
-/// because we enrich the event with project_id in the control-plane endpoint.
-///
-#[derive(Eq, Hash, PartialEq, Serialize, Debug)]
-pub struct Ids {
-    pub endpoint_id: String,
-    pub branch_id: String,
+use tokio::time::{self, Instant};
+
+use crate::console::messages::ColdStartInfo;
+
+#[derive(MetricGroup)]
+#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
+pub struct Metrics {
+    #[metric(namespace = "proxy")]
+    #[metric(init = ProxyMetrics::new(thread_pool))]
+    pub proxy: ProxyMetrics,
+
+    #[metric(namespace = "wake_compute_lock")]
+    pub wake_compute_lock: ApiLockMetrics,
 }
 
-pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<()> {
-    info!("metrics collector config: {config:?}");
-    scopeguard::defer! {
-        info!("metrics collector has shut down");
+static SELF: OnceLock<Metrics> = OnceLock::new();
+impl Metrics {
+    pub fn install(thread_pool: Arc<ThreadPoolMetrics>) {
+        SELF.set(Metrics::new(thread_pool))
+            .ok()
+            .expect("proxy metrics must not be installed more than once");
     }
 
-    let http_client = http::new_client();
-    let mut cached_metrics: HashMap<Ids, (u64, DateTime<Utc>)> = HashMap::new();
-    let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
+    pub fn get() -> &'static Self {
+        #[cfg(test)]
+        return SELF.get_or_init(|| Metrics::new(Arc::new(ThreadPoolMetrics::new(0))));
 
-    let mut ticker = tokio::time::interval(config.interval);
-    loop {
-        ticker.tick().await;
+        #[cfg(not(test))]
+        SELF.get()
+            .expect("proxy metrics must be installed by the main() function")
+    }
+}
 
-        let res = collect_metrics_iteration(
-            &http_client,
-            &mut cached_metrics,
-            &config.endpoint,
-            &hostname,
-        )
-        .await;
+#[derive(MetricGroup)]
+#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
+pub struct ProxyMetrics {
+    #[metric(flatten)]
+    pub db_connections: CounterPairVec<NumDbConnectionsGauge>,
+    #[metric(flatten)]
+    pub client_connections: CounterPairVec<NumClientConnectionsGauge>,
+    #[metric(flatten)]
+    pub connection_requests: CounterPairVec<NumConnectionRequestsGauge>,
+    #[metric(flatten)]
+    pub http_endpoint_pools: HttpEndpointPools,
 
-        match res {
-            Err(e) => error!("failed to send consumption metrics: {e} "),
-            Ok(_) => trace!("periodic metrics collection completed successfully"),
+    /// Time it took for proxy to establish a connection to the compute endpoint.
+    // largest bucket = 2^16 * 0.5ms = 32s
+    #[metric(metadata = Thresholds::exponential_buckets(0.0005, 2.0))]
+    pub compute_connection_latency_seconds: HistogramVec<ComputeConnectionLatencySet, 16>,
+
+    /// Time it took for proxy to receive a response from control plane.
+    #[metric(
+        // largest bucket = 2^16 * 0.2ms = 13s
+        metadata = Thresholds::exponential_buckets(0.0002, 2.0),
+    )]
+    pub console_request_latency: HistogramVec<ConsoleRequestSet, 16>,
+
+    /// Time it takes to acquire a token to call console plane.
+    // largest bucket = 3^16 * 0.05ms = 2.15s
+    #[metric(metadata = Thresholds::exponential_buckets(0.00005, 3.0))]
+    pub control_plane_token_acquire_seconds: Histogram<16>,
+
+    /// Size of the HTTP request body lengths.
+    // smallest bucket = 16 bytes
+    // largest bucket = 4^12 * 16 bytes = 256MB
+    #[metric(metadata = Thresholds::exponential_buckets(16.0, 4.0))]
+    pub http_conn_content_length_bytes: HistogramVec<StaticLabelSet<HttpDirection>, 12>,
+
+    /// Time it takes to reclaim unused connection pools.
+    #[metric(metadata = Thresholds::exponential_buckets(1e-6, 2.0))]
+    pub http_pool_reclaimation_lag_seconds: Histogram<16>,
+
+    /// Number of opened connections to a database.
+    pub http_pool_opened_connections: Gauge,
+
+    /// Number of cache hits/misses for allowed ips.
+    pub allowed_ips_cache_misses: CounterVec<StaticLabelSet<CacheOutcome>>,
+
+    /// Number of allowed ips
+    #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0]))]
+    pub allowed_ips_number: Histogram<10>,
+
+    /// Number of connections (per sni).
+    pub accepted_connections_by_sni: CounterVec<StaticLabelSet<SniKind>>,
+
+    /// Number of connection failures (per kind).
+    pub connection_failures_total: CounterVec<StaticLabelSet<ConnectionFailureKind>>,
+
+    /// Number of wake-up failures (per kind).
+    pub connection_failures_breakdown: CounterVec<ConnectionFailuresBreakdownSet>,
+
+    /// Number of bytes sent/received between all clients and backends.
+    pub io_bytes: CounterVec<StaticLabelSet<Direction>>,
+
+    /// Number of errors by a given classification.
+    pub errors_total: CounterVec<StaticLabelSet<crate::error::ErrorKind>>,
+
+    /// Number of cancellation requests (per found/not_found).
+    pub cancellation_requests_total: CounterVec<CancellationRequestSet>,
+
+    /// Number of errors by a given classification
+    pub redis_errors_total: CounterVec<RedisErrorsSet>,
+
+    /// Number of TLS handshake failures
+    pub tls_handshake_failures: Counter,
+
+    /// Number of connection requests affected by authentication rate limits
+    pub requests_auth_rate_limits_total: Counter,
+
+    /// HLL approximate cardinality of endpoints that are connecting
+    pub connecting_endpoints: HyperLogLogVec<StaticLabelSet<Protocol>, 32>,
+
+    /// Number of endpoints affected by errors of a given classification
+    pub endpoints_affected_by_errors: HyperLogLogVec<StaticLabelSet<crate::error::ErrorKind>, 32>,
+
+    /// Number of endpoints affected by authentication rate limits
+    pub endpoints_auth_rate_limits: HyperLogLog<32>,
+
+    /// Number of invalid endpoints (per protocol, per rejected).
+    pub invalid_endpoints_total: CounterVec<InvalidEndpointsSet>,
+
+    /// Number of retries (per outcome, per retry_type).
+    #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]))]
+    pub retries_metric: HistogramVec<RetriesMetricSet, 9>,
+
+    /// Number of events consumed from redis (per event type).
+    pub redis_events_count: CounterVec<StaticLabelSet<RedisEventsCount>>,
+
+    #[metric(namespace = "connect_compute_lock")]
+    pub connect_compute_lock: ApiLockMetrics,
+
+    #[metric(namespace = "scram_pool")]
+    #[metric(init = thread_pool)]
+    pub scram_pool: Arc<ThreadPoolMetrics>,
+}
+
+#[derive(MetricGroup)]
+#[metric(new())]
+pub struct ApiLockMetrics {
+    /// Number of semaphores registered in this api lock
+    pub semaphores_registered: Counter,
+    /// Number of semaphores unregistered in this api lock
+    pub semaphores_unregistered: Counter,
+    /// Time it takes to reclaim unused semaphores in the api lock
+    #[metric(metadata = Thresholds::exponential_buckets(1e-6, 2.0))]
+    pub reclamation_lag_seconds: Histogram<16>,
+    /// Time it takes to acquire a semaphore lock
+    #[metric(metadata = Thresholds::exponential_buckets(1e-4, 2.0))]
+    pub semaphore_acquire_seconds: Histogram<16>,
+}
+
+impl Default for ApiLockMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+#[label(singleton = "direction")]
+pub enum HttpDirection {
+    Request,
+    Response,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+#[label(singleton = "direction")]
+pub enum Direction {
+    Tx,
+    Rx,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+#[label(singleton = "protocol")]
+pub enum Protocol {
+    Http,
+    Ws,
+    Tcp,
+    SniRouter,
+}
+
+impl Protocol {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Protocol::Http => "http",
+            Protocol::Ws => "ws",
+            Protocol::Tcp => "tcp",
+            Protocol::SniRouter => "sni_router",
         }
     }
 }
 
-fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
-    let mut current_metrics: Vec<(Ids, (u64, DateTime<Utc>))> = Vec::new();
-    let metrics = prometheus::default_registry().gather();
+impl std::fmt::Display for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
-    for m in metrics {
-        if m.get_name() == "proxy_io_bytes_per_client" {
-            for ms in m.get_metric() {
-                let direction = ms
-                    .get_label()
-                    .iter()
-                    .find(|l| l.get_name() == "direction")
-                    .unwrap()
-                    .get_value();
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+pub enum Bool {
+    True,
+    False,
+}
 
-                // Only collect metric for outbound traffic
-                if direction == "tx" {
-                    let endpoint_id = ms
-                        .get_label()
-                        .iter()
-                        .find(|l| l.get_name() == "endpoint_id")
-                        .unwrap()
-                        .get_value();
-                    let branch_id = ms
-                        .get_label()
-                        .iter()
-                        .find(|l| l.get_name() == "branch_id")
-                        .unwrap()
-                        .get_value();
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+#[label(singleton = "outcome")]
+pub enum Outcome {
+    Success,
+    Failed,
+}
 
-                    let value = ms.get_counter().get_value() as u64;
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+#[label(singleton = "outcome")]
+pub enum CacheOutcome {
+    Hit,
+    Miss,
+}
 
-                    // Report if the metric value is suspiciously large
-                    if value > (1u64 << 40) {
-                        warn!(
-                            "potentially abnormal counter value: branch_id {} endpoint_id {} val: {}",
-                            branch_id, endpoint_id, value
-                        );
-                    }
+#[derive(LabelGroup)]
+#[label(set = ConsoleRequestSet)]
+pub struct ConsoleRequest<'a> {
+    #[label(dynamic_with = ThreadedRodeo, default)]
+    pub request: &'a str,
+}
 
-                    current_metrics.push((
-                        Ids {
-                            endpoint_id: endpoint_id.to_string(),
-                            branch_id: branch_id.to_string(),
-                        },
-                        (value, Utc::now()),
-                    ));
-                }
-            }
+#[derive(MetricGroup, Default)]
+pub struct HttpEndpointPools {
+    /// Number of endpoints we have registered pools for
+    pub http_pool_endpoints_registered_total: Counter,
+    /// Number of endpoints we have unregistered pools for
+    pub http_pool_endpoints_unregistered_total: Counter,
+}
+
+pub struct HttpEndpointPoolsGuard<'a> {
+    dec: &'a Counter,
+}
+
+impl Drop for HttpEndpointPoolsGuard<'_> {
+    fn drop(&mut self) {
+        self.dec.inc();
+    }
+}
+
+impl HttpEndpointPools {
+    pub fn guard(&self) -> HttpEndpointPoolsGuard {
+        self.http_pool_endpoints_registered_total.inc();
+        HttpEndpointPoolsGuard {
+            dec: &self.http_pool_endpoints_unregistered_total,
+        }
+    }
+}
+pub struct NumDbConnectionsGauge;
+impl CounterPairAssoc for NumDbConnectionsGauge {
+    const INC_NAME: &'static MetricName = MetricName::from_str("opened_db_connections_total");
+    const DEC_NAME: &'static MetricName = MetricName::from_str("closed_db_connections_total");
+    const INC_HELP: &'static str = "Number of opened connections to a database.";
+    const DEC_HELP: &'static str = "Number of closed connections to a database.";
+    type LabelGroupSet = StaticLabelSet<Protocol>;
+}
+pub type NumDbConnectionsGuard<'a> = metrics::MeasuredCounterPairGuard<'a, NumDbConnectionsGauge>;
+
+pub struct NumClientConnectionsGauge;
+impl CounterPairAssoc for NumClientConnectionsGauge {
+    const INC_NAME: &'static MetricName = MetricName::from_str("opened_client_connections_total");
+    const DEC_NAME: &'static MetricName = MetricName::from_str("closed_client_connections_total");
+    const INC_HELP: &'static str = "Number of opened connections from a client.";
+    const DEC_HELP: &'static str = "Number of closed connections from a client.";
+    type LabelGroupSet = StaticLabelSet<Protocol>;
+}
+pub type NumClientConnectionsGuard<'a> =
+    metrics::MeasuredCounterPairGuard<'a, NumClientConnectionsGauge>;
+
+pub struct NumConnectionRequestsGauge;
+impl CounterPairAssoc for NumConnectionRequestsGauge {
+    const INC_NAME: &'static MetricName = MetricName::from_str("accepted_connections_total");
+    const DEC_NAME: &'static MetricName = MetricName::from_str("closed_connections_total");
+    const INC_HELP: &'static str = "Number of client connections accepted.";
+    const DEC_HELP: &'static str = "Number of client connections closed.";
+    type LabelGroupSet = StaticLabelSet<Protocol>;
+}
+pub type NumConnectionRequestsGuard<'a> =
+    metrics::MeasuredCounterPairGuard<'a, NumConnectionRequestsGauge>;
+
+#[derive(LabelGroup)]
+#[label(set = ComputeConnectionLatencySet)]
+pub struct ComputeConnectionLatencyGroup {
+    protocol: Protocol,
+    cold_start_info: ColdStartInfo,
+    outcome: ConnectOutcome,
+    excluded: LatencyExclusions,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+pub enum LatencyExclusions {
+    Client,
+    ClientAndCplane,
+    ClientCplaneCompute,
+    ClientCplaneComputeRetry,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+#[label(singleton = "kind")]
+pub enum SniKind {
+    Sni,
+    NoSni,
+    PasswordHack,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+#[label(singleton = "kind")]
+pub enum ConnectionFailureKind {
+    ComputeCached,
+    ComputeUncached,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+#[label(singleton = "kind")]
+pub enum WakeupFailureKind {
+    BadComputeAddress,
+    ApiTransportError,
+    QuotaExceeded,
+    ApiConsoleLocked,
+    ApiConsoleBadRequest,
+    ApiConsoleOtherServerError,
+    ApiConsoleOtherError,
+    TimeoutError,
+}
+
+#[derive(LabelGroup)]
+#[label(set = ConnectionFailuresBreakdownSet)]
+pub struct ConnectionFailuresBreakdownGroup {
+    pub kind: WakeupFailureKind,
+    pub retry: Bool,
+}
+
+#[derive(LabelGroup, Copy, Clone)]
+#[label(set = RedisErrorsSet)]
+pub struct RedisErrors<'a> {
+    #[label(dynamic_with = ThreadedRodeo, default)]
+    pub channel: &'a str,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+pub enum CancellationSource {
+    FromClient,
+    FromRedis,
+    Local,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+pub enum CancellationOutcome {
+    NotFound,
+    Found,
+}
+
+#[derive(LabelGroup)]
+#[label(set = CancellationRequestSet)]
+pub struct CancellationRequest {
+    pub source: CancellationSource,
+    pub kind: CancellationOutcome,
+}
+
+pub enum Waiting {
+    Cplane,
+    Client,
+    Compute,
+    RetryTimeout,
+}
+
+#[derive(Default)]
+struct Accumulated {
+    cplane: time::Duration,
+    client: time::Duration,
+    compute: time::Duration,
+    retry: time::Duration,
+}
+
+pub struct LatencyTimer {
+    // time since the stopwatch was started
+    start: time::Instant,
+    // time since the stopwatch was stopped
+    stop: Option<time::Instant>,
+    // accumulated time on the stopwatch
+    accumulated: Accumulated,
+    // label data
+    protocol: Protocol,
+    cold_start_info: ColdStartInfo,
+    outcome: ConnectOutcome,
+}
+
+pub struct LatencyTimerPause<'a> {
+    timer: &'a mut LatencyTimer,
+    start: time::Instant,
+    waiting_for: Waiting,
+}
+
+impl LatencyTimer {
+    pub fn new(protocol: Protocol) -> Self {
+        Self {
+            start: time::Instant::now(),
+            stop: None,
+            accumulated: Accumulated::default(),
+            protocol,
+            cold_start_info: ColdStartInfo::Unknown,
+            // assume failed unless otherwise specified
+            outcome: ConnectOutcome::Failed,
         }
     }
 
-    current_metrics
-}
-
-#[instrument(skip_all)]
-async fn collect_metrics_iteration(
-    client: &http::ClientWithMiddleware,
-    cached_metrics: &mut HashMap<Ids, (u64, DateTime<Utc>)>,
-    metric_collection_endpoint: &reqwest::Url,
-    hostname: &str,
-) -> anyhow::Result<()> {
-    info!(
-        "starting collect_metrics_iteration. metric_collection_endpoint: {}",
-        metric_collection_endpoint
-    );
-
-    let current_metrics = gather_proxy_io_bytes_per_client();
-
-    let metrics_to_send: Vec<Event<Ids>> = current_metrics
-        .iter()
-        .filter_map(|(curr_key, (curr_val, curr_time))| {
-            let mut start_time = *curr_time;
-            let mut value = *curr_val;
-
-            if let Some((prev_val, prev_time)) = cached_metrics.get(curr_key) {
-                // Only send metrics updates if the metric has increased
-                if curr_val > prev_val {
-                    value = curr_val - prev_val;
-                    start_time = *prev_time;
-                } else {
-                    if curr_val < prev_val {
-                        error!("proxy_io_bytes_per_client metric value decreased from {} to {} for key {:?}",
-                        prev_val, curr_val, curr_key);
-                    }
-                    return None;
-                }
-            };
-
-            Some(Event {
-                kind: EventType::Incremental {
-                    start_time,
-                    stop_time: *curr_time,
-                },
-                metric: PROXY_IO_BYTES_PER_CLIENT,
-                idempotency_key: idempotency_key(hostname.to_owned()),
-                value,
-                extra: Ids {
-                    endpoint_id: curr_key.endpoint_id.clone(),
-                    branch_id: curr_key.branch_id.clone(),
-                },
-            })
-        })
-        .collect();
-
-    if metrics_to_send.is_empty() {
-        trace!("no new metrics to send");
-        return Ok(());
+    pub fn pause(&mut self, waiting_for: Waiting) -> LatencyTimerPause<'_> {
+        LatencyTimerPause {
+            timer: self,
+            start: Instant::now(),
+            waiting_for,
+        }
     }
 
-    // Send metrics.
-    // Split into chunks of 1000 metrics to avoid exceeding the max request size
-    for chunk in metrics_to_send.chunks(CHUNK_SIZE) {
-        let chunk_json = serde_json::value::to_raw_value(&EventChunk { events: chunk })
-            .expect("ProxyConsumptionMetric should not fail serialization");
+    pub fn cold_start_info(&mut self, cold_start_info: ColdStartInfo) {
+        self.cold_start_info = cold_start_info;
+    }
 
-        let res = client
-            .post(metric_collection_endpoint.clone())
-            .json(&chunk_json)
-            .send()
-            .await;
+    pub fn success(&mut self) {
+        // stop the stopwatch and record the time that we have accumulated
+        self.stop = Some(time::Instant::now());
 
-        let res = match res {
-            Ok(x) => x,
-            Err(err) => {
-                error!("failed to send metrics: {:?}", err);
-                continue;
-            }
-        };
+        // success
+        self.outcome = ConnectOutcome::Success;
+    }
+}
 
-        if res.status().is_success() {
-            // update cached metrics after they were sent successfully
-            for send_metric in chunk {
-                let stop_time = match send_metric.kind {
-                    EventType::Incremental { stop_time, .. } => stop_time,
-                    _ => unreachable!(),
-                };
+impl Drop for LatencyTimerPause<'_> {
+    fn drop(&mut self) {
+        let dur = self.start.elapsed();
+        match self.waiting_for {
+            Waiting::Cplane => self.timer.accumulated.cplane += dur,
+            Waiting::Client => self.timer.accumulated.client += dur,
+            Waiting::Compute => self.timer.accumulated.compute += dur,
+            Waiting::RetryTimeout => self.timer.accumulated.retry += dur,
+        }
+    }
+}
 
-                cached_metrics
-                    .entry(Ids {
-                        endpoint_id: send_metric.extra.endpoint_id.clone(),
-                        branch_id: send_metric.extra.branch_id.clone(),
-                    })
-                    // update cached value (add delta) and time
-                    .and_modify(|e| {
-                        e.0 = e.0.saturating_add(send_metric.value);
-                        e.1 = stop_time
-                    })
-                    // cache new metric
-                    .or_insert((send_metric.value, stop_time));
-            }
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+pub enum ConnectOutcome {
+    Success,
+    Failed,
+}
+
+impl Drop for LatencyTimer {
+    fn drop(&mut self) {
+        let duration = self
+            .stop
+            .unwrap_or_else(time::Instant::now)
+            .duration_since(self.start);
+
+        let metric = &Metrics::get().proxy.compute_connection_latency_seconds;
+
+        // Excluding client communication from the accumulated time.
+        metric.observe(
+            ComputeConnectionLatencyGroup {
+                protocol: self.protocol,
+                cold_start_info: self.cold_start_info,
+                outcome: self.outcome,
+                excluded: LatencyExclusions::Client,
+            },
+            duration
+                .saturating_sub(self.accumulated.client)
+                .as_secs_f64(),
+        );
+
+        // Exclude client and cplane communication from the accumulated time.
+        let accumulated_total = self.accumulated.client + self.accumulated.cplane;
+        metric.observe(
+            ComputeConnectionLatencyGroup {
+                protocol: self.protocol,
+                cold_start_info: self.cold_start_info,
+                outcome: self.outcome,
+                excluded: LatencyExclusions::ClientAndCplane,
+            },
+            duration.saturating_sub(accumulated_total).as_secs_f64(),
+        );
+
+        // Exclude client cplane, compue communication from the accumulated time.
+        let accumulated_total =
+            self.accumulated.client + self.accumulated.cplane + self.accumulated.compute;
+        metric.observe(
+            ComputeConnectionLatencyGroup {
+                protocol: self.protocol,
+                cold_start_info: self.cold_start_info,
+                outcome: self.outcome,
+                excluded: LatencyExclusions::ClientCplaneCompute,
+            },
+            duration.saturating_sub(accumulated_total).as_secs_f64(),
+        );
+
+        // Exclude client cplane, compue, retry communication from the accumulated time.
+        let accumulated_total = self.accumulated.client
+            + self.accumulated.cplane
+            + self.accumulated.compute
+            + self.accumulated.retry;
+        metric.observe(
+            ComputeConnectionLatencyGroup {
+                protocol: self.protocol,
+                cold_start_info: self.cold_start_info,
+                outcome: self.outcome,
+                excluded: LatencyExclusions::ClientCplaneComputeRetry,
+            },
+            duration.saturating_sub(accumulated_total).as_secs_f64(),
+        );
+    }
+}
+
+impl From<bool> for Bool {
+    fn from(value: bool) -> Self {
+        if value {
+            Bool::True
         } else {
-            error!("metrics endpoint refused the sent metrics: {:?}", res);
-            for metric in chunk.iter() {
-                // Report if the metric value is suspiciously large
-                if metric.value > (1u64 << 40) {
-                    error!("potentially abnormal metric value: {:?}", metric);
-                }
-            }
+            Bool::False
         }
     }
-    Ok(())
+}
+
+#[derive(LabelGroup)]
+#[label(set = InvalidEndpointsSet)]
+pub struct InvalidEndpointsGroup {
+    pub protocol: Protocol,
+    pub rejected: Bool,
+    pub outcome: ConnectOutcome,
+}
+
+#[derive(LabelGroup)]
+#[label(set = RetriesMetricSet)]
+pub struct RetriesMetricGroup {
+    pub outcome: ConnectOutcome,
+    pub retry_type: RetryType,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+pub enum RetryType {
+    WakeCompute,
+    ConnectToCompute,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+#[label(singleton = "event")]
+pub enum RedisEventsCount {
+    EndpointCreated,
+    BranchCreated,
+    ProjectCreated,
+    CancelSession,
+    PasswordUpdate,
+    AllowedIpsUpdate,
+}
+
+pub struct ThreadPoolWorkers(usize);
+pub struct ThreadPoolWorkerId(pub usize);
+
+impl LabelValue for ThreadPoolWorkerId {
+    fn visit<V: measured::label::LabelVisitor>(&self, v: V) -> V::Output {
+        v.write_int(self.0 as i64)
+    }
+}
+
+impl LabelGroup for ThreadPoolWorkerId {
+    fn visit_values(&self, v: &mut impl measured::label::LabelGroupVisitor) {
+        v.write_value(LabelName::from_str("worker"), self);
+    }
+}
+
+impl LabelSet for ThreadPoolWorkers {
+    type Value<'a> = ThreadPoolWorkerId;
+
+    fn dynamic_cardinality(&self) -> Option<usize> {
+        Some(self.0)
+    }
+
+    fn encode(&self, value: Self::Value<'_>) -> Option<usize> {
+        (value.0 < self.0).then_some(value.0)
+    }
+
+    fn decode(&self, value: usize) -> Self::Value<'_> {
+        ThreadPoolWorkerId(value)
+    }
+}
+
+impl FixedCardinalitySet for ThreadPoolWorkers {
+    fn cardinality(&self) -> usize {
+        self.0
+    }
+}
+
+#[derive(MetricGroup)]
+#[metric(new(workers: usize))]
+pub struct ThreadPoolMetrics {
+    pub injector_queue_depth: Gauge,
+    #[metric(init = GaugeVec::with_label_set(ThreadPoolWorkers(workers)))]
+    pub worker_queue_depth: GaugeVec<ThreadPoolWorkers>,
+    #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
+    pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
+    #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
+    pub worker_task_skips_total: CounterVec<ThreadPoolWorkers>,
 }

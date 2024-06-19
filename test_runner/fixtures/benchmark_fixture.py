@@ -5,7 +5,6 @@ import json
 import os
 import re
 import timeit
-import warnings
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -13,13 +12,16 @@ from pathlib import Path
 # Type-related stuff
 from typing import Callable, ClassVar, Dict, Iterator, Optional
 
+import allure
 import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
+from _pytest.fixtures import FixtureRequest
 from _pytest.terminal import TerminalReporter
 
+from fixtures.common_types import TenantId, TimelineId
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
-from fixtures.types import TenantId, TimelineId
 
 """
 This file contains fixtures for micro-benchmarks.
@@ -385,7 +387,7 @@ class NeonBenchmarker:
         path = f"{repo_dir}/tenants/{tenant_id}/timelines/{timeline_id}"
 
         totalbytes = 0
-        for root, dirs, files in os.walk(path):
+        for root, _dirs, files in os.walk(path):
             for name in files:
                 totalbytes += os.path.getsize(os.path.join(root, name))
 
@@ -411,13 +413,31 @@ class NeonBenchmarker:
 
 
 @pytest.fixture(scope="function")
-def zenbenchmark(record_property: Callable[[str, object], None]) -> Iterator[NeonBenchmarker]:
+def zenbenchmark(
+    request: FixtureRequest,
+    record_property: Callable[[str, object], None],
+) -> Iterator[NeonBenchmarker]:
     """
     This is a python decorator for benchmark fixtures. It contains functions for
     recording measurements, and prints them out at the end.
     """
     benchmarker = NeonBenchmarker(record_property)
     yield benchmarker
+
+    results = {}
+    for _, recorded_property in request.node.user_properties:
+        name = recorded_property["name"]
+        value = str(recorded_property["value"])
+        if (unit := recorded_property["unit"].strip()) != "":
+            value += f" {unit}"
+        results[name] = value
+
+    content = json.dumps(results, indent=2)
+    allure.attach(
+        content,
+        "benchmarks.json",
+        allure.attachment_type.JSON,
+    )
 
 
 def pytest_addoption(parser: Parser):
@@ -462,20 +482,18 @@ def pytest_terminal_summary(
                 terminalreporter.section("Benchmark results", "-")
                 is_header_printed = True
 
-            terminalreporter.write(
-                "{}.{}: ".format(test_report.head_line, recorded_property["name"])
-            )
+            terminalreporter.write(f"{test_report.head_line}.{recorded_property['name']}: ")
             unit = recorded_property["unit"]
             value = recorded_property["value"]
             if unit == "MB":
-                terminalreporter.write("{0:,.0f}".format(value), green=True)
+                terminalreporter.write(f"{value:,.0f}", green=True)
             elif unit in ("s", "ms") and isinstance(value, float):
-                terminalreporter.write("{0:,.3f}".format(value), green=True)
+                terminalreporter.write(f"{value:,.3f}", green=True)
             elif isinstance(value, float):
-                terminalreporter.write("{0:,.4f}".format(value), green=True)
+                terminalreporter.write(f"{value:,.4f}", green=True)
             else:
                 terminalreporter.write(str(value), green=True)
-            terminalreporter.line(" {}".format(unit))
+            terminalreporter.line(f" {unit}")
 
             result_entry.append(recorded_property)
 
@@ -492,7 +510,7 @@ def pytest_terminal_summary(
         return
 
     if not result:
-        warnings.warn("no results to store (no passed test suites)")
+        log.warning("no results to store (no passed test suites)")
         return
 
     get_out_path(Path(out_dir), revision=revision).write_text(

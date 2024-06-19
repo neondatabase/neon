@@ -1,4 +1,4 @@
-FROM node:18
+FROM node:21
 WORKDIR /source
 
 COPY . .

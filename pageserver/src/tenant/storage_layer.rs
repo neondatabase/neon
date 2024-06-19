@@ -1,47 +1,50 @@
 //! Common traits and structs for layers
 
 pub mod delta_layer;
-mod filename;
-mod image_layer;
-mod inmemory_layer;
+pub mod image_layer;
+pub(crate) mod inmemory_layer;
+pub(crate) mod layer;
 mod layer_desc;
-mod remote_layer;
+mod layer_name;
 
-use crate::config::PageServerConf;
-use crate::context::RequestContext;
-use crate::repository::{Key, Value};
+use crate::context::{AccessStatsBehavior, RequestContext};
+use crate::repository::Value;
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
-use anyhow::Result;
 use bytes::Bytes;
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use once_cell::sync::Lazy;
-use pageserver_api::models::LayerAccessKind;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::models::{
-    HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
+    LayerAccessKind, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
 };
+use std::borrow::Cow;
+use std::cmp::{Ordering, Reverse};
+use std::collections::hash_map::Entry;
+use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use utils::history_buffer::HistoryBufferWithDropCounter;
 use utils::rate_limit::RateLimit;
 
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::{id::TimelineId, lsn::Lsn};
 
-pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
-pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
+pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
-pub use remote_layer::RemoteLayer;
+pub use layer_name::{DeltaLayerName, ImageLayerName, LayerName};
 
-use super::layer_map::BatchedUpdates;
+pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
+
+use self::inmemory_layer::InMemoryLayerFileId;
+
+use super::timeline::GetVectoredError;
+use super::PageReconstructError;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -52,13 +55,6 @@ where
     } else {
         b.end > a.start
     }
-}
-
-pub fn range_eq<T>(a: &Range<T>, b: &Range<T>) -> bool
-where
-    T: PartialEq<T>,
-{
-    a.start == b.start && a.end == b.end
 }
 
 /// Struct used to communicate across calls to 'get_value_reconstruct_data'.
@@ -77,13 +73,376 @@ where
 /// the same ValueReconstructState struct in the next 'get_value_reconstruct_data'
 /// call, to collect more records.
 ///
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ValueReconstructState {
     pub records: Vec<(Lsn, NeonWalRecord)>,
     pub img: Option<(Lsn, Bytes)>,
 }
 
-/// Return value from Layer::get_page_reconstruct_data
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ValueReconstructSituation {
+    Complete,
+    #[default]
+    Continue,
+}
+
+/// Reconstruct data accumulated for a single key during a vectored get
+#[derive(Debug, Default, Clone)]
+pub(crate) struct VectoredValueReconstructState {
+    pub(crate) records: Vec<(Lsn, NeonWalRecord)>,
+    pub(crate) img: Option<(Lsn, Bytes)>,
+
+    situation: ValueReconstructSituation,
+}
+
+impl VectoredValueReconstructState {
+    fn get_cached_lsn(&self) -> Option<Lsn> {
+        self.img.as_ref().map(|img| img.0)
+    }
+}
+
+impl From<VectoredValueReconstructState> for ValueReconstructState {
+    fn from(mut state: VectoredValueReconstructState) -> Self {
+        // walredo expects the records to be descending in terms of Lsn
+        state.records.sort_by_key(|(lsn, _)| Reverse(*lsn));
+
+        ValueReconstructState {
+            records: state.records,
+            img: state.img,
+        }
+    }
+}
+
+/// Bag of data accumulated during a vectored get..
+pub(crate) struct ValuesReconstructState {
+    /// The keys will be removed after `get_vectored` completes. The caller outside `Timeline`
+    /// should not expect to get anything from this hashmap.
+    pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
+    /// The keys which are already retrieved
+    keys_done: KeySpaceRandomAccum,
+
+    /// The keys covered by the image layers
+    keys_with_image_coverage: Option<Range<Key>>,
+
+    // Statistics that are still accessible as a caller of `get_vectored_impl`.
+    layers_visited: u32,
+    delta_layers_visited: u32,
+}
+
+impl ValuesReconstructState {
+    pub(crate) fn new() -> Self {
+        Self {
+            keys: HashMap::new(),
+            keys_done: KeySpaceRandomAccum::new(),
+            keys_with_image_coverage: None,
+            layers_visited: 0,
+            delta_layers_visited: 0,
+        }
+    }
+
+    /// Associate a key with the error which it encountered and mark it as done
+    pub(crate) fn on_key_error(&mut self, key: Key, err: PageReconstructError) {
+        let previous = self.keys.insert(key, Err(err));
+        if let Some(Ok(state)) = previous {
+            if state.situation == ValueReconstructSituation::Continue {
+                self.keys_done.add_key(key);
+            }
+        }
+    }
+
+    pub(crate) fn on_layer_visited(&mut self, layer: &ReadableLayer) {
+        self.layers_visited += 1;
+        if let ReadableLayer::PersistentLayer(layer) = layer {
+            if layer.layer_desc().is_delta() {
+                self.delta_layers_visited += 1;
+            }
+        }
+    }
+
+    pub(crate) fn get_delta_layers_visited(&self) -> u32 {
+        self.delta_layers_visited
+    }
+
+    pub(crate) fn get_layers_visited(&self) -> u32 {
+        self.layers_visited
+    }
+
+    /// This function is called after reading a keyspace from a layer.
+    /// It checks if the read path has now moved past the cached Lsn for any keys.
+    ///
+    /// Implementation note: We intentionally iterate over the keys for which we've
+    /// already collected some reconstruct data. This avoids scaling complexity with
+    /// the size of the search space.
+    pub(crate) fn on_lsn_advanced(&mut self, keyspace: &KeySpace, advanced_to: Lsn) {
+        for (key, value) in self.keys.iter_mut() {
+            if !keyspace.contains(key) {
+                continue;
+            }
+
+            if let Ok(state) = value {
+                if state.situation != ValueReconstructSituation::Complete
+                    && state.get_cached_lsn() >= Some(advanced_to)
+                {
+                    state.situation = ValueReconstructSituation::Complete;
+                    self.keys_done.add_key(*key);
+                }
+            }
+        }
+    }
+
+    /// On hitting image layer, we can mark all keys in this range as done, because
+    /// if the image layer does not contain a key, it is deleted/never added.
+    pub(crate) fn on_image_layer_visited(&mut self, key_range: &Range<Key>) {
+        let prev_val = self.keys_with_image_coverage.replace(key_range.clone());
+        assert_eq!(
+            prev_val, None,
+            "should consume the keyspace before the next iteration"
+        );
+    }
+
+    /// Update the state collected for a given key.
+    /// Returns true if this was the last value needed for the key and false otherwise.
+    ///
+    /// If the key is done after the update, mark it as such.
+    pub(crate) fn update_key(
+        &mut self,
+        key: &Key,
+        lsn: Lsn,
+        value: Value,
+    ) -> ValueReconstructSituation {
+        let state = self
+            .keys
+            .entry(*key)
+            .or_insert(Ok(VectoredValueReconstructState::default()));
+
+        if let Ok(state) = state {
+            let key_done = match state.situation {
+                ValueReconstructSituation::Complete => unreachable!(),
+                ValueReconstructSituation::Continue => match value {
+                    Value::Image(img) => {
+                        state.img = Some((lsn, img));
+                        true
+                    }
+                    Value::WalRecord(rec) => {
+                        debug_assert!(
+                            Some(lsn) > state.get_cached_lsn(),
+                            "Attempt to collect a record below cached LSN for walredo: {} < {}",
+                            lsn,
+                            state
+                                .get_cached_lsn()
+                                .expect("Assertion can only fire if a cached lsn is present")
+                        );
+
+                        let will_init = rec.will_init();
+                        state.records.push((lsn, rec));
+                        will_init
+                    }
+                },
+            };
+
+            if key_done && state.situation == ValueReconstructSituation::Continue {
+                state.situation = ValueReconstructSituation::Complete;
+                self.keys_done.add_key(*key);
+            }
+
+            state.situation
+        } else {
+            ValueReconstructSituation::Complete
+        }
+    }
+
+    /// Returns the Lsn at which this key is cached if one exists.
+    /// The read path should go no further than this Lsn for the given key.
+    pub(crate) fn get_cached_lsn(&self, key: &Key) -> Option<Lsn> {
+        self.keys
+            .get(key)
+            .and_then(|k| k.as_ref().ok())
+            .and_then(|state| state.get_cached_lsn())
+    }
+
+    /// Returns the key space describing the keys that have
+    /// been marked as completed since the last call to this function.
+    /// Returns individual keys done, and the image layer coverage.
+    pub(crate) fn consume_done_keys(&mut self) -> (KeySpace, Option<Range<Key>>) {
+        (
+            self.keys_done.consume_keyspace(),
+            self.keys_with_image_coverage.take(),
+        )
+    }
+}
+
+impl Default for ValuesReconstructState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A key that uniquely identifies a layer in a timeline
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub(crate) enum LayerId {
+    PersitentLayerId(PersistentLayerKey),
+    InMemoryLayerId(InMemoryLayerFileId),
+}
+
+/// Layer wrapper for the read path. Note that it is valid
+/// to use these layers even after external operations have
+/// been performed on them (compaction, freeze, etc.).
+#[derive(Debug)]
+pub(crate) enum ReadableLayer {
+    PersistentLayer(Layer),
+    InMemoryLayer(Arc<InMemoryLayer>),
+}
+
+/// A partial description of a read to be done.
+#[derive(Debug, Clone)]
+struct ReadDesc {
+    /// An id used to resolve the readable layer within the fringe
+    layer_id: LayerId,
+    /// Lsn range for the read, used for selecting the next read
+    lsn_range: Range<Lsn>,
+}
+
+/// Data structure which maintains a fringe of layers for the
+/// read path. The fringe is the set of layers which intersects
+/// the current keyspace that the search is descending on.
+/// Each layer tracks the keyspace that intersects it.
+///
+/// The fringe must appear sorted by Lsn. Hence, it uses
+/// a two layer indexing scheme.
+#[derive(Debug)]
+pub(crate) struct LayerFringe {
+    planned_reads_by_lsn: BinaryHeap<ReadDesc>,
+    layers: HashMap<LayerId, LayerKeyspace>,
+}
+
+#[derive(Debug)]
+struct LayerKeyspace {
+    layer: ReadableLayer,
+    target_keyspace: KeySpaceRandomAccum,
+}
+
+impl LayerFringe {
+    pub(crate) fn new() -> Self {
+        LayerFringe {
+            planned_reads_by_lsn: BinaryHeap::new(),
+            layers: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayer, KeySpace, Range<Lsn>)> {
+        let read_desc = match self.planned_reads_by_lsn.pop() {
+            Some(desc) => desc,
+            None => return None,
+        };
+
+        let removed = self.layers.remove_entry(&read_desc.layer_id);
+
+        match removed {
+            Some((
+                _,
+                LayerKeyspace {
+                    layer,
+                    mut target_keyspace,
+                },
+            )) => Some((
+                layer,
+                target_keyspace.consume_keyspace(),
+                read_desc.lsn_range,
+            )),
+            None => unreachable!("fringe internals are always consistent"),
+        }
+    }
+
+    pub(crate) fn update(
+        &mut self,
+        layer: ReadableLayer,
+        keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
+    ) {
+        let layer_id = layer.id();
+        let entry = self.layers.entry(layer_id.clone());
+        match entry {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().target_keyspace.add_keyspace(keyspace);
+            }
+            Entry::Vacant(entry) => {
+                self.planned_reads_by_lsn.push(ReadDesc {
+                    lsn_range,
+                    layer_id: layer_id.clone(),
+                });
+                let mut accum = KeySpaceRandomAccum::new();
+                accum.add_keyspace(keyspace);
+                entry.insert(LayerKeyspace {
+                    layer,
+                    target_keyspace: accum,
+                });
+            }
+        }
+    }
+}
+
+impl Default for LayerFringe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Ord for ReadDesc {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let ord = self.lsn_range.end.cmp(&other.lsn_range.end);
+        if ord == std::cmp::Ordering::Equal {
+            self.lsn_range.start.cmp(&other.lsn_range.start).reverse()
+        } else {
+            ord
+        }
+    }
+}
+
+impl PartialOrd for ReadDesc {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for ReadDesc {
+    fn eq(&self, other: &Self) -> bool {
+        self.lsn_range == other.lsn_range
+    }
+}
+
+impl Eq for ReadDesc {}
+
+impl ReadableLayer {
+    pub(crate) fn id(&self) -> LayerId {
+        match self {
+            Self::PersistentLayer(layer) => LayerId::PersitentLayerId(layer.layer_desc().key()),
+            Self::InMemoryLayer(layer) => LayerId::InMemoryLayerId(layer.file_id()),
+        }
+    }
+
+    pub(crate) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        match self {
+            ReadableLayer::PersistentLayer(layer) => {
+                layer
+                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
+                    .await
+            }
+            ReadableLayer::InMemoryLayer(layer) => {
+                layer
+                    .get_values_reconstruct_data(keyspace, lsn_range.end, reconstruct_state, ctx)
+                    .await
+            }
+        }
+    }
+}
+
+/// Return value from [`Layer::get_value_reconstruct_data`]
 #[derive(Clone, Copy, Debug)]
 pub enum ValueReconstructResult {
     /// Got all the data needed to reconstruct the requested page
@@ -157,7 +516,7 @@ impl LayerAccessStatFullDetails {
         } = self;
         pageserver_api::models::LayerAccessStatFullDetails {
             when_millis_since_epoch: system_time_to_millis_since_epoch(when),
-            task_kind: task_kind.into(), // into static str, powered by strum_macros
+            task_kind: Cow::Borrowed(task_kind.into()), // into static str, powered by strum_macros
             access_kind: *access_kind,
         }
     }
@@ -169,6 +528,9 @@ impl LayerAccessStats {
     /// The caller is responsible for recording a residence event
     /// using [`record_residence_event`] before calling `latest_activity`.
     /// If they don't, [`latest_activity`] will return `None`.
+    ///
+    /// [`record_residence_event`]: Self::record_residence_event
+    /// [`latest_activity`]: Self::latest_activity
     pub(crate) fn empty_will_record_residence_event_later() -> Self {
         LayerAccessStats(Mutex::default())
     }
@@ -176,45 +538,12 @@ impl LayerAccessStats {
     /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
     ///
     /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
-    pub(crate) fn for_loading_layer<L>(
-        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
-        status: LayerResidenceStatus,
-    ) -> Self
-    where
-        L: ?Sized + Layer,
-    {
+    ///
+    /// [`LayerLoad`]: LayerResidenceEventReason::LayerLoad
+    /// [`record_residence_event`]: Self::record_residence_event
+    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
-        new.record_residence_event(
-            layer_map_lock_held_witness,
-            status,
-            LayerResidenceEventReason::LayerLoad,
-        );
-        new
-    }
-
-    /// Creates a clone of `self` and records `new_status` in the clone.
-    ///
-    /// The `new_status` is not recorded in `self`.
-    ///
-    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
-    pub(crate) fn clone_for_residence_change<L>(
-        &self,
-        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
-        new_status: LayerResidenceStatus,
-    ) -> LayerAccessStats
-    where
-        L: ?Sized + Layer,
-    {
-        let clone = {
-            let inner = self.0.lock().unwrap();
-            inner.clone()
-        };
-        let new = LayerAccessStats(Mutex::new(clone));
-        new.record_residence_event(
-            layer_map_lock_held_witness,
-            new_status,
-            LayerResidenceEventReason::ResidenceChange,
-        );
+        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
         new
     }
 
@@ -232,14 +561,11 @@ impl LayerAccessStats {
     /// - Compact: Grab layer map lock, add the new L1 to layer map and remove the L0s, release layer map lock.
     /// - Eviction: observes the new L1 layer whose only activity timestamp is the LayerCreate event.
     ///
-    pub(crate) fn record_residence_event<L>(
+    pub(crate) fn record_residence_event(
         &self,
-        _layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
         status: LayerResidenceStatus,
         reason: LayerResidenceEventReason,
-    ) where
-        L: ?Sized + Layer,
-    {
+    ) {
         let mut locked = self.0.lock().unwrap();
         locked.iter_mut().for_each(|inner| {
             inner
@@ -248,10 +574,14 @@ impl LayerAccessStats {
         });
     }
 
-    fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
+    fn record_access(&self, access_kind: LayerAccessKind, ctx: &RequestContext) {
+        if ctx.access_stats_behavior() == AccessStatsBehavior::Skip {
+            return;
+        }
+
         let this_access = LayerAccessStatFullDetails {
             when: SystemTime::now(),
-            task_kind,
+            task_kind: ctx.task_kind(),
             access_kind,
         };
 
@@ -259,7 +589,7 @@ impl LayerAccessStats {
         locked.iter_mut().for_each(|inner| {
             inner.first_access.get_or_insert(this_access);
             inner.count_by_access_kind[access_kind] += 1;
-            inner.task_kind_flag |= task_kind;
+            inner.task_kind_flag |= ctx.task_kind();
             inner.last_accesses.write(this_access);
         })
     }
@@ -284,7 +614,7 @@ impl LayerAccessStats {
                 .collect(),
             task_kind_access_flag: task_kind_flag
                 .iter()
-                .map(|task_kind| task_kind.into()) // into static str, powered by strum_macros
+                .map(|task_kind| Cow::Borrowed(task_kind.into())) // into static str, powered by strum_macros
                 .collect(),
             first: first_access.as_ref().map(|a| a.as_api_model()),
             accesses_history: last_accesses.map(|m| m.as_api_model()),
@@ -302,6 +632,12 @@ impl LayerAccessStats {
         ret
     }
 
+    /// Get the latest access timestamp, falling back to latest residence event, further falling
+    /// back to `SystemTime::now` for a usable timestamp for eviction.
+    pub(crate) fn latest_activity_or_now(&self) -> SystemTime {
+        self.latest_activity().unwrap_or_else(SystemTime::now)
+    }
+
     /// Get the latest access timestamp, falling back to latest residence event.
     ///
     /// This function can only return `None` if there has not yet been a call to the
@@ -309,12 +645,14 @@ impl LayerAccessStats {
     /// implementation error. This function logs a rate-limited warning in that case.
     ///
     /// TODO: use type system to avoid the need for `fallback`.
-    /// The approach in https://github.com/neondatabase/neon/pull/3775
+    /// The approach in <https://github.com/neondatabase/neon/pull/3775>
     /// could be used to enforce that a residence event is recorded
     /// before a layer is added to the layer map. We could also have
     /// a layer wrapper type that holds the LayerAccessStats, and ensure
     /// that that type can only be produced by inserting into the layer map.
-    pub(crate) fn latest_activity(&self) -> Option<SystemTime> {
+    ///
+    /// [`record_residence_event`]: Self::record_residence_event
+    fn latest_activity(&self) -> Option<SystemTime> {
         let locked = self.0.lock().unwrap();
         let inner = &locked.for_eviction_policy;
         match inner.last_accesses.recent() {
@@ -337,245 +675,49 @@ impl LayerAccessStats {
     }
 }
 
-/// Supertrait of the [`Layer`] trait that captures the bare minimum interface
-/// required by [`LayerMap`].
-///
-/// All layers should implement a minimal `std::fmt::Debug` without tenant or
-/// timeline names, because those are known in the context of which the layers
-/// are used in (timeline).
-pub trait Layer: std::fmt::Debug + Send + Sync {
-    /// Range of keys that this layer covers
-    fn get_key_range(&self) -> Range<Key>;
-
-    /// Inclusive start bound of the LSN range that this layer holds
-    /// Exclusive end bound of the LSN range that this layer holds.
-    ///
-    /// - For an open in-memory layer, this is MAX_LSN.
-    /// - For a frozen in-memory layer or a delta layer, this is a valid end bound.
-    /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
-    fn get_lsn_range(&self) -> Range<Lsn>;
-
-    /// Does this layer only contain some data for the key-range (incremental),
-    /// or does it contain a version of every page? This is important to know
-    /// for garbage collecting old layers: an incremental layer depends on
-    /// the previous non-incremental layer.
-    fn is_incremental(&self) -> bool;
-
-    ///
-    /// Return data needed to reconstruct given page at LSN.
-    ///
-    /// It is up to the caller to collect more data from previous layer and
-    /// perform WAL redo, if necessary.
-    ///
-    /// See PageReconstructResult for possible return values. The collected data
-    /// is appended to reconstruct_data; the caller should pass an empty struct
-    /// on first call, or a struct with a cached older image of the page if one
-    /// is available. If this returns ValueReconstructResult::Continue, look up
-    /// the predecessor layer and call again with the same 'reconstruct_data' to
-    /// collect more data.
-    fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult>;
-
-    /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
-    fn short_id(&self) -> String;
-
-    /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
-}
-
-/// Returned by [`Layer::iter`]
-pub type LayerIter<'i> = Box<dyn Iterator<Item = Result<(Key, Lsn, Value)>> + 'i + Send>;
-
-/// Returned by [`Layer::key_iter`]
-pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i + Send>;
-
-/// A Layer contains all data in a "rectangle" consisting of a range of keys and
-/// range of LSNs.
-///
-/// There are two kinds of layers, in-memory and on-disk layers. In-memory
-/// layers are used to ingest incoming WAL, and provide fast access to the
-/// recent page versions. On-disk layers are stored as files on disk, and are
-/// immutable. This trait presents the common functionality of in-memory and
-/// on-disk layers.
-///
-/// Furthermore, there are two kinds of on-disk layers: delta and image layers.
-/// A delta layer contains all modifications within a range of LSNs and keys.
-/// An image layer is a snapshot of all the data in a key-range, at a single
-/// LSN.
-pub trait PersistentLayer: Layer {
+/// Get a layer descriptor from a layer.
+pub trait AsLayerDesc {
     /// Get the layer descriptor.
     fn layer_desc(&self) -> &PersistentLayerDesc;
-
-    fn get_tenant_id(&self) -> TenantId {
-        self.layer_desc().tenant_id
-    }
-
-    /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> TimelineId {
-        self.layer_desc().timeline_id
-    }
-
-    /// File name used for this layer, both in the pageserver's local filesystem
-    /// state as well as in the remote storage.
-    fn filename(&self) -> LayerFileName {
-        self.layer_desc().filename()
-    }
-
-    // Path to the layer file in the local filesystem.
-    // `None` for `RemoteLayer`.
-    fn local_path(&self) -> Option<PathBuf>;
-
-    /// Iterate through all keys and values stored in the layer
-    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>>;
-
-    /// Iterate through all keys stored in the layer. Returns key, lsn and value size
-    /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
-        panic!("Not implemented")
-    }
-
-    /// Permanently remove this layer from disk.
-    fn delete_resident_layer_file(&self) -> Result<()>;
-
-    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
-        None
-    }
-
-    fn is_remote_layer(&self) -> bool {
-        false
-    }
-
-    /// Returns None if the layer file size is not known.
-    ///
-    /// Should not change over the lifetime of the layer object because
-    /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> u64 {
-        self.layer_desc().file_size
-    }
-
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
-
-    fn access_stats(&self) -> &LayerAccessStats;
 }
 
-pub fn downcast_remote_layer(
-    layer: &Arc<dyn PersistentLayer>,
-) -> Option<std::sync::Arc<RemoteLayer>> {
-    if layer.is_remote_layer() {
-        Arc::clone(layer).downcast_remote_layer()
-    } else {
-        None
-    }
-}
+pub mod tests {
+    use pageserver_api::shard::TenantShardId;
 
-/// Holds metadata about a layer without any content. Used mostly for testing.
-///
-/// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
-/// LayerDescriptor.
-#[derive(Clone, Debug)]
-pub struct LayerDescriptor {
-    pub key: Range<Key>,
-    pub lsn: Range<Lsn>,
-    pub is_incremental: bool,
-    pub short_id: String,
-}
+    use super::*;
 
-impl LayerDescriptor {
-    /// `LayerDescriptor` is only used for testing purpose so it does not matter whether it is image / delta,
-    /// and the tenant / timeline id does not matter.
-    pub fn get_persistent_layer_desc(&self) -> PersistentLayerDesc {
-        PersistentLayerDesc::new_delta(
-            TenantId::from_array([0; 16]),
-            TimelineId::from_array([0; 16]),
-            self.key.clone(),
-            self.lsn.clone(),
-            233,
-        )
-    }
-}
-
-impl Layer for LayerDescriptor {
-    fn get_key_range(&self) -> Range<Key> {
-        self.key.clone()
-    }
-
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.lsn.clone()
-    }
-
-    fn is_incremental(&self) -> bool {
-        self.is_incremental
-    }
-
-    fn get_value_reconstruct_data(
-        &self,
-        _key: Key,
-        _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-        _ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
-        todo!("This method shouldn't be part of the Layer trait")
-    }
-
-    fn short_id(&self) -> String {
-        self.short_id.clone()
-    }
-
-    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
-        todo!()
-    }
-}
-
-impl From<DeltaFileName> for LayerDescriptor {
-    fn from(value: DeltaFileName) -> Self {
-        let short_id = value.to_string();
-        LayerDescriptor {
-            key: value.key_range,
-            lsn: value.lsn_range,
-            is_incremental: true,
-            short_id,
+    impl From<DeltaLayerName> for PersistentLayerDesc {
+        fn from(value: DeltaLayerName) -> Self {
+            PersistentLayerDesc::new_delta(
+                TenantShardId::from([0; 18]),
+                TimelineId::from_array([0; 16]),
+                value.key_range,
+                value.lsn_range,
+                233,
+            )
         }
     }
-}
 
-impl From<ImageFileName> for LayerDescriptor {
-    fn from(value: ImageFileName) -> Self {
-        let short_id = value.to_string();
-        let lsn = value.lsn_as_range();
-        LayerDescriptor {
-            key: value.key_range,
-            lsn,
-            is_incremental: false,
-            short_id,
+    impl From<ImageLayerName> for PersistentLayerDesc {
+        fn from(value: ImageLayerName) -> Self {
+            PersistentLayerDesc::new_img(
+                TenantShardId::from([0; 18]),
+                TimelineId::from_array([0; 16]),
+                value.key_range,
+                value.lsn,
+                233,
+            )
         }
     }
-}
 
-impl From<LayerFileName> for LayerDescriptor {
-    fn from(value: LayerFileName) -> Self {
-        match value {
-            LayerFileName::Delta(d) => Self::from(d),
-            LayerFileName::Image(i) => Self::from(i),
+    impl From<LayerName> for PersistentLayerDesc {
+        fn from(value: LayerName) -> Self {
+            match value {
+                LayerName::Delta(d) => Self::from(d),
+                LayerName::Image(i) => Self::from(i),
+            }
         }
     }
-}
-
-/// Helper enum to hold a PageServerConf, or a path
-///
-/// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the
-/// global config, and paths to layer files are constructed using the tenant/timeline
-/// path from the config. But in the 'pagectl' binary, we need to construct a Layer
-/// struct for a file on disk, without having a page server running, so that we have no
-/// config. In that case, we use the Path variant to hold the full path to the file on
-/// disk.
-enum PathOrConf {
-    Path(PathBuf),
-    Conf(&'static PageServerConf),
 }
 
 /// Range wrapping newtype, which uses display to render Debug.

@@ -1,6 +1,6 @@
 //! Wrapper around nix::sys::statvfs::Statvfs that allows for mocking.
 
-use std::path::Path;
+use camino::Utf8Path;
 
 pub enum Statvfs {
     Real(nix::sys::statvfs::Statvfs),
@@ -12,16 +12,18 @@ pub enum Statvfs {
 // Sincce it should only be a problem on > 2TiB disks, let's ignore
 // the problem for now and upcast to u64.
 impl Statvfs {
-    pub fn get(tenants_dir: &Path, mocked: Option<&mock::Behavior>) -> nix::Result<Self> {
+    pub fn get(tenants_dir: &Utf8Path, mocked: Option<&mock::Behavior>) -> nix::Result<Self> {
         if let Some(mocked) = mocked {
             Ok(Statvfs::Mock(mock::get(tenants_dir, mocked)?))
         } else {
-            Ok(Statvfs::Real(nix::sys::statvfs::statvfs(tenants_dir)?))
+            Ok(Statvfs::Real(nix::sys::statvfs::statvfs(
+                tenants_dir.as_std_path(),
+            )?))
         }
     }
 
     // NB: allow() because the block count type is u32 on macOS.
-    #[allow(clippy::useless_conversion)]
+    #[allow(clippy::useless_conversion, clippy::unnecessary_fallible_conversions)]
     pub fn blocks(&self) -> u64 {
         match self {
             Statvfs::Real(stat) => u64::try_from(stat.blocks()).unwrap(),
@@ -30,7 +32,7 @@ impl Statvfs {
     }
 
     // NB: allow() because the block count type is u32 on macOS.
-    #[allow(clippy::useless_conversion)]
+    #[allow(clippy::useless_conversion, clippy::unnecessary_fallible_conversions)]
     pub fn blocks_available(&self) -> u64 {
         match self {
             Statvfs::Real(stat) => u64::try_from(stat.blocks_available()).unwrap(),
@@ -55,8 +57,8 @@ impl Statvfs {
 
 pub mod mock {
     use anyhow::Context;
+    use camino::Utf8Path;
     use regex::Regex;
-    use std::path::Path;
     use tracing::log::info;
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -86,7 +88,7 @@ pub mod mock {
         }
     }
 
-    pub fn get(tenants_dir: &Path, behavior: &Behavior) -> nix::Result<Statvfs> {
+    pub fn get(tenants_dir: &Utf8Path, behavior: &Behavior) -> nix::Result<Statvfs> {
         info!("running mocked statvfs");
 
         match behavior {
@@ -119,7 +121,7 @@ pub mod mock {
         }
     }
 
-    fn walk_dir_disk_usage(path: &Path, name_filter: Option<&Regex>) -> anyhow::Result<u64> {
+    fn walk_dir_disk_usage(path: &Utf8Path, name_filter: Option<&Regex>) -> anyhow::Result<u64> {
         let mut total = 0;
         for entry in walkdir::WalkDir::new(path) {
             let entry = entry?;

@@ -1,0 +1,13 @@
+self-hosted-runner:
+  labels:
+    - arm64
+    - gen3
+    - large
+    - large-arm64
+    - small
+    - small-arm64
+    - us-east-2
+config-variables:
+  - REMOTE_STORAGE_AZURE_CONTAINER
+  - REMOTE_STORAGE_AZURE_REGION
+  - SLACK_UPCOMING_RELEASE_CHANNEL_ID

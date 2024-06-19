@@ -12,18 +12,22 @@ testing = ["fail/failpoints"]
 
 [dependencies]
 anyhow.workspace = true
+arc-swap.workspace = true
+async-compression.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+camino.workspace = true
+camino-tempfile.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
-close_fds.workspace = true
 const_format.workspace = true
 consumption_metrics.workspace = true
 crc32c.workspace = true
 crossbeam-utils.workspace = true
 either.workspace = true
+flate2.workspace = true
 fail.workspace = true
 futures.workspace = true
 git-version.workspace = true
@@ -32,7 +36,11 @@ humantime.workspace = true
 humantime-serde.workspace = true
 hyper.workspace = true
 itertools.workspace = true
+leaky-bucket.workspace = true
+md5.workspace = true
 nix.workspace = true
+# hack to get the number of worker threads tokio uses
+num_cpus = { version = "1.15" }
 num-traits.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
@@ -45,22 +53,29 @@ regex.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
+serde_path_to_error.workspace = true
 serde_with.workspace = true
 signal-hook.workspace = true
+smallvec = { workspace = true, features = ["write"] }
 svg_fmt.workspace = true
 sync_wrapper.workspace = true
+sysinfo.workspace = true
 tokio-tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
+tokio-epoll-uring.workspace = true
 tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
+tokio-stream.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
 tracing.workspace = true
+twox-hash.workspace = true
 url.workspace = true
 walkdir.workspace = true
 metrics.workspace = true
 pageserver_api.workspace = true
+pageserver_compaction.workspace = true
 postgres_connection.workspace = true
 postgres_ffi.workspace = true
 pq_proto.workspace = true
@@ -72,14 +87,17 @@ workspace_hack.workspace = true
 reqwest.workspace = true
 rpds.workspace = true
 enum-map.workspace = true
-enumset.workspace = true
+enumset = { workspace = true, features = ["serde"]}
 strum.workspace = true
 strum_macros.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
 hex-literal.workspace = true
-tempfile.workspace = true
+tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }
 
 [[bench]]
 name = "bench_layer_map"

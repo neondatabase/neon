@@ -10,6 +10,12 @@ service BrokerService {
 
     // Publish safekeeper updates.
     rpc PublishSafekeeperInfo(stream SafekeeperTimelineInfo) returns (google.protobuf.Empty) {};
+
+    // Subscribe to all messages, limited by a filter.
+    rpc SubscribeByFilter(SubscribeByFilterRequest) returns (stream TypedMessage) {};
+
+    // Publish one message.
+    rpc PublishOne(TypedMessage) returns (google.protobuf.Empty) {};
 }
 
 message SubscribeSafekeeperInfoRequest {
@@ -22,6 +28,8 @@ message SubscribeSafekeeperInfoRequest {
 message SafekeeperTimelineInfo {
     uint64 safekeeper_id = 1;
     TenantTimelineId tenant_timeline_id = 2;
+    // Safekeeper term
+    uint64 term = 12;
     // Term of the last entry.
     uint64 last_log_term = 3;
     // LSN of the last record.
@@ -34,8 +42,11 @@ message SafekeeperTimelineInfo {
     uint64 remote_consistent_lsn = 7;
     uint64 peer_horizon_lsn = 8;
     uint64 local_start_lsn = 9;
+    uint64 standby_horizon = 14;
     // A connection string to use for WAL receiving.
     string safekeeper_connstr = 10;
+    // HTTP endpoint connection string
+    string http_connstr = 13;
     // Availability zone of a safekeeper.
     optional string availability_zone = 11;
 }
@@ -43,4 +54,58 @@ message SafekeeperTimelineInfo {
 message TenantTimelineId {
     bytes tenant_id = 1;
     bytes timeline_id = 2;
+}
+
+message FilterTenantTimelineId {
+    // If true, only messages related to `tenant_timeline_id` will be emitted.
+    // Otherwise, messages for all timelines will be emitted.
+    bool enabled = 1;
+    TenantTimelineId tenant_timeline_id = 2;
+}
+
+message TypeSubscription {
+    MessageType type = 1;
+}
+
+message SubscribeByFilterRequest {
+    // Subscription will emit messages only of the specified types. You need to specify
+    // at least one type to receive any messages.
+    repeated TypeSubscription types = 1;
+
+    // If set and enabled, subscription will emit messages only for the specified tenant/timeline.
+    optional FilterTenantTimelineId tenant_timeline_id = 2;
+}
+
+enum MessageType {
+    UNKNOWN = 0;
+    SAFEKEEPER_TIMELINE_INFO = 2;
+    SAFEKEEPER_DISCOVERY_REQUEST = 3;
+    SAFEKEEPER_DISCOVERY_RESPONSE = 4;
+}
+
+// A message with a type.
+message TypedMessage {
+    MessageType type = 1;
+
+    optional SafekeeperTimelineInfo safekeeper_timeline_info = 2;
+    optional SafekeeperDiscoveryRequest safekeeper_discovery_request = 3;
+    optional SafekeeperDiscoveryResponse safekeeper_discovery_response = 4;
+}
+
+message SafekeeperDiscoveryRequest {
+    TenantTimelineId tenant_timeline_id = 1;
+}
+
+// Shorter version of SafekeeperTimelineInfo, contains only necessary fields.
+message SafekeeperDiscoveryResponse {
+    uint64 safekeeper_id = 1;
+    TenantTimelineId tenant_timeline_id = 2;
+    // WAL available to download.
+    uint64 commit_lsn = 3;
+    // A connection string to use for WAL downloading.
+    string safekeeper_connstr = 4;
+    // Availability zone of a safekeeper.
+    optional string availability_zone = 5;
+    // Replica apply LSN
+    uint64 standby_horizon = 6;
 }

@@ -12,7 +12,7 @@ log.workspace = true
 once_cell.workspace = true
 postgres.workspace = true
 postgres_ffi.workspace = true
-tempfile.workspace = true
+camino-tempfile.workspace = true
 
 workspace_hack.workspace = true
 

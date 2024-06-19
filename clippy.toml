@@ -1,0 +1,14 @@
+disallowed-methods = [
+    "tokio::task::block_in_place",
+    # Allow this for now, to deny it later once we stop using Handle::block_on completely
+    # "tokio::runtime::Handle::block_on",
+    # use tokio_epoll_uring_ext instead
+    "tokio_epoll_uring::thread_local_system",
+]
+
+disallowed-macros = [
+    # use std::pin::pin
+    "futures::pin_mut",
+    # cannot disallow this, because clippy finds used from tokio macros
+    #"tokio::pin",
+]

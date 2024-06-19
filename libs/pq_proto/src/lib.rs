@@ -1,12 +1,15 @@
 //! Postgres protocol messages serialization-deserialization. See
 //! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod framed;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::{borrow::Cow, collections::HashMap, fmt, io, str};
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
+use std::{borrow::Cow, fmt, io, str};
 
 // re-export for use in utils pageserver_feedback.rs
 pub use postgres_protocol::PG_EPOCH;
@@ -48,15 +51,37 @@ pub enum FeStartupPacket {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
+pub struct StartupMessageParamsBuilder {
+    params: BytesMut,
+}
+
+impl StartupMessageParamsBuilder {
+    /// Set parameter's value by its name.
+    /// name and value must not contain a \0 byte
+    pub fn insert(&mut self, name: &str, value: &str) {
+        self.params.put(name.as_bytes());
+        self.params.put(&b"\0"[..]);
+        self.params.put(value.as_bytes());
+        self.params.put(&b"\0"[..]);
+    }
+
+    pub fn freeze(self) -> StartupMessageParams {
+        StartupMessageParams {
+            params: self.params.freeze(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct StartupMessageParams {
-    params: HashMap<String, String>,
+    params: Bytes,
 }
 
 impl StartupMessageParams {
     /// Get parameter's value by its name.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.params.get(name).map(|s| s.as_str())
+        self.iter().find_map(|(k, v)| (k == name).then_some(v))
     }
 
     /// Split command-line options according to PostgreSQL's logic,
@@ -110,19 +135,23 @@ impl StartupMessageParams {
 
     /// Iterate through key-value pairs in an arbitrary order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.params.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+        let params =
+            std::str::from_utf8(&self.params).expect("should be validated as utf8 already");
+        params.split_terminator('\0').tuples()
     }
 
     // This function is mostly useful in tests.
     #[doc(hidden)]
     pub fn new<'a, const N: usize>(pairs: [(&'a str, &'a str); N]) -> Self {
-        Self {
-            params: pairs.map(|(k, v)| (k.to_owned(), v.to_owned())).into(),
+        let mut b = StartupMessageParamsBuilder::default();
+        for (k, v) in pairs {
+            b.insert(k, v)
         }
+        b.freeze()
     }
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub struct CancelKeyData {
     pub backend_pid: i32,
     pub cancel_key: i32,
@@ -179,7 +208,7 @@ pub struct FeExecuteMessage {
 #[derive(Debug)]
 pub struct FeCloseMessage;
 
-/// An error occured while parsing or serializing raw stream into Postgres
+/// An error occurred while parsing or serializing raw stream into Postgres
 /// messages.
 #[derive(thiserror::Error, Debug)]
 pub enum ProtocolError {
@@ -288,10 +317,10 @@ impl FeStartupPacket {
         // We shouldn't advance `buf` as probably full message is not there yet,
         // so can't directly use Bytes::get_u32 etc.
         let len = (&buf[0..4]).read_u32::<BigEndian>().unwrap() as usize;
-        // The proposed replacement is `!(4..=MAX_STARTUP_PACKET_LENGTH).contains(&len)`
+        // The proposed replacement is `!(8..=MAX_STARTUP_PACKET_LENGTH).contains(&len)`
         // which is less readable
         #[allow(clippy::manual_range_contains)]
-        if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
+        if len < 8 || len > MAX_STARTUP_PACKET_LENGTH {
             return Err(ProtocolError::Protocol(format!(
                 "invalid startup packet message length {}",
                 len
@@ -343,35 +372,21 @@ impl FeStartupPacket {
             (major_version, minor_version) => {
                 // StartupMessage
 
-                // Parse pairs of null-terminated strings (key, value).
-                // See `postgres: ProcessStartupPacket, build_startup_packet`.
-                let mut tokens = str::from_utf8(&msg)
-                    .map_err(|_e| {
-                        ProtocolError::BadMessage("StartupMessage params: invalid utf-8".to_owned())
-                    })?
-                    .strip_suffix('\0') // drop packet's own null
-                    .ok_or_else(|| {
-                        ProtocolError::Protocol(
-                            "StartupMessage params: missing null terminator".to_string(),
-                        )
-                    })?
-                    .split_terminator('\0');
-
-                let mut params = HashMap::new();
-                while let Some(name) = tokens.next() {
-                    let value = tokens.next().ok_or_else(|| {
-                        ProtocolError::Protocol(
-                            "StartupMessage params: key without value".to_string(),
-                        )
-                    })?;
-
-                    params.insert(name.to_owned(), value.to_owned());
-                }
+                let s = str::from_utf8(&msg).map_err(|_e| {
+                    ProtocolError::BadMessage("StartupMessage params: invalid utf-8".to_owned())
+                })?;
+                let s = s.strip_suffix('\0').ok_or_else(|| {
+                    ProtocolError::Protocol(
+                        "StartupMessage params: missing null terminator".to_string(),
+                    )
+                })?;
 
                 FeStartupPacket::StartupMessage {
                     major_version,
                     minor_version,
-                    params: StartupMessageParams { params },
+                    params: StartupMessageParams {
+                        params: msg.slice_ref(s.as_bytes()),
+                    },
                 }
             }
         };
@@ -670,6 +685,7 @@ pub fn read_cstr(buf: &mut Bytes) -> Result<Bytes, ProtocolError> {
 }
 
 pub const SQLSTATE_INTERNAL_ERROR: &[u8; 5] = b"XX000";
+pub const SQLSTATE_ADMIN_SHUTDOWN: &[u8; 5] = b"57P01";
 pub const SQLSTATE_SUCCESSFUL_COMPLETION: &[u8; 5] = b"00000";
 
 impl<'a> BeMessage<'a> {
@@ -934,6 +950,15 @@ impl<'a> BeMessage<'a> {
     }
 }
 
+fn terminate_code(code: &[u8; 5]) -> [u8; 6] {
+    let mut terminated = [0; 6];
+    for (i, &elem) in code.iter().enumerate() {
+        terminated[i] = elem;
+    }
+
+    terminated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,7 +975,7 @@ mod tests {
         let make_params = |options| StartupMessageParams::new([("options", options)]);
 
         let params = StartupMessageParams::new([]);
-        assert!(matches!(params.options_escaped(), None));
+        assert!(params.options_escaped().is_none());
 
         let params = make_params("");
         assert!(split_options(&params).is_empty());
@@ -964,13 +989,10 @@ mod tests {
         let params = make_params("foo\\ bar \\ \\\\ baz\\  lol");
         assert_eq!(split_options(&params), ["foo bar", " \\", "baz ", "lol"]);
     }
-}
 
-fn terminate_code(code: &[u8; 5]) -> [u8; 6] {
-    let mut terminated = [0; 6];
-    for (i, &elem) in code.iter().enumerate() {
-        terminated[i] = elem;
+    #[test]
+    fn parse_fe_startup_packet_regression() {
+        let data = [0, 0, 0, 7, 0, 0, 0, 0];
+        FeStartupPacket::parse(&mut BytesMut::from_iter(data)).unwrap_err();
     }
-
-    terminated
 }

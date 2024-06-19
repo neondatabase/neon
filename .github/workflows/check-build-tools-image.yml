@@ -1,0 +1,51 @@
+name: Check build-tools image
+
+on:
+  workflow_call:
+    outputs:
+      image-tag:
+        description: "build-tools image tag"
+        value: ${{ jobs.check-image.outputs.tag }}
+      found:
+        description: "Whether the image is found in the registry"
+        value: ${{ jobs.check-image.outputs.found }}
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
+
+jobs:
+  check-image:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.get-build-tools-tag.outputs.image-tag }}
+      found: ${{ steps.check-image.outputs.found }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get build-tools image tag for the current commit
+        id: get-build-tools-tag
+        env:
+          IMAGE_TAG: |
+            ${{ hashFiles('Dockerfile.build-tools',
+                          '.github/workflows/check-build-tools-image.yml',
+                          '.github/workflows/build-build-tools-image.yml') }}
+        run: |
+          echo "image-tag=${IMAGE_TAG}" | tee -a $GITHUB_OUTPUT
+
+      - name: Check if such tag found in the registry
+        id: check-image
+        env:
+          IMAGE_TAG: ${{ steps.get-build-tools-tag.outputs.image-tag }}
+        run: |
+          if docker manifest inspect neondatabase/build-tools:${IMAGE_TAG}; then
+            found=true
+          else
+            found=false
+          fi
+
+          echo "found=${found}" | tee -a $GITHUB_OUTPUT

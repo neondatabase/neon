@@ -14,8 +14,10 @@
  */
 #include "postgres.h"
 
+#include "neon_pgversioncompat.h"
+
 #include "pagestore_client.h"
-#include "storage/relfilenode.h"
+#include RELFILEINFO_HDR
 #include "storage/smgr.h"
 #include "storage/lwlock.h"
 #include "storage/ipc.h"
@@ -30,7 +32,7 @@
 
 typedef struct
 {
-	RelFileNode rnode;
+	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 } RelTag;
 
@@ -38,11 +40,23 @@ typedef struct
 {
 	RelTag		tag;
 	BlockNumber size;
+	dlist_node	lru_node;		/* LRU list node */
 } RelSizeEntry;
+
+typedef struct
+{
+	size_t      size;
+	uint64		hits;
+	uint64		misses;
+	uint64		writes;
+	dlist_head	lru;			/* double linked list for LRU replacement
+								 * algorithm */
+} RelSizeHashControl;
 
 static HTAB *relsize_hash;
 static LWLockId relsize_lock;
 static int	relsize_hash_size;
+static RelSizeHashControl* relsize_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 #if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
@@ -50,7 +64,7 @@ static void relsize_shmem_request(void);
 #endif
 
 /*
- * Size of a cache entry is 20 bytes. So this default will take about 1.2 MB,
+ * Size of a cache entry is 36 bytes. So this default will take about 2.3 MB,
  * which seems reasonable.
  */
 #define DEFAULT_RELSIZE_HASH_SIZE (64 * 1024)
@@ -59,23 +73,33 @@ static void
 neon_smgr_shmem_startup(void)
 {
 	static HASHCTL info;
+	bool found;
 
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-	relsize_lock = (LWLockId) GetNamedLWLockTranche("neon_relsize");
-	info.keysize = sizeof(RelTag);
-	info.entrysize = sizeof(RelSizeEntry);
-	relsize_hash = ShmemInitHash("neon_relsize",
-								 relsize_hash_size, relsize_hash_size,
-								 &info,
-								 HASH_ELEM | HASH_BLOBS);
-	LWLockRelease(AddinShmemInitLock);
+	relsize_ctl = (RelSizeHashControl *) ShmemInitStruct("relsize_hash", sizeof(RelSizeHashControl), &found);
+	if (!found)
+	{
+		relsize_lock = (LWLockId) GetNamedLWLockTranche("neon_relsize");
+		info.keysize = sizeof(RelTag);
+		info.entrysize = sizeof(RelSizeEntry);
+		relsize_hash = ShmemInitHash("neon_relsize",
+									 relsize_hash_size, relsize_hash_size,
+									 &info,
+									 HASH_ELEM | HASH_BLOBS);
+		LWLockRelease(AddinShmemInitLock);
+		relsize_ctl->size = 0;
+		relsize_ctl->hits = 0;
+		relsize_ctl->misses = 0;
+		relsize_ctl->writes = 0;
+		dlist_init(&relsize_ctl->lru);
+	}
 }
 
 bool
-get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber *size)
+get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 {
 	bool		found = false;
 
@@ -84,14 +108,22 @@ get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber *size)
 		RelTag		tag;
 		RelSizeEntry *entry;
 
-		tag.rnode = rnode;
+		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_SHARED);
 		entry = hash_search(relsize_hash, &tag, HASH_FIND, NULL);
 		if (entry != NULL)
 		{
 			*size = entry->size;
+			relsize_ctl->hits += 1;
 			found = true;
+			/* Move entry to the LRU list tail */
+			dlist_delete(&entry->lru_node);
+			dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+		}
+		else
+		{
+			relsize_ctl->misses += 1;
 		}
 		LWLockRelease(relsize_lock);
 	}
@@ -99,24 +131,55 @@ get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber *size)
 }
 
 void
-set_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size)
+set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
 		RelSizeEntry *entry;
+		bool		found = false;
 
-		tag.rnode = rnode;
+		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
-		entry = hash_search(relsize_hash, &tag, HASH_ENTER, NULL);
+		/*
+		 * This should actually never happen! Below we check if hash is full and delete least recently user item in this case.
+		 * But for further safety we also perform check here.
+		 */
+		while ((entry = hash_search(relsize_hash, &tag, HASH_ENTER_NULL, &found)) == NULL)
+		{
+			RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
+			hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
+			Assert(relsize_ctl->size > 0);
+			relsize_ctl->size -= 1;
+		}
 		entry->size = size;
+		if (!found)
+		{
+			if (++relsize_ctl->size == relsize_hash_size)
+			{
+				/*
+				 * Remove least recently used elment from the hash.
+				 * Hash size after is becomes `relsize_hash_size-1`.
+				 * But it is not considered to be a problem, because size of this hash is expecrted large enough and +-1 doesn't matter.
+				 */
+				RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
+				hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
+				relsize_ctl->size -= 1;
+			}
+		}
+		else
+		{
+			dlist_delete(&entry->lru_node);
+		}
+		dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
+		relsize_ctl->writes += 1;
 		LWLockRelease(relsize_lock);
 	}
 }
 
 void
-update_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size)
+update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
 	if (relsize_hash_size > 0)
 	{
@@ -124,27 +187,47 @@ update_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size)
 		RelSizeEntry *entry;
 		bool		found;
 
-		tag.rnode = rnode;
+		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
 		entry = hash_search(relsize_hash, &tag, HASH_ENTER, &found);
 		if (!found || entry->size < size)
 			entry->size = size;
+		if (!found)
+		{
+			if (++relsize_ctl->size == relsize_hash_size)
+			{
+				RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
+				hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
+				relsize_ctl->size -= 1;
+			}
+		}
+		else
+		{
+			dlist_delete(&entry->lru_node);
+		}
+		relsize_ctl->writes += 1;
+		dlist_push_tail(&relsize_ctl->lru, &entry->lru_node);
 		LWLockRelease(relsize_lock);
 	}
 }
 
 void
-forget_cached_relsize(RelFileNode rnode, ForkNumber forknum)
+forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
 {
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
-
-		tag.rnode = rnode;
+		RelSizeEntry *entry;
+		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
-		hash_search(relsize_hash, &tag, HASH_REMOVE, NULL);
+		entry = hash_search(relsize_hash, &tag, HASH_REMOVE, NULL);
+		if (entry)
+		{
+			dlist_delete(&entry->lru_node);
+			relsize_ctl->size -= 1;
+		}
 		LWLockRelease(relsize_lock);
 	}
 }
@@ -189,7 +272,7 @@ relsize_shmem_request(void)
 	if (prev_shmem_request_hook)
 		prev_shmem_request_hook();
 
-	RequestAddinShmemSpace(hash_estimate_size(relsize_hash_size, sizeof(RelSizeEntry)));
+	RequestAddinShmemSpace(sizeof(RelSizeHashControl) + hash_estimate_size(relsize_hash_size, sizeof(RelSizeEntry)));
 	RequestNamedLWLockTranche("neon_relsize", 1);
 }
 #endif

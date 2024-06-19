@@ -1,6 +1,5 @@
-use crate::metrics::RemoteOpFileKind;
-
-use super::storage_layer::LayerFileName;
+use super::storage_layer::LayerName;
+use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
@@ -10,9 +9,13 @@ use std::fmt::Debug;
 use chrono::NaiveDateTime;
 use std::sync::Arc;
 use tracing::info;
+use utils::lsn::AtomicLsn;
 
 use std::sync::atomic::AtomicU32;
 use utils::lsn::Lsn;
+
+#[cfg(feature = "testing")]
+use utils::generation::Generation;
 
 // clippy warns that Uninitialized is much smaller than Initialized, which wastes
 // memory for Uninitialized variants. Doesn't matter in practice, there are not
@@ -40,24 +43,26 @@ pub(crate) struct UploadQueueInitialized {
     /// Counter to assign task IDs
     pub(crate) task_counter: u64,
 
-    /// All layer files stored in the remote storage, taking into account all
-    /// in-progress and queued operations
-    pub(crate) latest_files: HashMap<LayerFileName, LayerFileMetadata>,
+    /// The next uploaded index_part.json; assumed to be dirty.
+    ///
+    /// Should not be read, directly except for layer file updates. Instead you should add a
+    /// projected field.
+    pub(crate) dirty: IndexPart,
+
+    /// The latest remote persisted IndexPart.
+    ///
+    /// Each completed metadata upload will update this. The second item is the task_id which last
+    /// updated the value, used to ensure we never store an older value over a newer one.
+    pub(crate) clean: (IndexPart, Option<u64>),
 
     /// How many file uploads or deletions been scheduled, since the
     /// last (scheduling of) metadata index upload?
     pub(crate) latest_files_changes_since_metadata_upload_scheduled: u64,
 
-    /// Metadata stored in the remote storage, taking into account all
-    /// in-progress and queued operations.
-    /// DANGER: do not return to outside world, e.g., safekeepers.
-    pub(crate) latest_metadata: TimelineMetadata,
-
-    /// `disk_consistent_lsn` from the last metadata file that was successfully
-    /// uploaded. `Lsn(0)` if nothing was uploaded yet.
-    /// Unlike `latest_files` or `latest_metadata`, this value is never ahead.
-    /// Safekeeper can rely on it to make decisions for WAL storage.
-    pub(crate) last_uploaded_consistent_lsn: Lsn,
+    /// The Lsn is only updated after our generation has been validated with
+    /// the control plane (unlesss a timeline's generation is None, in which case
+    /// we skip validation)
+    pub(crate) visible_remote_consistent_lsn: Arc<AtomicLsn>,
 
     // Breakdown of different kinds of tasks currently in-progress
     pub(crate) num_inprogress_layer_uploads: usize,
@@ -74,11 +79,36 @@ pub(crate) struct UploadQueueInitialized {
     /// tasks to finish. For example, metadata upload cannot be performed before all
     /// preceding layer file uploads have completed.
     pub(crate) queued_operations: VecDeque<UploadOp>,
+
+    /// Files which have been unlinked but not yet had scheduled a deletion for. Only kept around
+    /// for error logging.
+    ///
+    /// Putting this behind a testing feature to catch problems in tests, but assuming we could have a
+    /// bug causing leaks, then it's better to not leave this enabled for production builds.
+    #[cfg(feature = "testing")]
+    pub(crate) dangling_files: HashMap<LayerName, Generation>,
+
+    /// Set to true when we have inserted the `UploadOp::Shutdown` into the `inprogress_tasks`.
+    pub(crate) shutting_down: bool,
+
+    /// Permitless semaphore on which any number of `RemoteTimelineClient::shutdown` futures can
+    /// wait on until one of them stops the queue. The semaphore is closed when
+    /// `RemoteTimelineClient::launch_queued_tasks` encounters `UploadOp::Shutdown`.
+    pub(crate) shutdown_ready: Arc<tokio::sync::Semaphore>,
 }
 
 impl UploadQueueInitialized {
     pub(super) fn no_pending_work(&self) -> bool {
         self.inprogress_tasks.is_empty() && self.queued_operations.is_empty()
+    }
+
+    pub(super) fn get_last_remote_consistent_lsn_visible(&self) -> Lsn {
+        self.visible_remote_consistent_lsn.load()
+    }
+
+    pub(super) fn get_last_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
+        let lsn = self.clean.0.metadata.disk_consistent_lsn();
+        self.clean.1.map(|_| lsn)
     }
 }
 
@@ -89,9 +119,35 @@ pub(super) enum SetDeletedFlagProgress {
     Successful(NaiveDateTime),
 }
 
-pub(super) struct UploadQueueStopped {
+pub(super) struct UploadQueueStoppedDeletable {
     pub(super) upload_queue_for_deletion: UploadQueueInitialized,
     pub(super) deleted_at: SetDeletedFlagProgress,
+}
+
+pub(super) enum UploadQueueStopped {
+    Deletable(UploadQueueStoppedDeletable),
+    Uninitialized,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum NotInitialized {
+    #[error("queue is in state Uninitialized")]
+    Uninitialized,
+    #[error("queue is in state Stopped")]
+    Stopped,
+    #[error("queue is shutting down")]
+    ShuttingDown,
+}
+
+impl NotInitialized {
+    pub(crate) fn is_stopping(&self) -> bool {
+        use NotInitialized::*;
+        match self {
+            Uninitialized => false,
+            Stopped => true,
+            ShuttingDown => true,
+        }
+    }
 }
 
 impl UploadQueue {
@@ -108,14 +164,13 @@ impl UploadQueue {
 
         info!("initializing upload queue for empty remote");
 
+        let index_part = IndexPart::empty(metadata.clone());
+
         let state = UploadQueueInitialized {
-            // As described in the doc comment, it's ok for `latest_files` and `latest_metadata` to be ahead.
-            latest_files: HashMap::new(),
+            dirty: index_part.clone(),
+            clean: (index_part, None),
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            latest_metadata: metadata.clone(),
-            // We haven't uploaded anything yet, so, `last_uploaded_consistent_lsn` must be 0 to prevent
-            // safekeepers from garbage-collecting anything.
-            last_uploaded_consistent_lsn: Lsn(0),
+            visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -123,6 +178,10 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            #[cfg(feature = "testing")]
+            dangling_files: HashMap::new(),
+            shutting_down: false,
+            shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -140,36 +199,18 @@ impl UploadQueue {
             }
         }
 
-        let mut files = HashMap::with_capacity(index_part.timeline_layers.len());
-        for layer_name in &index_part.timeline_layers {
-            match index_part
-                .layer_metadata
-                .get(layer_name)
-                .map(LayerFileMetadata::from)
-            {
-                Some(layer_metadata) => {
-                    files.insert(layer_name.to_owned(), layer_metadata);
-                }
-                None => {
-                    anyhow::bail!(
-                        "No remote layer metadata found for layer {}",
-                        layer_name.file_name()
-                    );
-                }
-            }
-        }
-
-        let index_part_metadata = index_part.parse_metadata()?;
         info!(
             "initializing upload queue with remote index_part.disk_consistent_lsn: {}",
-            index_part_metadata.disk_consistent_lsn()
+            index_part.metadata.disk_consistent_lsn()
         );
 
         let state = UploadQueueInitialized {
-            latest_files: files,
+            dirty: index_part.clone(),
+            clean: (index_part.clone(), None),
             latest_files_changes_since_metadata_upload_scheduled: 0,
-            latest_metadata: index_part_metadata.clone(),
-            last_uploaded_consistent_lsn: index_part_metadata.disk_consistent_lsn(),
+            visible_remote_consistent_lsn: Arc::new(
+                index_part.metadata.disk_consistent_lsn().into(),
+            ),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -177,6 +218,10 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            #[cfg(feature = "testing")]
+            dangling_files: HashMap::new(),
+            shutting_down: false,
+            shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -184,20 +229,29 @@ impl UploadQueue {
     }
 
     pub(crate) fn initialized_mut(&mut self) -> anyhow::Result<&mut UploadQueueInitialized> {
+        use UploadQueue::*;
         match self {
-            UploadQueue::Uninitialized | UploadQueue::Stopped(_) => {
-                anyhow::bail!("queue is in state {}", self.as_str())
+            Uninitialized => Err(NotInitialized::Uninitialized.into()),
+            Initialized(x) => {
+                if x.shutting_down {
+                    Err(NotInitialized::ShuttingDown.into())
+                } else {
+                    Ok(x)
+                }
             }
-            UploadQueue::Initialized(x) => Ok(x),
+            Stopped(_) => Err(NotInitialized::Stopped.into()),
         }
     }
 
-    pub(crate) fn stopped_mut(&mut self) -> anyhow::Result<&mut UploadQueueStopped> {
+    pub(crate) fn stopped_mut(&mut self) -> anyhow::Result<&mut UploadQueueStoppedDeletable> {
         match self {
             UploadQueue::Initialized(_) | UploadQueue::Uninitialized => {
                 anyhow::bail!("queue is in state {}", self.as_str())
             }
-            UploadQueue::Stopped(stopped) => Ok(stopped),
+            UploadQueue::Stopped(UploadQueueStopped::Uninitialized) => {
+                anyhow::bail!("queue is in state Stopped(Uninitialized)")
+            }
+            UploadQueue::Stopped(UploadQueueStopped::Deletable(deletable)) => Ok(deletable),
         }
     }
 }
@@ -212,47 +266,57 @@ pub(crate) struct UploadTask {
     pub(crate) op: UploadOp,
 }
 
+/// A deletion of some layers within the lifetime of a timeline.  This is not used
+/// for timeline deletion, which skips this queue and goes directly to DeletionQueue.
 #[derive(Debug)]
 pub(crate) struct Delete {
-    pub(crate) file_kind: RemoteOpFileKind,
-    pub(crate) layer_file_name: LayerFileName,
-    pub(crate) scheduled_from_timeline_delete: bool,
+    pub(crate) layers: Vec<(LayerName, LayerFileMetadata)>,
 }
 
 #[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
-    UploadLayer(LayerFileName, LayerFileMetadata),
+    UploadLayer(ResidentLayer, LayerFileMetadata),
 
-    /// Upload the metadata file
-    UploadMetadata(IndexPart, Lsn),
+    /// Upload a index_part.json file
+    UploadMetadata {
+        /// The next [`UploadQueueInitialized::clean`] after this upload succeeds.
+        uploaded: Box<IndexPart>,
+    },
 
-    /// Delete a layer file
+    /// Delete layer files
     Delete(Delete),
 
-    /// Barrier. When the barrier operation is reached,
+    /// Barrier. When the barrier operation is reached, the channel is closed.
     Barrier(tokio::sync::watch::Sender<()>),
+
+    /// Shutdown; upon encountering this operation no new operations will be spawned, otherwise
+    /// this is the same as a Barrier.
+    Shutdown,
 }
 
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(path, metadata) => {
+            UploadOp::UploadLayer(layer, metadata) => {
                 write!(
                     f,
-                    "UploadLayer({}, size={:?})",
-                    path.file_name(),
-                    metadata.file_size()
+                    "UploadLayer({}, size={:?}, gen={:?})",
+                    layer, metadata.file_size, metadata.generation
                 )
             }
-            UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
-            UploadOp::Delete(delete) => write!(
-                f,
-                "Delete(path: {}, scheduled_from_timeline_delete: {})",
-                delete.layer_file_name.file_name(),
-                delete.scheduled_from_timeline_delete
-            ),
+            UploadOp::UploadMetadata { uploaded, .. } => {
+                write!(
+                    f,
+                    "UploadMetadata(lsn: {})",
+                    uploaded.metadata.disk_consistent_lsn()
+                )
+            }
+            UploadOp::Delete(delete) => {
+                write!(f, "Delete({} layers)", delete.layers.len())
+            }
             UploadOp::Barrier(_) => write!(f, "Barrier"),
+            UploadOp::Shutdown => write!(f, "Shutdown"),
         }
     }
 }

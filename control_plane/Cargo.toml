@@ -6,24 +6,35 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+camino.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
+futures.workspace = true
 git-version.workspace = true
+humantime.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 postgres.workspace = true
+hex.workspace = true
+humantime-serde.workspace = true
+hyper.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
+scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-util.workspace = true
 url.workspace = true
-# Note: Do not directly depend on pageserver or safekeeper; use pageserver_api or safekeeper_api
-# instead, so that recompile times are better.
 pageserver_api.workspace = true
+pageserver_client.workspace = true
 postgres_backend.workspace = true
 safekeeper_api.workspace = true
 postgres_connection.workspace = true
@@ -32,3 +43,4 @@ utils.workspace = true
 
 compute_api.workspace = true
 workspace_hack.workspace = true
+tracing.workspace = true

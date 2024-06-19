@@ -10,18 +10,19 @@
 //! (non-Neon binaries don't necessarily follow our pidfile conventions).
 //! The pid stored in the file is later used to stop the service.
 //!
-//! See [`lock_file`] module for more info.
+//! See the [`lock_file`](utils::lock_file) module for more info.
 
 use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 use std::{fs, io, thread};
 
 use anyhow::Context;
+use camino::{Utf8Path, Utf8PathBuf};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag};
 use nix::sys::signal::{kill, Signal};
@@ -43,15 +44,15 @@ const NOTICE_AFTER_RETRIES: u64 = 50;
 
 /// Argument to `start_process`, to indicate whether it should create pidfile or if the process creates
 /// it itself.
-pub enum InitialPidFile<'t> {
+pub enum InitialPidFile {
     /// Create a pidfile, to allow future CLI invocations to manipulate the process.
-    Create(&'t Path),
+    Create(Utf8PathBuf),
     /// The process will create the pidfile itself, need to wait for that event.
-    Expect(&'t Path),
+    Expect(Utf8PathBuf),
 }
 
 /// Start a background child process using the parameters given.
-pub fn start_process<F, AI, A, EI>(
+pub async fn start_process<F, Fut, AI, A, EI>(
     process_name: &str,
     datadir: &Path,
     command: &Path,
@@ -59,18 +60,21 @@ pub fn start_process<F, AI, A, EI>(
     envs: EI,
     initial_pid_file: InitialPidFile,
     process_status_check: F,
-) -> anyhow::Result<Child>
+) -> anyhow::Result<()>
 where
-    F: Fn() -> anyhow::Result<bool>,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
     AI: IntoIterator<Item = A>,
     A: AsRef<OsStr>,
     // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
     EI: IntoIterator<Item = (String, String)>,
 {
+    if !datadir.metadata().context("stat datadir")?.is_dir() {
+        anyhow::bail!("`datadir` must be a directory when calling this function: {datadir:?}");
+    }
     let log_path = datadir.join(format!("{process_name}.log"));
     let process_log_file = fs::OpenOptions::new()
         .create(true)
-        .write(true)
         .append(true)
         .open(&log_path)
         .with_context(|| {
@@ -84,11 +88,20 @@ where
     let background_command = command
         .stdout(process_log_file)
         .stderr(same_file_for_stderr)
-        .args(args);
-    let filled_cmd = fill_aws_secrets_vars(fill_rust_env_vars(background_command));
+        .args(args)
+        // spawn all child processes in their datadir, useful for all kinds of things,
+        // not least cleaning up child processes e.g. after an unclean exit from the test suite:
+        // ```
+        // lsof  -d cwd -a +D  Users/cs/src/neon/test_output
+        // ```
+        .current_dir(datadir);
+
+    let filled_cmd = fill_env_vars_prefixed_neon(fill_remote_storage_secrets_vars(
+        fill_rust_env_vars(background_command),
+    ));
     filled_cmd.envs(envs);
 
-    let pid_file_to_check = match initial_pid_file {
+    let pid_file_to_check = match &initial_pid_file {
         InitialPidFile::Create(path) => {
             pre_exec_create_pidfile(filled_cmd, path);
             path
@@ -96,7 +109,7 @@ where
         InitialPidFile::Expect(path) => path,
     };
 
-    let mut spawned_process = filled_cmd.spawn().with_context(|| {
+    let spawned_process = filled_cmd.spawn().with_context(|| {
         format!("Could not spawn {process_name}, see console output and log files for details.")
     })?;
     let pid = spawned_process.id();
@@ -104,12 +117,26 @@ where
         i32::try_from(pid)
             .with_context(|| format!("Subprocess {process_name} has invalid pid {pid}"))?,
     );
+    // set up a scopeguard to kill & wait for the child in case we panic or bail below
+    let spawned_process = scopeguard::guard(spawned_process, |mut spawned_process| {
+        println!("SIGKILL & wait the started process");
+        (|| {
+            // TODO: use another signal that can be caught by the child so it can clean up any children it spawned (e..g, walredo).
+            spawned_process.kill().context("SIGKILL child")?;
+            spawned_process.wait().context("wait() for child process")?;
+            anyhow::Ok(())
+        })()
+        .with_context(|| format!("scopeguard kill&wait child {process_name:?}"))
+        .unwrap();
+    });
 
     for retries in 0..RETRIES {
-        match process_started(pid, Some(pid_file_to_check), &process_status_check) {
+        match process_started(pid, pid_file_to_check, &process_status_check).await {
             Ok(true) => {
-                println!("\n{process_name} started, pid: {pid}");
-                return Ok(spawned_process);
+                println!("\n{process_name} started and passed status check, pid: {pid}");
+                // leak the child process, it'll outlive this neon_local invocation
+                drop(scopeguard::ScopeGuard::into_inner(spawned_process));
+                return Ok(());
             }
             Ok(false) => {
                 if retries == NOTICE_AFTER_RETRIES {
@@ -124,20 +151,23 @@ where
                 thread::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS));
             }
             Err(e) => {
-                println!("{process_name} failed to start: {e:#}");
-                if let Err(e) = spawned_process.kill() {
-                    println!("Could not stop {process_name} subprocess: {e:#}")
-                };
+                println!("error starting process {process_name:?}: {e:#}");
                 return Err(e);
             }
         }
     }
     println!();
-    anyhow::bail!("{process_name} did not start in {RETRY_UNTIL_SECS} seconds");
+    anyhow::bail!(
+        "{process_name} did not start+pass status checks within {RETRY_UNTIL_SECS} seconds"
+    );
 }
 
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
-pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> anyhow::Result<()> {
+pub fn stop_process(
+    immediate: bool,
+    process_name: &str,
+    pid_file: &Utf8Path,
+) -> anyhow::Result<()> {
     let pid = match pid_file::read(pid_file)
         .with_context(|| format!("read pid_file {pid_file:?}"))?
     {
@@ -180,6 +210,11 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
     }
 
     // Wait until process is gone
+    wait_until_stopped(process_name, pid)?;
+    Ok(())
+}
+
+pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
     for retries in 0..RETRIES {
         match process_has_stopped(pid) {
             Ok(true) => {
@@ -228,14 +263,27 @@ fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
     filled_cmd
 }
 
-fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
+fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
     for env_key in [
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+        // HOME is needed in combination with `AWS_PROFILE` to pick up the SSO sessions.
+        "HOME",
+        "AZURE_STORAGE_ACCOUNT",
+        "AZURE_STORAGE_ACCESS_KEY",
     ] {
         if let Ok(value) = std::env::var(env_key) {
             cmd = cmd.env(env_key, value);
+        }
+    }
+    cmd
+}
+
+fn fill_env_vars_prefixed_neon(mut cmd: &mut Command) -> &mut Command {
+    for (var, val) in std::env::vars() {
+        if var.starts_with("NEON_PAGESERVER_") {
+            cmd = cmd.env(var, val);
         }
     }
     cmd
@@ -247,10 +295,10 @@ fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
 ///    will remain held until the cmd exits.
 fn pre_exec_create_pidfile<P>(cmd: &mut Command, path: P) -> &mut Command
 where
-    P: Into<PathBuf>,
+    P: Into<Utf8PathBuf>,
 {
-    let path: PathBuf = path.into();
-    // SAFETY
+    let path: Utf8PathBuf = path.into();
+    // SAFETY:
     // pre_exec is marked unsafe because it runs between fork and exec.
     // Why is that dangerous in various ways?
     // Long answer:  https://github.com/rust-lang/rust/issues/39575
@@ -267,7 +315,7 @@ where
     //      is in state 'taken' but the thread that would unlock it is
     //      not there.
     //   2. A rust object that represented some external resource in the
-    //      parent now got implicitly copied by the the fork, even though
+    //      parent now got implicitly copied by the fork, even though
     //      the object's type is not `Copy`. The parent program may use
     //      non-copyability as way to enforce unique ownership of an
     //      external resource in the typesystem. The fork breaks that
@@ -304,22 +352,20 @@ where
     cmd
 }
 
-fn process_started<F>(
+async fn process_started<F, Fut>(
     pid: Pid,
-    pid_file_to_check: Option<&Path>,
+    pid_file_to_check: &Utf8Path,
     status_check: &F,
 ) -> anyhow::Result<bool>
 where
-    F: Fn() -> anyhow::Result<bool>,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
 {
-    match status_check() {
-        Ok(true) => match pid_file_to_check {
-            Some(pid_file_path) => match pid_file::read(pid_file_path)? {
-                PidFileRead::NotExist => Ok(false),
-                PidFileRead::LockedByOtherProcess(pid_in_file) => Ok(pid_in_file == pid),
-                PidFileRead::NotHeldByAnyProcess(_) => Ok(false),
-            },
-            None => Ok(true),
+    match status_check().await {
+        Ok(true) => match pid_file::read(pid_file_to_check)? {
+            PidFileRead::NotExist => Ok(false),
+            PidFileRead::LockedByOtherProcess(pid_in_file) => Ok(pid_in_file == pid),
+            PidFileRead::NotHeldByAnyProcess(_) => Ok(false),
         },
         Ok(false) => Ok(false),
         Err(e) => anyhow::bail!("process failed to start: {e}"),

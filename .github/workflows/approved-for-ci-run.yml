@@ -1,0 +1,163 @@
+name: Handle `approved-for-ci-run` label
+# This workflow helps to run CI pipeline for PRs made by external contributors (from forks).
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      # Default types that triggers a workflow ([1]):
+      # - [1] https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request
+      - opened
+      - synchronize
+      - reopened
+      # Types that we wand to handle in addition to keep labels tidy:
+      - closed
+      # Actual magic happens here:
+      - labeled
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+  BRANCH: "ci-run/pr-${{ github.event.pull_request.number }}"
+
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  remove-label:
+    # Remove `approved-for-ci-run` label if the workflow is triggered by changes in a PR.
+    # The PR should be reviewed and labelled manually again.
+
+    permissions:
+      pull-requests: write # For `gh pr edit`
+
+    if: |
+      contains(fromJSON('["opened", "synchronize", "reopened", "closed"]'), github.event.action) &&
+      contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
+
+    runs-on: ubuntu-22.04
+
+    steps:
+      - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
+
+  create-or-update-pr-for-ci-run:
+    # Create local PR for an `approved-for-ci-run` labelled PR to run CI pipeline in it.
+
+    permissions:
+      pull-requests: write # for `gh pr edit`
+      # For `git push` and `gh pr create` we use CI_ACCESS_TOKEN
+
+    if: |
+      github.event.action == 'labeled' &&
+      contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
+
+    runs-on: ubuntu-22.04
+
+    steps:
+      - run: gh pr --repo "${GITHUB_REPOSITORY}" edit "${PR_NUMBER}" --remove-label "approved-for-ci-run"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.CI_ACCESS_TOKEN }}
+      
+      - name: Look for existing PR
+        id: get-pr
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          ALREADY_CREATED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --base main --json number --jq '.[].number')"
+          echo "ALREADY_CREATED=${ALREADY_CREATED}" >> ${GITHUB_OUTPUT}
+      
+      - name: Get changed labels
+        id: get-labels
+        if: steps.get-pr.outputs.ALREADY_CREATED != ''
+        env:
+          ALREADY_CREATED: ${{ steps.get-pr.outputs.ALREADY_CREATED }}
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          LABELS_TO_REMOVE=$(comm -23 <(gh pr --repo ${GITHUB_REPOSITORY} view ${ALREADY_CREATED} --json labels --jq '.labels.[].name'| ( grep -E '^run' || true ) | sort) \
+          <(gh pr --repo ${GITHUB_REPOSITORY} view ${PR_NUMBER} --json labels --jq '.labels.[].name' | ( grep -E '^run' || true ) | sort ) |\
+          ( grep -v run-e2e-tests-in-draft || true ) | paste -sd , -)
+          LABELS_TO_ADD=$(comm -13 <(gh pr --repo ${GITHUB_REPOSITORY} view ${ALREADY_CREATED} --json labels --jq '.labels.[].name'| ( grep -E '^run' || true ) |sort) \
+          <(gh pr --repo ${GITHUB_REPOSITORY} view ${PR_NUMBER} --json labels --jq '.labels.[].name' |  ( grep -E '^run' || true ) | sort ) |\
+          paste -sd , -)
+          echo "LABELS_TO_ADD=${LABELS_TO_ADD}" >> ${GITHUB_OUTPUT}
+          echo "LABELS_TO_REMOVE=${LABELS_TO_REMOVE}" >> ${GITHUB_OUTPUT}
+
+      - run: gh pr checkout "${PR_NUMBER}"
+
+      - run: git checkout -b "${BRANCH}"
+
+      - run: git push --force origin "${BRANCH}"
+        if: steps.get-pr.outputs.ALREADY_CREATED == ''
+
+      - name: Create a Pull Request for CI run (if required)
+        if: steps.get-pr.outputs.ALREADY_CREATED == ''
+        env: 
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          cat << EOF > body.md
+            This Pull Request is created automatically to run the CI pipeline for #${PR_NUMBER}
+
+            Please do not alter or merge/close it.
+
+            Feel free to review/comment/discuss the original PR #${PR_NUMBER}.
+          EOF
+
+          LABELS=$( (gh pr --repo "${GITHUB_REPOSITORY}" view ${PR_NUMBER}  --json labels --jq '.labels.[].name'; echo run-e2e-tests-in-draft  )| \
+          grep -E '^run' | paste -sd , -)
+          gh pr --repo "${GITHUB_REPOSITORY}" create --title "CI run for PR #${PR_NUMBER}" \
+                                                       --body-file "body.md" \
+                                                       --head "${BRANCH}" \
+                                                       --base "main" \
+                                                       --label ${LABELS} \
+                                                       --draft
+      - name: Modify the existing pull request (if required)
+        if: steps.get-pr.outputs.ALREADY_CREATED != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LABELS_TO_ADD: ${{ steps.get-labels.outputs.LABELS_TO_ADD }}
+          LABELS_TO_REMOVE: ${{ steps.get-labels.outputs.LABELS_TO_REMOVE }}
+          ALREADY_CREATED: ${{ steps.get-pr.outputs.ALREADY_CREATED }}
+        run: |
+          ADD_CMD=
+          REMOVE_CMD=
+          [ -z "${LABELS_TO_ADD}" ] || ADD_CMD="--add-label ${LABELS_TO_ADD}"
+          [ -z "${LABELS_TO_REMOVE}" ] || REMOVE_CMD="--remove-label ${LABELS_TO_REMOVE}"
+          if [ -n "${ADD_CMD}" ] || [ -n "${REMOVE_CMD}" ]; then
+            gh pr --repo "${GITHUB_REPOSITORY}" edit ${ALREADY_CREATED} ${ADD_CMD} ${REMOVE_CMD}
+          fi
+
+      - run: git push --force origin "${BRANCH}"
+        if: steps.get-pr.outputs.ALREADY_CREATED != ''
+             
+  cleanup:
+    # Close PRs and delete branchs if the original PR is closed.
+
+    permissions:
+      contents: write # for `--delete-branch` flag in `gh pr close`
+      pull-requests: write # for `gh pr close`
+
+    if: |
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Close PR and delete `ci-run/pr-${{ env.PR_NUMBER }}` branch
+        run: |
+          CLOSED="$(gh pr --repo ${GITHUB_REPOSITORY} list --head ${BRANCH} --json 'closed' --jq '.[].closed')"
+          if [ "${CLOSED}" == "false" ]; then
+            gh pr --repo "${GITHUB_REPOSITORY}" close "${BRANCH}" --delete-branch
+          fi

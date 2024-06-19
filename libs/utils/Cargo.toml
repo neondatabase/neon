@@ -4,19 +4,30 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
+# which adds some runtime cost to run tests on outage conditions
+testing = ["fail/failpoints"]
+
 [dependencies]
-atty.workspace = true
+arc-swap.workspace = true
 sentry.workspace = true
+async-compression.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
 bytes.workspace = true
+camino.workspace = true
 chrono.workspace = true
 heapless.workspace = true
 hex = { workspace = true, features = ["serde"] }
+humantime.workspace = true
 hyper = { workspace = true, features = ["full"] }
+fail.workspace = true
 futures = { workspace = true}
 jsonwebtoken.workspace = true
+leaky-bucket.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
@@ -27,6 +38,8 @@ serde_json.workspace = true
 signal-hook.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tar.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["json", "registry"] }
@@ -36,17 +49,28 @@ strum.workspace = true
 strum_macros.workspace = true
 url.workspace = true
 uuid.workspace = true
+walkdir.workspace = true
 
 pq_proto.workspace = true
+postgres_connection.workspace = true
 metrics.workspace = true
 workspace_hack.workspace = true
+
+const_format.workspace = true
+
+# to use tokio channels as streams, this is faster to compile than async_stream
+# why is it only here? no other crate should use it, streams are rarely needed.
+tokio-stream = { version = "0.1.14" }
+
+serde_path_to_error.workspace = true
 
 [dev-dependencies]
 byteorder.workspace = true
 bytes.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
-tempfile.workspace = true
+camino-tempfile.workspace = true
+serde_assert.workspace = true
 
 [[bench]]
 name = "benchmarks"

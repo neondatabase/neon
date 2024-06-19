@@ -1,0 +1,487 @@
+# Supplemental file for neondatabase/autoscaling's vm-builder, for producing the VM compute image.
+---
+commands:
+  - name: cgconfigparser
+    user: root
+    sysvInitAction: sysinit
+    shell: 'cgconfigparser -l /etc/cgconfig.conf -s 1664'
+  # restrict permissions on /neonvm/bin/resize-swap, because we grant access to compute_ctl for
+  # running it as root.
+  - name: chmod-resize-swap
+    user: root
+    sysvInitAction: sysinit
+    shell: 'chmod 711 /neonvm/bin/resize-swap'
+  - name: pgbouncer
+    user: postgres
+    sysvInitAction: respawn
+    shell: '/usr/local/bin/pgbouncer /etc/pgbouncer.ini'
+  - name: postgres-exporter
+    user: nobody
+    sysvInitAction: respawn
+    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres application_name=postgres-exporter" /bin/postgres_exporter'
+  - name: sql-exporter
+    user: nobody
+    sysvInitAction: respawn
+    shell: '/bin/sql_exporter -config.file=/etc/sql_exporter.yml -web.listen-address=:9399'
+  - name: sql-exporter-autoscaling
+    user: nobody
+    sysvInitAction: respawn
+    shell: '/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499'
+shutdownHook: |
+  su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
+files:
+  - filename: compute_ctl-resize-swap
+    content: |
+      # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
+      # as root without requiring entering a password (NOPASSWD), regardless of hostname (ALL)
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap
+  - filename: pgbouncer.ini
+    content: |
+      [databases]
+      *=host=localhost port=5432 auth_user=cloud_admin
+      [pgbouncer]
+      listen_port=6432
+      listen_addr=0.0.0.0
+      auth_type=scram-sha-256
+      auth_user=cloud_admin
+      auth_dbname=postgres
+      client_tls_sslmode=disable
+      server_tls_sslmode=disable
+      pool_mode=transaction
+      max_client_conn=10000
+      default_pool_size=64
+      max_prepared_statements=0
+      admin_users=postgres
+      unix_socket_dir=/tmp/
+      unix_socket_mode=0777
+  - filename: cgconfig.conf
+    content: |
+      # Configuration for cgroups in VM compute nodes
+      group neon-postgres {
+          perm {
+              admin {
+                  uid = postgres;
+              }
+              task {
+                  gid = users;
+              }
+          }
+          memory {}
+      }
+  - filename: sql_exporter.yml
+    content: |
+      # Configuration for sql_exporter
+      # Global defaults.
+      global:
+        # If scrape_timeout <= 0, no timeout is set unless Prometheus provides one. The default is 10s.
+        scrape_timeout: 10s
+        # Subtracted from Prometheus' scrape_timeout to give us some headroom and prevent Prometheus from timing out first.
+        scrape_timeout_offset: 500ms
+        # Minimum interval between collector runs: by default (0s) collectors are executed on every scrape.
+        min_interval: 0s
+        # Maximum number of open connections to any one target. Metric queries will run concurrently on multiple connections,
+        # as will concurrent scrapes.
+        max_connections: 1
+        # Maximum number of idle connections to any one target. Unless you use very long collection intervals, this should
+        # always be the same as max_connections.
+        max_idle_connections: 1
+        # Maximum number of maximum amount of time a connection may be reused. Expired connections may be closed lazily before reuse.
+        # If 0, connections are not closed due to a connection's age.
+        max_connection_lifetime: 5m
+
+      # The target to monitor and the collectors to execute on it.
+      target:
+        # Data source name always has a URI schema that matches the driver name. In some cases (e.g. MySQL)
+        # the schema gets dropped or replaced to match the driver expected DSN format.
+        data_source_name: 'postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter'
+
+        # Collectors (referenced by name) to execute on the target.
+        # Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
+        collectors: [neon_collector]
+
+      # Collector files specifies a list of globs. One collector definition is read from each matching file.
+      # Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
+      collector_files:
+        - "neon_collector.yml"
+  - filename: sql_exporter_autoscaling.yml
+    content: |
+      # Configuration for sql_exporter for autoscaling-agent
+      # Global defaults.
+      global:
+        # If scrape_timeout <= 0, no timeout is set unless Prometheus provides one. The default is 10s.
+        scrape_timeout: 10s
+        # Subtracted from Prometheus' scrape_timeout to give us some headroom and prevent Prometheus from timing out first.
+        scrape_timeout_offset: 500ms
+        # Minimum interval between collector runs: by default (0s) collectors are executed on every scrape.
+        min_interval: 0s
+        # Maximum number of open connections to any one target. Metric queries will run concurrently on multiple connections,
+        # as will concurrent scrapes.
+        max_connections: 1
+        # Maximum number of idle connections to any one target. Unless you use very long collection intervals, this should
+        # always be the same as max_connections.
+        max_idle_connections: 1
+        # Maximum number of maximum amount of time a connection may be reused. Expired connections may be closed lazily before reuse.
+        # If 0, connections are not closed due to a connection's age.
+        max_connection_lifetime: 5m
+
+      # The target to monitor and the collectors to execute on it.
+      target:
+        # Data source name always has a URI schema that matches the driver name. In some cases (e.g. MySQL)
+        # the schema gets dropped or replaced to match the driver expected DSN format.
+        data_source_name: 'postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter_autoscaling'
+
+        # Collectors (referenced by name) to execute on the target.
+        # Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
+        collectors: [neon_collector_autoscaling]
+
+      # Collector files specifies a list of globs. One collector definition is read from each matching file.
+      # Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
+      collector_files:
+        - "neon_collector_autoscaling.yml"
+  - filename: neon_collector.yml
+    content: |
+      collector_name: neon_collector
+      metrics:
+      - metric_name: lfc_misses
+        type: gauge
+        help: 'lfc_misses'
+        key_labels:
+        values: [lfc_misses]
+        query: |
+          select lfc_value as lfc_misses from neon.neon_lfc_stats where lfc_key='file_cache_misses';
+
+      - metric_name: lfc_used
+        type: gauge
+        help: 'LFC chunks used (chunk = 1MB)'
+        key_labels:
+        values: [lfc_used]
+        query: |
+          select lfc_value as lfc_used from neon.neon_lfc_stats where lfc_key='file_cache_used';
+
+      - metric_name: lfc_hits
+        type: gauge
+        help: 'lfc_hits'
+        key_labels:
+        values: [lfc_hits]
+        query: |
+          select lfc_value as lfc_hits from neon.neon_lfc_stats where lfc_key='file_cache_hits';
+
+      - metric_name: lfc_writes
+        type: gauge
+        help: 'lfc_writes'
+        key_labels:
+        values: [lfc_writes]
+        query: |
+          select lfc_value as lfc_writes from neon.neon_lfc_stats where lfc_key='file_cache_writes';
+
+      - metric_name: lfc_cache_size_limit
+        type: gauge
+        help: 'LFC cache size limit in bytes'
+        key_labels:
+        values: [lfc_cache_size_limit]
+        query: |
+          select pg_size_bytes(current_setting('neon.file_cache_size_limit')) as lfc_cache_size_limit;
+
+      - metric_name: connection_counts
+        type: gauge
+        help: 'Connection counts'
+        key_labels:
+          - datname
+          - state
+        values: [count]
+        query: |
+          select datname, state, count(*) as count from pg_stat_activity where state <> '' group by datname, state;
+
+      - metric_name: pg_stats_userdb
+        type: gauge
+        help: 'Stats for several oldest non-system dbs'
+        key_labels:
+          - datname
+        value_label: kind
+        values:
+          - db_size
+          - deadlocks
+          # Rows
+          - inserted
+          - updated
+          - deleted
+        # We export stats for 10 non-system database. Without this limit
+        # it is too easy to abuse the system by creating lots of databases.
+        query: |
+          select pg_database_size(datname) as db_size, deadlocks,
+                 tup_inserted as inserted, tup_updated as updated, tup_deleted as deleted,
+                 datname
+            from pg_stat_database
+           where datname IN (
+             select datname
+               from pg_database
+              where datname <> 'postgres' and not datistemplate
+              order by oid
+              limit 10
+           );
+
+      - metric_name: max_cluster_size
+        type: gauge
+        help: 'neon.max_cluster_size setting'
+        key_labels:
+        values: [max_cluster_size]
+        query: |
+          select setting::int as max_cluster_size from pg_settings where name = 'neon.max_cluster_size';
+
+      - metric_name: db_total_size
+        type: gauge
+        help: 'Size of all databases'
+        key_labels:
+        values: [total]
+        query: |
+          select sum(pg_database_size(datname)) as total from pg_database;
+
+      - metric_name: lfc_approximate_working_set_size
+        type: gauge
+        help: 'Approximate working set size in pages of 8192 bytes'
+        key_labels:
+        values: [approximate_working_set_size]
+        query: |
+          select neon.approximate_working_set_size(false) as approximate_working_set_size;
+
+      - metric_name: current_lsn
+        type: gauge
+        help: 'Current LSN of the database'
+        key_labels:
+        values: [lsn]
+        query: |
+          select
+            case
+              when pg_catalog.pg_is_in_recovery()
+              then (pg_last_wal_replay_lsn() - '0/0')::FLOAT8
+              else (pg_current_wal_lsn() - '0/0')::FLOAT8
+            end as lsn;
+
+      - metric_name: replication_delay_bytes
+        type: gauge
+        help: 'Bytes between received and replayed LSN'
+        key_labels:
+        values: [replication_delay_bytes]
+        query: |
+          SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()) AS replication_delay_bytes;
+
+      - metric_name: replication_delay_seconds
+        type: gauge
+        help: 'Time since last LSN was replayed'
+        key_labels:
+        values: [replication_delay_seconds]
+        query: |
+          SELECT
+            CASE
+              WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
+              ELSE GREATEST (0, EXTRACT (EPOCH FROM now() - pg_last_xact_replay_timestamp()))
+            END AS replication_delay_seconds;
+
+      - metric_name: checkpoints_req
+        type: gauge
+        help: 'Number of requested checkpoints'
+        key_labels:
+        values: [checkpoints_req]
+        query: |
+          SELECT checkpoints_req FROM pg_stat_bgwriter;
+
+      - metric_name: checkpoints_timed
+        type: gauge
+        help: 'Number of scheduled checkpoints'
+        key_labels:
+        values: [checkpoints_timed]
+        query: |
+          SELECT checkpoints_timed FROM pg_stat_bgwriter;
+
+      # In all the below metrics, we cast LSNs to floats because Prometheus only supports floats.
+      # It's probably fine because float64 can store integers from -2^53 to +2^53 exactly.
+
+      # Number of slots is limited by max_replication_slots, so collecting position for all of them shouldn't be bad.
+      - metric_name: logical_slot_restart_lsn
+        type: gauge
+        help: 'restart_lsn of logical slots'
+        key_labels:
+          - slot_name
+        values: [restart_lsn]
+        query: |
+          select slot_name, (restart_lsn - '0/0')::FLOAT8 as restart_lsn
+          from pg_replication_slots
+          where slot_type = 'logical';
+
+      - metric_name: retained_wal
+        type: gauge
+        help: 'Retained WAL in inactive replication slots'
+        key_labels:
+          - slot_name
+        values: [retained_wal]
+        query: |
+          SELECT slot_name, pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::FLOAT8 AS retained_wal
+          FROM pg_replication_slots
+          WHERE active = false;
+
+      - metric_name: wal_is_lost
+        type: gauge
+        help: 'Whether or not the replication slot wal_status is lost'
+        key_labels:
+          - slot_name
+        values: [wal_is_lost]
+        query: |
+          SELECT slot_name,
+          CASE
+            WHEN wal_status = 'lost' THEN 1
+            ELSE 0
+          END AS wal_is_lost
+          FROM pg_replication_slots;
+
+  - filename: neon_collector_autoscaling.yml
+    content: |
+      collector_name: neon_collector_autoscaling
+      metrics:
+      - metric_name: lfc_misses
+        type: gauge
+        help: 'lfc_misses'
+        key_labels:
+        values: [lfc_misses]
+        query: |
+          select lfc_value as lfc_misses from neon.neon_lfc_stats where lfc_key='file_cache_misses';
+
+      - metric_name: lfc_used
+        type: gauge
+        help: 'LFC chunks used (chunk = 1MB)'
+        key_labels:
+        values: [lfc_used]
+        query: |
+          select lfc_value as lfc_used from neon.neon_lfc_stats where lfc_key='file_cache_used';
+
+      - metric_name: lfc_hits
+        type: gauge
+        help: 'lfc_hits'
+        key_labels:
+        values: [lfc_hits]
+        query: |
+          select lfc_value as lfc_hits from neon.neon_lfc_stats where lfc_key='file_cache_hits';
+
+      - metric_name: lfc_writes
+        type: gauge
+        help: 'lfc_writes'
+        key_labels:
+        values: [lfc_writes]
+        query: |
+          select lfc_value as lfc_writes from neon.neon_lfc_stats where lfc_key='file_cache_writes';
+
+      - metric_name: lfc_cache_size_limit
+        type: gauge
+        help: 'LFC cache size limit in bytes'
+        key_labels:
+        values: [lfc_cache_size_limit]
+        query: |
+          select pg_size_bytes(current_setting('neon.file_cache_size_limit')) as lfc_cache_size_limit;
+
+      - metric_name: lfc_approximate_working_set_size
+        type: gauge
+        help: 'Approximate working set size in pages of 8192 bytes'
+        key_labels:
+        values: [approximate_working_set_size]
+        query: |
+          select neon.approximate_working_set_size(false) as approximate_working_set_size;
+build: |
+  # Build cgroup-tools
+  #
+  # At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
+  # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
+  # requires cgroup v2, so we'll build cgroup-tools ourselves.
+  FROM debian:bullseye-slim as libcgroup-builder
+  ENV LIBCGROUP_VERSION v2.0.3
+
+  RUN set -exu \
+      && apt update \
+      && apt install --no-install-recommends -y \
+          git \
+          ca-certificates \
+          automake \
+          cmake \
+          make \
+          gcc \
+          byacc \
+          flex \
+          libtool \
+          libpam0g-dev \
+      && git clone --depth 1 -b $LIBCGROUP_VERSION https://github.com/libcgroup/libcgroup \
+      && INSTALL_DIR="/libcgroup-install" \
+      && mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/include" \
+      && cd libcgroup \
+      # extracted from bootstrap.sh, with modified flags:
+      && (test -d m4 || mkdir m4) \
+      && autoreconf -fi \
+      && rm -rf autom4te.cache \
+      && CFLAGS="-O3" ./configure --prefix="$INSTALL_DIR" --sysconfdir=/etc --localstatedir=/var --enable-opaque-hierarchy="name=systemd" \
+      # actually build the thing...
+      && make install
+
+  FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
+
+  FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
+
+  # Build pgbouncer
+  #
+  FROM debian:bullseye-slim AS pgbouncer
+  RUN set -e \
+      && apt-get update \
+      && apt-get install -y \
+          build-essential \
+          git \
+          libevent-dev \
+          libtool \
+          pkg-config
+
+  # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
+  ENV PGBOUNCER_TAG pgbouncer_1_22_1
+  RUN set -e \
+      && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
+      && cd pgbouncer \
+      && ./autogen.sh \
+      && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
+      && make -j $(nproc) dist_man_MANS= \
+      && make install dist_man_MANS=
+merge: |
+  # tweak nofile limits
+  RUN set -e \
+      && echo 'fs.file-max = 1048576' >>/etc/sysctl.conf \
+      && test ! -e /etc/security || ( \
+         echo '*    - nofile 1048576' >>/etc/security/limits.conf \
+      && echo 'root - nofile 1048576' >>/etc/security/limits.conf \
+         )
+
+  # Allow postgres user (compute_ctl) to run swap resizer.
+  # Need to install sudo in order to allow this.
+  #
+  # Also, remove the 'read' permission from group/other on /neonvm/bin/resize-swap, just to be safe.
+  RUN set -e \
+      && apt update \
+      && apt install --no-install-recommends -y \
+             sudo \
+      && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+  COPY compute_ctl-resize-swap /etc/sudoers.d/compute_ctl-resize-swap
+
+  COPY cgconfig.conf /etc/cgconfig.conf
+  COPY pgbouncer.ini /etc/pgbouncer.ini
+  COPY sql_exporter.yml /etc/sql_exporter.yml
+  COPY neon_collector.yml /etc/neon_collector.yml
+  COPY sql_exporter_autoscaling.yml /etc/sql_exporter_autoscaling.yml
+  COPY neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
+
+  RUN set -e \
+      && chown postgres:postgres /etc/pgbouncer.ini \
+      && chmod 0666 /etc/pgbouncer.ini \
+      && chmod 0644 /etc/cgconfig.conf \
+      && chmod 0644 /etc/sql_exporter.yml \
+      && chmod 0644 /etc/neon_collector.yml \
+      && chmod 0644 /etc/sql_exporter_autoscaling.yml \
+      && chmod 0644 /etc/neon_collector_autoscaling.yml
+
+  COPY --from=libcgroup-builder /libcgroup-install/bin/*  /usr/bin/
+  COPY --from=libcgroup-builder /libcgroup-install/lib/*  /usr/lib/
+  COPY --from=libcgroup-builder /libcgroup-install/sbin/* /usr/sbin/
+  COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
+  COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
+  COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer

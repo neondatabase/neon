@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
@@ -13,6 +15,11 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     Information about image layers needed to collect old layers should
     be propagated by GC to compaction task which should take in in account
     when make a decision which new image layers needs to be created.
+
+    NB: this test demonstrates the problem. The source tree contained the
+    `gc_feedback` mechanism for about 9 months, but, there were problems
+    with it and it wasn't enabled at runtime.
+    This PR removed the code: https://github.com/neondatabase/neon/pull/6863
     """
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
@@ -47,7 +54,7 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
         # without modifying the earlier parts of the table.
         for step in range(n_steps):
             cur.execute(f"INSERT INTO t (step) SELECT {step} FROM generate_series(1, {step_size})")
-            for i in range(n_update_iters):
+            for _ in range(n_update_iters):
                 cur.execute(f"UPDATE t set count=count+1 where step = {step}")
                 cur.execute("vacuum t")
 
@@ -68,9 +75,31 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             physical_size = client.timeline_detail(tenant_id, timeline_id)["current_physical_size"]
             log.info(f"Physical storage size {physical_size}")
 
+    max_num_of_deltas_above_image = 0
+    max_total_num_of_deltas = 0
+    for key_range in client.perf_info(tenant_id, timeline_id):
+        max_total_num_of_deltas = max(max_total_num_of_deltas, key_range["total_num_of_deltas"])
+        max_num_of_deltas_above_image = max(
+            max_num_of_deltas_above_image, key_range["num_of_deltas_above_image"]
+        )
+
     MB = 1024 * 1024
     zenbenchmark.record("logical_size", logical_size // MB, "Mb", MetricReport.LOWER_IS_BETTER)
     zenbenchmark.record("physical_size", physical_size // MB, "Mb", MetricReport.LOWER_IS_BETTER)
     zenbenchmark.record(
         "physical/logical ratio", physical_size / logical_size, "", MetricReport.LOWER_IS_BETTER
     )
+    zenbenchmark.record(
+        "max_total_num_of_deltas", max_total_num_of_deltas, "", MetricReport.LOWER_IS_BETTER
+    )
+    zenbenchmark.record(
+        "max_num_of_deltas_above_image",
+        max_num_of_deltas_above_image,
+        "",
+        MetricReport.LOWER_IS_BETTER,
+    )
+
+    layer_map_path = env.repo_dir / "layer-map.json"
+    log.info(f"Writing layer map to {layer_map_path}")
+    with layer_map_path.open("w") as f:
+        f.write(json.dumps(client.timeline_layer_map_info(tenant_id, timeline_id)))

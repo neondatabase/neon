@@ -6,13 +6,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
+use camino::Utf8Path;
 use futures::StreamExt;
+use pageserver_api::key::rel_block_to_key;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
 use tracing::*;
 use walkdir::WalkDir;
 
 use crate::context::RequestContext;
+use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
@@ -29,10 +32,12 @@ use postgres_ffi::{BLCKSZ, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
 // Returns checkpoint LSN from controlfile
-pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
+pub fn get_lsn_from_controlfile(path: &Utf8Path) -> Result<Lsn> {
     // Read control file to extract the LSN
     let controlfile_path = path.join("global").join("pg_control");
-    let controlfile = ControlFileData::decode(&std::fs::read(controlfile_path)?)?;
+    let controlfile_buf = std::fs::read(&controlfile_path)
+        .with_context(|| format!("reading controlfile: {controlfile_path}"))?;
+    let controlfile = ControlFileData::decode(&controlfile_buf)?;
     let lsn = controlfile.checkPoint;
 
     Ok(Lsn(lsn))
@@ -46,7 +51,7 @@ pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
 /// cluster was not shut down cleanly.
 pub async fn import_timeline_from_postgres_datadir(
     tline: &Timeline,
-    pgdata_path: &Path,
+    pgdata_path: &Utf8Path,
     pgdata_lsn: Lsn,
     ctx: &RequestContext,
 ) -> Result<()> {
@@ -75,12 +80,12 @@ pub async fn import_timeline_from_postgres_datadir(
             {
                 pg_control = Some(control_file);
             }
-            modification.flush().await?;
+            modification.flush(ctx).await?;
         }
     }
 
     // We're done importing all the data files.
-    modification.commit().await?;
+    modification.commit(ctx).await?;
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
@@ -148,17 +153,17 @@ async fn import_rel(
     // because there is no guarantee about the order in which we are processing segments.
     // ignore "relation already exists" error
     //
-    // FIXME: use proper error type for this, instead of parsing the error message.
-    // Or better yet, keep track of which relations we've already created
+    // FIXME: Keep track of which relations we've already created?
     // https://github.com/neondatabase/neon/issues/3309
     if let Err(e) = modification
         .put_rel_creation(rel, nblocks as u32, ctx)
         .await
     {
-        if e.to_string().contains("already exists") {
-            debug!("relation {} already exists. we must be extending it", rel);
-        } else {
-            return Err(e);
+        match e {
+            RelationError::AlreadyExists => {
+                debug!("Relation {} already exist. We must be extending it.", rel)
+            }
+            _ => return Err(e.into()),
         }
     }
 
@@ -166,7 +171,10 @@ async fn import_rel(
         let r = reader.read_exact(&mut buf).await;
         match r {
             Ok(_) => {
-                modification.put_rel_page_image(rel, blknum, Bytes::copy_from_slice(&buf))?;
+                let key = rel_block_to_key(rel, blknum);
+                if modification.tline.get_shard_identity().is_key_local(&key) {
+                    modification.put_rel_page_image(rel, blknum, Bytes::copy_from_slice(&buf))?;
+                }
             }
 
             // TODO: UnexpectedEof is expected
@@ -256,7 +264,7 @@ async fn import_slru(
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
 async fn import_wal(
-    walpath: &Path,
+    walpath: &Utf8Path,
     tline: &Timeline,
     startpoint: Lsn,
     endpoint: Lsn,
@@ -301,13 +309,16 @@ async fn import_wal(
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
-        let mut modification = tline.begin_modification(endpoint);
+        let mut modification = tline.begin_modification(last_lsn);
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
                     .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
                     .await?;
+                WAL_INGEST.records_committed.inc();
+
+                modification.commit(ctx).await?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -359,7 +370,7 @@ pub async fn import_basebackup_from_tar(
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
-                modification.flush().await?;
+                modification.flush(ctx).await?;
             }
             tokio_tar::EntryType::Directory => {
                 debug!("directory {:?}", file_path);
@@ -377,7 +388,7 @@ pub async fn import_basebackup_from_tar(
     // sanity check: ensure that pg_control is loaded
     let _pg_control = pg_control.context("pg_control file not found")?;
 
-    modification.commit().await?;
+    modification.commit(ctx).await?;
     Ok(())
 }
 
@@ -437,13 +448,14 @@ pub async fn import_wal_from_tar(
 
         waldecoder.feed_bytes(&bytes[offset..]);
 
-        let mut modification = tline.begin_modification(end_lsn);
+        let mut modification = tline.begin_modification(last_lsn);
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
                     .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
                     .await?;
+                modification.commit(ctx).await?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);

@@ -19,29 +19,32 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+
+#include <curl/curl.h>
+
+#include "access/xact.h"
+#include "commands/defrem.h"
+#include "fmgr.h"
+#include "libpq/crypt.h"
+#include "miscadmin.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
-#include "access/xact.h"
+#include "utils/acl.h"
+#include "utils/guc.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
-#include "commands/defrem.h"
-#include "miscadmin.h"
-#include "utils/acl.h"
-#include "fmgr.h"
-#include "utils/guc.h"
-#include "port.h"
-#include <curl/curl.h>
 #include "utils/jsonb.h"
 
+#include "control_plane_connector.h"
+#include "neon_utils.h"
+
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
+
+static const char *jwt_token = NULL;
 
 /* GUCs */
 static char *ConsoleURL = NULL;
 static bool ForwardDDL = true;
-
-/* Curl structures for sending the HTTP requests */
-static CURL * CurlHandle;
-static struct curl_slist *ContentHeader = NULL;
 
 /*
  * CURL docs say that this buffer must exist until we call curl_easy_cleanup
@@ -53,7 +56,7 @@ typedef enum
 {
 	Op_Set,						/* An upsert: Either a creation or an alter */
 	Op_Delete,
-}			OpType;
+} OpType;
 
 typedef struct
 {
@@ -61,7 +64,7 @@ typedef struct
 	Oid			owner;
 	char		old_name[NAMEDATALEN];
 	OpType		type;
-}			DbEntry;
+} DbEntry;
 
 typedef struct
 {
@@ -69,7 +72,7 @@ typedef struct
 	char		old_name[NAMEDATALEN];
 	const char *password;
 	OpType		type;
-}			RoleEntry;
+} RoleEntry;
 
 /*
  * We keep one of these for each subtransaction in a stack. When a subtransaction
@@ -81,10 +84,10 @@ typedef struct DdlHashTable
 	struct DdlHashTable *prev_table;
 	HTAB	   *db_table;
 	HTAB	   *role_table;
-}			DdlHashTable;
+} DdlHashTable;
 
 static DdlHashTable RootTable;
-static DdlHashTable * CurrentDdlTable = &RootTable;
+static DdlHashTable *CurrentDdlTable = &RootTable;
 
 static void
 PushKeyValue(JsonbParseState **state, char *key, char *value)
@@ -111,15 +114,14 @@ ConstructDeltaMessage()
 	if (RootTable.db_table)
 	{
 		JsonbValue	dbs;
+		HASH_SEQ_STATUS status;
+		DbEntry    *entry;
 
 		dbs.type = jbvString;
 		dbs.val.string.val = "dbs";
 		dbs.val.string.len = strlen(dbs.val.string.val);
 		pushJsonbValue(&state, WJB_KEY, &dbs);
 		pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
-
-		HASH_SEQ_STATUS status;
-		DbEntry    *entry;
 
 		hash_seq_init(&status, RootTable.db_table);
 		while ((entry = hash_seq_search(&status)) != NULL)
@@ -161,7 +163,23 @@ ConstructDeltaMessage()
 			PushKeyValue(&state, "name", entry->name);
 			if (entry->password)
 			{
+#if PG_MAJORVERSION_NUM == 14
+				char	   *logdetail;
+#else
+				const char *logdetail;
+#endif
+				char	   *encrypted_password;
 				PushKeyValue(&state, "password", (char *) entry->password);
+				encrypted_password = get_role_password(entry->name, &logdetail);
+
+				if (encrypted_password)
+				{
+					PushKeyValue(&state, "encrypted_password", encrypted_password);
+				}
+				else
+				{
+					elog(ERROR, "Failed to get encrypted password: %s", logdetail);
+				}
 			}
 			if (entry->old_name[0] != '\0')
 			{
@@ -183,7 +201,7 @@ typedef struct
 {
 	char		str[ERROR_SIZE];
 	size_t		size;
-}			ErrorString;
+} ErrorString;
 
 static size_t
 ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
@@ -209,6 +227,8 @@ ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
 static void
 SendDeltasToControlPlane()
 {
+	static CURL		*handle = NULL;
+
 	if (!RootTable.db_table && !RootTable.role_table)
 		return;
 	if (!ConsoleURL)
@@ -219,29 +239,57 @@ SendDeltasToControlPlane()
 	if (!ForwardDDL)
 		return;
 
-	char	   *message = ConstructDeltaMessage();
-	ErrorString str = {};
+	if (handle == NULL)
+	{
+		struct curl_slist *headers = NULL;
 
-	curl_easy_setopt(CurlHandle, CURLOPT_CUSTOMREQUEST, "PATCH");
-	curl_easy_setopt(CurlHandle, CURLOPT_HTTPHEADER, ContentHeader);
-	curl_easy_setopt(CurlHandle, CURLOPT_POSTFIELDS, message);
-	curl_easy_setopt(CurlHandle, CURLOPT_URL, ConsoleURL);
-	curl_easy_setopt(CurlHandle, CURLOPT_ERRORBUFFER, CurlErrorBuf);
-	curl_easy_setopt(CurlHandle, CURLOPT_TIMEOUT, 3L /* seconds */ );
-	curl_easy_setopt(CurlHandle, CURLOPT_WRITEDATA, &str);
-	curl_easy_setopt(CurlHandle, CURLOPT_WRITEFUNCTION, ErrorWriteCallback);
+		headers = curl_slist_append(headers, "Content-Type: application/json");
+		if (headers == NULL)
+		{
+			elog(ERROR, "Failed to set Content-Type header");
+		}
+
+		if (jwt_token)
+		{
+			char		auth_header[8192];
+
+			snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", jwt_token);
+			headers = curl_slist_append(headers, auth_header);
+			if (headers == NULL)
+			{
+				elog(ERROR, "Failed to set Authorization header");
+			}
+		}
+
+		handle = alloc_curl_handle();
+
+		curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "PATCH");
+		curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+		curl_easy_setopt(handle, CURLOPT_URL, ConsoleURL);
+		curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, CurlErrorBuf);
+		curl_easy_setopt(handle, CURLOPT_TIMEOUT, 3L /* seconds */ );
+		curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, ErrorWriteCallback);
+	}
+
+	char	   *message = ConstructDeltaMessage();
+	ErrorString str;
+
+	str.size = 0;
+
+	curl_easy_setopt(handle, CURLOPT_POSTFIELDS, message);
+	curl_easy_setopt(handle, CURLOPT_WRITEDATA, &str);
 
 	const int	num_retries = 5;
-	int			curl_status;
+	CURLcode	curl_status;
 
 	for (int i = 0; i < num_retries; i++)
 	{
-		if ((curl_status = curl_easy_perform(CurlHandle)) == 0)
+		if ((curl_status = curl_easy_perform(handle)) == 0)
 			break;
 		elog(LOG, "Curl request failed on attempt %d: %s", i, CurlErrorBuf);
 		pg_usleep(1000 * 1000);
 	}
-	if (curl_status != 0)
+	if (curl_status != CURLE_OK)
 	{
 		elog(ERROR, "Failed to perform curl request: %s", CurlErrorBuf);
 	}
@@ -249,13 +297,11 @@ SendDeltasToControlPlane()
 	{
 		long		response_code;
 
-		if (curl_easy_getinfo(CurlHandle, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_UNKNOWN_OPTION)
+		if (curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_UNKNOWN_OPTION)
 		{
-			bool		error_exists = str.size != 0;
-
 			if (response_code != 200)
 			{
-				if (error_exists)
+				if (str.size != 0)
 				{
 					elog(ERROR,
 						 "Received HTTP code %ld from control plane: %s",
@@ -459,6 +505,12 @@ NeonXactCallback(XactEvent event, void *arg)
 	Assert(CurrentDdlTable == &RootTable);
 }
 
+static bool
+RoleIsNeonSuperuser(const char *role_name)
+{
+	return strcmp(role_name, "neon_superuser") == 0;
+}
+
 static void
 HandleCreateDb(CreatedbStmt *stmt)
 {
@@ -485,9 +537,17 @@ HandleCreateDb(CreatedbStmt *stmt)
 
 	entry->type = Op_Set;
 	if (downer && downer->arg)
-		entry->owner = get_role_oid(defGetString(downer), false);
+	{
+		const char *owner_name = defGetString(downer);
+
+		if (RoleIsNeonSuperuser(owner_name))
+			elog(ERROR, "can't create a database with owner neon_superuser");
+		entry->owner = get_role_oid(owner_name, false);
+	}
 	else
+	{
 		entry->owner = GetUserId();
+	}
 }
 
 static void
@@ -506,8 +566,11 @@ HandleAlterOwner(AlterOwnerStmt *stmt)
 
 	if (!found)
 		memset(entry->old_name, 0, sizeof(entry->old_name));
+	const char *new_owner = get_rolespec_name(stmt->newowner);
 
-	entry->owner = get_role_oid(get_rolespec_name(stmt->newowner), false);
+	if (RoleIsNeonSuperuser(new_owner))
+		elog(ERROR, "can't alter owner to neon_superuser");
+	entry->owner = get_role_oid(new_owner, false);
 	entry->type = Op_Set;
 }
 
@@ -601,6 +664,10 @@ HandleAlterRole(AlterRoleStmt *stmt)
 	InitRoleTableIfNeeded();
 	DefElem    *dpass = NULL;
 	ListCell   *option;
+	const char *role_name = stmt->role->rolename;
+
+	if (RoleIsNeonSuperuser(role_name) && !superuser())
+		elog(ERROR, "can't ALTER neon_superuser");
 
 	foreach(option, stmt->options)
 	{
@@ -615,7 +682,7 @@ HandleAlterRole(AlterRoleStmt *stmt)
 	bool		found = false;
 	RoleEntry  *entry = hash_search(
 									CurrentDdlTable->role_table,
-									stmt->role->rolename,
+									role_name,
 									HASH_ENTER,
 									&found);
 
@@ -765,7 +832,7 @@ NeonProcessUtility(
 	}
 }
 
-extern void
+void
 InitControlPlaneConnector()
 {
 	PreviousProcessUtilityHook = ProcessUtility_hook;
@@ -797,34 +864,10 @@ InitControlPlaneConnector()
 							 NULL,
 							 NULL);
 
-	const char *jwt_token = getenv("NEON_CONTROL_PLANE_TOKEN");
-
+	jwt_token = getenv("NEON_CONTROL_PLANE_TOKEN");
 	if (!jwt_token)
 	{
 		elog(LOG, "Missing NEON_CONTROL_PLANE_TOKEN environment variable, forwarding will not be authenticated");
 	}
 
-	if (curl_global_init(CURL_GLOBAL_DEFAULT))
-	{
-		elog(ERROR, "Failed to initialize curl");
-	}
-	if ((CurlHandle = curl_easy_init()) == NULL)
-	{
-		elog(ERROR, "Failed to initialize curl handle");
-	}
-	if ((ContentHeader = curl_slist_append(ContentHeader, "Content-Type: application/json")) == NULL)
-	{
-		elog(ERROR, "Failed to initialize content header");
-	}
-
-	if (jwt_token)
-	{
-		char		auth_header[8192];
-
-		snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", jwt_token);
-		if ((ContentHeader = curl_slist_append(ContentHeader, auth_header)) == NULL)
-		{
-			elog(ERROR, "Failed to initialize authorization header");
-		}
-	}
 }

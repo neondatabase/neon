@@ -61,5 +61,5 @@ def test_seqscans(env: PgCompare, scale: int, rows: int, iters: int, workers: in
             cur.execute(f"set max_parallel_workers_per_gather = {workers}")
 
             with env.record_duration("run"):
-                for i in range(iters):
+                for _ in range(iters):
                     cur.execute("select count(*) from t;")

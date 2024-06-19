@@ -1,0 +1,214 @@
+FROM debian:bullseye-slim
+
+# Add nonroot user
+RUN useradd -ms /bin/bash nonroot -b /home
+SHELL ["/bin/bash", "-c"]
+
+# System deps
+RUN set -e \
+    && apt update \
+    && apt install -y \
+        autoconf \
+        automake \
+        bison \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        flex \
+        git \
+        gnupg \
+        gzip \
+        jq \
+        libcurl4-openssl-dev \
+        libbz2-dev \
+        libffi-dev \
+        liblzma-dev \
+        libncurses5-dev \
+        libncursesw5-dev \
+        libpq-dev \
+        libreadline-dev \
+        libseccomp-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        libstdc++-10-dev \
+        libtool \
+        libxml2-dev \
+        libxmlsec1-dev \
+        libxxhash-dev \
+        lsof \
+        make \
+        netcat \
+        net-tools \
+        openssh-client \
+        parallel \
+        pkg-config \
+        unzip \
+        wget \
+        xz-utils \
+        zlib1g-dev \
+        zstd \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# protobuf-compiler (protoc)
+ENV PROTOC_VERSION 25.1
+RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \
+    && unzip -q protoc.zip -d protoc \
+    && mv protoc/bin/protoc /usr/local/bin/protoc \
+    && mv protoc/include/google /usr/local/include/google \
+    && rm -rf protoc.zip protoc
+
+# s5cmd
+ENV S5CMD_VERSION=2.2.2
+RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-$(uname -m | sed 's/x86_64/64bit/g' | sed 's/aarch64/arm64/g').tar.gz" | tar zxvf - s5cmd \
+    && chmod +x s5cmd \
+    && mv s5cmd /usr/local/bin/s5cmd
+
+# LLVM
+ENV LLVM_VERSION=18
+RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
+    && echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
+    && apt update \
+    && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
+    && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# PostgreSQL 14
+RUN curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
+    && echo 'deb http://apt.postgresql.org/pub/repos/apt bullseye-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
+    && apt update \
+    && apt install -y postgresql-client-14 \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# AWS CLI
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip" \
+    && unzip -q awscliv2.zip \
+    && ./aws/install \
+    && rm awscliv2.zip
+
+# Mold: A Modern Linker
+ENV MOLD_VERSION v2.31.0
+RUN set -e \
+    && git clone https://github.com/rui314/mold.git \
+    && mkdir mold/build \
+    && cd mold/build \
+    && git checkout ${MOLD_VERSION} \
+    && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ .. \
+    && cmake --build . -j $(nproc) \
+    && cmake --install . \
+    && cd .. \
+    && rm -rf mold
+
+# LCOV
+# Build lcov from a fork:
+# It includes several bug fixes on top on v2.0 release (https://github.com/linux-test-project/lcov/compare/v2.0...master)
+# And patches from us:
+# - Generates json file with code coverage summary (https://github.com/neondatabase/lcov/commit/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz)
+RUN for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JSON::XS Memory::Process Time::HiRes JSON; do yes | perl -MCPAN -e "CPAN::Shell->notest('install', '$package')"; done \
+    && wget https://github.com/neondatabase/lcov/archive/426e7e7a22f669da54278e9b55e6d8caabd00af0.tar.gz -O lcov.tar.gz \
+    && echo "61a22a62e20908b8b9e27d890bd0ea31f567a7b9668065589266371dcbca0992  lcov.tar.gz" | sha256sum --check \
+    && mkdir -p lcov && tar -xzf lcov.tar.gz -C lcov --strip-components=1 \
+    && cd lcov \
+    && make install \
+    && rm -rf ../lcov.tar.gz
+
+# Compile and install the static OpenSSL library
+ENV OPENSSL_VERSION=3.2.2
+ENV OPENSSL_PREFIX=/usr/local/openssl
+RUN wget -O /tmp/openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz && \
+    echo "197149c18d9e9f292c43f0400acaba12e5f52cacfe050f3d199277ea738ec2e7 /tmp/openssl-${OPENSSL_VERSION}.tar.gz" | sha256sum --check && \
+    cd /tmp && \
+    tar xzvf /tmp/openssl-${OPENSSL_VERSION}.tar.gz && \
+    rm /tmp/openssl-${OPENSSL_VERSION}.tar.gz && \
+    cd /tmp/openssl-${OPENSSL_VERSION} && \
+    ./config --prefix=${OPENSSL_PREFIX}  -static --static no-shared -fPIC && \
+    make -j "$(nproc)" && \
+    make install && \
+    cd /tmp && \
+    rm -rf /tmp/openssl-${OPENSSL_VERSION}
+
+# Use the same version of libicu as the compute nodes so that
+# clusters created using inidb on pageserver can be used by computes.
+#
+# TODO: at this time, Dockerfile.compute-node uses the debian bullseye libicu
+# package, which is 67.1. We're duplicating that knowledge here, and also, technically,
+# Debian has a few patches on top of 67.1 that we're not adding here.
+ENV ICU_VERSION=67.1
+ENV ICU_PREFIX=/usr/local/icu
+
+# Download and build static ICU
+RUN wget -O /tmp/libicu-${ICU_VERSION}.tgz https://github.com/unicode-org/icu/releases/download/release-${ICU_VERSION//./-}/icu4c-${ICU_VERSION//./_}-src.tgz && \
+    echo "94a80cd6f251a53bd2a997f6f1b5ac6653fe791dfab66e1eb0227740fb86d5dc /tmp/libicu-${ICU_VERSION}.tgz" | sha256sum --check && \
+    mkdir /tmp/icu && \
+    pushd /tmp/icu && \
+    tar -xzf /tmp/libicu-${ICU_VERSION}.tgz && \
+    pushd icu/source && \
+    ./configure --prefix=${ICU_PREFIX}  --enable-static --enable-shared=no CXXFLAGS="-fPIC" CFLAGS="-fPIC" && \
+    make -j "$(nproc)" && \
+    make install && \
+    popd && \
+    rm -rf icu && \
+    rm -f /tmp/libicu-${ICU_VERSION}.tgz && \
+    popd
+
+# Switch to nonroot user
+USER nonroot:nonroot
+WORKDIR /home/nonroot
+
+# Python
+ENV PYTHON_VERSION=3.9.18 \
+    PYENV_ROOT=/home/nonroot/.pyenv \
+    PATH=/home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
+RUN set -e \
+    && cd $HOME \
+    && curl -sSO https://raw.githubusercontent.com/pyenv/pyenv-installer/master/bin/pyenv-installer \
+    && chmod +x pyenv-installer \
+    && ./pyenv-installer \
+    && export PYENV_ROOT=/home/nonroot/.pyenv \
+    && export PATH="$PYENV_ROOT/bin:$PATH" \
+    && export PATH="$PYENV_ROOT/shims:$PATH" \
+    && pyenv install ${PYTHON_VERSION} \
+    && pyenv global ${PYTHON_VERSION} \
+    && python --version \
+    && pip install --upgrade pip \
+    && pip --version \
+    && pip install pipenv wheel poetry
+
+# Switch to nonroot user (again)
+USER nonroot:nonroot
+WORKDIR /home/nonroot
+
+# Rust
+# Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
+ENV RUSTC_VERSION=1.79.0
+ENV RUSTUP_HOME="/home/nonroot/.rustup"
+ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
+RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
+	chmod +x rustup-init && \
+	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
+	rm rustup-init && \
+    export PATH="$HOME/.cargo/bin:$PATH" && \
+    . "$HOME/.cargo/env" && \
+    cargo --version && rustup --version && \
+    rustup component add llvm-tools-preview rustfmt clippy && \
+    cargo install --git https://github.com/paritytech/cachepot && \
+    cargo install rustfilt && \
+    cargo install cargo-hakari && \
+    cargo install cargo-deny --locked && \
+    cargo install cargo-hack && \
+    cargo install cargo-nextest && \
+    rm -rf /home/nonroot/.cargo/registry && \
+    rm -rf /home/nonroot/.cargo/git
+ENV RUSTC_WRAPPER=cachepot
+
+# Show versions
+RUN whoami \
+    && python --version \
+    && pip --version \
+    && cargo --version --verbose \
+    && rustup --version --verbose \
+    && rustc --version --verbose \
+    && clang --version
+
+# Set following flag to check in Makefile if its running in Docker
+RUN touch /home/nonroot/.docker_build

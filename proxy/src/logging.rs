@@ -18,7 +18,7 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
         .from_env_lossy();
 
     let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(atty::is(atty::Stream::Stderr))
+        .with_ansi(false)
         .with_writer(std::io::stderr)
         .with_target(false);
 

@@ -1,0 +1,36 @@
+name: Check Permissions
+
+on:
+  workflow_call:
+    inputs:
+      github-event-name:
+        required: true
+        type: string
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
+
+jobs:
+  check-permissions:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Disallow CI runs on PRs from forks
+      if: |
+        inputs.github-event-name  == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name != github.repository
+      run: |
+        if [ "${{ contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}" = "true" ]; then
+          MESSAGE="Please create a PR from a branch of ${GITHUB_REPOSITORY} instead of a fork"
+        else
+          MESSAGE="The PR should be reviewed and labelled with 'approved-for-ci-run' to trigger a CI run"
+        fi
+
+        # TODO: use actions/github-script to post this message as a PR comment
+        echo >&2 "We don't run CI for PRs from forks"
+        echo >&2 "${MESSAGE}"
+
+        exit 1

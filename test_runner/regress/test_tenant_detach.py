@@ -1,17 +1,18 @@
 import asyncio
+import enum
 import random
 import time
 from threading import Thread
+from typing import List, Optional
 
 import asyncpg
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
     NeonEnvBuilder,
-    RemoteStorageKind,
-    available_remote_storages,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -19,8 +20,21 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
     wait_until_tenant_state,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.remote_storage import (
+    RemoteStorageKind,
+)
 from fixtures.utils import query_scalar, wait_until
+from prometheus_client.samples import Sample
+
+# In tests that overlap endpoint activity with tenant attach/detach, there are
+# a variety of warnings that the page service may emit when it cannot acquire
+# an active tenant to serve a request
+PERMIT_PAGE_SERVICE_ERRORS = [
+    ".*page_service.*Tenant .* not found",
+    ".*page_service.*Tenant .* is not active",
+    ".*page_service.*cancelled",
+    ".*page_service.*will not become active.*",
+]
 
 
 def do_gc_target(
@@ -37,17 +51,18 @@ def do_gc_target(
         log.info("gc http thread returning")
 
 
-# Basic detach and re-attach test
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_tenant_reattach(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_tenant_reattach",
-    )
+class ReattachMode(str, enum.Enum):
+    REATTACH_EXPLICIT = "explicit"
+    REATTACH_RESET = "reset"
+    REATTACH_RESET_DROP = "reset_drop"
 
+
+# Basic detach and re-attach test
+@pytest.mark.parametrize(
+    "mode",
+    [ReattachMode.REATTACH_EXPLICIT, ReattachMode.REATTACH_RESET, ReattachMode.REATTACH_RESET_DROP],
+)
+def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
     # that they are present after the test.
@@ -59,12 +74,11 @@ def test_tenant_reattach(
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
 
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
-    )
+    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
+
+    # Our re-attach may race with the deletion queue processing LSN updates
+    # from the original attachment.
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         with endpoint.cursor() as cur:
@@ -78,10 +92,10 @@ def test_tenant_reattach(
     wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
 
     # Check that we had to retry the uploads
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadLayer.*, will retry.*"
     )
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadMetadata.*, will retry.*"
     )
 
@@ -94,8 +108,15 @@ def test_tenant_reattach(
         ps_metrics.query_one("pageserver_last_record_lsn", filter=tenant_metric_filter).value
     )
 
-    pageserver_http.tenant_detach(tenant_id)
-    pageserver_http.tenant_attach(tenant_id)
+    if mode == ReattachMode.REATTACH_EXPLICIT:
+        # Explicitly detach then attach the tenant as two separate API calls
+        env.pageserver.tenant_detach(tenant_id)
+        env.pageserver.tenant_attach(tenant_id)
+    elif mode in (ReattachMode.REATTACH_RESET, ReattachMode.REATTACH_RESET_DROP):
+        # Use the reset API to detach/attach in one shot
+        pageserver_http.tenant_reset(tenant_id, mode == ReattachMode.REATTACH_RESET_DROP)
+    else:
+        raise NotImplementedError(mode)
 
     time.sleep(1)  # for metrics propagation
 
@@ -111,71 +132,12 @@ def test_tenant_reattach(
             assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
 
         # Check that we had to retry the downloads
-        assert env.pageserver.log_contains(".*list prefixes.*failed, will retry.*")
+        assert env.pageserver.log_contains(".*list identifiers.*failed, will retry.*")
         assert env.pageserver.log_contains(".*download.*failed, will retry.*")
 
 
 num_connections = 10
 num_rows = 100000
-updates_to_perform = 0
-
-updates_started = 0
-updates_finished = 0
-
-
-# Run random UPDATEs on test table. On failure, try again.
-async def update_table(pg_conn: asyncpg.Connection):
-    global updates_started, updates_finished, updates_to_perform
-
-    while updates_started < updates_to_perform or updates_to_perform == 0:
-        updates_started += 1
-        id = random.randrange(1, num_rows)
-
-        # Loop to retry until the UPDATE succeeds
-        while True:
-            try:
-                await pg_conn.fetchrow(f"UPDATE t SET counter = counter + 1 WHERE id = {id}")
-                updates_finished += 1
-                if updates_finished % 1000 == 0:
-                    log.info(f"update {updates_finished} / {updates_to_perform}")
-                break
-            except asyncpg.PostgresError as e:
-                # Received error from Postgres. Log it, sleep a little, and continue
-                log.info(f"UPDATE error: {e}")
-                await asyncio.sleep(0.1)
-
-
-async def sleep_and_reattach(pageserver_http: PageserverHttpClient, tenant_id: TenantId):
-    global updates_started, updates_finished, updates_to_perform
-
-    # Wait until we have performed some updates
-    wait_until(20, 0.5, lambda: updates_finished > 500)
-
-    log.info("Detaching tenant")
-    pageserver_http.tenant_detach(tenant_id)
-    await asyncio.sleep(1)
-    log.info("Re-attaching tenant")
-    pageserver_http.tenant_attach(tenant_id)
-    log.info("Re-attach finished")
-
-    # Continue with 5000 more updates
-    updates_to_perform = updates_started + 5000
-
-
-# async guts of test_tenant_reattach_while_bysy test
-async def reattach_while_busy(
-    env: NeonEnv, endpoint: Endpoint, pageserver_http: PageserverHttpClient, tenant_id: TenantId
-):
-    workers = []
-    for worker_id in range(num_connections):
-        pg_conn = await endpoint.connect_async()
-        workers.append(asyncio.create_task(update_table(pg_conn)))
-
-    workers.append(asyncio.create_task(sleep_and_reattach(pageserver_http, tenant_id)))
-    await asyncio.gather(*workers)
-
-    assert updates_finished == updates_to_perform
-
 
 # Detach and re-attach tenant, while compute is busy running queries.
 #
@@ -219,16 +181,66 @@ async def reattach_while_busy(
 #
 # I don't know what's causing that...
 @pytest.mark.skip(reason="fixme")
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_tenant_reattach_while_busy(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_tenant_reattach_while_busy",
-    )
+    updates_started = 0
+    updates_finished = 0
+    updates_to_perform = 0
+
     env = neon_env_builder.init_start()
+
+    # Run random UPDATEs on test table. On failure, try again.
+    async def update_table(pg_conn: asyncpg.Connection):
+        nonlocal updates_started, updates_finished, updates_to_perform
+
+        while updates_started < updates_to_perform or updates_to_perform == 0:
+            updates_started += 1
+            id = random.randrange(1, num_rows)
+
+            # Loop to retry until the UPDATE succeeds
+            while True:
+                try:
+                    await pg_conn.fetchrow(f"UPDATE t SET counter = counter + 1 WHERE id = {id}")
+                    updates_finished += 1
+                    if updates_finished % 1000 == 0:
+                        log.info(f"update {updates_finished} / {updates_to_perform}")
+                    break
+                except asyncpg.PostgresError as e:
+                    # Received error from Postgres. Log it, sleep a little, and continue
+                    log.info(f"UPDATE error: {e}")
+                    await asyncio.sleep(0.1)
+
+    async def sleep_and_reattach(pageserver_http: PageserverHttpClient, tenant_id: TenantId):
+        nonlocal updates_started, updates_finished, updates_to_perform
+
+        # Wait until we have performed some updates
+        wait_until(20, 0.5, lambda: updates_finished > 500)
+
+        log.info("Detaching tenant")
+        pageserver_http.tenant_detach(tenant_id)
+        await asyncio.sleep(1)
+        log.info("Re-attaching tenant")
+        env.pageserver.tenant_attach(tenant_id)
+        log.info("Re-attach finished")
+
+        # Continue with 5000 more updates
+        updates_to_perform = updates_started + 5000
+
+    # async guts of test_tenant_reattach_while_bysy test
+    async def reattach_while_busy(
+        env: NeonEnv, endpoint: Endpoint, pageserver_http: PageserverHttpClient, tenant_id: TenantId
+    ):
+        nonlocal updates_to_perform, updates_finished
+        workers = []
+        for _ in range(num_connections):
+            pg_conn = await endpoint.connect_async()
+            workers.append(asyncio.create_task(update_table(pg_conn)))
+
+        workers.append(asyncio.create_task(sleep_and_reattach(pageserver_http, tenant_id)))
+        await asyncio.gather(*workers)
+
+        assert updates_finished == updates_to_perform
 
     pageserver_http = env.pageserver.http_client()
 
@@ -240,10 +252,7 @@ def test_tenant_reattach_while_busy(
 
     # Attempts to connect from compute to pageserver while the tenant is
     # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
-    )
+    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
@@ -264,7 +273,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
-    env.pageserver.allowed_errors.append(".*NotFound: Tenant .*")
+    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
     # first check for non existing tenant
     tenant_id = TenantId.generate()
@@ -276,21 +285,11 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     assert excinfo.value.status_code == 404
 
-    # the error will be printed to the log too
-    env.pageserver.allowed_errors.append(".*NotFound: tenant *")
-
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
 
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
-    )
-
     # assert tenant exists on disk
-    assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -303,15 +302,19 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     # gc should not try to even start on a timeline that doesn't exist
     with pytest.raises(
-        expected_exception=PageserverApiException, match="gc target timeline does not exist"
+        expected_exception=PageserverApiException, match="NotFound: Timeline not found"
     ):
         bogus_timeline_id = TimelineId.generate()
         pageserver_http.timeline_gc(tenant_id, bogus_timeline_id, 0)
 
-    # the error will be printed to the log too
-    env.pageserver.allowed_errors.append(".*gc target timeline does not exist.*")
-    # Timelines get stopped during detach, ignore the gc calls that error, witnessing that
-    env.pageserver.allowed_errors.append(".*InternalServerError\\(timeline is Stopping.*")
+    env.pageserver.allowed_errors.extend(
+        [
+            # the error will be printed to the log too
+            ".*NotFound: Timeline not found.*",
+            # Timelines get stopped during detach, ignore the gc calls that error, witnessing that
+            ".*InternalServerError\\(timeline is Stopping.*",
+        ]
+    )
 
     # Detach while running manual GC.
     # It should wait for manual GC to finish because it runs in a task associated with the tenant.
@@ -320,7 +323,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     )
     gc_thread = Thread(target=lambda: do_gc_target(pageserver_http, tenant_id, timeline_id))
     gc_thread.start()
-    time.sleep(1)
+    time.sleep(5)
     # By now the gc task is spawned but in sleep for another second due to the failpoint.
 
     log.info("detaching tenant")
@@ -333,7 +336,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     log.info("gc thread returned")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     with pytest.raises(
         expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
@@ -350,15 +353,10 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     # create a new tenant
     tenant_id, _ = env.neon_cli.create_tenant()
 
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
-    )
+    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
     # assert tenant exists on disk
-    assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -387,14 +385,13 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     log.info("ignored tenant detached without error")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     # assert the tenant does not exists in the Pageserver
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
     assert (
         tenant_id not in tenants_after_detach
-    ), f"Ignored and then detached tenant {tenant_id} \
-        should not be present in pageserver's memory"
+    ), f"Ignored and then detached tenant {tenant_id} should not be present in pageserver's memory"
 
 
 # Creates a tenant, and detaches it with extra paremeter that forces ignored tenant detach.
@@ -406,15 +403,10 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     # create a new tenant
     tenant_id, _ = env.neon_cli.create_tenant()
 
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
-    )
+    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
     # assert tenant exists on disk
-    assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
+    assert env.pageserver.tenant_dir(tenant_id).exists()
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
@@ -431,26 +423,18 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     log.info("regular tenant detached without error")
 
     # check that nothing is left on disk for deleted tenant
-    assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
+    assert not env.pageserver.tenant_dir(tenant_id).exists()
 
     # assert the tenant does not exists in the Pageserver
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
     assert (
         tenant_id not in tenants_after_detach
-    ), f"Ignored and then detached tenant {tenant_id} \
-        should not be present in pageserver's memory"
+    ), f"Ignored and then detached tenant {tenant_id} should not be present in pageserver's memory"
 
 
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_detach_while_attaching(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_detach_while_attaching",
-    )
-
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -458,15 +442,14 @@ def test_detach_while_attaching(
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
-    )
+    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
+
+    # Our re-attach may race with the deletion queue processing LSN updates
+    # from the original attachment.
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer
@@ -499,9 +482,9 @@ def test_detach_while_attaching(
     pageserver_http.tenant_detach(tenant_id)
 
     # And re-attach
-    pageserver_http.configure_failpoints([("attach-before-activate", "return(5000)")])
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "return(5000)")])
 
-    pageserver_http.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     # Before it has chance to finish, detach it again
     pageserver_http.tenant_detach(tenant_id)
@@ -511,7 +494,7 @@ def test_detach_while_attaching(
 
     # Attach it again. If the GC and compaction loops from the previous attach/detach
     # cycle are still running, things could get really confusing..
-    pageserver_http.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
 
     with endpoint.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM foo")
@@ -526,19 +509,13 @@ def test_detach_while_attaching(
 # * restart the pageserver and verify that ignored tenant is still not loaded
 # * `load` the same tenant
 # * ensure that it's status is `Active` and it's present in pageserver's memory with all timelines
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3])
-def test_ignored_tenant_reattach(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_ignored_tenant_reattach",
-    )
+def test_ignored_tenant_reattach(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
     ignored_tenant_id, _ = env.neon_cli.create_tenant()
-    tenant_dir = env.repo_dir / "tenants" / str(ignored_tenant_id)
+    tenant_dir = env.pageserver.tenant_dir(ignored_tenant_id)
     tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
     tenants_before_ignore.sort()
     timelines_before_ignore = [
@@ -576,7 +553,7 @@ def test_ignored_tenant_reattach(
     ), "Ignored tenant should not be reloaded after pageserver restart"
 
     # now, load it from the local files and expect it works
-    pageserver_http.tenant_load(tenant_id=ignored_tenant_id)
+    env.pageserver.tenant_load(tenant_id=ignored_tenant_id)
     wait_until_tenant_state(pageserver_http, ignored_tenant_id, "Active", 5)
 
     tenants_after_attach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
@@ -598,27 +575,16 @@ def test_ignored_tenant_reattach(
 # * `load` the same tenant
 # * ensure that it's status is `Active`
 # * check that timeline data is restored
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_ignored_tenant_download_missing_layers(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_ignored_tenant_download_and_attach",
-    )
+def test_ignored_tenant_download_missing_layers(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
-    )
+    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
     data_id = 1
     data_secret = "very secret secret"
@@ -632,17 +598,17 @@ def test_ignored_tenant_download_missing_layers(
 
     # ignore the tenant and remove its layers
     pageserver_http.tenant_ignore(tenant_id)
-    tenant_timeline_dir = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
     layers_removed = False
-    for dir_entry in tenant_timeline_dir.iterdir():
+    for dir_entry in timeline_dir.iterdir():
         if dir_entry.name.startswith("00000"):
             # Looks like a layer file. Remove it
             dir_entry.unlink()
             layers_removed = True
-    assert layers_removed, f"Found no layers for tenant {tenant_timeline_dir}"
+    assert layers_removed, f"Found no layers for tenant {timeline_dir}"
 
     # now, load it from the local files and expect it to work due to remote storage restoration
-    pageserver_http.tenant_load(tenant_id=tenant_id)
+    env.pageserver.tenant_load(tenant_id=tenant_id)
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
     tenants_after_attach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
@@ -659,108 +625,36 @@ def test_ignored_tenant_download_missing_layers(
     ensure_test_data(data_id, data_secret, endpoint)
 
 
-# Tests that it's possible to `load` broken tenants:
-# * `ignore` a tenant
-# * removes its `metadata` file locally
-# * `load` the same tenant
-# * ensure that it's status is `Broken`
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_ignored_tenant_stays_broken_without_metadata(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_ignored_tenant_stays_broken_without_metadata",
-    )
-    env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
-    endpoint = env.endpoints.create_start("main")
-
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
-
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Broken.*"
-    )
-
-    # ignore the tenant and remove its metadata
-    pageserver_http.tenant_ignore(tenant_id)
-    tenant_timeline_dir = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-    metadata_removed = False
-    for dir_entry in tenant_timeline_dir.iterdir():
-        if dir_entry.name == "metadata":
-            # Looks like a layer file. Remove it
-            dir_entry.unlink()
-            metadata_removed = True
-    assert metadata_removed, f"Failed to find metadata file in {tenant_timeline_dir}"
-
-    env.pageserver.allowed_errors.append(
-        f".*{tenant_id}.*: load failed.*: failed to load metadata.*"
-    )
-
-    # now, load it from the local files and expect it to be broken due to inability to load tenant files into memory
-    pageserver_http.tenant_load(tenant_id=tenant_id)
-    wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 5)
-
-
 # Tests that attach is never working on a tenant, ignored or not, as long as it's not absent locally
 # Similarly, tests that it's not possible to schedule a `load` for tenat that's not ignored.
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_load_attach_negatives(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_load_attach_negatives",
-    )
+def test_load_negatives(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
-    endpoint = env.endpoints.create_start("main")
+    env.endpoints.create_start("main")
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    tenant_id = env.initial_tenant
 
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
-    )
+    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
     env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
     with pytest.raises(
         expected_exception=PageserverApiException,
         match=f"tenant {tenant_id} already exists, state: Active",
     ):
-        pageserver_http.tenant_load(tenant_id)
-
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match=f"tenant {tenant_id} already exists, state: Active",
-    ):
-        pageserver_http.tenant_attach(tenant_id)
+        env.pageserver.tenant_load(tenant_id)
 
     pageserver_http.tenant_ignore(tenant_id)
 
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match="tenant directory already exists",
-    ):
-        pageserver_http.tenant_attach(tenant_id)
 
-
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_ignore_while_attaching(
+def test_detach_while_activating(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_ignore_while_attaching",
-    )
+    """
+    Test cancellation behavior for tenants that are stuck somewhere between
+    being attached and reaching Active state.
+    """
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -768,52 +662,41 @@ def test_ignore_while_attaching(
 
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
-    )
+    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
+
+    # Our re-attach may race with the deletion queue processing LSN updates
+    # from the original attachment.
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
 
     data_id = 1
     data_secret = "very secret secret"
     insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, endpoint)
 
-    tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    tenants_before_detach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
 
     # Detach it
     pageserver_http.tenant_detach(tenant_id)
+
     # And re-attach, but stop attach task_mgr task from completing
-    pageserver_http.configure_failpoints([("attach-before-activate", "return(5000)")])
-    pageserver_http.tenant_attach(tenant_id)
-    # Run ignore on the task, thereby cancelling the attach.
-    # XXX This should take priority over attach, i.e., it should cancel the attach task.
-    # But neither the failpoint, nor the proper storage_sync download functions,
-    # are sensitive to task_mgr::shutdown.
-    # This problem is tracked in https://github.com/neondatabase/neon/issues/2996 .
-    # So, for now, effectively, this ignore here will block until attach task completes.
-    pageserver_http.tenant_ignore(tenant_id)
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "return(600000)")])
+    env.pageserver.tenant_attach(tenant_id)
 
-    # Cannot attach it due to some local files existing
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match="tenant directory already exists",
-    ):
-        pageserver_http.tenant_attach(tenant_id)
+    # The tenant is in the Activating state.  This should not block us from
+    # shutting it down and detaching it.
+    pageserver_http.tenant_detach(tenant_id)
 
-    tenants_after_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
-    assert tenant_id not in tenants_after_ignore, "Ignored tenant should be missing"
-    assert len(tenants_after_ignore) + 1 == len(
-        tenants_before_ignore
+    tenants_after_detach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    assert tenant_id not in tenants_after_detach, "Detached tenant should be missing"
+    assert len(tenants_after_detach) + 1 == len(
+        tenants_before_detach
     ), "Only ignored tenant should be missing"
 
-    # But can load it from local files, that will restore attach.
-    pageserver_http.tenant_load(tenant_id)
-
+    # Subsequently attaching it again should still work
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "off")])
+    env.pageserver.tenant_attach(tenant_id)
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
     endpoint.stop()
@@ -854,3 +737,59 @@ def ensure_test_data(data_id: int, data: str, endpoint: Endpoint):
         assert (
             query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data
         ), "Should have timeline data back"
+
+
+def test_metrics_while_ignoring_broken_tenant_and_reloading(
+    neon_env_builder: NeonEnvBuilder,
+):
+    env = neon_env_builder.init_start()
+
+    client = env.pageserver.http_client()
+    env.pageserver.allowed_errors.append(
+        r".* Changing Active tenant to Broken state, reason: broken from test"
+    )
+
+    def only_int(samples: List[Sample]) -> Optional[int]:
+        if len(samples) == 1:
+            return int(samples[0].value)
+        assert len(samples) == 0
+        return None
+
+    wait_until_tenant_state(client, env.initial_tenant, "Active", 10, 0.5)
+
+    client.tenant_break(env.initial_tenant)
+
+    def found_broken():
+        m = client.get_metrics()
+        active = m.query_all("pageserver_tenant_states_count", {"state": "Active"})
+        broken = m.query_all("pageserver_tenant_states_count", {"state": "Broken"})
+        broken_set = m.query_all(
+            "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
+        )
+        assert only_int(active) == 0 and only_int(broken) == 1 and only_int(broken_set) == 1
+
+    wait_until(10, 0.5, found_broken)
+
+    client.tenant_ignore(env.initial_tenant)
+
+    def found_cleaned_up():
+        m = client.get_metrics()
+        broken = m.query_all("pageserver_tenant_states_count", {"state": "Broken"})
+        broken_set = m.query_all(
+            "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
+        )
+        assert only_int(broken) == 0 and len(broken_set) == 0
+
+    wait_until(10, 0.5, found_cleaned_up)
+
+    env.pageserver.tenant_load(env.initial_tenant)
+
+    def found_active():
+        m = client.get_metrics()
+        active = m.query_all("pageserver_tenant_states_count", {"state": "Active"})
+        broken_set = m.query_all(
+            "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
+        )
+        assert only_int(active) == 1 and len(broken_set) == 0
+
+    wait_until(10, 0.5, found_active)

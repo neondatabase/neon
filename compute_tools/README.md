@@ -19,9 +19,10 @@ Also `compute_ctl` spawns two separate service threads:
 - `http-endpoint` runs a Hyper HTTP API server, which serves readiness and the
   last activity requests.
 
-If the `vm-informant` binary is present at `/bin/vm-informant`, it will also be started. For VM
-compute nodes, `vm-informant` communicates with the VM autoscaling system. It coordinates
-downscaling and (eventually) will request immediate upscaling under resource pressure.
+If `AUTOSCALING` environment variable is set, `compute_ctl` will start the
+`vm-monitor` located in [`neon/libs/vm_monitor`]. For VM compute nodes,
+`vm-monitor` communicates with the VM autoscaling system. It coordinates
+downscaling and requests immediate upscaling under resource pressure.
 
 Usage example:
 ```sh
@@ -29,6 +30,29 @@ compute_ctl -D /var/db/postgres/compute \
             -C 'postgresql://cloud_admin@localhost/postgres' \
             -S /var/db/postgres/specs/current.json \
             -b /usr/local/bin/postgres
+```
+
+## State Diagram
+
+Computes can be in various states. Below is a diagram that details how a
+compute moves between states.
+
+```mermaid
+%% https://mermaid.js.org/syntax/stateDiagram.html
+stateDiagram-v2
+  [*] --> Empty : Compute spawned
+  Empty --> ConfigurationPending : Waiting for compute spec
+  ConfigurationPending --> Configuration : Received compute spec
+  Configuration --> Failed : Failed to configure the compute
+  Configuration --> Running : Compute has been configured
+  Empty --> Init : Compute spec is immediately available
+  Empty --> TerminationPending : Requested termination
+  Init --> Failed : Failed to start Postgres
+  Init --> Running : Started Postgres
+  Running --> TerminationPending : Requested termination
+  TerminationPending --> Terminated : Terminated compute
+  Failed --> [*] : Compute exited
+  Terminated --> [*] : Compute exited
 ```
 
 ## Tests
