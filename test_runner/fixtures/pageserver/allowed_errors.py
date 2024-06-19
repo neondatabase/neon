@@ -106,8 +106,6 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     ".*startup_reconcile: Could not scan node.*",
     # Tests run in dev mode
     ".*Starting in dev mode.*",
-    # error message specific to pagebench approach to swap environments
-    ".* Scheduler missing node 1",
 ]
 
 
