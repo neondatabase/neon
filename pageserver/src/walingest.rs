@@ -55,6 +55,36 @@ pub struct WalIngest {
     checkpoint_modified: bool,
 }
 
+macro_rules! special_treatment_check {
+    (needs none) => {{
+        // we acknowledge that this record type needs no special treatment
+    }};
+    (unknown record type, $pg_version:expr, $lsn:expr, $decoded:expr) => {{
+        let pg_version: u32 = $pg_version;
+        let lsn: Lsn = $lsn;
+        let decoded: &DecodedWALRecord = $decoded;
+        use std::sync::atomic;
+        static LOGGED: atomic::AtomicBool = atomic::AtomicBool::new(false);
+        if LOGGED
+            .compare_exchange(
+                false,
+                true,
+                atomic::Ordering::Relaxed,
+                atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            warn!(
+                pg_version,
+                %lsn,
+                xl_rmid = %decoded.xl_rmid,
+                xl_info = %decoded.xl_info,
+                "unknown WAL record type, investigate whether it needs special treatment"
+            );
+        }
+    }};
+}
+
 impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
@@ -111,6 +141,7 @@ impl WalIngest {
 
         failpoint_support::sleep_millis_async!("wal-ingest-record-sleep");
 
+        #[allow(clippy::if_same_then_else)]
         match decoded.xl_rmid {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
                 // Heap AM records need some special handling, because they modify VM pages
@@ -134,6 +165,8 @@ impl WalIngest {
                     let truncate = XlSmgrTruncate::decode(&mut buf);
                     self.ingest_xlog_smgr_truncate(modification, &truncate, ctx)
                         .await?;
+                } else {
+                    special_treatment_check!(needs none);
                 }
             }
             pg_constants::RM_DBASE_ID => {
@@ -155,6 +188,8 @@ impl WalIngest {
                                 .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
                                 .await?;
                         }
+                    } else {
+                        special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                     }
                 } else if pg_version == 15 {
                     if info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG {
@@ -175,6 +210,8 @@ impl WalIngest {
                                 .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
                                 .await?;
                         }
+                    } else {
+                        special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                     }
                 } else if pg_version == 16 {
                     if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG {
@@ -195,11 +232,16 @@ impl WalIngest {
                                 .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
                                 .await?;
                         }
+                    } else {
+                        special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                     }
+                } else {
+                    special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                 }
             }
             pg_constants::RM_TBLSPC_ID => {
                 trace!("XLOG_TBLSPC_CREATE/DROP is not handled yet");
+                todo!() // should we do: special_treatment_check!(unknown record type, pg_version, lsn, decoded);
             }
             pg_constants::RM_CLOG_ID => {
                 let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
@@ -217,11 +259,12 @@ impl WalIngest {
                         ctx,
                     )
                     .await?;
-                } else {
-                    assert!(info == pg_constants::CLOG_TRUNCATE);
+                } else if info == pg_constants::CLOG_TRUNCATE {
                     let xlrec = XlClogTruncate::decode(&mut buf);
                     self.ingest_clog_truncate_record(modification, &xlrec, ctx)
                         .await?;
+                } else {
+                    special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                 }
             }
             pg_constants::RM_XACT_ID => {
@@ -265,6 +308,12 @@ impl WalIngest {
                     modification
                         .put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..]), ctx)
                         .await?;
+                } else if info == pg_constants::XLOG_XACT_ASSIGNMENT {
+                    special_treatment_check!(needs none);
+                } else if info == pg_constants::XLOG_XACT_INVALIDATIONS {
+                    special_treatment_check!(needs none);
+                } else {
+                    special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                 }
             }
             pg_constants::RM_MULTIXACT_ID => {
@@ -303,12 +352,20 @@ impl WalIngest {
                     let xlrec = XlMultiXactTruncate::decode(&mut buf);
                     self.ingest_multixact_truncate_record(modification, &xlrec, ctx)
                         .await?;
+                } else {
+                    special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                 }
             }
             pg_constants::RM_RELMAP_ID => {
-                let xlrec = XlRelmapUpdate::decode(&mut buf);
-                self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
-                    .await?;
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+
+                if info == pg_constants::XLOG_RELMAP_UPDATE {
+                    let xlrec = XlRelmapUpdate::decode(&mut buf);
+                    self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
+                        .await?;
+                } else {
+                    special_treatment_check!(unknown record type, pg_version, lsn, decoded);
+                }
             }
             pg_constants::RM_XLOG_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
@@ -318,6 +375,8 @@ impl WalIngest {
                     if self.checkpoint.nextOid != next_oid {
                         self.checkpoint.nextOid = next_oid;
                         self.checkpoint_modified = true;
+                    } else {
+                        special_treatment_check!(needs none);
                     }
                 } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
                     || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
@@ -350,6 +409,31 @@ impl WalIngest {
                     // have some trace of the checkpoint records in the layer files at the same
                     // LSNs.
                     self.checkpoint_modified = true;
+                } else if info == pg_constants::XLOG_FPI || info == pg_constants::XLOG_FPI_FOR_HINT
+                {
+                    // These records are importan for us, bu they are handled by
+                    // generic ingest_decoded_block() function below. They don't need
+                    // any special handling.
+                    //
+                    // HEIKKI: Is Noop the right code for that case?
+                    special_treatment_check!(needs none);
+                } else if info == pg_constants::XLOG_NOOP
+                    || info == pg_constants::XLOG_NEXTOID
+                    || info == pg_constants::XLOG_SWITCH
+                    || info == pg_constants::XLOG_BACKUP_END
+                    || info == pg_constants::XLOG_PARAMETER_CHANGE
+                    || info == pg_constants::XLOG_RESTORE_POINT
+                    || info == pg_constants::XLOG_FPW_CHANGE
+                    || info == pg_constants::XLOG_END_OF_RECOVERY
+                {
+                    special_treatment_check!(needs none);
+                } else if info == pg_constants::XLOG_OVERWRITE_CONTRECORD {
+                    // HEIKKI: I suspect we're not handling these correctly.
+                    // See https://github.com/neondatabase/neon/issues/934
+                    // Given that, not sure what the right outcome is.
+                    todo!()
+                } else {
+                    special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                 }
             }
             pg_constants::RM_LOGICALMSG_ID => {
@@ -365,9 +449,14 @@ impl WalIngest {
                         // we could peek into the message and only pause if it contains
                         // a particular string, for example, but this is enough for now.
                         failpoint_support::sleep_millis_async!("wal-ingest-logical-message-sleep");
+                        special_treatment_check!(needs none);
                     } else if let Some(path) = prefix.strip_prefix("neon-file:") {
                         modification.put_file(path, message, ctx).await?;
+                    } else {
+                        special_treatment_check!(needs none);
                     }
+                } else {
+                    special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                 }
             }
             pg_constants::RM_STANDBY_ID => {
@@ -375,6 +464,9 @@ impl WalIngest {
                 if info == pg_constants::XLOG_RUNNING_XACTS {
                     let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
                     self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
+                    todo!() // checkpoint_modified=true missing?
+                } else {
+                    todo!()
                 }
             }
             pg_constants::RM_REPLORIGIN_ID => {
@@ -387,13 +479,27 @@ impl WalIngest {
                 } else if info == pg_constants::XLOG_REPLORIGIN_DROP {
                     let xlrec = crate::walrecord::XlReploriginDrop::decode(&mut buf);
                     modification.drop_replorigin(xlrec.node_id).await?
+                } else {
+                    todo!()
                 }
             }
-            _x => {
-                // TODO: should probably log & fail here instead of blindly
-                // doing something without understanding the protocol
-            }
-        }
+
+            // All of these are handled by the generic ingest_decoded_block function
+            pg_constants::RM_BTREE_ID => special_treatment_check!(needs none),
+            pg_constants::RM_HASH_ID => special_treatment_check!(needs none),
+            pg_constants::RM_GIN_ID => special_treatment_check!(needs none),
+            pg_constants::RM_GIST_ID => special_treatment_check!(needs none),
+            pg_constants::RM_SEQ_ID => special_treatment_check!(needs none),
+            pg_constants::RM_SPGIST_ID => special_treatment_check!(needs none),
+            pg_constants::RM_BRIN_ID => special_treatment_check!(needs none),
+            pg_constants::RM_GENERIC_ID => special_treatment_check!(needs none),
+
+            // We don't support the commit-ts tracking in neon. No harm if we see
+            // these records though.
+            pg_constants::RM_COMMIT_TS_ID => special_treatment_check!(needs none),
+
+            _x => special_treatment_check!(unknown record type, pg_version, lsn, decoded),
+        };
 
         // Iterate through all the blocks that the record modifies, and
         // "put" a separate copy of the record for each block.
@@ -541,7 +647,10 @@ impl WalIngest {
         let mut old_heap_blkno: Option<u32> = None;
         let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
 
-        match modification.tline.pg_version {
+        let pg_version = modification.tline.pg_version;
+        let lsn = modification.get_lsn();
+        #[allow(clippy::if_same_then_else)]
+        match pg_version {
             14 => {
                 if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -580,6 +689,19 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP_TRUNCATE {
+                        // per comment in heap_redo:
+                        // TRUNCATE is a no-op because the actions are already logged as
+                        // SMGR WAL records.  TRUNCATE WAL record only exists for logical
+                        // decoding.
+                        special_treatment_check!(needs none);
+                    } else if info == pg_constants::XLOG_HEAP_CONFIRM
+                        || info == pg_constants::XLOG_HEAP_INPLACE
+                    {
+                        // these don't update the FSM or VM, so no special handling needed.
+                        special_treatment_check!(needs none);
+                    } else {
+                        special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -604,6 +726,23 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP2_REWRITE
+                        || info == pg_constants::XLOG_HEAP2_NEW_CID
+                    {
+                        // related to logical replication, we can ignore in storage
+                        special_treatment_check!(needs none);
+                    } else if info == pg_constants::XLOG_HEAP2_PRUNE
+                        || info == pg_constants::XLOG_HEAP2_VACUUM
+                        || info == pg_constants::XLOG_HEAP2_FREEZE_PAGE
+                    {
+                        // these don't update the VM, so no special handling needed.
+                        special_treatment_check!(needs none);
+                    } else if info == pg_constants::XLOG_HEAP2_VISIBLE {
+                        // This updates the VM, but the VM page is registered as a normal
+                        // block in the WAL record, so no special handling is needed.
+                        special_treatment_check!(needs none);
+                    } else {
+                        special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                     }
                 } else {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
@@ -647,6 +786,19 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP_TRUNCATE {
+                        // per comment in heap_redo:
+                        // TRUNCATE is a no-op because the actions are already logged as
+                        // SMGR WAL records.  TRUNCATE WAL record only exists for logical
+                        // decoding.
+                        special_treatment_check!(needs none);
+                    } else if info == pg_constants::XLOG_HEAP_CONFIRM
+                        || info == pg_constants::XLOG_HEAP_INPLACE
+                    {
+                        // these don't update the FSM or VM, so no special handling needed.
+                        special_treatment_check!(needs none);
+                    } else {
+                        special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -671,6 +823,23 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP2_REWRITE
+                        || info == pg_constants::XLOG_HEAP2_NEW_CID
+                    {
+                        // related to logical replication, we can ignore in storage
+                        special_treatment_check!(needs none);
+                    } else if info == pg_constants::XLOG_HEAP2_PRUNE
+                        || info == pg_constants::XLOG_HEAP2_VACUUM
+                        || info == pg_constants::XLOG_HEAP2_FREEZE_PAGE
+                    {
+                        // these don't update the VM, so no special handling needed.
+                        special_treatment_check!(needs none);
+                    } else if info == pg_constants::XLOG_HEAP2_VISIBLE {
+                        // This updates the VM, but the VM page is registered as a normal
+                        // block in the WAL record, so no special handling is needed.
+                        special_treatment_check!(needs none);
+                    } else {
+                        special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                     }
                 } else {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
@@ -714,6 +883,19 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP_TRUNCATE {
+                        // per comment in heap_redo:
+                        // TRUNCATE is a no-op because the actions are already logged as
+                        // SMGR WAL records.  TRUNCATE WAL record only exists for logical
+                        // decoding.
+                        special_treatment_check!(needs none);
+                    } else if info == pg_constants::XLOG_HEAP_CONFIRM
+                        || info == pg_constants::XLOG_HEAP_INPLACE
+                    {
+                        // these don't update the FSM or VM, so no special handling needed.
+                        special_treatment_check!(needs none);
+                    } else {
+                        special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -738,6 +920,23 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP2_REWRITE
+                        || info == pg_constants::XLOG_HEAP2_NEW_CID
+                    {
+                        // related to logical replication, we can ignore in storage
+                        special_treatment_check!(needs none);
+                    } else if info == pg_constants::XLOG_HEAP2_PRUNE
+                        || info == pg_constants::XLOG_HEAP2_VACUUM
+                        || info == pg_constants::XLOG_HEAP2_FREEZE_PAGE
+                    {
+                        // these don't update the VM, so no special handling needed.
+                        special_treatment_check!(needs none);
+                    } else if info == pg_constants::XLOG_HEAP2_VISIBLE {
+                        // This updates the VM, but the VM page is registered as a normal
+                        // block in the WAL record, so no special handling is needed.
+                        special_treatment_check!(needs none);
+                    } else {
+                        special_treatment_check!(unknown record type, pg_version, lsn, decoded);
                     }
                 } else {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
