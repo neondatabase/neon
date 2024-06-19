@@ -634,9 +634,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         **kwargs,
     ):
         log.info(
-            f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}, with_lease={with_lease}"
+            f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}, {with_lease=}"
         )
-        with_lease_query = f"with_lease={with_lease}".lower()
+        with_lease_query = f"{with_lease=}".lower()
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp.isoformat()}Z&{with_lease_query}",
             **kwargs,

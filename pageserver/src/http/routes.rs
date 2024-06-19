@@ -766,6 +766,9 @@ async fn get_lsn_by_timestamp_handler(
     let lease = if with_lease && (kind == "present" || kind == "future") {
         timeline
             .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .inspect_err(|_| {
+                info!("fail to grant a lease to {}", lsn);
+            })
             .ok()
     } else {
         None
