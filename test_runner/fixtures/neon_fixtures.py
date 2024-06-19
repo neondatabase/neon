@@ -3446,11 +3446,12 @@ class Endpoint(PgProtocol, LogUtils):
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
-        # This lock prevents concurrent start & stop operations, keeping `self.running` consistent
-        # with whether we're really running.  Tests generally wouldn't try and do these concurrently,
-        # but endpoints are also stopped during test teardown, which might happen concurrently with
-        # destruction of objects in tests.
-        self.lock = threading.Lock()
+        # Semaphore is set to 1 when we start, and acquire'd back to zero when we stop
+        #
+        # We use a semaphore rather than a bool so that racing calls to stop() don't
+        # try and stop the same process twice, as stop() is called by test teardown and
+        # potentially by some __del__ chains in other threads.
+        self._running = threading.Semaphore(0)
 
     def http_client(
         self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
@@ -3522,15 +3523,14 @@ class Endpoint(PgProtocol, LogUtils):
 
         log.info(f"Starting postgres endpoint {self.endpoint_id}")
 
-        with self.lock:
-            self.env.neon_cli.endpoint_start(
-                self.endpoint_id,
-                safekeepers=self.active_safekeepers,
-                remote_ext_config=remote_ext_config,
-                pageserver_id=pageserver_id,
-                allow_multiple=allow_multiple,
-            )
-            self.running = True
+        self.env.neon_cli.endpoint_start(
+            self.endpoint_id,
+            safekeepers=self.active_safekeepers,
+            remote_ext_config=remote_ext_config,
+            pageserver_id=pageserver_id,
+            allow_multiple=allow_multiple,
+        )
+        self._running.release(1)
 
         return self
 
@@ -3578,8 +3578,11 @@ class Endpoint(PgProtocol, LogUtils):
             conf_file.write("\n".join(hba) + "\n")
             conf_file.write(data)
 
-        if self.running:
+        if self.is_running():
             self.safe_psql("SELECT pg_reload_conf()")
+
+    def is_running(self):
+        return self._running._value > 0
 
     def reconfigure(self, pageserver_id: Optional[int] = None):
         assert self.endpoint_id is not None
@@ -3629,13 +3632,12 @@ class Endpoint(PgProtocol, LogUtils):
         Returns self.
         """
 
-        with self.lock:
-            if self.running:
-                assert self.endpoint_id is not None
-                self.env.neon_cli.endpoint_stop(
-                    self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
-                )
-                self.running = False
+        running = self._running.acquire(blocking=False)
+        if running:
+            assert self.endpoint_id is not None
+            self.env.neon_cli.endpoint_stop(
+                self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
+            )
 
         return self
 
@@ -3645,13 +3647,13 @@ class Endpoint(PgProtocol, LogUtils):
         Returns self.
         """
 
-        with self.lock:
+        running = self._running.acquire(blocking=False)
+        if running:
             assert self.endpoint_id is not None
             self.env.neon_cli.endpoint_stop(
                 self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
             )
             self.endpoint_id = None
-            self.running = False
 
         return self
 
