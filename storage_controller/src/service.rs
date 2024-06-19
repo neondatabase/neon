@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
@@ -236,6 +237,9 @@ pub struct Config {
     /// How large must a shard grow in bytes before we split it?
     /// None disables auto-splitting.
     pub split_threshold: Option<u64>,
+
+    // TODO: make this cfg(feature  = "testing")
+    pub neon_local_repo_dir: Option<PathBuf>,
 }
 
 impl From<DatabaseError> for ApiError {

@@ -314,15 +314,17 @@ impl StorageController {
             args.push(format!("--split-threshold={split_threshold}"))
         }
 
+        args.push(format!(
+            "--neon-local-repo-dir={}",
+            self.env.base_data_dir.display()
+        ));
+
         background_process::start_process(
             COMMAND,
             &self.env.base_data_dir,
             &self.env.storage_controller_bin(),
             args,
-            [(
-                "NEON_REPO_DIR".to_string(),
-                self.env.base_data_dir.to_string_lossy().to_string(),
-            )],
+            [],
             background_process::InitialPidFile::Create(self.pid_file()),
             || async {
                 match self.ready().await {

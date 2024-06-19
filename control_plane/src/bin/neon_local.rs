@@ -87,7 +87,8 @@ fn main() -> Result<()> {
         handle_init(sub_args).map(Some)
     } else {
         // all other commands need an existing config
-        let mut env = LocalEnv::load_config().context("Error loading config")?;
+        let mut env =
+            LocalEnv::load_config(&local_env::base_path()).context("Error loading config")?;
         let original_env = env.clone();
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -364,7 +365,8 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
 
     LocalEnv::init(init_conf, force)
         .context("materialize initial neon_local environment on disk")?;
-    Ok(LocalEnv::load_config().expect("freshly written config should be loadable"))
+    Ok(LocalEnv::load_config(&local_env::base_path())
+        .expect("freshly written config should be loadable"))
 }
 
 /// The default pageserver is the one where CLI tenant/timeline operations are sent by default.
