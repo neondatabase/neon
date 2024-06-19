@@ -15,6 +15,7 @@ use camino::Utf8PathBuf;
 use postgres_connection::PgConnectionConfig;
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
+use utils::auth::{Claims, Scope};
 use utils::{http::error::HttpErrorBody, id::NodeId};
 
 use crate::{
@@ -203,7 +204,7 @@ impl SafekeeperNode {
             &datadir,
             &self.env.safekeeper_bin(),
             &args,
-            [],
+            self.safekeeper_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             retry_timeout,
             || async {
@@ -215,6 +216,18 @@ impl SafekeeperNode {
             },
         )
         .await
+    }
+
+    fn safekeeper_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
+        // Generate a token to connect from safekeeper to peers
+        if self.conf.auth_enabled {
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
+            Ok(vec![("SAFEKEEPER_AUTH_TOKEN".to_owned(), token)])
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     ///

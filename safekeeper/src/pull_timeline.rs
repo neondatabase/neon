@@ -1,28 +1,244 @@
-use std::sync::Arc;
-
+use anyhow::{anyhow, bail, Context, Result};
+use bytes::Bytes;
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
 use chrono::{DateTime, Utc};
+use futures::{SinkExt, StreamExt, TryStreamExt};
+use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
 use serde::{Deserialize, Serialize};
+use std::{
+    cmp::min,
+    io::{self, ErrorKind},
+    sync::Arc,
+};
+use tokio::{
+    fs::{File, OpenOptions},
+    io::AsyncWrite,
+    sync::mpsc,
+    task,
+};
+use tokio_tar::{Archive, Builder};
+use tokio_util::{
+    io::{CopyToBytes, SinkWriter},
+    sync::PollSender,
+};
+use tracing::{error, info, instrument};
 
-use anyhow::{bail, Context, Result};
-use tokio::io::AsyncWriteExt;
-use tracing::info;
+use crate::{
+    control_file::{self, CONTROL_FILE_NAME},
+    debug_dump,
+    http::{
+        client::{self, Client},
+        routes::TimelineStatus,
+    },
+    safekeeper::Term,
+    timeline::{get_tenant_dir, get_timeline_dir, FullAccessTimeline, Timeline, TimelineError},
+    wal_storage::{self, open_wal_file, Storage},
+    GlobalTimelines, SafeKeeperConf,
+};
 use utils::{
+    crashsafe::{durable_rename, fsync_async_opt},
     id::{TenantId, TenantTimelineId, TimelineId},
+    logging::SecretString,
     lsn::Lsn,
     pausable_failpoint,
 };
 
-use crate::{
-    control_file, debug_dump,
-    http::routes::TimelineStatus,
-    timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError},
-    wal_storage::{self, Storage},
-    GlobalTimelines, SafeKeeperConf,
-};
+/// Stream tar archive of timeline to tx.
+#[instrument(name = "snapshot", skip_all, fields(ttid = %tli.ttid))]
+pub async fn stream_snapshot(tli: FullAccessTimeline, tx: mpsc::Sender<Result<Bytes>>) {
+    if let Err(e) = stream_snapshot_guts(tli, tx.clone()).await {
+        // Error type/contents don't matter as they won't can't reach the client
+        // (hyper likely doesn't do anything with it), but http stream will be
+        // prematurely terminated. It would be nice to try to send the error in
+        // trailers though.
+        tx.send(Err(anyhow!("snapshot failed"))).await.ok();
+        error!("snapshot failed: {:#}", e);
+    }
+}
 
-/// Info about timeline on safekeeper ready for reporting.
+/// State needed while streaming the snapshot.
+pub struct SnapshotContext {
+    pub from_segno: XLogSegNo, // including
+    pub upto_segno: XLogSegNo, // including
+    pub term: Term,
+    pub last_log_term: Term,
+    pub flush_lsn: Lsn,
+    pub wal_seg_size: usize,
+    // used to remove WAL hold off in Drop.
+    pub tli: FullAccessTimeline,
+}
+
+impl Drop for SnapshotContext {
+    fn drop(&mut self) {
+        let tli = self.tli.clone();
+        task::spawn(async move {
+            let mut shared_state = tli.write_shared_state().await;
+            shared_state.wal_removal_on_hold = false;
+        });
+    }
+}
+
+pub async fn stream_snapshot_guts(
+    tli: FullAccessTimeline,
+    tx: mpsc::Sender<Result<Bytes>>,
+) -> Result<()> {
+    // tokio-tar wants Write implementor, but we have mpsc tx <Result<Bytes>>;
+    // use SinkWriter as a Write impl. That is,
+    // - create Sink from the tx. It returns PollSendError if chan is closed.
+    let sink = PollSender::new(tx);
+    // - SinkWriter needs sink error to be io one, map it.
+    let sink_io_err = sink.sink_map_err(|_| io::Error::from(ErrorKind::BrokenPipe));
+    // - SinkWriter wants sink type to be just Bytes, not Result<Bytes>, so map
+    //   it with with(). Note that with() accepts async function which we don't
+    //   need and allows the map to fail, which we don't need either, but hence
+    //   two Oks.
+    let oksink = sink_io_err.with(|b: Bytes| async { io::Result::Ok(Result::Ok(b)) });
+    // - SinkWriter (not surprisingly) wants sink of &[u8], not bytes, so wrap
+    // into CopyToBytes. This is a data copy.
+    let copy_to_bytes = CopyToBytes::new(oksink);
+    let mut writer = SinkWriter::new(copy_to_bytes);
+    let pinned_writer = std::pin::pin!(writer);
+
+    // Note that tokio_tar append_* funcs use tokio::io::copy with 8KB buffer
+    // which is also likely suboptimal.
+    let mut ar = Builder::new_non_terminated(pinned_writer);
+
+    let bctx = tli.start_snapshot(&mut ar).await?;
+    pausable_failpoint!("sk-snapshot-after-list-pausable");
+
+    let tli_dir = tli.get_timeline_dir();
+    info!(
+        "sending {} segments [{:#X}-{:#X}], term={}, last_log_term={}, flush_lsn={}",
+        bctx.upto_segno - bctx.from_segno + 1,
+        bctx.from_segno,
+        bctx.upto_segno,
+        bctx.term,
+        bctx.last_log_term,
+        bctx.flush_lsn,
+    );
+    for segno in bctx.from_segno..=bctx.upto_segno {
+        let (mut sf, is_partial) = open_wal_file(&tli_dir, segno, bctx.wal_seg_size).await?;
+        let mut wal_file_name = XLogFileName(PG_TLI, segno, bctx.wal_seg_size);
+        if is_partial {
+            wal_file_name.push_str(".partial");
+        }
+        ar.append_file(&wal_file_name, &mut sf).await?;
+    }
+
+    // Do the term check before ar.finish to make archive corrupted in case of
+    // term change. Client shouldn't ignore abrupt stream end, but to be sure.
+    tli.finish_snapshot(&bctx).await?;
+
+    ar.finish().await?;
+
+    Ok(())
+}
+
+impl FullAccessTimeline {
+    /// Start streaming tar archive with timeline:
+    /// 1) stream control file under lock;
+    /// 2) hold off WAL removal;
+    /// 3) collect SnapshotContext to understand which WAL segments should be
+    ///    streamed.
+    ///
+    /// Snapshot streams data up to flush_lsn. To make this safe, we must check
+    /// that term doesn't change during the procedure, or we risk sending mix of
+    /// WAL from different histories. Term is remembered in the SnapshotContext
+    /// and checked in finish_snapshot. Note that in the last segment some WAL
+    /// higher than flush_lsn set here might be streamed; that's fine as long as
+    /// terms doesn't change.
+    ///
+    /// Alternatively we could send only up to commit_lsn to get some valid
+    /// state which later will be recovered by compute, in this case term check
+    /// is not needed, but we likely don't want that as there might be no
+    /// compute which could perform the recovery.
+    ///
+    /// When returned SnapshotContext is dropped WAL hold is removed.
+    async fn start_snapshot<W: AsyncWrite + Unpin + Send>(
+        &self,
+        ar: &mut tokio_tar::Builder<W>,
+    ) -> Result<SnapshotContext> {
+        let mut shared_state = self.write_shared_state().await;
+
+        let cf_path = self.get_timeline_dir().join(CONTROL_FILE_NAME);
+        let mut cf = File::open(cf_path).await?;
+        ar.append_file(CONTROL_FILE_NAME, &mut cf).await?;
+
+        // We need to stream since the oldest segment someone (s3 or pageserver)
+        // still needs. This duplicates calc_horizon_lsn logic.
+        //
+        // We know that WAL wasn't removed up to this point because it cannot be
+        // removed further than `backup_lsn`. Since we're holding shared_state
+        // lock and setting `wal_removal_on_hold` later, it guarantees that WAL
+        // won't be removed until we're done.
+        let from_lsn = min(
+            shared_state.sk.state.remote_consistent_lsn,
+            shared_state.sk.state.backup_lsn,
+        );
+        if from_lsn == Lsn::INVALID {
+            // this is possible if snapshot is called before handling first
+            // elected message
+            bail!("snapshot is called on uninitialized timeline");
+        }
+        let from_segno = from_lsn.segment_number(shared_state.get_wal_seg_size());
+        let term = shared_state.sk.get_term();
+        let last_log_term = shared_state.sk.get_last_log_term();
+        let flush_lsn = shared_state.sk.flush_lsn();
+        let upto_segno = flush_lsn.segment_number(shared_state.get_wal_seg_size());
+        // have some limit on max number of segments as a sanity check
+        const MAX_ALLOWED_SEGS: u64 = 1000;
+        let num_segs = upto_segno - from_segno + 1;
+        if num_segs > MAX_ALLOWED_SEGS {
+            bail!(
+                "snapshot is called on timeline with {} segments, but the limit is {}",
+                num_segs,
+                MAX_ALLOWED_SEGS
+            );
+        }
+
+        // Prevent WAL removal while we're streaming data.
+        //
+        // Since this a flag, not a counter just bail out if already set; we
+        // shouldn't need concurrent snapshotting.
+        if shared_state.wal_removal_on_hold {
+            bail!("wal_removal_on_hold is already true");
+        }
+        shared_state.wal_removal_on_hold = true;
+
+        let bctx = SnapshotContext {
+            from_segno,
+            upto_segno,
+            term,
+            last_log_term,
+            flush_lsn,
+            wal_seg_size: shared_state.get_wal_seg_size(),
+            tli: self.clone(),
+        };
+
+        Ok(bctx)
+    }
+
+    /// Finish snapshotting: check that term(s) hasn't changed.
+    ///
+    /// Note that WAL gc hold off is removed in Drop of SnapshotContext to not
+    /// forget this if snapshotting fails mid the way.
+    pub async fn finish_snapshot(&self, bctx: &SnapshotContext) -> Result<()> {
+        let shared_state = self.read_shared_state().await;
+        let term = shared_state.sk.get_term();
+        let last_log_term = shared_state.sk.get_last_log_term();
+        // There are some cases to relax this check (e.g. last_log_term might
+        // change, but as long as older history is strictly part of new that's
+        // fine), but there is no need to do it.
+        if bctx.term != term || bctx.last_log_term != last_log_term {
+            bail!("term(s) changed during snapshot: were term={}, last_log_term={}, now term={}, last_log_term={}",
+              bctx.term, bctx.last_log_term, term, last_log_term);
+        }
+        Ok(())
+    }
+}
+
+/// pull_timeline request body.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
     pub tenant_id: TenantId,
@@ -48,7 +264,10 @@ pub struct DebugDumpResponse {
 }
 
 /// Find the most advanced safekeeper and pull timeline from it.
-pub async fn handle_request(request: Request) -> Result<Response> {
+pub async fn handle_request(
+    request: Request,
+    sk_auth_token: Option<SecretString>,
+) -> Result<Response> {
     let existing_tli = GlobalTimelines::get(TenantTimelineId::new(
         request.tenant_id,
         request.timeline_id,
@@ -57,28 +276,26 @@ pub async fn handle_request(request: Request) -> Result<Response> {
         bail!("Timeline {} already exists", request.timeline_id);
     }
 
-    let client = reqwest::Client::new();
     let http_hosts = request.http_hosts.clone();
 
-    // Send request to /v1/tenant/:tenant_id/timeline/:timeline_id
-    let responses = futures::future::join_all(http_hosts.iter().map(|url| {
-        let url = format!(
-            "{}/v1/tenant/{}/timeline/{}",
-            url, request.tenant_id, request.timeline_id
-        );
-        client.get(url).send()
-    }))
-    .await;
+    // Figure out statuses of potential donors.
+    let responses: Vec<Result<TimelineStatus, client::Error>> =
+        futures::future::join_all(http_hosts.iter().map(|url| async {
+            let cclient = Client::new(url.clone(), sk_auth_token.clone());
+            let info = cclient
+                .timeline_status(request.tenant_id, request.timeline_id)
+                .await?;
+            Ok(info)
+        }))
+        .await;
 
     let mut statuses = Vec::new();
     for (i, response) in responses.into_iter().enumerate() {
-        let response = response.context(format!("Failed to get status from {}", http_hosts[i]))?;
-        let status: crate::http::routes::TimelineStatus = response.json().await?;
+        let status = response.context(format!("fetching status from {}", http_hosts[i]))?;
         statuses.push((status, i));
     }
 
     // Find the most advanced safekeeper
-    // TODO: current logic may be wrong, fix it later
     let (status, i) = statuses
         .into_iter()
         .max_by_key(|(status, _)| {
@@ -94,10 +311,14 @@ pub async fn handle_request(request: Request) -> Result<Response> {
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    pull_timeline(status, safekeeper_host).await
+    pull_timeline(status, safekeeper_host, sk_auth_token).await
 }
 
-async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response> {
+async fn pull_timeline(
+    status: TimelineStatus,
+    host: String,
+    sk_auth_token: Option<SecretString>,
+) -> Result<Response> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
         "pulling timeline {} from safekeeper {}, commit_lsn={}, flush_lsn={}, term={}, epoch={}",
@@ -111,95 +332,53 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     let conf = &GlobalTimelines::get_global_config();
 
-    let client = reqwest::Client::new();
-    // TODO: don't use debug dump, it should be used only in tests.
-    //      This is a proof of concept, we should figure out a way
-    //      to use scp without implementing it manually.
-
-    // Implementing our own scp over HTTP.
-    // At first, we need to fetch list of files from safekeeper.
-    let dump: DebugDumpResponse = client
-        .get(format!(
-            "{}/v1/debug_dump?dump_all=true&tenant_id={}&timeline_id={}",
-            host, status.tenant_id, status.timeline_id
-        ))
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    if dump.timelines.len() != 1 {
-        bail!(
-            "expected to fetch single timeline, got {} timelines",
-            dump.timelines.len()
-        );
-    }
-
-    let timeline = dump.timelines.into_iter().next().unwrap();
-    let disk_content = timeline.disk_content.ok_or(anyhow::anyhow!(
-        "timeline {} doesn't have disk content",
-        ttid
-    ))?;
-
-    let mut filenames = disk_content
-        .files
-        .iter()
-        .map(|file| file.name.clone())
-        .collect::<Vec<_>>();
-
-    // Sort filenames to make sure we pull files in correct order
-    // After sorting, we should have:
-    // - 000000010000000000000001
-    // - ...
-    // - 000000010000000000000002.partial
-    // - safekeeper.control
-    filenames.sort();
-
-    // safekeeper.control should be the first file, so we need to move it to the beginning
-    let control_file_index = filenames
-        .iter()
-        .position(|name| name == "safekeeper.control")
-        .ok_or(anyhow::anyhow!("safekeeper.control not found"))?;
-    filenames.remove(control_file_index);
-    filenames.insert(0, "safekeeper.control".to_string());
-
-    pausable_failpoint!("sk-pull-timeline-after-list-pausable");
-
-    info!(
-        "downloading {} files from safekeeper {}",
-        filenames.len(),
-        host
-    );
-
     let (_tmp_dir, tli_dir_path) = create_temp_timeline_dir(conf, ttid).await?;
 
-    // Note: some time happens between fetching list of files and fetching files themselves.
-    //       It's possible that some files will be removed from safekeeper and we will fail to fetch them.
-    //       This function will fail in this case, should be retried by the caller.
-    for filename in filenames {
-        let file_path = tli_dir_path.join(&filename);
-        // /v1/tenant/:tenant_id/timeline/:timeline_id/file/:filename
-        let http_url = format!(
-            "{}/v1/tenant/{}/timeline/{}/file/{}",
-            host, status.tenant_id, status.timeline_id, filename
-        );
+    let client = Client::new(host.clone(), sk_auth_token.clone());
+    // Request stream with basebackup archive.
+    let bb_resp = client
+        .snapshot(status.tenant_id, status.timeline_id)
+        .await?;
 
-        let mut file = tokio::fs::File::create(&file_path).await?;
-        let mut response = client.get(&http_url).send().await?;
-        if response.status() != reqwest::StatusCode::OK {
-            bail!(
-                "pulling file {} failed: status is {}",
-                filename,
-                response.status()
-            );
-        }
-        while let Some(chunk) = response.chunk().await? {
-            file.write_all(&chunk).await?;
-            file.flush().await?;
+    // Make Stream of Bytes from it...
+    let bb_stream = bb_resp.bytes_stream().map_err(std::io::Error::other);
+    // and turn it into StreamReader implementing AsyncRead.
+    let bb_reader = tokio_util::io::StreamReader::new(bb_stream);
+
+    // Extract it on the fly to the disk. We don't use simple unpack() to fsync
+    // files.
+    let mut entries = Archive::new(bb_reader).entries()?;
+    while let Some(base_tar_entry) = entries.next().await {
+        let mut entry = base_tar_entry?;
+        let header = entry.header();
+        let file_path = header.path()?.into_owned();
+        match header.entry_type() {
+            tokio_tar::EntryType::Regular => {
+                let utf8_file_path =
+                    Utf8PathBuf::from_path_buf(file_path).expect("non-Unicode path");
+                let dst_path = tli_dir_path.join(utf8_file_path);
+                let mut f = OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&dst_path)
+                    .await?;
+                tokio::io::copy(&mut entry, &mut f).await?;
+                // fsync the file
+                f.sync_all().await?;
+            }
+            _ => {
+                bail!(
+                    "entry {} in backup tar archive is of unexpected type: {:?}",
+                    file_path.display(),
+                    header.entry_type()
+                );
+            }
         }
     }
 
-    // TODO: fsync?
+    // fsync temp timeline directory to remember its contents.
+    fsync_async_opt(&tli_dir_path, !conf.no_sync).await?;
 
     // Let's create timeline from temp directory and verify that it's correct
     let (commit_lsn, flush_lsn) = validate_temp_timeline(conf, ttid, &tli_dir_path).await?;
@@ -290,7 +469,9 @@ pub async fn load_temp_timeline(
         ttid, tmp_path, timeline_path
     );
     tokio::fs::create_dir_all(get_tenant_dir(conf, &ttid.tenant_id)).await?;
-    tokio::fs::rename(tmp_path, &timeline_path).await?;
+    // fsync tenant dir creation
+    fsync_async_opt(&conf.workdir, !conf.no_sync).await?;
+    durable_rename(tmp_path, &timeline_path, !conf.no_sync).await?;
 
     let tli = GlobalTimelines::load_timeline(&guard, ttid)
         .await

@@ -39,6 +39,7 @@ pub struct StateSnapshot {
     // misc
     pub cfile_last_persist_at: Instant,
     pub inmem_flush_pending: bool,
+    pub wal_removal_on_hold: bool,
     pub peers: Vec<PeerInfo>,
 }
 
@@ -54,6 +55,7 @@ impl StateSnapshot {
             cfile_backup_lsn: read_guard.sk.state.backup_lsn,
             cfile_last_persist_at: read_guard.sk.state.pers.last_persist_at(),
             inmem_flush_pending: Self::has_unflushed_inmem_state(&read_guard),
+            wal_removal_on_hold: read_guard.wal_removal_on_hold,
             peers: read_guard.get_peers(heartbeat_timeout),
         }
     }
@@ -324,8 +326,8 @@ async fn update_wal_removal(
     last_removed_segno: u64,
     wal_removal_task: &mut Option<JoinHandle<anyhow::Result<u64>>>,
 ) {
-    if wal_removal_task.is_some() {
-        // WAL removal is already in progress
+    if wal_removal_task.is_some() || state.wal_removal_on_hold {
+        // WAL removal is already in progress or hold off
         return;
     }
 

@@ -385,6 +385,10 @@ impl PageServerNode {
                 .map(|x| x.parse::<AuxFilePolicy>())
                 .transpose()
                 .context("Failed to parse 'switch_aux_file_policy'")?,
+            lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
+            lsn_lease_length_for_ts: settings
+                .remove("lsn_lease_length_for_ts")
+                .map(|x| x.to_string()),
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -508,6 +512,10 @@ impl PageServerNode {
                     .map(|x| x.parse::<AuxFilePolicy>())
                     .transpose()
                     .context("Failed to parse 'switch_aux_file_policy'")?,
+                lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
+                lsn_lease_length_for_ts: settings
+                    .remove("lsn_lease_length_for_ts")
+                    .map(|x| x.to_string()),
             }
         };
 

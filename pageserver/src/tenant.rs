@@ -31,6 +31,7 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
 use std::fmt;
+use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
 use tokio::sync::watch;
@@ -65,9 +66,9 @@ use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
+use self::timeline::GcCutoffs;
 use self::timeline::TimelineResources;
 use self::timeline::WaitLsnError;
-use self::timeline::{GcCutoffs, GcInfo};
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -2428,6 +2429,13 @@ impl Tenant {
         }
     }
 
+    pub fn get_lsn_lease_length(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf
+            .lsn_lease_length
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+    }
+
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         // Use read-copy-update in order to avoid overwriting the location config
         // state if this races with [`Tenant::set_new_location_config`]. Note that
@@ -3010,12 +3018,13 @@ impl Tenant {
             {
                 let mut target = timeline.gc_info.write().unwrap();
 
+                let now = SystemTime::now();
+                target.leases.retain(|_, lease| !lease.is_expired(&now));
+
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
-                        *target = GcInfo {
-                            retain_lsns: branchpoints,
-                            cutoffs,
-                        };
+                        target.retain_lsns = branchpoints;
+                        target.cutoffs = cutoffs;
                     }
                     None => {
                         // reasons for this being unavailable:
@@ -3833,6 +3842,8 @@ pub(crate) mod harness {
                     tenant_conf.image_layer_creation_check_threshold,
                 ),
                 switch_aux_file_policy: Some(tenant_conf.switch_aux_file_policy),
+                lsn_lease_length: Some(tenant_conf.lsn_lease_length),
+                lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
             }
         }
     }
@@ -6936,6 +6947,95 @@ mod tests {
         );
         // assert_eq!(tline.get(get_key(3), Lsn(0x50), &ctx).await?, Bytes::new());
         // assert_eq!(tline.get(get_key(4), Lsn(0x50), &ctx).await?, Bytes::new());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_lsn_lease() -> anyhow::Result<()> {
+        let (tenant, ctx) = TenantHarness::create("test_lsn_lease")?.load().await;
+        let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+
+        let end_lsn = Lsn(0x100);
+        let image_layers = (0x20..=0x90)
+            .step_by(0x10)
+            .map(|n| {
+                (
+                    Lsn(n),
+                    vec![(key, test_img(&format!("data key at {:x}", n)))],
+                )
+            })
+            .collect();
+
+        let timeline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                Vec::new(),
+                image_layers,
+                end_lsn,
+            )
+            .await?;
+
+        let leased_lsns = [0x30, 0x50, 0x70];
+        let mut leases = Vec::new();
+        let _: anyhow::Result<_> = leased_lsns.iter().try_for_each(|n| {
+            leases.push(timeline.make_lsn_lease(Lsn(*n), timeline.get_lsn_lease_length(), &ctx)?);
+            Ok(())
+        });
+
+        // Renewing with shorter lease should not change the lease.
+        let updated_lease_0 =
+            timeline.make_lsn_lease(Lsn(leased_lsns[0]), Duration::from_secs(0), &ctx)?;
+        assert_eq!(updated_lease_0.valid_until, leases[0].valid_until);
+
+        // Renewing with a long lease should renew lease with later expiration time.
+        let updated_lease_1 = timeline.make_lsn_lease(
+            Lsn(leased_lsns[1]),
+            timeline.get_lsn_lease_length() * 2,
+            &ctx,
+        )?;
+
+        assert!(updated_lease_1.valid_until > leases[1].valid_until);
+
+        // Force set disk consistent lsn so we can get the cutoff at `end_lsn`.
+        info!(
+            "latest_gc_cutoff_lsn: {}",
+            *timeline.get_latest_gc_cutoff_lsn()
+        );
+        timeline.force_set_disk_consistent_lsn(end_lsn);
+
+        let res = tenant
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
+            .await?;
+
+        // Keeping everything <= Lsn(0x80) b/c leases:
+        // 0/10: initdb layer
+        // (0/20..=0/70).step_by(0x10): image layers added when creating the timeline.
+        assert_eq!(res.layers_needed_by_leases, 7);
+        // Keeping 0/90 b/c it is the latest layer.
+        assert_eq!(res.layers_not_updated, 1);
+        // Removed 0/80.
+        assert_eq!(res.layers_removed, 1);
+
+        // Make lease on a already GC-ed LSN.
+        // 0/80 does not have a valid lease + is below latest_gc_cutoff
+        assert!(Lsn(0x80) < *timeline.get_latest_gc_cutoff_lsn());
+        let res = timeline.make_lsn_lease(Lsn(0x80), timeline.get_lsn_lease_length(), &ctx);
+        assert!(res.is_err());
+
+        // Should still be able to renew a currently valid lease
+        // Assumption: original lease to is still valid for 0/50.
+        let _ =
+            timeline.make_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)?;
 
         Ok(())
     }
