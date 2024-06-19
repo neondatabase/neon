@@ -46,6 +46,7 @@ const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
 pub struct AttachHookRequest {
     pub tenant_shard_id: TenantShardId,
     pub node_id: Option<NodeId>,
+    pub generation_override: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -440,6 +441,7 @@ impl StorageController {
         let request = AttachHookRequest {
             tenant_shard_id,
             node_id: Some(pageserver_id),
+            generation_override: None,
         };
 
         let response = self

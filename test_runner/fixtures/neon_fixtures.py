@@ -2159,12 +2159,19 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return time.time() - t1
 
     def attach_hook_issue(
-        self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
+        self,
+        tenant_shard_id: Union[TenantId, TenantShardId],
+        pageserver_id: int,
+        generation_override: Optional[int] = None,
     ) -> int:
+        body = {"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id}
+        if generation_override is not None:
+            body["generation_override"] = generation_override
+
         response = self.request(
             "POST",
             f"{self.env.storage_controller_api}/debug/v1/attach-hook",
-            json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
+            json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
         gen = response.json()["gen"]
@@ -2635,6 +2642,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         config: None | Dict[str, Any] = None,
         config_null: bool = False,
         generation: Optional[int] = None,
+        override_storage_controller_generation: bool = False,
     ):
         """
         Tenant attachment passes through here to acquire a generation number before proceeding
@@ -2643,6 +2651,10 @@ class NeonPageserver(PgProtocol, LogUtils):
         client = self.http_client()
         if generation is None:
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
+        elif override_storage_controller_generation:
+            generation = self.env.storage_controller.attach_hook_issue(
+                tenant_id, self.id, generation
+            )
         return client.tenant_attach(
             tenant_id,
             config,
