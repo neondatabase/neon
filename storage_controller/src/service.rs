@@ -5443,8 +5443,10 @@ impl Service {
                 match tids_by_node.get_mut(&node_id) {
                     Some(tids) => match tids.pop() {
                         Some(tid) => {
-                            let max_promote_for_tenant =
-                                std::cmp::max(tid.shard_count.0 as usize / locked.nodes.len(), 1);
+                            let max_promote_for_tenant = std::cmp::max(
+                                tid.shard_count.count() as usize / locked.nodes.len(),
+                                1,
+                            );
                             let promoted = promoted_per_tenant.entry(tid.tenant_id).or_default();
                             if *promoted < max_promote_for_tenant {
                                 plan.push(tid);
