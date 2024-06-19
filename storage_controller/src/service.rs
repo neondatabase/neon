@@ -5275,6 +5275,8 @@ impl Service {
         }
 
         while !waiters.is_empty() {
+            tracing::info!("Awaiting {} pending drain reconciliations", waiters.len());
+
             waiters = self
                 .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
                 .await;
@@ -5452,6 +5454,8 @@ impl Service {
         }
 
         while !waiters.is_empty() {
+            tracing::info!("Awaiting {} pending fill reconciliations", waiters.len());
+
             waiters = self
                 .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
                 .await;
