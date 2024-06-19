@@ -447,6 +447,7 @@ jobs:
         with:
           build_type: ${{ matrix.build_type }}
           test_selection: regress
+          extra_params: -k 'test_pg_regress['
           needs_postgres_source: true
           run_with_real_s3: true
           real_s3_bucket: neon-github-ci-tests
