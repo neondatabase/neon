@@ -5268,13 +5268,16 @@ impl Service {
                     if tenant_shard.intent.demote_attached(scheduler, node_id) {
                         match tenant_shard.schedule(scheduler, &mut schedule_context) {
                             Err(e) => {
-                                tracing::warn!(%tid, "Scheduling error when draining pageserver {} : {e}", node_id);
+                                tracing::warn!(
+                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                    "Scheduling error when draining pageserver {} : {e}", node_id
+                                );
                             }
                             Ok(()) => {
                                 let scheduled_to = tenant_shard.intent.get_attached();
                                 tracing::info!(
-                                    "Rescheduled shard {} while draining node {}: {} -> {:?}",
-                                    tid,
+                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                    "Rescheduled shard while draining node {}: {} -> {:?}",
                                     node_id,
                                     node_id,
                                     scheduled_to
@@ -5446,12 +5449,15 @@ impl Service {
                             tenant_shard.intent.promote_attached(scheduler, node_id);
                             match tenant_shard.schedule(scheduler, &mut schedule_context) {
                                 Err(e) => {
-                                    tracing::warn!(%tid, "Scheduling error when filling pageserver {} : {e}", node_id);
+                                    tracing::warn!(
+                                        tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                        "Scheduling error when filling pageserver {} : {e}", node_id
+                                    );
                                 }
                                 Ok(()) => {
                                     tracing::info!(
-                                        "Rescheduled shard {} while filling node {}: {:?} -> {}",
-                                        tid,
+                                        tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                        "Rescheduled shard while filling node {}: {:?} -> {}",
                                         node_id,
                                         previously_attached_to,
                                         node_id
