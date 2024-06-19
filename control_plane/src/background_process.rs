@@ -36,9 +36,8 @@ use utils::pid_file::{self, PidFileRead};
 // it's waiting. If the process hasn't started/stopped after 5 seconds,
 // it prints a notice that it's taking long, but keeps waiting.
 //
-const DEFAULT_STOP_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_STOP_RETRIES: u128 =
-    DEFAULT_STOP_RETRY_TIMEOUT.as_millis() / RETRY_INTERVAL.as_millis();
+const STOP_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+const STOP_RETRIES: u128 = STOP_RETRY_TIMEOUT.as_millis() / RETRY_INTERVAL.as_millis();
 const RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const DOT_EVERY_RETRIES: u128 = 10;
 const NOTICE_AFTER_RETRIES: u128 = 50;
@@ -211,7 +210,7 @@ pub fn stop_process(
 }
 
 pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
-    for retries in 0..DEFAULT_STOP_RETRIES {
+    for retries in 0..STOP_RETRIES {
         match process_has_stopped(pid) {
             Ok(true) => {
                 println!("\n{process_name} stopped");
@@ -227,7 +226,7 @@ pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
                     print!(".");
                     io::stdout().flush().unwrap();
                 }
-                thread::sleep(DEFAULT_STOP_RETRY_TIMEOUT);
+                thread::sleep(STOP_RETRY_TIMEOUT);
             }
             Err(e) => {
                 println!("{process_name} with pid {pid} failed to stop: {e:#}");
@@ -238,7 +237,7 @@ pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
     println!();
     anyhow::bail!(format!(
         "{} with pid {} did not stop in {:?} seconds",
-        process_name, pid, DEFAULT_STOP_RETRY_TIMEOUT
+        process_name, pid, STOP_RETRY_TIMEOUT
     ));
 }
 

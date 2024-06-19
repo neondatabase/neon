@@ -99,7 +99,7 @@ fn main() -> Result<()> {
         let subcommand_result = match sub_name {
             "tenant" => rt.block_on(handle_tenant(sub_args, &mut env)),
             "timeline" => rt.block_on(handle_timeline(sub_args, &mut env)),
-            "start" => rt.block_on(handle_start_all(&env, get_retry_timeout(sub_args))),
+            "start" => rt.block_on(handle_start_all(&env, get_start_timeout(sub_args))),
             "stop" => rt.block_on(handle_stop_all(sub_args, &env)),
             "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
             "storage_controller" => rt.block_on(handle_storage_controller(sub_args, &env)),
@@ -1047,7 +1047,7 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
     ))
 }
 
-fn get_retry_timeout(args: &ArgMatches) -> &Duration {
+fn get_start_timeout(args: &ArgMatches) -> &Duration {
     let humantime_duration = args
         .get_one::<humantime::Duration>("start-timeout")
         .expect("invalid value for start-timeout");
@@ -1058,7 +1058,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
             if let Err(e) = get_pageserver(env, subcommand_args)?
-                .start(get_retry_timeout(subcommand_args))
+                .start(get_start_timeout(subcommand_args))
                 .await
             {
                 eprintln!("pageserver start failed: {e}");
@@ -1086,7 +1086,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
                 exit(1);
             }
 
-            if let Err(e) = pageserver.start(get_retry_timeout(sub_match)).await {
+            if let Err(e) = pageserver.start(get_start_timeout(sub_match)).await {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1115,7 +1115,7 @@ async fn handle_storage_controller(
     let svc = StorageController::from_env(env);
     match sub_match.subcommand() {
         Some(("start", start_match)) => {
-            if let Err(e) = svc.start(get_retry_timeout(start_match)).await {
+            if let Err(e) = svc.start(get_start_timeout(start_match)).await {
                 eprintln!("start failed: {e}");
                 exit(1);
             }
@@ -1175,7 +1175,7 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
             let extra_opts = safekeeper_extra_opts(sub_args);
 
             if let Err(e) = safekeeper
-                .start(extra_opts, get_retry_timeout(sub_args))
+                .start(extra_opts, get_start_timeout(sub_args))
                 .await
             {
                 eprintln!("safekeeper start failed: {}", e);
@@ -1204,7 +1204,7 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
 
             let extra_opts = safekeeper_extra_opts(sub_args);
             if let Err(e) = safekeeper
-                .start(extra_opts, get_retry_timeout(sub_args))
+                .start(extra_opts, get_start_timeout(sub_args))
                 .await
             {
                 eprintln!("safekeeper start failed: {}", e);
