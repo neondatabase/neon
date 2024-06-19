@@ -5,6 +5,8 @@
 //! ```text
 //!   .neon/safekeepers/<safekeeper id>
 //! ```
+use std::time::Duration;
+
 use anyhow::Context;
 
 use camino::Utf8PathBuf;
@@ -13,7 +15,7 @@ use crate::{background_process, local_env};
 
 pub async fn start_broker_process(
     env: &local_env::LocalEnv,
-    retry_timeout_in_seconds: u64,
+    retry_timeout: &Duration,
 ) -> anyhow::Result<()> {
     let broker = &env.broker;
     let listen_addr = &broker.listen_addr;
@@ -30,6 +32,7 @@ pub async fn start_broker_process(
         args,
         [],
         background_process::InitialPidFile::Create(storage_broker_pid_file_path(env)),
+        retry_timeout,
         || async {
             let url = broker.client_url();
             let status_url = url.join("status").with_context(|| {
@@ -44,7 +47,6 @@ pub async fn start_broker_process(
                 Err(_) => Ok(false),
             }
         },
-        Some(retry_timeout_in_seconds),
     )
     .await
     .context("Failed to spawn storage_broker subprocess")?;

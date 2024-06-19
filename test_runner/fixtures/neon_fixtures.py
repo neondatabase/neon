@@ -1797,7 +1797,7 @@ class NeonCli(AbstractNeonCli):
     ):
         cmd = ["storage_controller", "start"]
         if timeout_in_seconds is not None:
-            cmd.append(f"--start-timeout={timeout_in_seconds}")
+            cmd.append(f"--start-timeout={timeout_in_seconds}s")
         return self.raw_cli(cmd)
 
     def storage_controller_stop(self, immediate: bool):
@@ -1814,7 +1814,7 @@ class NeonCli(AbstractNeonCli):
     ) -> "subprocess.CompletedProcess[str]":
         start_args = ["pageserver", "start", f"--id={id}"]
         if timeout_in_seconds is not None:
-            start_args.append(f"--start-timeout={timeout_in_seconds}")
+            start_args.append(f"--start-timeout={timeout_in_seconds}s")
         storage = self.env.pageserver_remote_storage
 
         if isinstance(storage, S3Storage):
@@ -1846,7 +1846,7 @@ class NeonCli(AbstractNeonCli):
         else:
             extra_opts = []
         if timeout_in_seconds is not None:
-            extra_opts.append(f"--start-timeout={timeout_in_seconds}")
+            extra_opts.append(f"--start-timeout={timeout_in_seconds}s")
         return self.raw_cli(
             ["safekeeper", "start", str(id), *extra_opts], extra_env_vars=s3_env_vars
         )

@@ -36,6 +36,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
+use std::time::Duration;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use url::Host;
 use utils::{
@@ -49,7 +50,6 @@ use utils::{
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
 const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
-const DEFAULT_RETRY_UNTIL_SECS: u64 = 10;
 project_git_version!(GIT_VERSION);
 
 const DEFAULT_PG_VERSION: &str = "15";
@@ -1047,12 +1047,11 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
     ))
 }
 
-fn get_retry_timeout(args: &ArgMatches) -> u64 {
-    if let Some(timeout) = args.get_one::<u64>("timeout-in-seconds") {
-        *timeout
-    } else {
-        DEFAULT_RETRY_UNTIL_SECS
-    }
+fn get_retry_timeout(args: &ArgMatches) -> &Duration {
+    let humantime_duration = args
+        .get_one::<humantime::Duration>("start-timeout")
+        .expect("invalid value for start-timeout");
+    humantime_duration.as_ref()
 }
 
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
@@ -1222,16 +1221,16 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
 
 async fn handle_start_all(
     env: &local_env::LocalEnv,
-    retry_timeout_in_seconds: u64,
+    retry_timeout: &Duration,
 ) -> anyhow::Result<()> {
     // Endpoints are not started automatically
 
-    broker::start_broker_process(env, retry_timeout_in_seconds).await?;
+    broker::start_broker_process(env, retry_timeout).await?;
 
     // Only start the storage controller if the pageserver is configured to need it
     if env.control_plane_api.is_some() {
         let storage_controller = StorageController::from_env(env);
-        if let Err(e) = storage_controller.start(retry_timeout_in_seconds).await {
+        if let Err(e) = storage_controller.start(retry_timeout).await {
             eprintln!("storage_controller start failed: {:#}", e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1240,7 +1239,7 @@ async fn handle_start_all(
 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
-        if let Err(e) = pageserver.start(retry_timeout_in_seconds).await {
+        if let Err(e) = pageserver.start(retry_timeout).await {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1249,7 +1248,7 @@ async fn handle_start_all(
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
-        if let Err(e) = safekeeper.start(vec![], retry_timeout_in_seconds).await {
+        if let Err(e) = safekeeper.start(vec![], retry_timeout).await {
             eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
             try_stop_all(env, false).await;
             exit(1);
@@ -1309,13 +1308,13 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 }
 
 fn cli() -> Command {
-    let timeout_arg = Arg::new("timeout-in-seconds")
+    let timeout_arg = Arg::new("start-timeout")
         .long("start-timeout")
         .short('t')
         .global(true)
-        .help("timeout in seconds until we fail the command")
-        .value_parser(value_parser!(u64))
-        .default_value("10")
+        .help("timeout until we fail the command, e.g. 30s")
+        .value_parser(value_parser!(humantime::Duration))
+        .default_value("10s")
         .required(false);
 
     let branch_name_arg = Arg::new("branch-name")

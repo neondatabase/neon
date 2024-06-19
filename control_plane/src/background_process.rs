@@ -36,11 +36,12 @@ use utils::pid_file::{self, PidFileRead};
 // it's waiting. If the process hasn't started/stopped after 5 seconds,
 // it prints a notice that it's taking long, but keeps waiting.
 //
-const DEFAULT_RETRY_TIMEOUT_SECS: u64 = 10;
-const DEFAULT_RETRIES: u64 = (DEFAULT_RETRY_TIMEOUT_SECS * 1000) / RETRY_INTERVAL_MILLIS;
-const RETRY_INTERVAL_MILLIS: u64 = 100;
-const DOT_EVERY_RETRIES: u64 = 10;
-const NOTICE_AFTER_RETRIES: u64 = 50;
+const DEFAULT_STOP_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_STOP_RETRIES: u128 =
+    DEFAULT_STOP_RETRY_TIMEOUT.as_millis() / RETRY_INTERVAL.as_millis();
+const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const DOT_EVERY_RETRIES: u128 = 10;
+const NOTICE_AFTER_RETRIES: u128 = 50;
 
 /// Argument to `start_process`, to indicate whether it should create pidfile or if the process creates
 /// it itself.
@@ -60,8 +61,8 @@ pub async fn start_process<F, Fut, AI, A, EI>(
     args: AI,
     envs: EI,
     initial_pid_file: InitialPidFile,
+    retry_timeout: &Duration,
     process_status_check: F,
-    retry_timeout_in_seconds: Option<u64>,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> Fut,
@@ -71,8 +72,7 @@ where
     // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
     EI: IntoIterator<Item = (String, String)>,
 {
-    let retry_timeout_in_seconds = retry_timeout_in_seconds.unwrap_or(DEFAULT_RETRY_TIMEOUT_SECS);
-    let retries: u64 = (retry_timeout_in_seconds * 1000) / RETRY_INTERVAL_MILLIS;
+    let retries: u128 = retry_timeout.as_millis() / RETRY_INTERVAL.as_millis();
     let log_path = datadir.join(format!("{process_name}.log"));
     let process_log_file = fs::OpenOptions::new()
         .create(true)
@@ -143,7 +143,7 @@ where
                     print!(".");
                     io::stdout().flush().unwrap();
                 }
-                thread::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS));
+                thread::sleep(RETRY_INTERVAL);
             }
             Err(e) => {
                 println!("error starting process {process_name:?}: {e:#}");
@@ -152,9 +152,10 @@ where
         }
     }
     println!();
-    anyhow::bail!(
-        "{process_name} did not start+pass status checks within {retry_timeout_in_seconds} seconds"
-    );
+    anyhow::bail!(format!(
+        "{} did not start+pass status checks within {:?} seconds",
+        process_name, retry_timeout
+    ));
 }
 
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
@@ -210,7 +211,7 @@ pub fn stop_process(
 }
 
 pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
-    for retries in 0..DEFAULT_RETRIES {
+    for retries in 0..DEFAULT_STOP_RETRIES {
         match process_has_stopped(pid) {
             Ok(true) => {
                 println!("\n{process_name} stopped");
@@ -226,7 +227,7 @@ pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
                     print!(".");
                     io::stdout().flush().unwrap();
                 }
-                thread::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS));
+                thread::sleep(DEFAULT_STOP_RETRY_TIMEOUT);
             }
             Err(e) => {
                 println!("{process_name} with pid {pid} failed to stop: {e:#}");
@@ -235,9 +236,10 @@ pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
         }
     }
     println!();
-    anyhow::bail!(
-        "{process_name} with pid {pid} did not stop in {DEFAULT_RETRY_TIMEOUT_SECS} seconds"
-    );
+    anyhow::bail!(format!(
+        "{} with pid {} did not stop in {:?} seconds",
+        process_name, pid, DEFAULT_STOP_RETRY_TIMEOUT
+    ));
 }
 
 fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {

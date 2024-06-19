@@ -7,6 +7,7 @@
 //! ```
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{io, result};
 
 use anyhow::Context;
@@ -113,13 +114,13 @@ impl SafekeeperNode {
     pub async fn start(
         &self,
         extra_opts: Vec<String>,
-        retry_timeout_in_seconds: u64,
+        retry_timeout: &Duration,
     ) -> anyhow::Result<()> {
         print!(
-            "Starting safekeeper at '{}' in '{}', retrying for {} seconds",
+            "Starting safekeeper at '{}' in '{}', retrying for {:?}",
             self.pg_connection_config.raw_address(),
             self.datadir_path().display(),
-            retry_timeout_in_seconds
+            retry_timeout,
         );
         io::stdout().flush().unwrap();
 
@@ -204,6 +205,7 @@ impl SafekeeperNode {
             &args,
             [],
             background_process::InitialPidFile::Expect(self.pid_file()),
+            retry_timeout,
             || async {
                 match self.check_status().await {
                     Ok(()) => Ok(true),
@@ -211,7 +213,6 @@ impl SafekeeperNode {
                     Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
                 }
             },
-            Some(retry_timeout_in_seconds),
         )
         .await
     }
