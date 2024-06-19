@@ -27,14 +27,14 @@ use rand::SeedableRng;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::time::timeout;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use tokio_util::task::TaskTracker;
 
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::Metrics;
-use crate::protocol2::read_proxy_protocol;
+use crate::protocol2::{read_proxy_protocol, ChainRW};
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
@@ -102,8 +102,6 @@ pub async fn task_main(
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
     connections.close(); // allows `connections.wait to complete`
 
-    let server = Builder::new(TokioExecutor::new());
-
     while let Some(res) = run_until_cancelled(ws_listener.accept(), &cancellation_token).await {
         let (conn, peer_addr) = res.context("could not accept TCP stream")?;
         if let Err(e) = conn.set_nodelay(true) {
@@ -127,24 +125,50 @@ pub async fn task_main(
         }
 
         let conn_token = cancellation_token.child_token();
-        let conn = connection_handler(
-            config,
-            backend.clone(),
-            connections.clone(),
-            cancellation_handler.clone(),
-            endpoint_rate_limiter.clone(),
-            conn_token.clone(),
-            server.clone(),
-            tls_acceptor.clone(),
-            conn,
-            peer_addr,
-        )
-        .instrument(http_conn_span);
+        let tls_acceptor = tls_acceptor.clone();
+        let backend = backend.clone();
+        let connections2 = connections.clone();
+        let cancellation_handler = cancellation_handler.clone();
+        let endpoint_rate_limiter = endpoint_rate_limiter.clone();
+        connections.spawn(
+            async move {
+                let conn_token2 = conn_token.clone();
+                let _cancel_guard = config.http_config.cancel_set.insert(conn_id, conn_token2);
 
-        connections.spawn(async move {
-            let _cancel_guard = config.http_config.cancel_set.insert(conn_id, conn_token);
-            conn.await
-        });
+                let session_id = uuid::Uuid::new_v4();
+
+                let _gauge = Metrics::get()
+                    .proxy
+                    .client_connections
+                    .guard(crate::metrics::Protocol::Http);
+
+                let startup_result = Box::pin(connection_startup(
+                    config,
+                    tls_acceptor,
+                    session_id,
+                    conn,
+                    peer_addr,
+                ))
+                .await;
+                let Some((conn, peer_addr)) = startup_result else {
+                    return;
+                };
+
+                Box::pin(connection_handler(
+                    config,
+                    backend,
+                    connections2,
+                    cancellation_handler,
+                    endpoint_rate_limiter,
+                    conn_token,
+                    conn,
+                    peer_addr,
+                    session_id,
+                ))
+                .await;
+            }
+            .instrument(http_conn_span),
+        );
     }
 
     connections.wait().await;
@@ -152,40 +176,22 @@ pub async fn task_main(
     Ok(())
 }
 
-/// Handles the TCP lifecycle.
-///
+/// Handles the TCP startup lifecycle.
 /// 1. Parses PROXY protocol V2
 /// 2. Handles TLS handshake
-/// 3. Handles HTTP connection
-///     1. With graceful shutdowns
-///     2. With graceful request cancellation with connection failure
-///     3. With websocket upgrade support.
-#[allow(clippy::too_many_arguments)]
-async fn connection_handler(
-    config: &'static ProxyConfig,
-    backend: Arc<PoolingBackend>,
-    connections: TaskTracker,
-    cancellation_handler: Arc<CancellationHandlerMain>,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    cancellation_token: CancellationToken,
-    server: Builder<TokioExecutor>,
+async fn connection_startup(
+    config: &ProxyConfig,
     tls_acceptor: TlsAcceptor,
+    session_id: uuid::Uuid,
     conn: TcpStream,
     peer_addr: SocketAddr,
-) {
-    let session_id = uuid::Uuid::new_v4();
-
-    let _gauge = Metrics::get()
-        .proxy
-        .client_connections
-        .guard(crate::metrics::Protocol::Http);
-
+) -> Option<(TlsStream<ChainRW<TcpStream>>, IpAddr)> {
     // handle PROXY protocol
     let (conn, peer) = match read_proxy_protocol(conn).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
-            return;
+            return None;
         }
     };
 
@@ -208,7 +214,7 @@ async fn connection_handler(
                 Metrics::get().proxy.tls_handshake_failures.inc();
             }
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
-            return;
+            return None;
         }
         // The handshake timed out
         Err(e) => {
@@ -216,16 +222,36 @@ async fn connection_handler(
                 Metrics::get().proxy.tls_handshake_failures.inc();
             }
             warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
-            return;
+            return None;
         }
     };
 
+    Some((conn, peer_addr))
+}
+
+/// Handles HTTP connection
+/// 1. With graceful shutdowns
+/// 2. With graceful request cancellation with connection failure
+/// 3. With websocket upgrade support.
+#[allow(clippy::too_many_arguments)]
+async fn connection_handler(
+    config: &'static ProxyConfig,
+    backend: Arc<PoolingBackend>,
+    connections: TaskTracker,
+    cancellation_handler: Arc<CancellationHandlerMain>,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    cancellation_token: CancellationToken,
+    conn: TlsStream<ChainRW<TcpStream>>,
+    peer_addr: IpAddr,
+    session_id: uuid::Uuid,
+) {
     let session_id = AtomicTake::new(session_id);
 
     // Cancel all current inflight HTTP requests if the HTTP connection is closed.
     let http_cancellation_token = CancellationToken::new();
     let _cancel_connection = http_cancellation_token.clone().drop_guard();
 
+    let server = Builder::new(TokioExecutor::new());
     let conn = server.serve_connection_with_upgrades(
         hyper_util::rt::TokioIo::new(conn),
         hyper1::service::service_fn(move |req: hyper1::Request<Incoming>| {
