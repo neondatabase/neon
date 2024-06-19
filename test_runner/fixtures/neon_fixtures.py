@@ -2213,6 +2213,30 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def node_drain(self, node_id):
+        log.info(f"node_drain({node_id})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_fill(self, node_id):
+        log.info(f"node_fill({node_id})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_status(self, node_id):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
     def node_list(self):
         response = self.request(
             "GET",

@@ -10,7 +10,9 @@ use crate::{
     reconciler::ReconcileUnits,
     scheduler::{AffinityScore, MaySchedule, RefCountUpdate, ScheduleContext},
 };
-use pageserver_api::controller_api::{PlacementPolicy, ShardSchedulingPolicy};
+use pageserver_api::controller_api::{
+    NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
+};
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
@@ -311,6 +313,12 @@ pub(crate) struct ReconcilerWaiter {
     seq: Sequence,
 }
 
+pub(crate) enum ReconcilerStatus {
+    Done,
+    Failed,
+    InProgress,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ReconcileWaitError {
     #[error("Timeout waiting for shard {0}")]
@@ -372,6 +380,16 @@ impl ReconcilerWaiter {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn get_status(&self) -> ReconcilerStatus {
+        if self.seq_wait.would_wait_for(self.seq).is_err() {
+            ReconcilerStatus::Done
+        } else if self.error_seq_wait.would_wait_for(self.seq).is_err() {
+            ReconcilerStatus::Failed
+        } else {
+            ReconcilerStatus::InProgress
+        }
     }
 }
 
@@ -652,13 +670,17 @@ impl TenantShard {
         let mut scores = all_pageservers
             .iter()
             .flat_map(|node_id| {
-                if matches!(
-                    nodes
-                        .get(node_id)
-                        .map(|n| n.may_schedule())
-                        .unwrap_or(MaySchedule::No),
-                    MaySchedule::No
+                let node = nodes.get(node_id);
+                if node.is_none() {
+                    None
+                } else if matches!(
+                    node.unwrap().get_scheduling(),
+                    NodeSchedulingPolicy::Filling
                 ) {
+                    // If the node is currently filling, don't count it as a candidate to avoid,
+                    // racing with the background fill.
+                    None
+                } else if matches!(node.unwrap().may_schedule(), MaySchedule::No) {
                     None
                 } else {
                     let affinity_score = schedule_context.get_node_affinity(*node_id);
