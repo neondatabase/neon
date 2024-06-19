@@ -1,4 +1,5 @@
 use crate::{node::Node, tenant_shard::TenantShard};
+use itertools::Itertools;
 use pageserver_api::controller_api::UtilizationScore;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -281,6 +282,44 @@ impl Scheduler {
                 node.shard_count -= 1;
             }
         }
+    }
+
+    // Check if the number of shards attached to a given node is lagging below
+    // the cluster average. If that's the case, the node should be filled.
+    pub(crate) fn compute_fill_requirement(&self, node_id: NodeId) -> usize {
+        let Some(node) = self.nodes.get(&node_id) else {
+            debug_assert!(false);
+            tracing::error!("Scheduler missing node {node_id}");
+            return 0;
+        };
+        assert!(!self.nodes.is_empty());
+        let expected_attached_shards_per_node = self.expected_attached_shard_count();
+
+        for (node_id, node) in self.nodes.iter() {
+            tracing::trace!(%node_id, "attached_shard_count={} shard_count={} expected={}", node.attached_shard_count, node.shard_count, expected_attached_shards_per_node);
+        }
+
+        if node.attached_shard_count < expected_attached_shards_per_node {
+            expected_attached_shards_per_node - node.attached_shard_count
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn expected_attached_shard_count(&self) -> usize {
+        let total_attached_shards: usize =
+            self.nodes.values().map(|n| n.attached_shard_count).sum();
+
+        assert!(!self.nodes.is_empty());
+        total_attached_shards / self.nodes.len()
+    }
+
+    pub(crate) fn nodes_by_attached_shard_count(&self) -> Vec<(NodeId, usize)> {
+        self.nodes
+            .iter()
+            .map(|(node_id, stats)| (*node_id, stats.attached_shard_count))
+            .sorted_by(|lhs, rhs| Ord::cmp(&lhs.1, &rhs.1).reverse())
+            .collect()
     }
 
     pub(crate) fn node_upsert(&mut self, node: &Node) {

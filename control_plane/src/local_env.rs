@@ -42,8 +42,8 @@ pub struct LocalEnv {
     // compute endpoints).
     //
     // This is not stored in the config file. Rather, this is the path where the
-    // config file itself is. It is read from the NEON_REPO_DIR env variable or
-    // '.neon' if not given.
+    // config file itself is. It is read from the NEON_REPO_DIR env variable which
+    // must be an absolute path. If the env var is not set, $PWD/.neon is used.
     pub base_data_dir: PathBuf,
 
     // Path to postgres distribution. It's expected that "bin", "include",
@@ -431,9 +431,7 @@ impl LocalEnv {
     }
 
     ///  Construct `Self` from on-disk state.
-    pub fn load_config() -> anyhow::Result<Self> {
-        let repopath = base_path();
-
+    pub fn load_config(repopath: &Path) -> anyhow::Result<Self> {
         if !repopath.exists() {
             bail!(
                 "Neon config is not found in {}. You need to run 'neon_local init' first",
@@ -461,7 +459,7 @@ impl LocalEnv {
                 branch_name_mappings,
             } = on_disk_config;
             LocalEnv {
-                base_data_dir: repopath.clone(),
+                base_data_dir: repopath.to_owned(),
                 pg_distrib_dir,
                 neon_distrib_dir,
                 default_tenant_id,
@@ -482,7 +480,7 @@ impl LocalEnv {
             "we ensure this during deserialization"
         );
         env.pageservers = {
-            let iter = std::fs::read_dir(&repopath).context("open dir")?;
+            let iter = std::fs::read_dir(repopath).context("open dir")?;
             let mut pageservers = Vec::new();
             for res in iter {
                 let dentry = res?;
@@ -719,10 +717,25 @@ impl LocalEnv {
 }
 
 pub fn base_path() -> PathBuf {
-    match std::env::var_os("NEON_REPO_DIR") {
-        Some(val) => PathBuf::from(val),
-        None => PathBuf::from(".neon"),
-    }
+    let path = match std::env::var_os("NEON_REPO_DIR") {
+        Some(val) => {
+            let path = PathBuf::from(val);
+            if !path.is_absolute() {
+                // repeat the env var in the error because our default is always absolute
+                panic!("NEON_REPO_DIR must be an absolute path, got {path:?}");
+            }
+            path
+        }
+        None => {
+            let pwd = std::env::current_dir()
+                // technically this can fail but it's quite unlikeley
+                .expect("determine current directory");
+            let pwd_abs = pwd.canonicalize().expect("canonicalize current directory");
+            pwd_abs.join(".neon")
+        }
+    };
+    assert!(path.is_absolute());
+    path
 }
 
 /// Generate a public/private key pair for JWT authentication

@@ -2159,12 +2159,19 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return time.time() - t1
 
     def attach_hook_issue(
-        self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
+        self,
+        tenant_shard_id: Union[TenantId, TenantShardId],
+        pageserver_id: int,
+        generation_override: Optional[int] = None,
     ) -> int:
+        body = {"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id}
+        if generation_override is not None:
+            body["generation_override"] = generation_override
+
         response = self.request(
             "POST",
             f"{self.env.storage_controller_api}/debug/v1/attach-hook",
-            json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
+            json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
         gen = response.json()["gen"]
@@ -2212,6 +2219,30 @@ class NeonStorageController(MetricsGetter, LogUtils):
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
+
+    def node_drain(self, node_id):
+        log.info(f"node_drain({node_id})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_fill(self, node_id):
+        log.info(f"node_fill({node_id})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_status(self, node_id):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
 
     def node_list(self):
         response = self.request(
@@ -2611,6 +2642,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         config: None | Dict[str, Any] = None,
         config_null: bool = False,
         generation: Optional[int] = None,
+        override_storage_controller_generation: bool = False,
     ):
         """
         Tenant attachment passes through here to acquire a generation number before proceeding
@@ -2619,6 +2651,10 @@ class NeonPageserver(PgProtocol, LogUtils):
         client = self.http_client()
         if generation is None:
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
+        elif override_storage_controller_generation:
+            generation = self.env.storage_controller.attach_hook_issue(
+                tenant_id, self.id, generation
+            )
         return client.tenant_attach(
             tenant_id,
             config,
@@ -3410,6 +3446,12 @@ class Endpoint(PgProtocol, LogUtils):
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
+        # This lock prevents concurrent start & stop operations, keeping `self.running` consistent
+        # with whether we're really running.  Tests generally wouldn't try and do these concurrently,
+        # but endpoints are also stopped during test teardown, which might happen concurrently with
+        # destruction of objects in tests.
+        self.lock = threading.Lock()
+
     def http_client(
         self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
     ) -> EndpointHttpClient:
@@ -3480,14 +3522,15 @@ class Endpoint(PgProtocol, LogUtils):
 
         log.info(f"Starting postgres endpoint {self.endpoint_id}")
 
-        self.env.neon_cli.endpoint_start(
-            self.endpoint_id,
-            safekeepers=self.active_safekeepers,
-            remote_ext_config=remote_ext_config,
-            pageserver_id=pageserver_id,
-            allow_multiple=allow_multiple,
-        )
-        self.running = True
+        with self.lock:
+            self.env.neon_cli.endpoint_start(
+                self.endpoint_id,
+                safekeepers=self.active_safekeepers,
+                remote_ext_config=remote_ext_config,
+                pageserver_id=pageserver_id,
+                allow_multiple=allow_multiple,
+            )
+            self.running = True
 
         return self
 
@@ -3579,15 +3622,20 @@ class Endpoint(PgProtocol, LogUtils):
     def stop(self, mode: str = "fast") -> "Endpoint":
         """
         Stop the Postgres instance if it's running.
+
+        Because test teardown might try and stop an endpoint concurrently with test code
+        stopping the endpoint, this method is thread safe
+
         Returns self.
         """
 
-        if self.running:
-            assert self.endpoint_id is not None
-            self.env.neon_cli.endpoint_stop(
-                self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
-            )
-            self.running = False
+        with self.lock:
+            if self.running:
+                assert self.endpoint_id is not None
+                self.env.neon_cli.endpoint_stop(
+                    self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
+                )
+                self.running = False
 
         return self
 
@@ -3597,12 +3645,13 @@ class Endpoint(PgProtocol, LogUtils):
         Returns self.
         """
 
-        assert self.endpoint_id is not None
-        self.env.neon_cli.endpoint_stop(
-            self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
-        )
-        self.endpoint_id = None
-        self.running = False
+        with self.lock:
+            assert self.endpoint_id is not None
+            self.env.neon_cli.endpoint_stop(
+                self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
+            )
+            self.endpoint_id = None
+            self.running = False
 
         return self
 

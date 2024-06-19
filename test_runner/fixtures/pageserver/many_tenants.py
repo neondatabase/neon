@@ -66,6 +66,8 @@ def single_timeline(
         env.pageserver.tenant_attach(
             tenant,
             config=template_config.copy(),
+            generation=100,
+            override_storage_controller_generation=True,
         )
         time.sleep(0.1)
         wait_until_tenant_state(ps_http, tenant, "Broken", 10)
