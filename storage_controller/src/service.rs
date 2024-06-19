@@ -309,7 +309,7 @@ impl From<ReconcileWaitError> for ApiError {
 impl From<OperationError> for ApiError {
     fn from(value: OperationError) -> Self {
         match value {
-            OperationError::NodeStateChanged(err) => {
+            OperationError::NodeStateChanged(err) | OperationError::FinalizeError(err) => {
                 ApiError::InternalServerError(anyhow::anyhow!(err))
             }
             OperationError::Cancelled => ApiError::Conflict("Operation was cancelled".into()),
@@ -4503,7 +4503,20 @@ impl Service {
                                 panic!("We always remove the same operation")
                             }
                         }
-                        service.drain_node(node_id, cancel).await
+
+                        tracing::info!(%node_id, "Drain background operation starting");
+                        let res = service.drain_node(node_id, cancel).await;
+                        match res {
+                            Ok(()) => {
+                                tracing::info!(%node_id, "Drain background operation completed successfully");
+                            }
+                            Err(OperationError::Cancelled) => {
+                                tracing::info!(%node_id, "Drain background operation was cancelled");
+                            }
+                            Err(err) => {
+                                tracing::error!(%node_id, "Drain background operation encountered: {err}")
+                            }
+                        }
                     }
                 });
             }
@@ -4585,7 +4598,19 @@ impl Service {
                             }
                         }
 
-                        service.fill_node(node_id, cancel).await
+                        tracing::info!(%node_id, "Fill background operation starting");
+                        let res = service.fill_node(node_id, cancel).await;
+                        match res {
+                            Ok(()) => {
+                                tracing::info!(%node_id, "Fill background operation completed successfully");
+                            }
+                            Err(OperationError::Cancelled) => {
+                                tracing::info!(%node_id, "Fill background operation was cancelled");
+                            }
+                            Err(err) => {
+                                tracing::error!(%node_id, "Fill background operation encountered: {err}")
+                            }
+                        }
                     }
                 });
             }
@@ -5196,8 +5221,6 @@ impl Service {
         node_id: NodeId,
         cancel: CancellationToken,
     ) -> Result<(), OperationError> {
-        tracing::info!(%node_id, "Starting drain background operation");
-
         let mut last_inspected_shard: Option<TenantShardId> = None;
         let mut inspected_all_shards = false;
         let mut waiters = Vec::new();
@@ -5293,10 +5316,13 @@ impl Service {
             // the end of the drain operations will hang, but all such places should enforce an
             // overall timeout. The scheduling policy will be updated upon node re-attach and/or
             // by the counterpart fill operation.
-            tracing::warn!(%node_id, "Failed to finalise drain by setting scheduling policy: {err}");
+            return Err(OperationError::FinalizeError(
+                format!(
+                    "Failed to finalise drain of {node_id} by setting scheduling policy to PauseForRestart: {err}"
+                )
+                .into(),
+            ));
         }
-
-        tracing::info!(%node_id, "Completed drain background operation");
 
         Ok(())
     }
@@ -5377,9 +5403,6 @@ impl Service {
         // TODO(vlad): Currently this operates on the assumption that all
         // secondaries are warm. This is not always true (e.g. we just migrated the
         // tenant). Take that into consideration by checking the secondary status.
-
-        tracing::info!(%node_id, "Starting fill background operation");
-
         let mut tids_to_promote = self.fill_node_plan(node_id);
 
         let mut waiters = Vec::new();
@@ -5468,10 +5491,11 @@ impl Service {
             // This isn't a huge issue since the filling process starts upon request. However, it
             // will prevent the next drain from starting. The only case in which this can fail
             // is database unavailability. Such a case will require manual intervention.
-            tracing::error!(%node_id, "Failed to finalise fill by setting scheduling policy: {err}");
+            return Err(OperationError::FinalizeError(
+                format!("Failed to finalise fill of {node_id} by setting scheduling policy to Active: {err}")
+                    .into(),
+            ));
         }
-
-        tracing::info!(%node_id, "Completed fill background operation");
 
         Ok(())
     }

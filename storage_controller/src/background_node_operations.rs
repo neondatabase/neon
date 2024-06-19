@@ -25,6 +25,8 @@ pub(crate) enum Operation {
 pub(crate) enum OperationError {
     #[error("Node state changed during operation: {0}")]
     NodeStateChanged(Cow<'static, str>),
+    #[error("Operation finalize error: {0}")]
+    FinalizeError(Cow<'static, str>),
     #[error("Operation cancelled")]
     Cancelled,
 }
