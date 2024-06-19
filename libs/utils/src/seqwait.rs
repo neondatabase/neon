@@ -1,12 +1,11 @@
 #![warn(missing_docs)]
 
-use std::cmp::{Eq, Ordering, PartialOrd};
+use std::cmp::{Eq, Ordering};
 use std::collections::BinaryHeap;
-use std::fmt::Debug;
 use std::mem;
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::sync::watch::{channel, Receiver, Sender};
+use tokio::sync::watch::{self, channel};
 use tokio::time::timeout;
 
 /// An error happened while waiting for a number
@@ -35,23 +34,73 @@ pub trait MonotonicCounter<V> {
     fn cnt_value(&self) -> V;
 }
 
-/// Internal components of a `SeqWait`
-struct SeqWaitInt<S, V>
+/// Heap of waiters, lowest numbers pop first.
+struct Waiters<V>
 where
-    S: MonotonicCounter<V>,
     V: Ord,
 {
-    waiters: BinaryHeap<Waiter<V>>,
-    current: S,
-    shutdown: bool,
+    heap: BinaryHeap<Waiter<V>>,
+    /// Number of the first waiter in the heap, or None if there are no waiters.
+    status_channel: watch::Sender<Option<V>>,
+}
+
+impl<V> Waiters<V>
+where
+    V: Ord + Copy,
+{
+    fn new() -> Self {
+        Waiters {
+            heap: BinaryHeap::new(),
+            status_channel: channel(None).0,
+        }
+    }
+
+    /// `status_channel` contains the number of the first waiter in the heap.
+    /// This function should be called whenever waiters heap changes.
+    fn update_status(&self) {
+        let first_waiter = self.heap.peek().map(|w| w.wake_num);
+        let _ = self.status_channel.send_replace(first_waiter);
+    }
+
+    /// Add new waiter to the heap, return a channel that will be notified when the number arrives.
+    fn add(&mut self, num: V) -> watch::Receiver<()> {
+        let (tx, rx) = channel(());
+        self.heap.push(Waiter {
+            wake_num: num,
+            wake_channel: tx,
+        });
+        self.update_status();
+        rx
+    }
+
+    /// Pop all waiters <= num from the heap. Collect channels in a vector,
+    /// so that caller can wake them up.
+    fn pop_leq(&mut self, num: V) -> Vec<watch::Sender<()>> {
+        let mut wake_these = Vec::new();
+        while let Some(n) = self.heap.peek() {
+            if n.wake_num > num {
+                break;
+            }
+            wake_these.push(self.heap.pop().unwrap().wake_channel);
+        }
+        self.update_status();
+        wake_these
+    }
+
+    /// Used on shutdown to efficiently drop all waiters.
+    fn take_all(&mut self) -> BinaryHeap<Waiter<V>> {
+        let heap = mem::take(&mut self.heap);
+        self.update_status();
+        heap
+    }
 }
 
 struct Waiter<T>
 where
     T: Ord,
 {
-    wake_num: T,              // wake me when this number arrives ...
-    wake_channel: Sender<()>, // ... by sending a message to this channel
+    wake_num: T,                     // wake me when this number arrives ...
+    wake_channel: watch::Sender<()>, // ... by sending a message to this channel
 }
 
 // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
@@ -75,6 +124,17 @@ impl<T: Ord> PartialEq for Waiter<T> {
 }
 
 impl<T: Ord> Eq for Waiter<T> {}
+
+/// Internal components of a `SeqWait`
+struct SeqWaitInt<S, V>
+where
+    S: MonotonicCounter<V>,
+    V: Ord,
+{
+    waiters: Waiters<V>,
+    current: S,
+    shutdown: bool,
+}
 
 /// A tool for waiting on a sequence number
 ///
@@ -108,7 +168,7 @@ where
     /// Create a new `SeqWait`, initialized to a particular number
     pub fn new(starting_num: S) -> Self {
         let internal = SeqWaitInt {
-            waiters: BinaryHeap::new(),
+            waiters: Waiters::new(),
             current: starting_num,
             shutdown: false,
         };
@@ -128,9 +188,8 @@ where
             // Block any future waiters from starting
             internal.shutdown = true;
 
-            // This will steal the entire waiters map.
-            // When we drop it all waiters will be woken.
-            mem::take(&mut internal.waiters)
+            // Take all waiters to drop them later.
+            internal.waiters.take_all()
 
             // Drop the lock as we exit this scope.
         };
@@ -182,9 +241,21 @@ where
         }
     }
 
+    /// Check if [`Self::wait_for`] or [`Self::wait_for_timeout`] would wait if called with `num`.
+    pub fn would_wait_for(&self, num: V) -> Result<(), V> {
+        let internal = self.internal.lock().unwrap();
+        let cnt = internal.current.cnt_value();
+        drop(internal);
+        if cnt >= num {
+            Ok(())
+        } else {
+            Err(cnt)
+        }
+    }
+
     /// Register and return a channel that will be notified when a number arrives,
     /// or None, if it has already arrived.
-    fn queue_for_wait(&self, num: V) -> Result<Option<Receiver<()>>, SeqWaitError> {
+    fn queue_for_wait(&self, num: V) -> Result<Option<watch::Receiver<()>>, SeqWaitError> {
         let mut internal = self.internal.lock().unwrap();
         if internal.current.cnt_value() >= num {
             return Ok(None);
@@ -193,12 +264,8 @@ where
             return Err(SeqWaitError::Shutdown);
         }
 
-        // Create a new channel.
-        let (tx, rx) = channel(());
-        internal.waiters.push(Waiter {
-            wake_num: num,
-            wake_channel: tx,
-        });
+        // Add waiter channel to the queue.
+        let rx = internal.waiters.add(num);
         // Drop the lock as we exit this scope.
         Ok(Some(rx))
     }
@@ -219,16 +286,8 @@ where
             }
             internal.current.cnt_advance(num);
 
-            // Pop all waiters <= num from the heap. Collect them in a vector, and
-            // wake them up after releasing the lock.
-            let mut wake_these = Vec::new();
-            while let Some(n) = internal.waiters.peek() {
-                if n.wake_num > num {
-                    break;
-                }
-                wake_these.push(internal.waiters.pop().unwrap().wake_channel);
-            }
-            wake_these
+            // Pop all waiters <= num from the heap.
+            internal.waiters.pop_leq(num)
         };
 
         for tx in wake_these {
@@ -243,13 +302,29 @@ where
     pub fn load(&self) -> S {
         self.internal.lock().unwrap().current
     }
+
+    /// Get a Receiver for the current status.
+    ///
+    /// The current status is the number of the first waiter in the queue,
+    /// or None if there are no waiters.
+    ///
+    /// This receiver will be notified whenever the status changes.
+    /// It is useful for receiving notifications when the first waiter
+    /// starts waiting for a number, or when there are no more waiters left.
+    pub fn status_receiver(&self) -> watch::Receiver<Option<V>> {
+        self.internal
+            .lock()
+            .unwrap()
+            .waiters
+            .status_channel
+            .subscribe()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::time::Duration;
 
     impl MonotonicCounter<i32> for i32 {
         fn cnt_advance(&mut self, val: i32) {

@@ -95,7 +95,7 @@
             },
             {
                 "name": "shared_preload_libraries",
-                "value": "neon",
+                "value": "neon,pg_cron,timescaledb,pg_stat_statements",
                 "vartype": "string"
             },
             {
@@ -126,6 +126,16 @@
             {
                 "name": "max_replication_flush_lag",
                 "value": "10GB",
+                "vartype": "string"
+            },
+            {
+                "name": "cron.database",
+                "value": "postgres",
+                "vartype": "string"
+            },
+            {
+                "name": "session_preload_libraries",
+                "value": "anon",
                 "vartype": "string"
             }
         ]

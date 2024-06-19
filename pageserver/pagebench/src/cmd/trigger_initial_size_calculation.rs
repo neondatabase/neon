@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use humantime::Duration;
+use pageserver_api::shard::TenantShardId;
 use tokio::task::JoinSet;
 use utils::id::TenantTimelineId;
+
+use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 
 #[derive(clap::Parser)]
 pub(crate) struct Args {
@@ -56,14 +59,19 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     for tl in timelines {
         let mgmt_api_client = Arc::clone(&mgmt_api_client);
         js.spawn(async move {
-            // TODO: API to explicitly trigger initial logical size computation.
-            // Should probably also avoid making it a side effect of timeline details to trigger initial logical size calculation.
-            // => https://github.com/neondatabase/neon/issues/6168
             let info = mgmt_api_client
-                .timeline_info(tl.tenant_id, tl.timeline_id)
+                .timeline_info(
+                    TenantShardId::unsharded(tl.tenant_id),
+                    tl.timeline_id,
+                    ForceAwaitLogicalSize::Yes,
+                )
                 .await
                 .unwrap();
 
+            // Polling should not be strictly required here since we await
+            // for the initial logical size, however it's possible for the request
+            // to land before the timeline is initialised. This results in an approximate
+            // logical size.
             if let Some(period) = args.poll_for_completion {
                 let mut ticker = tokio::time::interval(period.into());
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -71,7 +79,11 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                 while !info.current_logical_size_is_accurate {
                     ticker.tick().await;
                     info = mgmt_api_client
-                        .timeline_info(tl.tenant_id, tl.timeline_id)
+                        .timeline_info(
+                            TenantShardId::unsharded(tl.tenant_id),
+                            tl.timeline_id,
+                            ForceAwaitLogicalSize::Yes,
+                        )
                         .await
                         .unwrap();
                 }

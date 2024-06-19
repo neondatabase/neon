@@ -12,7 +12,7 @@
 //!
 //! The endpoint is managed by the `compute_ctl` binary. When an endpoint is
 //! started, we launch `compute_ctl` It synchronizes the safekeepers, downloads
-//! the basebackup from the pageserver to initialize the the data directory, and
+//! the basebackup from the pageserver to initialize the data directory, and
 //! finally launches the PostgreSQL process. It watches the PostgreSQL process
 //! until it exits.
 //!
@@ -41,22 +41,28 @@ use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::spec::Database;
+use compute_api::spec::PgIdent;
 use compute_api::spec::RemoteExtSpec;
+use compute_api::spec::Role;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
+use pageserver_api::shard::ShardStripeSize;
 use serde::{Deserialize, Serialize};
+use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
 
 use crate::local_env::LocalEnv;
-use crate::pageserver::PageServerNode;
 use crate::postgresql_conf::PostgresConf;
+use crate::storage_controller::StorageController;
 
 use compute_api::responses::{ComputeState, ComputeStatus};
-use compute_api::spec::{Cluster, ComputeMode, ComputeSpec};
+use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -69,7 +75,7 @@ pub struct EndpointConf {
     http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
-    pageserver_id: NodeId,
+    features: Vec<ComputeFeature>,
 }
 
 //
@@ -121,19 +127,15 @@ impl ComputeControlPlane {
         http_port: Option<u16>,
         pg_version: u32,
         mode: ComputeMode,
-        pageserver_id: NodeId,
+        skip_pg_catalog_updates: bool,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
-        let pageserver =
-            PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
-
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), pg_port),
             http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), http_port),
             env: self.env.clone(),
-            pageserver,
             timeline_id,
             mode,
             tenant_id,
@@ -144,7 +146,8 @@ impl ComputeControlPlane {
             // before and after start are the same. So, skip catalog updates,
             // with this we basically test a case of waking up an idle compute, where
             // we also skip catalog updates in the cloud.
-            skip_pg_catalog_updates: true,
+            skip_pg_catalog_updates,
+            features: vec![],
         });
 
         ep.create_endpoint_dir()?;
@@ -158,8 +161,8 @@ impl ComputeControlPlane {
                 http_port,
                 pg_port,
                 pg_version,
-                skip_pg_catalog_updates: true,
-                pageserver_id,
+                skip_pg_catalog_updates,
+                features: vec![],
             })?,
         )?;
         std::fs::write(
@@ -187,7 +190,7 @@ impl ComputeControlPlane {
                 v.tenant_id == tenant_id
                     && v.timeline_id == timeline_id
                     && v.mode == mode
-                    && v.status() != "stopped"
+                    && v.status() != EndpointStatus::Stopped
             });
 
             if let Some((key, _)) = duplicates.next() {
@@ -218,10 +221,32 @@ pub struct Endpoint {
     // These are not part of the endpoint as such, but the environment
     // the endpoint runs in.
     pub env: LocalEnv,
-    pageserver: PageServerNode,
 
     // Optimizations
     skip_pg_catalog_updates: bool,
+
+    // Feature flags
+    features: Vec<ComputeFeature>,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum EndpointStatus {
+    Running,
+    Stopped,
+    Crashed,
+    RunningNoPidfile,
+}
+
+impl std::fmt::Display for EndpointStatus {
+    fn fmt(&self, writer: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Crashed => "crashed",
+            Self::RunningNoPidfile => "running, no pidfile",
+        };
+        write!(writer, "{}", s)
+    }
 }
 
 impl Endpoint {
@@ -241,20 +266,17 @@ impl Endpoint {
         let conf: EndpointConf =
             serde_json::from_slice(&std::fs::read(entry.path().join("endpoint.json"))?)?;
 
-        let pageserver =
-            PageServerNode::from_env(env, env.get_pageserver_conf(conf.pageserver_id)?);
-
         Ok(Endpoint {
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.pg_port),
             http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.http_port),
             endpoint_id,
             env: env.clone(),
-            pageserver,
             timeline_id: conf.timeline_id,
             mode: conf.mode,
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            features: conf.features,
         })
     }
 
@@ -384,16 +406,16 @@ impl Endpoint {
         self.endpoint_path().join("pgdata")
     }
 
-    pub fn status(&self) -> &str {
+    pub fn status(&self) -> EndpointStatus {
         let timeout = Duration::from_millis(300);
         let has_pidfile = self.pgdata().join("postmaster.pid").exists();
         let can_connect = TcpStream::connect_timeout(&self.pg_address, timeout).is_ok();
 
         match (has_pidfile, can_connect) {
-            (true, true) => "running",
-            (false, false) => "stopped",
-            (true, false) => "crashed",
-            (false, true) => "running, no pidfile",
+            (true, true) => EndpointStatus::Running,
+            (false, false) => EndpointStatus::Stopped,
+            (true, false) => EndpointStatus::Crashed,
+            (false, true) => EndpointStatus::RunningNoPidfile,
         }
     }
 
@@ -442,7 +464,7 @@ impl Endpoint {
     }
 
     fn wait_for_compute_ctl_to_exit(&self, send_sigterm: bool) -> Result<()> {
-        // TODO use background_process::stop_process instead
+        // TODO use background_process::stop_process instead: https://github.com/neondatabase/neon/pull/6482
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
         let pid = nix::unistd::Pid::from_raw(pid as i32);
@@ -469,13 +491,24 @@ impl Endpoint {
         }
     }
 
+    fn build_pageserver_connstr(pageservers: &[(Host, u16)]) -> String {
+        pageservers
+            .iter()
+            .map(|(host, port)| format!("postgresql://no_user@{host}:{port}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     pub async fn start(
         &self,
         auth_token: &Option<String>,
         safekeepers: Vec<NodeId>,
+        pageservers: Vec<(Host, u16)>,
         remote_ext_config: Option<&String>,
+        shard_stripe_size: usize,
+        create_test_user: bool,
     ) -> Result<()> {
-        if self.status() == "running" {
+        if self.status() == EndpointStatus::Running {
             anyhow::bail!("The endpoint is already running");
         }
 
@@ -487,13 +520,9 @@ impl Endpoint {
             std::fs::remove_dir_all(self.pgdata())?;
         }
 
-        let pageserver_connstring = {
-            let config = &self.pageserver.pg_connection_config;
-            let (host, port) = (config.host(), config.port());
+        let pageserver_connstring = Self::build_pageserver_connstr(&pageservers);
+        assert!(!pageserver_connstring.is_empty());
 
-            // NOTE: avoid spaces in connection string, because it is less error prone if we forward it somewhere.
-            format!("postgresql://no_user@{host}:{port}")
-        };
         let mut safekeeper_connstrings = Vec::new();
         if self.mode == ComputeMode::Primary {
             for sk_id in safekeepers {
@@ -524,13 +553,32 @@ impl Endpoint {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
             format_version: 1.0,
             operation_uuid: None,
-            features: vec![],
+            features: self.features.clone(),
+            swap_size_bytes: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
                 state: None,
-                roles: vec![],
-                databases: vec![],
+                roles: if create_test_user {
+                    vec![Role {
+                        name: PgIdent::from_str("test").unwrap(),
+                        encrypted_password: None,
+                        options: None,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                databases: if create_test_user {
+                    vec![Database {
+                        name: PgIdent::from_str("neondb").unwrap(),
+                        owner: PgIdent::from_str("test").unwrap(),
+                        options: None,
+                        restrict_conn: false,
+                        invalid: false,
+                    }]
+                } else {
+                    Vec::new()
+                },
                 settings: None,
                 postgresql_conf: Some(postgresql_conf),
             },
@@ -543,6 +591,8 @@ impl Endpoint {
             storage_auth_token: auth_token.clone(),
             remote_extensions,
             pgbouncer_settings: None,
+            shard_stripe_size: Some(shard_stripe_size),
+            primary_is_running: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -554,11 +604,16 @@ impl Endpoint {
             .open(self.endpoint_path().join("compute.log"))?;
 
         // Launch compute_ctl
-        println!("Starting postgres node at '{}'", self.connstr());
+        let conn_str = self.connstr("cloud_admin", "postgres");
+        println!("Starting postgres node at '{}'", conn_str);
+        if create_test_user {
+            let conn_str = self.connstr("test", "neondb");
+            println!("Also at '{}'", conn_str);
+        }
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
         cmd.args(["--http-port", &self.http_address.port().to_string()])
             .args(["--pgdata", self.pgdata().to_str().unwrap()])
-            .args(["--connstr", &self.connstr()])
+            .args(["--connstr", &conn_str])
             .args([
                 "--spec-path",
                 self.endpoint_path().join("spec.json").to_str().unwrap(),
@@ -580,9 +635,21 @@ impl Endpoint {
         }
 
         let child = cmd.spawn()?;
+        // set up a scopeguard to kill & wait for the child in case we panic or bail below
+        let child = scopeguard::guard(child, |mut child| {
+            println!("SIGKILL & wait the started process");
+            (|| {
+                // TODO: use another signal that can be caught by the child so it can clean up any children it spawned
+                child.kill().context("SIGKILL child")?;
+                child.wait().context("wait() for child process")?;
+                anyhow::Ok(())
+            })()
+            .with_context(|| format!("scopeguard kill&wait child {child:?}"))
+            .unwrap();
+        });
 
         // Write down the pid so we can wait for it when we want to stop
-        // TODO use background_process::start_process instead
+        // TODO use background_process::start_process instead: https://github.com/neondatabase/neon/pull/6482
         let pid = child.id();
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         std::fs::write(pidfile_path, pid.to_string())?;
@@ -590,7 +657,7 @@ impl Endpoint {
         // Wait for it to start
         let mut attempt = 0;
         const ATTEMPT_INTERVAL: Duration = Duration::from_millis(100);
-        const MAX_ATTEMPTS: u32 = 10 * 30; // Wait up to 30 s
+        const MAX_ATTEMPTS: u32 = 10 * 90; // Wait up to 1.5 min
         loop {
             attempt += 1;
             match self.get_status().await {
@@ -617,7 +684,9 @@ impl Endpoint {
                         }
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
-                        | ComputeStatus::Configuration => {
+                        | ComputeStatus::Configuration
+                        | ComputeStatus::TerminationPending
+                        | ComputeStatus::Terminated => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
                     }
@@ -630,6 +699,9 @@ impl Endpoint {
             }
             std::thread::sleep(ATTEMPT_INTERVAL);
         }
+
+        // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
+        drop(scopeguard::ScopeGuard::into_inner(child));
 
         Ok(())
     }
@@ -665,7 +737,11 @@ impl Endpoint {
         }
     }
 
-    pub async fn reconfigure(&self, pageserver_id: Option<NodeId>) -> Result<()> {
+    pub async fn reconfigure(
+        &self,
+        mut pageservers: Vec<(Host, u16)>,
+        stripe_size: Option<ShardStripeSize>,
+    ) -> Result<()> {
         let mut spec: ComputeSpec = {
             let spec_path = self.endpoint_path().join("spec.json");
             let file = std::fs::File::open(spec_path)?;
@@ -675,26 +751,34 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        if let Some(pageserver_id) = pageserver_id {
-            let endpoint_config_path = self.endpoint_path().join("endpoint.json");
-            let mut endpoint_conf: EndpointConf = {
-                let file = std::fs::File::open(&endpoint_config_path)?;
-                serde_json::from_reader(file)?
-            };
-            endpoint_conf.pageserver_id = pageserver_id;
-            std::fs::write(
-                endpoint_config_path,
-                serde_json::to_string_pretty(&endpoint_conf)?,
-            )?;
-
-            let pageserver =
-                PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
-            let ps_http_conf = &pageserver.pg_connection_config;
-            let (host, port) = (ps_http_conf.host(), ps_http_conf.port());
-            spec.pageserver_connstring = Some(format!("postgresql://no_user@{host}:{port}"));
+        // If we weren't given explicit pageservers, query the storage controller
+        if pageservers.is_empty() {
+            let storage_controller = StorageController::from_env(&self.env);
+            let locate_result = storage_controller.tenant_locate(self.tenant_id).await?;
+            pageservers = locate_result
+                .shards
+                .into_iter()
+                .map(|shard| {
+                    (
+                        Host::parse(&shard.listen_pg_addr)
+                            .expect("Storage controller reported bad hostname"),
+                        shard.listen_pg_port,
+                    )
+                })
+                .collect::<Vec<_>>();
         }
 
-        let client = reqwest::Client::new();
+        let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
+        assert!(!pageserver_connstr.is_empty());
+        spec.pageserver_connstring = Some(pageserver_connstr);
+        if stripe_size.is_some() {
+            spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
         let response = client
             .post(format!(
                 "http://{}:{}/configure",
@@ -721,22 +805,8 @@ impl Endpoint {
         }
     }
 
-    pub fn stop(&self, destroy: bool) -> Result<()> {
-        // If we are going to destroy data directory,
-        // use immediate shutdown mode, otherwise,
-        // shutdown gracefully to leave the data directory sane.
-        //
-        // Postgres is always started from scratch, so stop
-        // without destroy only used for testing and debugging.
-        //
-        self.pg_ctl(
-            if destroy {
-                &["-m", "immediate", "stop"]
-            } else {
-                &["stop"]
-            },
-            &None,
-        )?;
+    pub fn stop(&self, mode: &str, destroy: bool) -> Result<()> {
+        self.pg_ctl(&["-m", mode, "stop"], &None)?;
 
         // Also wait for the compute_ctl process to die. It might have some
         // cleanup work to do after postgres stops, like syncing safekeepers,
@@ -757,13 +827,13 @@ impl Endpoint {
         Ok(())
     }
 
-    pub fn connstr(&self) -> String {
+    pub fn connstr(&self, user: &str, db_name: &str) -> String {
         format!(
             "postgresql://{}@{}:{}/{}",
-            "cloud_admin",
+            user,
             self.pg_address.ip(),
             self.pg_address.port(),
-            "postgres"
+            db_name
         )
     }
 }

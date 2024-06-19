@@ -58,24 +58,6 @@ paths:
       responses:
         "200":
           description: The reload completed successfully.
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error (also hits if no keys were found)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
 
   /v1/tenant/{tenant_id}:
     parameters:
@@ -93,62 +75,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TenantInfo"
-        "400":
-          description: Error when no tenant id found in path or no timeline id
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
     delete:
       description: |
         Attempts to delete specified tenant. 500, 503 and 409 errors should be retried until 404 is retrieved.
         404 means that deletion successfully finished"
       responses:
-        "400":
-          description: Error when no tenant id found in path
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
+        "200":
+          description: Tenant was successfully deleted, or was already not found.
         "404":
-          description: Tenant not found
+          description: Tenant not found. This is a success result, equivalent to 200.
           content:
             application/json:
               schema:
@@ -165,19 +101,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PreconditionFailedError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
+  /v1/tenant/{tenant_id}/time_travel_remote_storage:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: travel_to
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+      - name: done_if_after
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+    put:
+      description: Time travel the tenant's remote storage
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: string
 
   /v1/tenant/{tenant_id}/timeline:
     parameters:
@@ -197,36 +149,6 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/TimelineInfo"
-        "400":
-          description: Error when no tenant id found in path
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}:
@@ -251,60 +173,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TimelineInfo"
-        "400":
-          description: Error when no tenant id found in path or no timeline id
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
     delete:
       description: "Attempts to delete specified timeline. 500 and 409 errors should be retried"
       responses:
-        "400":
-          description: Error when no tenant id found in path or no timeline id
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
         "404":
-          description: Timeline not found
+          description: Timeline not found. This is the success path.
           content:
             application/json:
               schema:
@@ -321,18 +195,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PreconditionFailedError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_timestamp_of_lsn:
     parameters:
@@ -365,36 +227,6 @@ paths:
               schema:
                 type: string
                 format: date-time
-        "400":
-          description: Error when no tenant id found in path, no timeline id or invalid timestamp
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "404":
-          description: Timeline not found, or there is no timestamp information for the given lsn
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp:
     parameters:
@@ -419,12 +251,6 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
-        - name: version
-          in: query
-          required: false
-          schema:
-            type: integer
-          description: The version of the endpoint to use
       responses:
         "200":
           description: OK
@@ -432,36 +258,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LsnByTimestampResponse"
-        "400":
-          description: Error when no tenant id found in path, no timeline id or invalid timestamp
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/lsn_lease:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Obtain lease for the given LSN
+      parameters:
+        - name: lsn
+          in: query
+          required: true
+          schema:
+            type: string
+            format: hex
+          description: A LSN to obtain the lease for
+      responses:
+        "200":
+          description: OK
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
+                $ref: "#/components/schemas/LsnLease"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc:
     parameters:
@@ -485,147 +312,9 @@ paths:
             application/json:
               schema:
                 type: string
-        "400":
-          description: Error when no tenant id found in path, no timeline id or invalid timestamp
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
-
-  /v1/tenant/{tenant_id}/attach:
+  /v1/tenant/{tenant_shard_id}/location_config:
     parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      description: |
-        Schedules attach operation to happen in the background for the given tenant.
-        As soon as the caller sends this request, it must assume the pageserver
-        starts writing to the tenant's S3 state unless it receives one of the
-        distinguished errors below that state otherwise.
-
-        If a client receives a not-distinguished response, e.g., a network timeout,
-        it MUST retry the /attach request and poll again for the tenant's
-        attachment status.
-
-        After the client has received a 202, it MUST poll the tenant's
-        attachment status (field `attachment_status`) to reach state `attached`.
-        If the `attachment_status` is missing, the client MUST retry the `/attach`
-        request (goto previous paragraph). This is a robustness measure in case the tenant
-        status endpoint is buggy, but the attach operation is ongoing.
-
-        There is no way to cancel an in-flight request.
-
-        In any case, the client
-        * MUST NOT ASSUME that the /attach request has been lost in the network,
-        * MUST NOT ASSUME that the request has been lost, based on the observation
-          that a subsequent tenant status request returns 404. The request may
-          still be in flight. It must be retried.
-
-        The client SHOULD supply a `TenantConfig` for the tenant in the request body.
-        Settings specified in the config override the pageserver's defaults.
-        It is guaranteed that the config settings are applied before the pageserver
-        starts operating on the tenant. E.g., if the config specifies a specific
-        PITR interval for a tenant, then that setting will be in effect before the
-        pageserver starts the garbage collection loop. This enables a client to
-        guarantee a specific PITR setting across detach/attach cycles.
-        The pageserver will reject the request if it cannot parse the config, or
-        if there are any unknown fields in it.
-
-        If the client does not supply a config, the pageserver will use its defaults.
-        This behavior is deprecated: https://github.com/neondatabase/neon/issues/4282
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TenantAttachRequest"
-      responses:
-        "202":
-          description: Tenant attaching scheduled
-        "400":
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "404":
-          description: Timeline not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "409":
-          description: |
-            The tenant is already known to Pageserver in some way,
-            and hence this `/attach` call has been rejected.
-
-            Some examples of how this can happen:
-            - tenant was created on this pageserver
-            - tenant attachment was started by an earlier call to `/attach`.
-
-            Callers should poll the tenant status's `attachment_status` field,
-            like for status 202. See the longer description for `POST /attach`
-            for details.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ConflictError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
-
-
-  /v1/tenant/{tenant_id}/location_config:
-    parameters:
-      - name: tenant_id
+      - name: tenant_shard_id
         in: path
         required: true
         schema:
@@ -635,6 +324,12 @@ paths:
         required: false
         schema:
           type: integer
+      - name: lazy
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: Set to true for attaches to queue up until activated by compute. Eager (false) is the default.
     put:
       description: |
         Configures a _tenant location_, that is how a particular pageserver handles
@@ -674,24 +369,10 @@ paths:
       responses:
         "200":
           description: Tenant is now in requested state
-        "503":
-          description: Tenant's state cannot be changed right now.  Wait a few seconds and retry.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
+                $ref: "#/components/schemas/TenantLocationConfigResponse"
         "409":
           description: |
             The tenant is already known to Pageserver in some way,
@@ -708,72 +389,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-
-  /v1/tenant/{tenant_id}/detach:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-      - name: detach_ignored
-        in: query
-        required: false
-        schema:
-          type: boolean
-        description: |
-          When true, allow to detach a tenant which state is ignored.
-    post:
-      description: |
-        Remove tenant data (including all corresponding timelines) from pageserver's memory and file system.
-        Files on the remote storage are not affected.
-      responses:
-        "200":
-          description: Tenant detached
-        "400":
-          description: Error when no tenant id found in path parameters
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "404":
-          description: Tenant not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
-
-
   /v1/tenant/{tenant_id}/ignore:
     parameters:
       - name: tenant_id
@@ -790,36 +405,6 @@ paths:
       responses:
         "200":
           description: Tenant ignored
-        "400":
-          description: Error when no tenant id found in path parameters
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
 
   /v1/tenant/{tenant_id}/load:
@@ -846,81 +431,28 @@ paths:
       responses:
         "202":
           description: Tenant scheduled to load successfully
-        "400":
-          description: Error when no tenant id found in path parameters
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
-
-  /v1/tenant/{tenant_id}/synthetic_size:
+  /v1/tenant/{tenant_id}/{timeline_id}/preserve_initdb_archive:
     parameters:
       - name: tenant_id
         in: path
         required: true
         schema:
           type: string
-    get:
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
       description: |
-        Calculate tenant's synthetic size
+        Marks the initdb archive for preservation upon deletion of the timeline or tenant.
+        This is meant to be part of the disaster recovery process.
       responses:
-        "200":
-          description: Tenant's synthetic size
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SyntheticSizeResponse"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
+        "202":
+          description: Tenant scheduled to load successfully
 
-  /v1/tenant/{tenant_id}/size:
+  /v1/tenant/{tenant_id}/synthetic_size:
     parameters:
       - name: tenant_id
         in: path
@@ -950,19 +482,9 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required:
-                  - id
-                  - size
-                properties:
-                  id:
-                    type: string
-                    format: hex
-                  size:
-                    type: integer
-                    nullable: true
-                    description: |
-                      Size metric in bytes or null if inputs_only=true was given.
+                $ref: "#/components/schemas/SyntheticSizeResponse"
+            text/html:
+              description: SVG representation of the tenant and it's timelines.
         "401":
           description: Unauthorized Error
           content:
@@ -988,6 +510,49 @@ paths:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
+  /v1/tenant/{tenant_shard_id}/heatmap_upload:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      description: |
+        If the location is in an attached mode, upload the current state to the remote heatmap
+      responses:
+        "200":
+          description: Success
+
+  /v1/tenant/{tenant_shard_id}/secondary/download:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: wait_ms
+        description: If set, we will wait this long for download to complete, and if it isn't complete then return 202
+        in: query
+        required: false
+        schema:
+          type: integer
+    post:
+      description: |
+        If the location is in secondary mode, download latest heatmap and layers
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecondaryProgress"
+        "202":
+          description: Download has started but not yet finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecondaryProgress"
 
   /v1/tenant/{tenant_id}/timeline/:
     parameters:
@@ -1025,29 +590,11 @@ paths:
                   format: hex
       responses:
         "201":
-          description: TimelineInfo
+          description: Timeline was created, or already existed with matching parameters
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/TimelineInfo"
-        "400":
-          description: Malformed timeline create request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
         "406":
           description: Permanently unsatisfiable request, don't retry.
           content:
@@ -1055,23 +602,91 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: Timeline already exists, creation skipped
+          description: Timeline already exists, with different parameters.  Creation cannot proceed.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
-        "500":
-          description: Generic operation error
+        "429":
+          description: A creation request was sent for the same Timeline Id while a creation was already in progress.  Back off and retry.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/detach_ancestor:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        ŕequired: true
+        schema:
+          type: string
+
+    put:
+      description: |
+        Detach a timeline from its ancestor and reparent all ancestors timelines with lower `ancestor_lsn`.
+        Current implementation might not be retryable across failure cases, but will be enhanced in future.
+        Detaching should be expected to be expensive operation. Timeouts should be retried.
+      responses:
+        "200":
+          description: |
+            The timeline has been detached from it's ancestor (now or earlier), and at least the returned timelines have been reparented.
+            If any timelines were deleted after reparenting, they might not be on this list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AncestorDetached"
+
+        "400":
+          description: |
+            Number of early checks meaning the timeline cannot be detached now:
+              - the ancestor of timeline has an ancestor: not supported, see RFC
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+        "404":
+          description: Tenant or timeline not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+
+        "409":
+          description: |
+            The timeline can never be detached:
+              - timeline has no ancestor, implying that the timeline has never had an ancestor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+
+        "500":
+          description: |
+            Transient error, for example, pageserver shutdown happened while
+            processing the request but we were unable to distinguish that. Must
+            be retried.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
         "503":
-          description: Temporarily unavailable, please retry.
+          description: |
+            Temporarily unavailable, please retry. Possible reasons:
+              - another timeline detach for the same tenant is underway, please retry later
+              - detected shutdown error
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/:
     get:
@@ -1085,30 +700,6 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/TenantInfo"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
     post:
       description: |
@@ -1129,43 +720,12 @@ paths:
             application/json:
               schema:
                 type: string
-        "400":
-          description: Malformed tenant create request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
         "409":
           description: Tenant already exists, creation skipped
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
-
 
   /v1/tenant/config:
     put:
@@ -1187,36 +747,6 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/TenantInfo"
-        "400":
-          description: Malformed tenant config request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/config/:
     parameters:
@@ -1236,42 +766,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TenantConfigResponse"
-        "400":
-          description: Malformed get tenanant config request
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnauthorizedError"
-        "403":
-          description: Forbidden Error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ForbiddenError"
-        "404":
-          description: Tenand or timeline were not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "500":
-          description: Generic operation error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "503":
-          description: Temporarily unavailable, please retry.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceUnavailableError"
+
+  /v1/utilization:
+    get:
+      description: |
+        Returns the pageservers current utilization and fitness score for new tenants.
+
+      responses:
+        "200":
+            description: Pageserver utilization and fitness score
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/PageserverUtilization"
 
 components:
   securitySchemes:
@@ -1339,16 +846,6 @@ components:
         generation:
           type: integer
           description: Attachment generation number.
-    TenantAttachRequest:
-      type: object
-      required:
-        - config
-      properties:
-        config:
-          $ref: '#/components/schemas/TenantConfig'
-        generation:
-          type: integer
-          description: Attachment generation number.
     TenantConfigRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
@@ -1361,10 +858,8 @@ components:
     TenantLocationConfigRequest:
       type: object
       required:
-        - tenant_id
+        - mode
       properties:
-        tenant_id:
-          type: string
         mode:
           type: string
           enum: ["AttachedSingle", "AttachedMulti", "AttachedStale", "Secondary", "Detached"]
@@ -1376,6 +871,32 @@ components:
           $ref: '#/components/schemas/SecondaryConfig'
         tenant_conf:
           $ref: '#/components/schemas/TenantConfig'
+    TenantLocationConfigResponse:
+      type: object
+      required:
+        - shards
+      properties:
+        shards:
+          description: Pageservers where this tenant's shards are attached.  Not populated for secondary locations.
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantShardLocation"
+        stripe_size:
+          description: If multiple shards are present, this field contains the sharding stripe size, else it is null.
+          type: integer
+          nullable: true
+    TenantShardLocation:
+      type: object
+      required:
+        - node_id
+        - shard_id
+      properties:
+        node_id:
+          description: Pageserver node ID where this shard is attached
+          type: integer
+        shard_id:
+          description: Tenant shard ID of the shard
+          type: string
     SecondaryConfig:
       type: object
       properties:
@@ -1412,7 +933,7 @@ components:
         trace_read_requests:
           type: boolean
         heatmap_period:
-          type: integer
+          type: string
     TenantConfigResponse:
       type: object
       properties:
@@ -1486,6 +1007,9 @@ components:
           format: hex
         size:
           type: integer
+          nullable: true
+          description: |
+            Size metric in bytes or null if inputs_only=true was given.
         segment_sizes:
           type: array
           items:
@@ -1562,6 +1086,86 @@ components:
         kind:
           type: string
           enum: [past, present, future, nodata]
+
+    LsnLease:
+      type: object
+      required:
+        - valid_until
+      properties:
+        valid_until:
+          type: string
+          format: date-time
+
+    PageserverUtilization:
+      type: object
+      required:
+        - disk_usage_bytes
+        - free_space_bytes
+        - utilization_score
+      properties:
+        disk_usage_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The amount of disk space currently used.
+        free_space_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The amount of usable disk space left.
+        utilization_score:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036854775807
+          default: 9223372036854775807
+          description: |
+            Lower is better score for how good this pageserver would be for the next tenant.
+            The default or maximum value can be returned in situations when a proper score cannot (yet) be calculated.
+
+    SecondaryProgress:
+      type: object
+      required:
+        - heatmap_mtime
+        - layers_downloaded
+        - layers_total
+        - bytes_downloaded
+        - bytes_total
+      properties:
+        heatmap_mtime:
+          type: string
+          format: date-time
+          description: Modification time of the most recently downloaded layer heatmap (RFC 3339 format)
+        layers_downloaded:
+          type: integer
+          format: int64
+          description: How many layers from the latest layer heatmap are present on disk
+        bytes_downloaded:
+          type: integer
+          format: int64
+          description: How many bytes of layer content from the latest layer heatmap are present on disk
+        layers_total:
+          type: integer
+          format: int64
+          description: How many layers were in the latest layer heatmap
+        bytes_total:
+          type: integer
+          format: int64
+          description: How many bytes of layer content were in the latest layer heatmap
+
+    AncestorDetached:
+      type: object
+      required:
+        - reparented_timelines
+      properties:
+        reparented_timelines:
+          type: array
+          description: Set of reparented timeline ids
+          properties:
+            type: string
+            format: hex
+            description: TimelineId
+
 
     Error:
       type: object

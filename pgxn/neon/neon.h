@@ -25,12 +25,13 @@ extern int	wal_acceptor_connection_timeout;
 extern void pg_init_libpagestore(void);
 extern void pg_init_walproposer(void);
 
-extern void pg_init_extension_server(void);
-
 extern uint64 BackpressureThrottlingTime(void);
+extern void SetNeonCurrentClusterSize(uint64 size);
+extern uint64 GetNeonCurrentClusterSize(void);
 extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
 
 extern void PGDLLEXPORT WalProposerSync(int argc, char *argv[]);
 extern void PGDLLEXPORT WalProposerMain(Datum main_arg);
+PGDLLEXPORT void LogicalSlotsMonitorMain(Datum main_arg);
 
 #endif							/* NEON_H */

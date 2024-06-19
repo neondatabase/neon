@@ -4,11 +4,15 @@ use super::{backend::ComputeCredentialKeys, AuthErrorImpl, PasswordHackPayload};
 use crate::{
     config::TlsServerEndPoint,
     console::AuthSecret,
-    sasl, scram,
+    context::RequestMonitoring,
+    intern::EndpointIdInt,
+    sasl,
+    scram::{self, threadpool::ThreadPool},
     stream::{PqStream, Stream},
 };
+use postgres_protocol::authentication::sasl::{SCRAM_SHA_256, SCRAM_SHA_256_PLUS};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
-use std::io;
+use std::{io, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
@@ -23,7 +27,7 @@ pub trait AuthMethod {
 pub struct Begin;
 
 /// Use [SCRAM](crate::scram)-based auth in [`AuthFlow`].
-pub struct Scram<'a>(pub &'a scram::ServerSecret);
+pub struct Scram<'a>(pub &'a scram::ServerSecret, pub &'a mut RequestMonitoring);
 
 impl AuthMethod for Scram<'_> {
     #[inline(always)]
@@ -51,7 +55,11 @@ impl AuthMethod for PasswordHack {
 
 /// Use clear-text password auth called `password` in docs
 /// <https://www.postgresql.org/docs/current/auth-password.html>
-pub struct CleartextPassword(pub AuthSecret);
+pub struct CleartextPassword {
+    pub pool: Arc<ThreadPool>,
+    pub endpoint: EndpointIdInt,
+    pub secret: AuthSecret,
+}
 
 impl AuthMethod for CleartextPassword {
     #[inline(always)]
@@ -124,7 +132,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
             .strip_suffix(&[0])
             .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
 
-        let outcome = validate_password_and_exchange(password, self.state.0)?;
+        let outcome = validate_password_and_exchange(
+            &self.state.pool,
+            self.state.endpoint,
+            password,
+            self.state.secret,
+        )
+        .await?;
 
         if let sasl::Outcome::Success(_) = &outcome {
             self.stream.write_message_noflush(&Be::AuthenticationOk)?;
@@ -138,6 +152,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     /// Perform user authentication. Raise an error in case authentication failed.
     pub async fn authenticate(self) -> super::Result<sasl::Outcome<scram::ScramKey>> {
+        let Scram(secret, ctx) = self.state;
+
+        // pause the timer while we communicate with the client
+        let _paused = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
+
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
         let sasl = sasl::FirstMessage::parse(&msg)
@@ -148,9 +167,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
             return Err(super::AuthError::bad_auth_method(sasl.method));
         }
 
+        match sasl.method {
+            SCRAM_SHA_256 => ctx.auth_method = Some(crate::context::AuthMethod::ScramSha256),
+            SCRAM_SHA_256_PLUS => {
+                ctx.auth_method = Some(crate::context::AuthMethod::ScramSha256Plus)
+            }
+            _ => {}
+        }
         info!("client chooses {}", sasl.method);
 
-        let secret = self.state.0;
         let outcome = sasl::SaslStream::new(self.stream, sasl.message)
             .authenticate(scram::Exchange::new(
                 secret,
@@ -167,12 +192,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     }
 }
 
-pub(super) fn validate_password_and_exchange(
+pub(crate) async fn validate_password_and_exchange(
+    pool: &ThreadPool,
+    endpoint: EndpointIdInt,
     password: &[u8],
     secret: AuthSecret,
 ) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
     match secret {
-        #[cfg(feature = "testing")]
+        #[cfg(any(test, feature = "testing"))]
         AuthSecret::Md5(_) => {
             // test only
             Ok(sasl::Outcome::Success(ComputeCredentialKeys::Password(
@@ -181,13 +208,7 @@ pub(super) fn validate_password_and_exchange(
         }
         // perform scram authentication as both client and server to validate the keys
         AuthSecret::Scram(scram_secret) => {
-            use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
-            let sasl_client = ScramSha256::new(password, ChannelBinding::unsupported());
-            let outcome = crate::scram::exchange(
-                &scram_secret,
-                sasl_client,
-                crate::config::TlsServerEndPoint::Undefined,
-            )?;
+            let outcome = crate::scram::exchange(pool, endpoint, &scram_secret, password).await?;
 
             let client_key = match outcome {
                 sasl::Outcome::Success(client_key) => client_key,

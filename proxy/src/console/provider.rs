@@ -1,45 +1,47 @@
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod mock;
 pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::backend::ComputeUserInfo,
-    cache::{timed_lru, TimedLru},
+    auth::{
+        backend::{ComputeCredentialKeys, ComputeUserInfo},
+        IpPattern,
+    },
+    cache::{endpoints::EndpointsCache, project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
+    config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
     context::RequestMonitoring,
-    scram,
+    error::ReportableError,
+    intern::ProjectIdInt,
+    metrics::ApiLockMetrics,
+    rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token},
+    scram, EndpointCacheKey,
 };
-use async_trait::async_trait;
 use dashmap::DashMap;
-use smol_str::SmolStr;
-use std::{sync::Arc, time::Duration};
-use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore},
-    time::Instant,
-};
+use std::{hash::Hash, sync::Arc, time::Duration};
+use tokio::time::Instant;
 use tracing::info;
 
 pub mod errors {
     use crate::{
-        error::{io_error, UserFacingError},
-        http,
+        console::messages::{self, ConsoleError},
+        error::{io_error, ReportableError, UserFacingError},
         proxy::retry::ShouldRetry,
     };
     use thiserror::Error;
 
+    use super::ApiLockError;
+
     /// A go-to error message which doesn't leak any detail.
-    const REQUEST_FAILED: &str = "Console request failed";
+    pub const REQUEST_FAILED: &str = "Console request failed";
 
     /// Common console API error.
     #[derive(Debug, Error)]
     pub enum ApiError {
         /// Error returned by the console itself.
-        #[error("{REQUEST_FAILED} with {}: {}", .status, .text)]
-        Console {
-            status: http::StatusCode,
-            text: Box<str>,
-        },
+        #[error("{REQUEST_FAILED} with {0}")]
+        Console(ConsoleError),
 
         /// Various IO errors like broken pipe or malformed payload.
         #[error("{REQUEST_FAILED}: {0}")]
@@ -48,11 +50,11 @@ pub mod errors {
 
     impl ApiError {
         /// Returns HTTP status code if it's the reason for failure.
-        pub fn http_status_code(&self) -> Option<http::StatusCode> {
+        pub fn get_reason(&self) -> messages::Reason {
             use ApiError::*;
             match self {
-                Console { status, .. } => Some(*status),
-                _ => None,
+                Console(e) => e.get_reason(),
+                _ => messages::Reason::Unknown,
             }
         }
     }
@@ -62,23 +64,66 @@ pub mod errors {
             use ApiError::*;
             match self {
                 // To minimize risks, only select errors are forwarded to users.
-                // Ask @neondatabase/control-plane for review before adding more.
-                Console { status, .. } => match *status {
-                    http::StatusCode::NOT_FOUND => {
-                        // Status 404: failed to get a project-related resource.
-                        format!("{REQUEST_FAILED}: endpoint cannot be found")
-                    }
-                    http::StatusCode::NOT_ACCEPTABLE => {
-                        // Status 406: endpoint is disabled (we don't allow connections).
-                        format!("{REQUEST_FAILED}: endpoint is disabled")
-                    }
-                    http::StatusCode::LOCKED => {
-                        // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
-                        format!("{REQUEST_FAILED}: endpoint is temporary unavailable. check your quotas and/or contact our support")
-                    }
-                    _ => REQUEST_FAILED.to_owned(),
-                },
+                Console(c) => c.get_user_facing_message(),
                 _ => REQUEST_FAILED.to_owned(),
+            }
+        }
+    }
+
+    impl ReportableError for ApiError {
+        fn get_error_kind(&self) -> crate::error::ErrorKind {
+            match self {
+                ApiError::Console(e) => {
+                    use crate::error::ErrorKind::*;
+                    match e.get_reason() {
+                        crate::console::messages::Reason::RoleProtected => User,
+                        crate::console::messages::Reason::ResourceNotFound => User,
+                        crate::console::messages::Reason::ProjectNotFound => User,
+                        crate::console::messages::Reason::EndpointNotFound => User,
+                        crate::console::messages::Reason::BranchNotFound => User,
+                        crate::console::messages::Reason::RateLimitExceeded => ServiceRateLimit,
+                        crate::console::messages::Reason::NonPrimaryBranchComputeTimeExceeded => {
+                            User
+                        }
+                        crate::console::messages::Reason::ActiveTimeQuotaExceeded => User,
+                        crate::console::messages::Reason::ComputeTimeQuotaExceeded => User,
+                        crate::console::messages::Reason::WrittenDataQuotaExceeded => User,
+                        crate::console::messages::Reason::DataTransferQuotaExceeded => User,
+                        crate::console::messages::Reason::LogicalSizeQuotaExceeded => User,
+                        crate::console::messages::Reason::Unknown => match &e {
+                            ConsoleError {
+                                http_status_code:
+                                    http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
+                                ..
+                            } => crate::error::ErrorKind::User,
+                            ConsoleError {
+                                http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
+                                error,
+                                ..
+                            } if error.contains(
+                                "compute time quota of non-primary branches is exceeded",
+                            ) =>
+                            {
+                                crate::error::ErrorKind::User
+                            }
+                            ConsoleError {
+                                http_status_code: http::StatusCode::LOCKED,
+                                error,
+                                ..
+                            } if error.contains("quota exceeded")
+                                || error.contains("the limit for current plan reached") =>
+                            {
+                                crate::error::ErrorKind::User
+                            }
+                            ConsoleError {
+                                http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
+                                ..
+                            } => crate::error::ErrorKind::ServiceRateLimit,
+                            ConsoleError { .. } => crate::error::ErrorKind::ControlPlane,
+                        },
+                    }
+                }
+                ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
     }
@@ -88,26 +133,7 @@ pub mod errors {
             match self {
                 // retry some transport errors
                 Self::Transport(io) => io.could_retry(),
-                // retry some temporary failures because the compute was in a bad state
-                // (bad request can be returned when the endpoint was in transition)
-                Self::Console {
-                    status: http::StatusCode::BAD_REQUEST,
-                    ..
-                } => true,
-                // locked can be returned when the endpoint was in transition
-                // or when quotas are exceeded. don't retry when quotas are exceeded
-                Self::Console {
-                    status: http::StatusCode::LOCKED,
-                    ref text,
-                } => {
-                    // written data quota exceeded
-                    // data transfer quota exceeded
-                    // compute time quota exceeded
-                    // logical size quota exceeded
-                    !text.contains("quota exceeded")
-                        && !text.contains("the limit for current plan reached")
-                }
-                _ => false,
+                Self::Console(e) => e.could_retry(),
             }
         }
     }
@@ -152,6 +178,16 @@ pub mod errors {
             }
         }
     }
+
+    impl ReportableError for GetAuthInfoError {
+        fn get_error_kind(&self) -> crate::error::ErrorKind {
+            match self {
+                GetAuthInfoError::BadSecret => crate::error::ErrorKind::ControlPlane,
+                GetAuthInfoError::ApiError(_) => crate::error::ErrorKind::ControlPlane,
+            }
+        }
+    }
+
     #[derive(Debug, Error)]
     pub enum WakeComputeError {
         #[error("Console responded with a malformed compute address: {0}")]
@@ -160,25 +196,17 @@ pub mod errors {
         #[error(transparent)]
         ApiError(ApiError),
 
-        #[error("Timeout waiting to acquire wake compute lock")]
-        TimeoutError,
+        #[error("Too many connections attempts")]
+        TooManyConnections,
+
+        #[error("error acquiring resource permit: {0}")]
+        TooManyConnectionAttempts(#[from] ApiLockError),
     }
 
     // This allows more useful interactions than `#[from]`.
     impl<E: Into<ApiError>> From<E> for WakeComputeError {
         fn from(e: E) -> Self {
             Self::ApiError(e.into())
-        }
-    }
-
-    impl From<tokio::sync::AcquireError> for WakeComputeError {
-        fn from(_: tokio::sync::AcquireError) -> Self {
-            WakeComputeError::TimeoutError
-        }
-    }
-    impl From<tokio::time::error::Elapsed> for WakeComputeError {
-        fn from(_: tokio::time::error::Elapsed) -> Self {
-            WakeComputeError::TimeoutError
         }
     }
 
@@ -192,32 +220,31 @@ pub mod errors {
                 // However, API might return a meaningful error.
                 ApiError(e) => e.to_string_client(),
 
-                TimeoutError => "timeout while acquiring the compute resource lock".to_owned(),
+                TooManyConnections => self.to_string(),
+
+                TooManyConnectionAttempts(_) => {
+                    "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
+                }
+            }
+        }
+    }
+
+    impl ReportableError for WakeComputeError {
+        fn get_error_kind(&self) -> crate::error::ErrorKind {
+            match self {
+                WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
+                WakeComputeError::ApiError(e) => e.get_error_kind(),
+                WakeComputeError::TooManyConnections => crate::error::ErrorKind::RateLimit,
+                WakeComputeError::TooManyConnectionAttempts(e) => e.get_error_kind(),
             }
         }
     }
 }
 
-/// Extra query params we'd like to pass to the console.
-pub struct ConsoleReqExtra {
-    pub options: Vec<(String, String)>,
-}
-
-impl ConsoleReqExtra {
-    // https://swagger.io/docs/specification/serialization/ DeepObject format
-    // paramName[prop1]=value1&paramName[prop2]=value2&....
-    pub fn options_as_deep_object(&self) -> Vec<(String, String)> {
-        self.options
-            .iter()
-            .map(|(k, v)| (format!("options[{}]", k), v.to_string()))
-            .collect()
-    }
-}
-
 /// Auth secret which is managed by the cloud.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum AuthSecret {
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     /// Md5 hash of user's password.
     Md5([u8; 16]),
 
@@ -229,7 +256,9 @@ pub enum AuthSecret {
 pub struct AuthInfo {
     pub secret: Option<AuthSecret>,
     /// List of IP addresses allowed for the autorization.
-    pub allowed_ips: Vec<String>,
+    pub allowed_ips: Vec<IpPattern>,
+    /// Project ID. This is used for cache invalidation.
+    pub project_id: Option<ProjectIdInt>,
 }
 
 /// Info for establishing a connection to a compute node.
@@ -248,123 +277,202 @@ pub struct NodeInfo {
     pub allow_self_signed_compute: bool,
 }
 
-pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
-pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
-pub type AllowedIpsCache = TimedLru<SmolStr, Arc<Vec<String>>>;
-pub type RoleSecretCache = TimedLru<(SmolStr, SmolStr), Option<AuthSecret>>;
-pub type CachedRoleSecret = timed_lru::Cached<&'static RoleSecretCache>;
+impl NodeInfo {
+    pub async fn connect(
+        &self,
+        ctx: &mut RequestMonitoring,
+        timeout: Duration,
+    ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
+        self.config
+            .connect(
+                ctx,
+                self.allow_self_signed_compute,
+                self.aux.clone(),
+                timeout,
+            )
+            .await
+    }
+    pub fn reuse_settings(&mut self, other: Self) {
+        self.allow_self_signed_compute = other.allow_self_signed_compute;
+        self.config.reuse_password(other.config);
+    }
+
+    pub fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
+        match keys {
+            ComputeCredentialKeys::Password(password) => self.config.password(password),
+            ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
+        };
+    }
+}
+
+pub type NodeInfoCache = TimedLru<EndpointCacheKey, NodeInfo>;
+pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
+pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
+pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
-#[async_trait]
-pub trait Api {
+pub(crate) trait Api {
     /// Get the client's auth secret for authentication.
+    /// Returns option because user not found situation is special.
+    /// We still have to mock the scram to avoid leaking information that user doesn't exist.
     async fn get_role_secret(
         &self,
         ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
         ctx: &mut RequestMonitoring,
-        creds: &ComputeUserInfo,
-    ) -> Result<Arc<Vec<String>>, errors::GetAuthInfoError>;
+        user_info: &ComputeUserInfo,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
-        creds: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
+}
+
+#[non_exhaustive]
+pub enum ConsoleBackend {
+    /// Current Cloud API (V2).
+    Console(neon::Api),
+    /// Local mock of Cloud API (V2).
+    #[cfg(any(test, feature = "testing"))]
+    Postgres(mock::Api),
+    /// Internal testing
+    #[cfg(test)]
+    Test(Box<dyn crate::auth::backend::TestBackend>),
+}
+
+impl Api for ConsoleBackend {
+    async fn get_role_secret(
+        &self,
+        ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
+        use ConsoleBackend::*;
+        match self {
+            Console(api) => api.get_role_secret(ctx, user_info).await,
+            #[cfg(any(test, feature = "testing"))]
+            Postgres(api) => api.get_role_secret(ctx, user_info).await,
+            #[cfg(test)]
+            Test(_) => unreachable!("this function should never be called in the test backend"),
+        }
+    }
+
+    async fn get_allowed_ips_and_secret(
+        &self,
+        ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
+        use ConsoleBackend::*;
+        match self {
+            Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            #[cfg(any(test, feature = "testing"))]
+            Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            #[cfg(test)]
+            Test(api) => api.get_allowed_ips_and_secret(),
+        }
+    }
+
+    async fn wake_compute(
+        &self,
+        ctx: &mut RequestMonitoring,
+        user_info: &ComputeUserInfo,
+    ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
+        use ConsoleBackend::*;
+
+        match self {
+            Console(api) => api.wake_compute(ctx, user_info).await,
+            #[cfg(any(test, feature = "testing"))]
+            Postgres(api) => api.wake_compute(ctx, user_info).await,
+            #[cfg(test)]
+            Test(api) => api.wake_compute(),
+        }
+    }
 }
 
 /// Various caches for [`console`](super).
 pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub node_info: NodeInfoCache,
-    /// Cache for the `get_allowed_ips`. TODO(anna): use notifications listener instead.
-    pub allowed_ips: AllowedIpsCache,
-    /// Cache for the `get_role_secret`. TODO(anna): use notifications listener instead.
-    pub role_secret: RoleSecretCache,
+    /// Cache which stores project_id -> endpoint_ids mapping.
+    pub project_info: Arc<ProjectInfoCacheImpl>,
+    /// List of all valid endpoints.
+    pub endpoints_cache: Arc<EndpointsCache>,
+}
+
+impl ApiCaches {
+    pub fn new(
+        wake_compute_cache_config: CacheOptions,
+        project_info_cache_config: ProjectInfoCacheOptions,
+        endpoint_cache_config: EndpointCacheConfig,
+    ) -> Self {
+        Self {
+            node_info: NodeInfoCache::new(
+                "node_info_cache",
+                wake_compute_cache_config.size,
+                wake_compute_cache_config.ttl,
+                true,
+            ),
+            project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
+            endpoints_cache: Arc::new(EndpointsCache::new(endpoint_cache_config)),
+        }
+    }
 }
 
 /// Various caches for [`console`](super).
-pub struct ApiLocks {
+pub struct ApiLocks<K> {
     name: &'static str,
-    node_locks: DashMap<Arc<str>, Arc<Semaphore>>,
-    permits: usize,
+    node_locks: DashMap<K, Arc<DynamicLimiter>>,
+    config: RateLimiterConfig,
     timeout: Duration,
-    registered: prometheus::IntCounter,
-    unregistered: prometheus::IntCounter,
-    reclamation_lag: prometheus::Histogram,
-    lock_acquire_lag: prometheus::Histogram,
+    epoch: std::time::Duration,
+    metrics: &'static ApiLockMetrics,
 }
 
-impl ApiLocks {
+#[derive(Debug, thiserror::Error)]
+pub enum ApiLockError {
+    #[error("timeout acquiring resource permit")]
+    TimeoutError(#[from] tokio::time::error::Elapsed),
+}
+
+impl ReportableError for ApiLockError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        match self {
+            ApiLockError::TimeoutError(_) => crate::error::ErrorKind::RateLimit,
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone> ApiLocks<K> {
     pub fn new(
         name: &'static str,
-        permits: usize,
+        config: RateLimiterConfig,
         shards: usize,
         timeout: Duration,
+        epoch: std::time::Duration,
+        metrics: &'static ApiLockMetrics,
     ) -> prometheus::Result<Self> {
-        let registered = prometheus::IntCounter::with_opts(
-            prometheus::Opts::new(
-                "semaphores_registered",
-                "Number of semaphores registered in this api lock",
-            )
-            .namespace(name),
-        )?;
-        prometheus::register(Box::new(registered.clone()))?;
-        let unregistered = prometheus::IntCounter::with_opts(
-            prometheus::Opts::new(
-                "semaphores_unregistered",
-                "Number of semaphores unregistered in this api lock",
-            )
-            .namespace(name),
-        )?;
-        prometheus::register(Box::new(unregistered.clone()))?;
-        let reclamation_lag = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                "reclamation_lag_seconds",
-                "Time it takes to reclaim unused semaphores in the api lock",
-            )
-            .namespace(name)
-            // 1us -> 65ms
-            // benchmarks on my mac indicate it's usually in the range of 256us and 512us
-            .buckets(prometheus::exponential_buckets(1e-6, 2.0, 16)?),
-        )?;
-        prometheus::register(Box::new(reclamation_lag.clone()))?;
-        let lock_acquire_lag = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                "semaphore_acquire_seconds",
-                "Time it takes to reclaim unused semaphores in the api lock",
-            )
-            .namespace(name)
-            // 0.1ms -> 6s
-            .buckets(prometheus::exponential_buckets(1e-4, 2.0, 16)?),
-        )?;
-        prometheus::register(Box::new(lock_acquire_lag.clone()))?;
-
         Ok(Self {
             name,
             node_locks: DashMap::with_shard_amount(shards),
-            permits,
+            config,
             timeout,
-            lock_acquire_lag,
-            registered,
-            unregistered,
-            reclamation_lag,
+            epoch,
+            metrics,
         })
     }
 
-    pub async fn get_wake_compute_permit(
-        &self,
-        key: &Arc<str>,
-    ) -> Result<WakeComputePermit, errors::WakeComputeError> {
-        if self.permits == 0 {
-            return Ok(WakeComputePermit { permit: None });
+    pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
+        if self.config.initial_limit == 0 {
+            return Ok(WakeComputePermit {
+                permit: Token::disabled(),
+            });
         }
         let now = Instant::now();
         let semaphore = {
@@ -375,28 +483,27 @@ impl ApiLocks {
                 self.node_locks
                     .entry(key.clone())
                     .or_insert_with(|| {
-                        self.registered.inc();
-                        Arc::new(Semaphore::new(self.permits))
+                        self.metrics.semaphores_registered.inc();
+                        DynamicLimiter::new(self.config)
                     })
                     .clone()
             }
         };
-        let permit = tokio::time::timeout_at(now + self.timeout, semaphore.acquire_owned()).await;
+        let permit = semaphore.acquire_timeout(self.timeout).await;
 
-        self.lock_acquire_lag
-            .observe((Instant::now() - now).as_secs_f64());
-
-        Ok(WakeComputePermit {
-            permit: Some(permit??),
-        })
+        self.metrics
+            .semaphore_acquire_seconds
+            .observe(now.elapsed().as_secs_f64());
+        info!("acquired permit {:?}", now.elapsed().as_secs_f64());
+        Ok(WakeComputePermit { permit: permit? })
     }
 
-    pub async fn garbage_collect_worker(&self, epoch: std::time::Duration) {
-        if self.permits == 0 {
+    pub async fn garbage_collect_worker(&self) {
+        if self.config.initial_limit == 0 {
             return;
         }
-
-        let mut interval = tokio::time::interval(epoch / (self.node_locks.shards().len()) as u32);
+        let mut interval =
+            tokio::time::interval(self.epoch / (self.node_locks.shards().len()) as u32);
         loop {
             for (i, shard) in self.node_locks.shards().iter().enumerate() {
                 interval.tick().await;
@@ -409,25 +516,34 @@ impl ApiLocks {
                     "performing epoch reclamation on api lock"
                 );
                 let mut lock = shard.write();
-                let timer = self.reclamation_lag.start_timer();
+                let timer = self.metrics.reclamation_lag_seconds.start_timer();
                 let count = lock
                     .extract_if(|_, semaphore| Arc::strong_count(semaphore.get_mut()) == 1)
                     .count();
                 drop(lock);
-                self.unregistered.inc_by(count as u64);
-                timer.observe_duration()
+                self.metrics.semaphores_unregistered.inc_by(count as u64);
+                timer.observe();
             }
         }
     }
 }
 
 pub struct WakeComputePermit {
-    // None if the lock is disabled
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Token,
 }
 
 impl WakeComputePermit {
     pub fn should_check_cache(&self) -> bool {
-        self.permit.is_some()
+        !self.permit.is_disabled()
+    }
+    pub fn release(self, outcome: Outcome) {
+        self.permit.release(outcome)
+    }
+    pub fn release_result<T, E>(self, res: Result<T, E>) -> Result<T, E> {
+        match res {
+            Ok(_) => self.release(Outcome::Success),
+            Err(_) => self.release(Outcome::Overload),
+        }
+        res
     }
 }

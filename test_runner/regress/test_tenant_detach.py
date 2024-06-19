@@ -7,6 +7,7 @@ from typing import List, Optional
 
 import asyncpg
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -22,7 +23,6 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import (
     RemoteStorageKind,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
 from prometheus_client.samples import Sample
 
@@ -92,10 +92,10 @@ def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
     wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
 
     # Check that we had to retry the uploads
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadLayer.*, will retry.*"
     )
-    assert env.pageserver.log_contains(
+    env.pageserver.assert_log_contains(
         ".*failed to perform remote task UploadMetadata.*, will retry.*"
     )
 
@@ -132,7 +132,7 @@ def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
             assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
 
         # Check that we had to retry the downloads
-        assert env.pageserver.log_contains(".*list timelines.*failed, will retry.*")
+        assert env.pageserver.log_contains(".*list identifiers.*failed, will retry.*")
         assert env.pageserver.log_contains(".*download.*failed, will retry.*")
 
 
@@ -302,7 +302,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     # gc should not try to even start on a timeline that doesn't exist
     with pytest.raises(
-        expected_exception=PageserverApiException, match="gc target timeline does not exist"
+        expected_exception=PageserverApiException, match="NotFound: Timeline not found"
     ):
         bogus_timeline_id = TimelineId.generate()
         pageserver_http.timeline_gc(tenant_id, bogus_timeline_id, 0)
@@ -310,7 +310,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.extend(
         [
             # the error will be printed to the log too
-            ".*gc target timeline does not exist.*",
+            ".*NotFound: Timeline not found.*",
             # Timelines get stopped during detach, ignore the gc calls that error, witnessing that
             ".*InternalServerError\\(timeline is Stopping.*",
         ]
@@ -482,7 +482,7 @@ def test_detach_while_attaching(
     pageserver_http.tenant_detach(tenant_id)
 
     # And re-attach
-    pageserver_http.configure_failpoints([("attach-before-activate", "return(5000)")])
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "return(5000)")])
 
     env.pageserver.tenant_attach(tenant_id)
 
@@ -627,7 +627,7 @@ def test_ignored_tenant_download_missing_layers(neon_env_builder: NeonEnvBuilder
 
 # Tests that attach is never working on a tenant, ignored or not, as long as it's not absent locally
 # Similarly, tests that it's not possible to schedule a `load` for tenat that's not ignored.
-def test_load_attach_negatives(neon_env_builder: NeonEnvBuilder):
+def test_load_negatives(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -644,25 +644,16 @@ def test_load_attach_negatives(neon_env_builder: NeonEnvBuilder):
     ):
         env.pageserver.tenant_load(tenant_id)
 
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match=f"tenant {tenant_id} already exists, state: Active",
-    ):
-        env.pageserver.tenant_attach(tenant_id)
-
     pageserver_http.tenant_ignore(tenant_id)
 
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match="tenant directory already exists",
-    ):
-        env.pageserver.tenant_attach(tenant_id)
 
-
-def test_ignore_while_attaching(
+def test_detach_while_activating(
     neon_env_builder: NeonEnvBuilder,
 ):
+    """
+    Test cancellation behavior for tenants that are stuck somewhere between
+    being attached and reaching Active state.
+    """
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
@@ -684,39 +675,28 @@ def test_ignore_while_attaching(
     data_secret = "very secret secret"
     insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, endpoint)
 
-    tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    tenants_before_detach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
 
     # Detach it
     pageserver_http.tenant_detach(tenant_id)
+
     # And re-attach, but stop attach task_mgr task from completing
-    pageserver_http.configure_failpoints([("attach-before-activate", "return(5000)")])
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "return(600000)")])
     env.pageserver.tenant_attach(tenant_id)
-    # Run ignore on the task, thereby cancelling the attach.
-    # XXX This should take priority over attach, i.e., it should cancel the attach task.
-    # But neither the failpoint, nor the proper remote_timeline_client download functions,
-    # are sensitive to task_mgr::shutdown.
-    # This problem is tracked in https://github.com/neondatabase/neon/issues/2996 .
-    # So, for now, effectively, this ignore here will block until attach task completes.
-    pageserver_http.tenant_ignore(tenant_id)
 
-    # Cannot attach it due to some local files existing
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match="tenant directory already exists",
-    ):
-        env.pageserver.tenant_attach(tenant_id)
+    # The tenant is in the Activating state.  This should not block us from
+    # shutting it down and detaching it.
+    pageserver_http.tenant_detach(tenant_id)
 
-    tenants_after_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
-    assert tenant_id not in tenants_after_ignore, "Ignored tenant should be missing"
-    assert len(tenants_after_ignore) + 1 == len(
-        tenants_before_ignore
+    tenants_after_detach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    assert tenant_id not in tenants_after_detach, "Detached tenant should be missing"
+    assert len(tenants_after_detach) + 1 == len(
+        tenants_before_detach
     ), "Only ignored tenant should be missing"
 
-    # Calling load will bring the tenant back online
-    pageserver_http.configure_failpoints([("attach-before-activate", "off")])
-    env.pageserver.tenant_load(tenant_id)
-
+    # Subsequently attaching it again should still work
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "off")])
+    env.pageserver.tenant_attach(tenant_id)
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
     endpoint.stop()
@@ -762,8 +742,6 @@ def ensure_test_data(data_id: int, data: str, endpoint: Endpoint):
 def test_metrics_while_ignoring_broken_tenant_and_reloading(
     neon_env_builder: NeonEnvBuilder,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
-
     env = neon_env_builder.init_start()
 
     client = env.pageserver.http_client()
@@ -781,56 +759,37 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
 
     client.tenant_break(env.initial_tenant)
 
-    found_broken = False
-    active, broken, broken_set = ([], [], [])
-    for _ in range(10):
+    def found_broken():
         m = client.get_metrics()
         active = m.query_all("pageserver_tenant_states_count", {"state": "Active"})
         broken = m.query_all("pageserver_tenant_states_count", {"state": "Broken"})
         broken_set = m.query_all(
             "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
         )
-        found_broken = only_int(active) == 0 and only_int(broken) == 1 and only_int(broken_set) == 1
+        assert only_int(active) == 0 and only_int(broken) == 1 and only_int(broken_set) == 1
 
-        if found_broken:
-            break
-        log.info(f"active: {active}, broken: {broken}, broken_set: {broken_set}")
-        time.sleep(0.5)
-    assert (
-        found_broken
-    ), f"tenant shows up as broken; active={active}, broken={broken}, broken_set={broken_set}"
+    wait_until(10, 0.5, found_broken)
 
     client.tenant_ignore(env.initial_tenant)
 
-    found_broken = False
-    broken, broken_set = ([], [])
-    for _ in range(10):
+    def found_cleaned_up():
         m = client.get_metrics()
         broken = m.query_all("pageserver_tenant_states_count", {"state": "Broken"})
         broken_set = m.query_all(
             "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
         )
-        found_broken = only_int(broken) == 0 and only_int(broken_set) == 1
+        assert only_int(broken) == 0 and len(broken_set) == 0
 
-        if found_broken:
-            break
-        time.sleep(0.5)
-    assert found_broken, f"broken should still be in set, but it is not in the tenant state count: broken={broken}, broken_set={broken_set}"
+    wait_until(10, 0.5, found_cleaned_up)
 
     env.pageserver.tenant_load(env.initial_tenant)
 
-    found_active = False
-    active, broken_set = ([], [])
-    for _ in range(10):
+    def found_active():
         m = client.get_metrics()
         active = m.query_all("pageserver_tenant_states_count", {"state": "Active"})
         broken_set = m.query_all(
             "pageserver_broken_tenants_count", {"tenant_id": str(env.initial_tenant)}
         )
-        found_active = only_int(active) == 1 and len(broken_set) == 0
+        assert only_int(active) == 1 and len(broken_set) == 0
 
-        if found_active:
-            break
-        time.sleep(0.5)
-
-    assert found_active, f"reloaded tenant should be active, and broken tenant set item removed: active={active}, broken_set={broken_set}"
+    wait_until(10, 0.5, found_active)

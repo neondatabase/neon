@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -7,11 +8,14 @@ from typing import List, Optional
 
 import pytest
 import toml
+from fixtures.common_types import Lsn
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
 )
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
@@ -19,7 +23,6 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
@@ -110,11 +113,6 @@ def test_create_snapshot(
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
     pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
     pg_bin.run_capture(
@@ -136,6 +134,7 @@ def test_create_snapshot(
     for sk in env.safekeepers:
         sk.stop()
     env.pageserver.stop()
+    env.storage_controller.stop()
 
     # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
     compatibility_snapshot_dir = (
@@ -143,7 +142,12 @@ def test_create_snapshot(
     )
     if compatibility_snapshot_dir.exists():
         shutil.rmtree(compatibility_snapshot_dir)
-    shutil.copytree(test_output_dir, compatibility_snapshot_dir)
+
+    shutil.copytree(
+        test_output_dir,
+        compatibility_snapshot_dir,
+        ignore=shutil.ignore_patterns("pg_dynshmem"),
+    )
 
 
 @check_ondisk_data_compatibility_if_enabled
@@ -223,13 +227,45 @@ def test_forward_compatibility(
     )
 
     try:
+        # Previous version neon_local and pageserver are not aware
+        # of the new config.
+        # TODO: remove these once the previous version of neon local supports them
+        neon_env_builder.pageserver_get_impl = None
+        neon_env_builder.pageserver_validate_vectored_get = None
+
         neon_env_builder.num_safekeepers = 3
+
+        # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
+        # But always use the current version's neon_local binary.
+        # This is because we want to test the compatibility of the data format, not the compatibility of the neon_local CLI.
+        neon_env_builder.neon_binpath = compatibility_neon_bin
+        neon_env_builder.pg_distrib_dir = compatibility_postgres_distrib_dir
+        neon_env_builder.neon_local_binpath = neon_env_builder.neon_local_binpath
+
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
-            neon_binpath=compatibility_neon_bin,
-            pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
+
+        # not using env.pageserver.version because it was initialized before
+        prev_pageserver_version_str = env.get_binary_version("pageserver")
+        prev_pageserver_version_match = re.search(
+            "Neon page server git-env:(.*) failpoints: (.*), features: (.*)",
+            prev_pageserver_version_str,
+        )
+        if prev_pageserver_version_match is not None:
+            prev_pageserver_version = prev_pageserver_version_match.group(1)
+        else:
+            raise AssertionError(
+                "cannot find git hash in the version string: " + prev_pageserver_version_str
+            )
+
+        # does not include logs from previous runs
+        assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
+
         neon_env_builder.start()
+
+        # ensure the specified pageserver is running
+        assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)
 
         check_neon_works(
             env,
@@ -237,6 +273,7 @@ def test_forward_compatibility(
             sql_dump_path=compatibility_snapshot_dir / "dump.sql",
             repo_dir=env.repo_dir,
         )
+
     except Exception:
         if breaking_changes_allowed:
             pytest.xfail(
@@ -250,9 +287,10 @@ def test_forward_compatibility(
 
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
     ep = env.endpoints.create_start("main")
+    connstr = ep.connstr()
+
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
 
-    connstr = ep.connstr()
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"]
     )
@@ -269,14 +307,23 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     timeline_id = env.initial_timeline
     pg_version = env.pg_version
 
-    # Delete all files from local_fs_remote_storage except initdb.tar.zst,
+    # Stop endpoint while we recreate timeline
+    ep.stop()
+
+    try:
+        pageserver_http.timeline_preserve_initdb_archive(tenant_id, timeline_id)
+    except PageserverApiException as e:
+        # Allow the error as we might be running the old pageserver binary
+        log.info(f"Got allowed error: '{e}'")
+
+    # Delete all files from local_fs_remote_storage except initdb-preserved.tar.zst,
     # the file is required for `timeline_create` with `existing_initdb_timeline_id`.
     #
     # TODO: switch to Path.walk() in Python 3.12
     # for dirpath, _dirnames, filenames in (repo_dir / "local_fs_remote_storage").walk():
     for dirpath, _dirnames, filenames in os.walk(repo_dir / "local_fs_remote_storage"):
         for filename in filenames:
-            if filename != "initdb.tar.zst":
+            if filename != "initdb-preserved.tar.zst" and filename != "initdb.tar.zst":
                 (Path(dirpath) / filename).unlink()
 
     timeline_delete_wait_completed(pageserver_http, tenant_id, timeline_id)
@@ -286,6 +333,9 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
         new_timeline_id=timeline_id,
         existing_initdb_timeline_id=timeline_id,
     )
+
+    # Timeline exists again: restart the endpoint
+    ep.start()
 
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]

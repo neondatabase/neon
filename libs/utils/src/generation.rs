@@ -34,6 +34,8 @@ pub enum Generation {
 /// scenarios where pageservers might otherwise issue conflicting writes to
 /// remote storage
 impl Generation {
+    pub const MAX: Self = Self::Valid(u32::MAX);
+
     /// Create a new Generation that represents a legacy key format with
     /// no generation suffix
     pub fn none() -> Self {
@@ -45,7 +47,7 @@ impl Generation {
         Self::Broken
     }
 
-    pub fn new(v: u32) -> Self {
+    pub const fn new(v: u32) -> Self {
         Self::Valid(v)
     }
 
@@ -54,12 +56,10 @@ impl Generation {
     }
 
     #[track_caller]
-    pub fn get_suffix(&self) -> String {
+    pub fn get_suffix(&self) -> impl std::fmt::Display {
         match self {
-            Self::Valid(v) => {
-                format!("-{:08x}", v)
-            }
-            Self::None => "".into(),
+            Self::Valid(v) => GenerationFileSuffix(Some(*v)),
+            Self::None => GenerationFileSuffix(None),
             Self::Broken => {
                 panic!("Tried to use a broken generation");
             }
@@ -90,6 +90,7 @@ impl Generation {
         }
     }
 
+    #[track_caller]
     pub fn next(&self) -> Generation {
         match self {
             Self::Valid(n) => Self::Valid(*n + 1),
@@ -103,6 +104,18 @@ impl Generation {
             Some(v)
         } else {
             None
+        }
+    }
+}
+
+struct GenerationFileSuffix(Option<u32>);
+
+impl std::fmt::Display for GenerationFileSuffix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(g) = self.0 {
+            write!(f, "-{g:08x}")
+        } else {
+            Ok(())
         }
     }
 }
@@ -163,5 +176,25 @@ mod test {
         // pre-generation systems.
         assert!(Generation::none() < Generation::new(0));
         assert!(Generation::none() < Generation::new(1));
+    }
+
+    #[test]
+    fn suffix_is_stable() {
+        use std::fmt::Write as _;
+
+        // the suffix must remain stable through-out the pageserver remote storage evolution and
+        // not be changed accidentially without thinking about migration
+        let examples = [
+            (line!(), Generation::None, ""),
+            (line!(), Generation::Valid(0), "-00000000"),
+            (line!(), Generation::Valid(u32::MAX), "-ffffffff"),
+        ];
+
+        let mut s = String::new();
+        for (line, gen, expected) in examples {
+            s.clear();
+            write!(s, "{}", &gen.get_suffix()).expect("string grows");
+            assert_eq!(s, expected, "example on {line}");
+        }
     }
 }

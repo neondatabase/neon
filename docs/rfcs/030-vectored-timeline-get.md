@@ -69,7 +69,7 @@ However, unlike above, an ideal solution will
   * This means, read each `DiskBtree` page at most once.
 * Facilitate merging of the reads we issue to the OS and eventually NVMe.
 
-Each of these items above represents a signficant amount of work.
+Each of these items above represents a significant amount of work.
 
 ## Performance
 

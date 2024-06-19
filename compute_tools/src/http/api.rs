@@ -5,18 +5,21 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
+use crate::catalog::SchemaDumpError;
+use crate::catalog::{get_database_schema, get_dbs_and_roles};
+use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
 use anyhow::Result;
+use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use num_cpus;
-use serde_json;
 use tokio::task;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_utils::http::OtelName;
+use utils::http::request::must_get_query_param;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
@@ -45,7 +48,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
     match (req.method(), req.uri().path()) {
         // Serialized compute state.
         (&Method::GET, "/status") => {
-            info!("serving /status GET request");
+            debug!("serving /status GET request");
             let state = compute.state.lock().unwrap();
             let status_response = status_response_from_state(&state);
             Response::new(Body::from(serde_json::to_string(&status_response).unwrap()))
@@ -119,6 +122,45 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Err((msg, code)) => {
                     error!("error handling /configure request: {msg}");
                     render_json_error(&msg, code)
+                }
+            }
+        }
+
+        (&Method::POST, "/terminate") => {
+            info!("serving /terminate POST request");
+            match handle_terminate_request(compute).await {
+                Ok(()) => Response::new(Body::empty()),
+                Err((msg, code)) => {
+                    error!("error handling /terminate request: {msg}");
+                    render_json_error(&msg, code)
+                }
+            }
+        }
+
+        (&Method::GET, "/dbs_and_roles") => {
+            info!("serving /dbs_and_roles GET request",);
+            match get_dbs_and_roles(compute).await {
+                Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
+                Err(_) => {
+                    render_json_error("can't get dbs and roles", StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
+
+        (&Method::GET, "/database_schema") => {
+            let database = match must_get_query_param(&req, "database") {
+                Err(e) => return e.into_response(),
+                Ok(database) => database,
+            };
+            info!("serving /database_schema GET request with database: {database}",);
+            match get_database_schema(compute, &database).await {
+                Ok(res) => render_plain(Body::wrap_stream(res)),
+                Err(SchemaDumpError::DatabaseDoesNotExist) => {
+                    render_json_error("database does not exist", StatusCode::NOT_FOUND)
+                }
+                Err(e) => {
+                    error!("can't get schema dump: {}", e);
+                    render_json_error("can't get schema dump", StatusCode::INTERNAL_SERVER_ERROR)
                 }
             }
         }
@@ -293,8 +335,66 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
     };
     Response::builder()
         .status(status)
+        .header(CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::to_string(&error).unwrap()))
         .unwrap()
+}
+
+fn render_json(body: Body) -> Response<Body> {
+    Response::builder()
+        .header(CONTENT_TYPE, "application/json")
+        .body(body)
+        .unwrap()
+}
+
+fn render_plain(body: Body) -> Response<Body> {
+    Response::builder()
+        .header(CONTENT_TYPE, "text/plain")
+        .body(body)
+        .unwrap()
+}
+
+async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (String, StatusCode)> {
+    {
+        let mut state = compute.state.lock().unwrap();
+        if state.status == ComputeStatus::Terminated {
+            return Ok(());
+        }
+        if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
+            let msg = format!(
+                "invalid compute status for termination request: {:?}",
+                state.status.clone()
+            );
+            return Err((msg, StatusCode::PRECONDITION_FAILED));
+        }
+        state.status = ComputeStatus::TerminationPending;
+        compute.state_changed.notify_all();
+        drop(state);
+    }
+    forward_termination_signal();
+    info!("sent signal and notified waiters");
+
+    // Spawn a blocking thread to wait for compute to become Terminated.
+    // This is needed to do not block the main pool of workers and
+    // be able to serve other requests while some particular request
+    // is waiting for compute to finish configuration.
+    let c = compute.clone();
+    task::spawn_blocking(move || {
+        let mut state = c.state.lock().unwrap();
+        while state.status != ComputeStatus::Terminated {
+            state = c.state_changed.wait(state).unwrap();
+            info!(
+                "waiting for compute to become Terminated, current status: {:?}",
+                state.status
+            );
+        }
+
+        Ok(())
+    })
+    .await
+    .unwrap()?;
+    info!("terminated Postgres");
+    Ok(())
 }
 
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.

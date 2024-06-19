@@ -1,3 +1,4 @@
+#![recursion_limit = "300"]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 mod auth;
@@ -11,15 +12,18 @@ pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
 pub use pageserver_api::keyspace;
+pub mod aux_file;
 pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
 pub mod repository;
+pub mod span;
 pub(crate) mod statvfs;
 pub mod task_mgr;
 pub mod tenant;
 pub mod trace;
+pub mod utilization;
 pub mod virtual_file;
 pub mod walingest;
 pub mod walrecord;
@@ -28,6 +32,7 @@ pub mod walredo;
 use crate::task_mgr::TaskKind;
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
+use tenant::mgr::TenantManager;
 use tracing::info;
 
 /// Current storage format version
@@ -50,7 +55,11 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 pub use crate::metrics::preinitialize_metrics;
 
 #[tracing::instrument(skip_all, fields(%exit_code))]
-pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_code: i32) {
+pub async fn shutdown_pageserver(
+    tenant_manager: &TenantManager,
+    mut deletion_queue: DeletionQueue,
+    exit_code: i32,
+) {
     use std::time::Duration;
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
@@ -64,7 +73,7 @@ pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_cod
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
     timed(
-        tenant::mgr::shutdown_all_tenants(),
+        tenant_manager.shutdown(),
         "shutdown all tenants",
         Duration::from_secs(5),
     )
@@ -80,9 +89,7 @@ pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_cod
     .await;
 
     // Best effort to persist any outstanding deletions, to avoid leaking objects
-    if let Some(mut deletion_queue) = deletion_queue {
-        deletion_queue.shutdown(Duration::from_secs(5)).await;
-    }
+    deletion_queue.shutdown(Duration::from_secs(5)).await;
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
@@ -105,33 +112,29 @@ pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_cod
     std::process::exit(exit_code);
 }
 
-/// The name of the metadata file pageserver creates per timeline.
-/// Full path: `tenants/<tenant_id>/timelines/<timeline_id>/metadata`.
-pub const METADATA_FILE_NAME: &str = "metadata";
+/// Per-tenant configuration file.
+/// Full path: `tenants/<tenant_id>/config`.
+pub(crate) const TENANT_CONFIG_NAME: &str = "config";
 
 /// Per-tenant configuration file.
 /// Full path: `tenants/<tenant_id>/config`.
-pub const TENANT_CONFIG_NAME: &str = "config";
-
-/// Per-tenant configuration file.
-/// Full path: `tenants/<tenant_id>/config`.
-pub const TENANT_LOCATION_CONFIG_NAME: &str = "config-v1";
+pub(crate) const TENANT_LOCATION_CONFIG_NAME: &str = "config-v1";
 
 /// Per-tenant copy of their remote heatmap, downloaded into the local
 /// tenant path while in secondary mode.
-pub const TENANT_HEATMAP_BASENAME: &str = "heatmap-v1.json";
+pub(crate) const TENANT_HEATMAP_BASENAME: &str = "heatmap-v1.json";
 
 /// A suffix used for various temporary files. Any temporary files found in the
 /// data directory at pageserver startup can be automatically removed.
-pub const TEMP_FILE_SUFFIX: &str = "___temp";
+pub(crate) const TEMP_FILE_SUFFIX: &str = "___temp";
 
 /// A marker file to mark that a timeline directory was not fully initialized.
 /// If a timeline directory with this marker is encountered at pageserver startup,
 /// the timeline directory and the marker file are both removed.
 /// Full path: `tenants/<tenant_id>/timelines/<timeline_id>___uninit`.
-pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
+pub(crate) const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
 
-pub const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
+pub(crate) const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
 
 /// A marker file to prevent pageserver from loading a certain tenant on restart.
 /// Different from [`TIMELINE_UNINIT_MARK_SUFFIX`] due to semantics of the corresponding
@@ -158,21 +161,12 @@ fn ends_with_suffix(path: &Utf8Path, suffix: &str) -> bool {
 // from the directory name. Instead create type "UninitMark(TimelineId)" and only parse it once
 // from the name.
 
-pub fn is_uninit_mark(path: &Utf8Path) -> bool {
+pub(crate) fn is_uninit_mark(path: &Utf8Path) -> bool {
     ends_with_suffix(path, TIMELINE_UNINIT_MARK_SUFFIX)
 }
 
-pub fn is_delete_mark(path: &Utf8Path) -> bool {
+pub(crate) fn is_delete_mark(path: &Utf8Path) -> bool {
     ends_with_suffix(path, TIMELINE_DELETE_MARK_SUFFIX)
-}
-
-fn is_walkdir_io_not_found(e: &walkdir::Error) -> bool {
-    if let Some(e) = e.io_error() {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            return true;
-        }
-    }
-    false
 }
 
 /// During pageserver startup, we need to order operations not to exhaust tokio worker threads by

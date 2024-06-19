@@ -4,12 +4,12 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    flush_ep_to_pageserver,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.common_types import parse_layer_file_name
+from fixtures.pageserver.utils import wait_for_upload
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn
-from fixtures.utils import query_scalar
 
 
 # Crates a few layers, ensures that we can evict them (removing locally but keeping track of them anyway)
@@ -46,20 +46,21 @@ def test_basic_eviction(
             FROM generate_series(1, 5000000) g
             """
         )
-        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
-    wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
+    # stops the endpoint
+    current_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
+
     client.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
 
-    # disable compute & sks to avoid on-demand downloads by walreceiver / getpage
-    endpoint.stop()
+    # stop sks to avoid on-demand downloads by walreceiver / getpage; endpoint
+    # has already been stopped by flush_ep_to_pageserver
     for sk in env.safekeepers:
         sk.stop()
 
-    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
-    initial_local_layers = sorted(
-        list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
+    initial_local_layers = dict(
+        (parse_layer_file_name(path.name), path)
+        for path in env.pageserver.list_layers(tenant_id, timeline_id)
     )
     assert (
         len(initial_local_layers) > 1
@@ -73,6 +74,7 @@ def test_basic_eviction(
     assert len(initial_local_layers) == len(
         initial_layer_map_info.historic_layers
     ), "Should have the same layers in memory and on disk"
+
     for returned_layer in initial_layer_map_info.historic_layers:
         assert (
             returned_layer.kind == "Delta"
@@ -81,27 +83,29 @@ def test_basic_eviction(
             not returned_layer.remote
         ), f"All created layers should be present locally, but got {returned_layer}"
 
-        local_layers = list(
-            filter(lambda layer: layer.name == returned_layer.layer_file_name, initial_local_layers)
+        returned_layer_name = parse_layer_file_name(returned_layer.layer_file_name)
+        assert (
+            returned_layer_name in initial_local_layers
+        ), f"Did not find returned layer {returned_layer_name} in local layers {list(initial_local_layers.keys())}"
+
+        local_layer_path = (
+            env.pageserver.timeline_dir(tenant_id, timeline_id)
+            / initial_local_layers[returned_layer_name]
         )
         assert (
-            len(local_layers) == 1
-        ), f"Did not find returned layer {returned_layer} in local layers {initial_local_layers}"
-        local_layer = local_layers[0]
-        assert (
-            returned_layer.layer_file_size == local_layer.stat().st_size
-        ), f"Returned layer {returned_layer} has a different file size than local layer {local_layer}"
+            returned_layer.layer_file_size == local_layer_path.stat().st_size
+        ), f"Returned layer {returned_layer} has a different file size than local layer {local_layer_path}"
 
     # Detach all layers, ensre they are not in the local FS, but are still dumped as part of the layer map
-    for local_layer in initial_local_layers:
+    for local_layer_name, local_layer_path in initial_local_layers.items():
         client.evict_layer(
-            tenant_id=tenant_id, timeline_id=timeline_id, layer_name=local_layer.name
+            tenant_id=tenant_id, timeline_id=timeline_id, layer_name=local_layer_path.name
         )
-        assert not any(
-            new_local_layer.name == local_layer.name for new_local_layer in timeline_path.glob("*")
-        ), f"Did not expect to find {local_layer} layer after evicting"
+        assert not env.pageserver.layer_exists(
+            tenant_id, timeline_id, local_layer_name
+        ), f"Did not expect to find {local_layer_name} layer after evicting"
 
-    empty_layers = list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
+    empty_layers = env.pageserver.list_layers(tenant_id, timeline_id)
     assert not empty_layers, f"After evicting all layers, timeline {tenant_id}/{timeline_id} should have no layers locally, but got: {empty_layers}"
 
     evicted_layer_map_info = client.layer_map_info(tenant_id=tenant_id, timeline_id=timeline_id)
@@ -118,15 +122,15 @@ def test_basic_eviction(
         assert (
             returned_layer.remote
         ), f"All layers should be evicted and not present locally, but got {returned_layer}"
-        assert any(
-            local_layer.name == returned_layer.layer_file_name
-            for local_layer in initial_local_layers
+        returned_layer_name = parse_layer_file_name(returned_layer.layer_file_name)
+        assert (
+            returned_layer_name in initial_local_layers
         ), f"Did not find returned layer {returned_layer} in local layers {initial_local_layers}"
 
     # redownload all evicted layers and ensure the initial state is restored
-    for local_layer in initial_local_layers:
+    for local_layer_name, _local_layer_path in initial_local_layers.items():
         client.download_layer(
-            tenant_id=tenant_id, timeline_id=timeline_id, layer_name=local_layer.name
+            tenant_id=tenant_id, timeline_id=timeline_id, layer_name=local_layer_name.to_str()
         )
     client.timeline_download_remote_layers(
         tenant_id,
@@ -137,8 +141,9 @@ def test_basic_eviction(
         at_least_one_download=False,
     )
 
-    redownloaded_layers = sorted(
-        list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
+    redownloaded_layers = dict(
+        (parse_layer_file_name(path.name), path)
+        for path in env.pageserver.list_layers(tenant_id, timeline_id)
     )
     assert (
         redownloaded_layers == initial_local_layers
@@ -154,7 +159,9 @@ def test_basic_eviction(
 def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start()
+    # don't create initial tenant, we'll create it manually with custom config
+    env = neon_env_builder.init_configs()
+    env.start()
 
     tenant_config = {
         "pitr_interval": "1s",  # set to non-zero, so GC actually does something
@@ -165,6 +172,7 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
         "compaction_threshold": "3",
         # "image_creation_threshold": set at runtime
         "compaction_target_size": f"{128 * (1024**2)}",  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
+        "image_layer_creation_check_threshold": "0",  # always check if a new image layer can be created
     }
 
     def tenant_update_config(changes):
@@ -264,14 +272,14 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
             resident_physical_size_metric == 0
         ), "ensure that resident_physical_size metric is zero"
         assert resident_physical_size_metric == sum(
-            layer.layer_file_size or 0 for layer in info.historic_layers if not layer.remote
+            layer.layer_file_size for layer in info.historic_layers if not layer.remote
         ), "ensure that resident_physical_size metric corresponds to layer map dump"
 
         remote_physical_size_metric = ps_http.get_timeline_metric(
             tenant_id, timeline_id, "pageserver_remote_physical_size"
         )
         assert remote_physical_size_metric == sum(
-            layer.layer_file_size or 0 for layer in info.historic_layers if layer.remote
+            layer.layer_file_size for layer in info.historic_layers if layer.remote
         ), "ensure that remote_physical_size metric corresponds to layer map dump"
 
     log.info("before runnning GC, ensure that remote_physical size is zero")

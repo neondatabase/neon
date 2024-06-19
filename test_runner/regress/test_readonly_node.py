@@ -1,8 +1,8 @@
 import pytest
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.pageserver.utils import wait_for_last_record_lsn
-from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
 
@@ -16,7 +16,6 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_readonly_node", "empty")
     endpoint_main = env.endpoints.create_start("test_readonly_node")
-    log.info("postgres is running on 'test_readonly_node' branch")
 
     env.pageserver.allowed_errors.append(".*basebackup .* failed: invalid basebackup lsn.*")
 

@@ -7,10 +7,7 @@ use tokio::runtime::Runtime;
 use std::time::Duration;
 use storage_broker::Uri;
 
-use utils::{
-    auth::SwappableJwtAuth,
-    id::{NodeId, TenantId, TenantTimelineId},
-};
+use utils::{auth::SwappableJwtAuth, id::NodeId, logging::SecretString};
 
 mod auth;
 pub mod broker;
@@ -22,14 +19,19 @@ pub mod handler;
 pub mod http;
 pub mod json_ctrl;
 pub mod metrics;
+pub mod patch_control_file;
 pub mod pull_timeline;
 pub mod receive_wal;
 pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
 pub mod send_wal;
+pub mod state;
 pub mod timeline;
+pub mod timeline_manager;
+pub mod timelines_set;
 pub mod wal_backup;
+pub mod wal_backup_partial;
 pub mod wal_service;
 pub mod wal_storage;
 
@@ -46,6 +48,7 @@ pub mod defaults {
 
     pub const DEFAULT_HEARTBEAT_TIMEOUT: &str = "5000ms";
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
+    pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
 }
 
 #[derive(Debug, Clone)]
@@ -75,17 +78,18 @@ pub struct SafeKeeperConf {
     pub pg_auth: Option<Arc<JwtAuth>>,
     pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
     pub http_auth: Option<Arc<SwappableJwtAuth>>,
+    /// JWT token to connect to other safekeepers with.
+    pub sk_auth_token: Option<SecretString>,
     pub current_thread_runtime: bool,
+    pub walsenders_keep_horizon: bool,
+    pub partial_backup_enabled: bool,
+    pub partial_backup_timeout: Duration,
+    pub disable_periodic_broker_push: bool,
 }
 
 impl SafeKeeperConf {
-    pub fn tenant_dir(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.workdir.join(tenant_id.to_string())
-    }
-
-    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> Utf8PathBuf {
-        self.tenant_dir(&ttid.tenant_id)
-            .join(ttid.timeline_id.to_string())
+    pub fn is_wal_backup_enabled(&self) -> bool {
+        self.remote_storage.is_some() && self.wal_backup_enabled
     }
 }
 
@@ -112,9 +116,14 @@ impl SafeKeeperConf {
             pg_auth: None,
             pg_tenant_only_auth: None,
             http_auth: None,
+            sk_auth_token: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,
+            walsenders_keep_horizon: false,
+            partial_backup_enabled: false,
+            partial_backup_timeout: Duration::from_secs(0),
+            disable_periodic_broker_push: false,
         }
     }
 }

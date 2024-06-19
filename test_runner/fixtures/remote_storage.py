@@ -12,8 +12,8 @@ import boto3
 import toml
 from mypy_boto3_s3 import S3Client
 
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.types import TenantId, TimelineId
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
 TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"
@@ -50,7 +50,7 @@ class MockS3Server:
         # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
         # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
         # if a process is started from the shell process.
-        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", "s3", f"-p{port}"])
+        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", f"-p{port}"])
         error = None
         try:
             return_code = self.subprocess.poll()
@@ -141,11 +141,13 @@ class LocalFsStorage:
         with self.heatmap_path(tenant_id).open("r") as f:
             return json.load(f)
 
-    def to_toml_inline_table(self) -> str:
-        rv = {
+    def to_toml_dict(self) -> Dict[str, Any]:
+        return {
             "local_path": str(self.root),
         }
-        return toml.TomlEncoder().dump_inline_table(rv)
+
+    def to_toml_inline_table(self) -> str:
+        return toml.TomlEncoder().dump_inline_table(self.to_toml_dict())
 
     def cleanup(self):
         # no cleanup is done here, because there's NeonEnvBuilder.cleanup_local_storage which will remove everything, including localfs files
@@ -160,20 +162,31 @@ class LocalFsStorage:
 class S3Storage:
     bucket_name: str
     bucket_region: str
-    access_key: str
-    secret_key: str
+    access_key: Optional[str]
+    secret_key: Optional[str]
+    aws_profile: Optional[str]
     prefix_in_bucket: str
     client: S3Client
     cleanup: bool
     """Is this MOCK_S3 (false) or REAL_S3 (true)"""
     real: bool
     endpoint: Optional[str] = None
+    """formatting deserialized with humantime crate, for example "1s"."""
+    custom_timeout: Optional[str] = None
 
     def access_env_vars(self) -> Dict[str, str]:
-        return {
-            "AWS_ACCESS_KEY_ID": self.access_key,
-            "AWS_SECRET_ACCESS_KEY": self.secret_key,
-        }
+        if self.aws_profile is not None:
+            return {
+                "AWS_PROFILE": self.aws_profile,
+            }
+        if self.access_key is not None and self.secret_key is not None:
+            return {
+                "AWS_ACCESS_KEY_ID": self.access_key,
+                "AWS_SECRET_ACCESS_KEY": self.secret_key,
+            }
+        raise RuntimeError(
+            "Either AWS_PROFILE or (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) have to be set for S3Storage"
+        )
 
     def to_string(self) -> str:
         return json.dumps(
@@ -185,7 +198,7 @@ class S3Storage:
             }
         )
 
-    def to_toml_inline_table(self) -> str:
+    def to_toml_dict(self) -> Dict[str, Any]:
         rv = {
             "bucket_name": self.bucket_name,
             "bucket_region": self.bucket_region,
@@ -197,7 +210,13 @@ class S3Storage:
         if self.endpoint is not None:
             rv["endpoint"] = self.endpoint
 
-        return toml.TomlEncoder().dump_inline_table(rv)
+        if self.custom_timeout is not None:
+            rv["timeout"] = self.custom_timeout
+
+        return rv
+
+    def to_toml_inline_table(self) -> str:
+        return toml.TomlEncoder().dump_inline_table(self.to_toml_dict())
 
     def do_cleanup(self):
         if not self.cleanup:
@@ -242,6 +261,22 @@ class S3Storage:
             )
 
         log.info(f"deleted {cnt} objects from remote storage")
+
+    def tenants_path(self) -> str:
+        return f"{self.prefix_in_bucket}/tenants"
+
+    def tenant_path(self, tenant_id: TenantId) -> str:
+        return f"{self.tenants_path()}/{tenant_id}"
+
+    def heatmap_key(self, tenant_id: TenantId) -> str:
+        return f"{self.tenant_path(tenant_id)}/{TENANT_HEATMAP_FILE_NAME}"
+
+    def heatmap_content(self, tenant_id: TenantId):
+        r = self.client.get_object(Bucket=self.bucket_name, Key=self.heatmap_key(tenant_id))
+        return json.loads(r["Body"].read().decode("utf-8"))
+
+    def mock_remote_tenant_path(self, tenant_id: TenantId):
+        assert self.real is False
 
 
 RemoteStorage = Union[LocalFsStorage, S3Storage]
@@ -308,6 +343,7 @@ class RemoteStorageKind(str, enum.Enum):
                 bucket_region=mock_region,
                 access_key=access_key,
                 secret_key=secret_key,
+                aws_profile=None,
                 prefix_in_bucket="",
                 client=client,
                 cleanup=False,
@@ -317,12 +353,11 @@ class RemoteStorageKind(str, enum.Enum):
         assert self == RemoteStorageKind.REAL_S3
 
         env_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-        assert env_access_key, "no aws access key provided"
         env_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        assert env_secret_key, "no aws access key provided"
-
-        # session token is needed for local runs with sso auth
-        session_token = os.getenv("AWS_SESSION_TOKEN")
+        env_profile = os.getenv("AWS_PROFILE")
+        assert (
+            env_access_key and env_secret_key
+        ) or env_profile, "need to specify either access key and secret access key or profile"
 
         bucket_name = bucket_name or os.getenv("REMOTE_STORAGE_S3_BUCKET")
         assert bucket_name is not None, "no remote storage bucket name provided"
@@ -334,9 +369,6 @@ class RemoteStorageKind(str, enum.Enum):
         client = boto3.client(
             "s3",
             region_name=bucket_region,
-            aws_access_key_id=env_access_key,
-            aws_secret_access_key=env_secret_key,
-            aws_session_token=session_token,
         )
 
         return S3Storage(
@@ -344,6 +376,7 @@ class RemoteStorageKind(str, enum.Enum):
             bucket_region=bucket_region,
             access_key=env_access_key,
             secret_key=env_secret_key,
+            aws_profile=env_profile,
             prefix_in_bucket=prefix_in_bucket,
             client=client,
             cleanup=True,
@@ -389,6 +422,13 @@ def default_remote_storage() -> RemoteStorageKind:
     The remote storage kind used in tests that do not specify a preference
     """
     return RemoteStorageKind.LOCAL_FS
+
+
+def remote_storage_to_toml_dict(remote_storage: RemoteStorage) -> Dict[str, Any]:
+    if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
+        raise Exception("invalid remote storage type")
+
+    return remote_storage.to_toml_dict()
 
 
 # serialize as toml inline table

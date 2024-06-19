@@ -27,7 +27,6 @@ use super::TaskStateUpdate;
 use crate::{
     context::RequestContext,
     metrics::{LIVE_CONNECTIONS_COUNT, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
-    task_mgr,
     task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
@@ -37,8 +36,8 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::pageserver_feedback::PageserverFeedback;
 use utils::{id::NodeId, lsn::Lsn};
+use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +67,7 @@ pub(super) enum WalReceiverError {
     SuccessfulCompletion(String),
     /// Generic error
     Other(anyhow::Error),
+    ClosedGate,
 }
 
 impl From<tokio_postgres::Error> for WalReceiverError {
@@ -119,6 +119,16 @@ pub(super) async fn handle_walreceiver_connection(
 ) -> Result<(), WalReceiverError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
+    // prevent timeline shutdown from finishing until we have exited
+    let _guard = timeline.gate.enter().map_err(|e| match e {
+        GateError::GateClosed => WalReceiverError::ClosedGate,
+    })?;
+    // This function spawns a side-car task (WalReceiverConnectionPoller).
+    // Get its gate guard now as well.
+    let poller_guard = timeline.gate.enter().map_err(|e| match e {
+        GateError::GateClosed => WalReceiverError::ClosedGate,
+    })?;
+
     WALRECEIVER_STARTED_CONNECTIONS.inc();
 
     // Connect to the database in replication mode.
@@ -156,22 +166,19 @@ pub(super) async fn handle_walreceiver_connection(
     }
 
     // The connection object performs the actual communication with the database,
-    // so spawn it off to run on its own.
+    // so spawn it off to run on its own. It shouldn't outlive this function, but,
+    // due to lack of async drop, we can't enforce that. However, we ensure that
+    // 1. it is sensitive to `cancellation` and
+    // 2. holds the Timeline gate open so that after timeline shutdown,
+    //    we know this task is gone.
     let _connection_ctx = ctx.detached_child(
         TaskKind::WalReceiverConnectionPoller,
         ctx.download_behavior(),
     );
     let connection_cancellation = cancellation.clone();
-    task_mgr::spawn(
-        WALRECEIVER_RUNTIME.handle(),
-        TaskKind::WalReceiverConnectionPoller,
-        Some(timeline.tenant_shard_id),
-        Some(timeline.timeline_id),
-        "walreceiver connection",
-        false,
+    WALRECEIVER_RUNTIME.spawn(
         async move {
             debug_assert_current_span_has_tenant_and_timeline_id();
-
             select! {
                 connection_result = connection => match connection_result {
                     Ok(()) => debug!("Walreceiver db connection closed"),
@@ -182,6 +189,9 @@ pub(super) async fn handle_walreceiver_connection(
                                 // with a similar error.
                             },
                             WalReceiverError::SuccessfulCompletion(_) => {}
+                            WalReceiverError::ClosedGate => {
+                                // doesn't happen at runtime
+                            }
                             WalReceiverError::Other(err) => {
                                 warn!("Connection aborted: {err:#}")
                             }
@@ -190,7 +200,7 @@ pub(super) async fn handle_walreceiver_connection(
                 },
                 _ = connection_cancellation.cancelled() => debug!("Connection cancelled"),
             }
-            Ok(())
+            drop(poller_guard);
         }
         // Enrich the log lines emitted by this closure with meaningful context.
         // TODO: technically, this task outlives the surrounding function, so, the
@@ -303,6 +313,7 @@ pub(super) async fn handle_walreceiver_connection(
 
                 trace!("received XLogData between {startlsn} and {endlsn}");
 
+                WAL_INGEST.bytes_received.inc_by(data.len() as u64);
                 waldecoder.feed_bytes(data);
 
                 {
@@ -389,16 +400,6 @@ pub(super) async fn handle_walreceiver_connection(
             }
         }
 
-        timeline
-            .check_checkpoint_distance()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to check checkpoint distance for timeline {}",
-                    timeline.timeline_id
-                )
-            })?;
-
         if let Some(last_lsn) = status_update {
             let timeline_remote_consistent_lsn = timeline
                 .get_remote_consistent_lsn_visible()
@@ -426,19 +427,28 @@ pub(super) async fn handle_walreceiver_connection(
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
-            let current_timeline_size = timeline
-                .get_current_logical_size(
-                    crate::tenant::timeline::GetLogicalSizePriority::User,
-                    &ctx,
-                )
-                // FIXME: https://github.com/neondatabase/neon/issues/5963
-                .size_dont_care_about_accuracy();
+            let current_timeline_size = if timeline.tenant_shard_id.is_shard_zero() {
+                timeline
+                    .get_current_logical_size(
+                        crate::tenant::timeline::GetLogicalSizePriority::User,
+                        &ctx,
+                    )
+                    // FIXME: https://github.com/neondatabase/neon/issues/5963
+                    .size_dont_care_about_accuracy()
+            } else {
+                // Non-zero shards send zero for logical size.  The safekeeper will ignore
+                // this number.  This is because in a sharded tenant, only shard zero maintains
+                // accurate logical size.
+                0
+            };
+
             let status_update = PageserverFeedback {
                 current_timeline_size,
                 last_received_lsn,
                 disk_consistent_lsn,
                 remote_consistent_lsn,
                 replytime: ts,
+                shard_number: timeline.tenant_shard_id.shard_number.0 as u32,
             };
 
             debug!("neon_status_update {status_update:?}");

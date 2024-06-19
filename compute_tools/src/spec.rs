@@ -2,13 +2,14 @@ use std::fs::File;
 use std::path::Path;
 use std::str::FromStr;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use postgres::config::Config;
 use postgres::{Client, NoTls};
 use reqwest::StatusCode;
 use tracing::{error, info, info_span, instrument, span_enabled, warn, Level};
 
 use crate::config;
+use crate::logger::inlinify;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
@@ -189,18 +190,20 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
     // Print a list of existing Postgres roles (only in debug mode)
     if span_enabled!(Level::INFO) {
-        info!("postgres roles:");
+        let mut vec = Vec::new();
         for r in &existing_roles {
-            info!(
-                "    - {}:{}",
+            vec.push(format!(
+                "{}:{}",
                 r.name,
                 if r.encrypted_password.is_some() {
                     "[FILTERED]"
                 } else {
                     "(null)"
                 }
-            );
+            ));
         }
+
+        info!("postgres roles (total {}): {:?}", vec.len(), vec);
     }
 
     // Process delta operations first
@@ -238,7 +241,10 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     // Refresh Postgres roles info to handle possible roles renaming
     let existing_roles: Vec<Role> = get_existing_roles(&mut xact)?;
 
-    info!("cluster spec roles:");
+    info!(
+        "handling cluster spec roles (total {})",
+        spec.cluster.roles.len()
+    );
     for role in &spec.cluster.roles {
         let name = &role.name;
         // XXX: with a limited number of roles it is fine, but consider making it a HashMap
@@ -301,7 +307,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                     "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
-                info!("role create query: '{}'", &query);
+                info!("running role create query: '{}'", &query);
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
             }
@@ -318,7 +324,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 RoleAction::Create => " -> create",
                 RoleAction::Update => " -> update",
             };
-            info!("   - {}:{}{}", name, pwd, action_str);
+            info!(" - {}:{}{}", name, pwd, action_str);
         }
     }
 
@@ -427,10 +433,11 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
     // Print a list of existing Postgres databases (only in debug mode)
     if span_enabled!(Level::INFO) {
-        info!("postgres databases:");
+        let mut vec = Vec::new();
         for (dbname, db) in &existing_dbs {
-            info!("    {}:{}", dbname, db.owner);
+            vec.push(format!("{}:{}", dbname, db.owner));
         }
+        info!("postgres databases (total {}): {:?}", vec.len(), vec);
     }
 
     // Process delta operations first
@@ -483,7 +490,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 "rename_db" => {
                     let new_name = op.new_name.as_ref().unwrap();
 
-                    if existing_dbs.get(&op.name).is_some() {
+                    if existing_dbs.contains_key(&op.name) {
                         let query: String = format!(
                             "ALTER DATABASE {} RENAME TO {}",
                             op.name.pg_quote(),
@@ -502,7 +509,10 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     // Refresh Postgres databases info to handle possible renames
     let existing_dbs = get_existing_dbs(client)?;
 
-    info!("cluster spec databases:");
+    info!(
+        "handling cluster spec databases (total {})",
+        spec.cluster.databases.len()
+    );
     for db in &spec.cluster.databases {
         let name = &db.name;
         let pg_db = existing_dbs.get(name);
@@ -561,7 +571,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 DatabaseAction::Create => " -> create",
                 DatabaseAction::Update => " -> update",
             };
-            info!("   - {}:{}{}", db.name, db.owner, action_str);
+            info!(" - {}:{}{}", db.name, db.owner, action_str);
         }
     }
 
@@ -571,7 +581,12 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 /// Grant CREATE ON DATABASE to the database owner and do some other alters and grants
 /// to allow users creating trusted extensions and re-creating `public` schema, for example.
 #[instrument(skip_all)]
-pub fn handle_grants(spec: &ComputeSpec, client: &mut Client, connstr: &str) -> Result<()> {
+pub fn handle_grants(
+    spec: &ComputeSpec,
+    client: &mut Client,
+    connstr: &str,
+    enable_anon_extension: bool,
+) -> Result<()> {
     info!("modifying database permissions");
     let existing_dbs = get_existing_dbs(client)?;
 
@@ -640,6 +655,9 @@ pub fn handle_grants(spec: &ComputeSpec, client: &mut Client, connstr: &str) -> 
         // remove this code if possible. The worst thing that could happen is that
         // user won't be able to use public schema in NEW databases created in the
         // very OLD project.
+        //
+        // Also, alter default permissions so that relations created by extensions can be
+        // used by neon_superuser without permission issues.
         let grant_query = "DO $$\n\
                 BEGIN\n\
                     IF EXISTS(\n\
@@ -658,12 +676,31 @@ pub fn handle_grants(spec: &ComputeSpec, client: &mut Client, connstr: &str) -> 
                             GRANT CREATE ON SCHEMA public TO web_access;\n\
                         END IF;\n\
                     END IF;\n\
+                    IF EXISTS(\n\
+                        SELECT nspname\n\
+                        FROM pg_catalog.pg_namespace\n\
+                        WHERE nspname = 'public'\n\
+                    )\n\
+                    THEN\n\
+                        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser WITH GRANT OPTION;\n\
+                        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser WITH GRANT OPTION;\n\
+                    END IF;\n\
                 END\n\
             $$;"
         .to_string();
 
-        info!("grant query for db {} : {}", &db.name, &grant_query);
+        info!(
+            "grant query for db {} : {}",
+            &db.name,
+            inlinify(&grant_query)
+        );
         db_client.simple_query(&grant_query)?;
+
+        // it is important to run this after all grants
+        if enable_anon_extension {
+            handle_extension_anon(spec, &db.owner, &mut db_client, false)
+                .context("handle_grants handle_extension_anon")?;
+        }
     }
 
     Ok(())
@@ -708,8 +745,234 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
     // - extension was just installed
     // - extension was already installed and is up to date
     let query = "ALTER EXTENSION neon UPDATE";
-    info!("update neon extension schema with query: {}", query);
+    info!("update neon extension version with query: {}", query);
+    if let Err(e) = client.simple_query(query) {
+        error!(
+            "failed to upgrade neon extension during `handle_extension_neon`: {}",
+            e
+        );
+    }
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+pub fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
+    info!("handle neon extension upgrade");
+    let query = "ALTER EXTENSION neon UPDATE";
+    info!("update neon extension version with query: {}", query);
     client.simple_query(query)?;
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+pub fn handle_migrations(client: &mut Client) -> Result<()> {
+    info!("handle migrations");
+
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // !BE SURE TO ONLY ADD MIGRATIONS TO THE END OF THIS ARRAY. IF YOU DO NOT, VERY VERY BAD THINGS MAY HAPPEN!
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+    // Add new migrations in numerical order.
+    let migrations = [
+        include_str!("./migrations/0000-neon_superuser_bypass_rls.sql"),
+        include_str!("./migrations/0001-alter_roles.sql"),
+        include_str!("./migrations/0002-grant_pg_create_subscription_to_neon_superuser.sql"),
+        include_str!("./migrations/0003-grant_pg_monitor_to_neon_superuser.sql"),
+        include_str!("./migrations/0004-grant_all_on_tables_to_neon_superuser.sql"),
+        include_str!("./migrations/0005-grant_all_on_sequences_to_neon_superuser.sql"),
+        include_str!(
+            "./migrations/0006-grant_all_on_tables_to_neon_superuser_with_grant_option.sql"
+        ),
+        include_str!(
+            "./migrations/0007-grant_all_on_sequences_to_neon_superuser_with_grant_option.sql"
+        ),
+        include_str!("./migrations/0008-revoke_replication_for_previously_allowed_roles.sql"),
+    ];
+
+    let mut func = || {
+        let query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
+        client.simple_query(query)?;
+
+        let query = "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key INT NOT NULL PRIMARY KEY, id bigint NOT NULL DEFAULT 0)";
+        client.simple_query(query)?;
+
+        let query = "INSERT INTO neon_migration.migration_id VALUES (0, 0) ON CONFLICT DO NOTHING";
+        client.simple_query(query)?;
+
+        let query = "ALTER SCHEMA neon_migration OWNER TO cloud_admin";
+        client.simple_query(query)?;
+
+        let query = "REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC";
+        client.simple_query(query)?;
+        Ok::<_, anyhow::Error>(())
+    };
+    func().context("handle_migrations prepare")?;
+
+    let query = "SELECT id FROM neon_migration.migration_id";
+    let row = client
+        .query_one(query, &[])
+        .context("handle_migrations get migration_id")?;
+    let mut current_migration: usize = row.get::<&str, i64>("id") as usize;
+    let starting_migration_id = current_migration;
+
+    let query = "BEGIN";
+    client
+        .simple_query(query)
+        .context("handle_migrations begin")?;
+
+    while current_migration < migrations.len() {
+        let migration = &migrations[current_migration];
+        if migration.starts_with("-- SKIP") {
+            info!("Skipping migration id={}", current_migration);
+        } else {
+            info!(
+                "Running migration id={}:\n{}\n",
+                current_migration, migration
+            );
+            client.simple_query(migration).with_context(|| {
+                format!("handle_migrations current_migration={}", current_migration)
+            })?;
+        }
+        current_migration += 1;
+    }
+    let setval = format!(
+        "UPDATE neon_migration.migration_id SET id={}",
+        migrations.len()
+    );
+    client
+        .simple_query(&setval)
+        .context("handle_migrations update id")?;
+
+    let query = "COMMIT";
+    client
+        .simple_query(query)
+        .context("handle_migrations commit")?;
+
+    info!(
+        "Ran {} migrations",
+        (migrations.len() - starting_migration_id)
+    );
+
+    Ok(())
+}
+
+/// Connect to the database as superuser and pre-create anon extension
+/// if it is present in shared_preload_libraries
+#[instrument(skip_all)]
+pub fn handle_extension_anon(
+    spec: &ComputeSpec,
+    db_owner: &str,
+    db_client: &mut Client,
+    grants_only: bool,
+) -> Result<()> {
+    info!("handle extension anon");
+
+    if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+        if libs.contains("anon") {
+            if !grants_only {
+                // check if extension is already initialized using anon.is_initialized()
+                let query = "SELECT anon.is_initialized()";
+                match db_client.query(query, &[]) {
+                    Ok(rows) => {
+                        if !rows.is_empty() {
+                            let is_initialized: bool = rows[0].get(0);
+                            if is_initialized {
+                                info!("anon extension is already initialized");
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "anon extension is_installed check failed with expected error: {}",
+                            e
+                        );
+                    }
+                };
+
+                // Create anon extension if this compute needs it
+                // Users cannot create it themselves, because superuser is required.
+                let mut query = "CREATE EXTENSION IF NOT EXISTS anon CASCADE";
+                info!("creating anon extension with query: {}", query);
+                match db_client.query(query, &[]) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("anon extension creation failed with error: {}", e);
+                        return Ok(());
+                    }
+                }
+
+                // check that extension is installed
+                query = "SELECT extname FROM pg_extension WHERE extname = 'anon'";
+                let rows = db_client.query(query, &[])?;
+                if rows.is_empty() {
+                    error!("anon extension is not installed");
+                    return Ok(());
+                }
+
+                // Initialize anon extension
+                // This also requires superuser privileges, so users cannot do it themselves.
+                query = "SELECT anon.init()";
+                match db_client.query(query, &[]) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("anon.init() failed with error: {}", e);
+                        return Ok(());
+                    }
+                }
+            }
+
+            // check that extension is installed, if not bail early
+            let query = "SELECT extname FROM pg_extension WHERE extname = 'anon'";
+            match db_client.query(query, &[]) {
+                Ok(rows) => {
+                    if rows.is_empty() {
+                        error!("anon extension is not installed");
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    error!("anon extension check failed with error: {}", e);
+                    return Ok(());
+                }
+            };
+
+            let query = format!("GRANT ALL ON SCHEMA anon TO {}", db_owner);
+            info!("granting anon extension permissions with query: {}", query);
+            db_client.simple_query(&query)?;
+
+            // Grant permissions to db_owner to use anon extension functions
+            let query = format!("GRANT ALL ON ALL FUNCTIONS IN SCHEMA anon TO {}", db_owner);
+            info!("granting anon extension permissions with query: {}", query);
+            db_client.simple_query(&query)?;
+
+            // This is needed, because some functions are defined as SECURITY DEFINER.
+            // In Postgres SECURITY DEFINER functions are executed with the privileges
+            // of the owner.
+            // In anon extension this it is needed to access some GUCs, which are only accessible to
+            // superuser. But we've patched postgres to allow db_owner to access them as well.
+            // So we need to change owner of these functions to db_owner.
+            let query = format!("
+                SELECT 'ALTER FUNCTION '||nsp.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||') OWNER TO {};'
+                from pg_proc p
+                join pg_namespace nsp ON p.pronamespace = nsp.oid
+                where nsp.nspname = 'anon';", db_owner);
+
+            info!("change anon extension functions owner to db owner");
+            db_client.simple_query(&query)?;
+
+            //  affects views as well
+            let query = format!("GRANT ALL ON ALL TABLES IN SCHEMA anon TO {}", db_owner);
+            info!("granting anon extension permissions with query: {}", query);
+            db_client.simple_query(&query)?;
+
+            let query = format!("GRANT ALL ON ALL SEQUENCES IN SCHEMA anon TO {}", db_owner);
+            info!("granting anon extension permissions with query: {}", query);
+            db_client.simple_query(&query)?;
+        }
+    }
 
     Ok(())
 }

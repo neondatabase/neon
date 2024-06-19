@@ -33,6 +33,7 @@ once_cell.workspace = true
 parking_lot.workspace = true
 postgres.workspace = true
 postgres-protocol.workspace = true
+rand.workspace = true
 regex.workspace = true
 scopeguard.workspace = true
 reqwest = { workspace = true, features = ["json"] }
@@ -45,6 +46,7 @@ tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true }
 tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
+tokio-tar.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
 url.workspace = true
@@ -61,3 +63,10 @@ tokio-stream.workspace = true
 utils.workspace = true
 
 workspace_hack.workspace = true
+
+[dev-dependencies]
+walproposer.workspace = true
+rand.workspace = true
+desim.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["json"] }

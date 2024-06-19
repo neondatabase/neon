@@ -33,6 +33,23 @@ pub struct ComputeSpec {
     #[serde(default)]
     pub features: Vec<ComputeFeature>,
 
+    /// If compute_ctl was passed `--resize-swap-on-bind`, a value of `Some(_)` instructs
+    /// compute_ctl to `/neonvm/bin/resize-swap` with the given size, when the spec is first
+    /// received.
+    ///
+    /// Both this field and `--resize-swap-on-bind` are required, so that the control plane's
+    /// spec generation doesn't need to be aware of the actual compute it's running on, while
+    /// guaranteeing gradual rollout of swap. Otherwise, without `--resize-swap-on-bind`, we could
+    /// end up trying to resize swap in VMs without it -- or end up *not* resizing swap, thus
+    /// giving every VM much more swap than it should have (32GiB).
+    ///
+    /// Eventually we may remove `--resize-swap-on-bind` and exclusively use `swap_size_bytes` for
+    /// enabling the swap resizing behavior once rollout is complete.
+    ///
+    /// See neondatabase/cloud#12047 for more.
+    #[serde(default)]
+    pub swap_size_bytes: Option<u64>,
+
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
@@ -75,6 +92,16 @@ pub struct ComputeSpec {
     pub remote_extensions: Option<RemoteExtSpec>,
 
     pub pgbouncer_settings: Option<HashMap<String, String>>,
+
+    // Stripe size for pageserver sharding, in pages
+    #[serde(default)]
+    pub shard_stripe_size: Option<usize>,
+
+    // When we are starting a new replica in hot standby mode,
+    // we need to know if the primary is running.
+    // This is used to determine if replica should wait for
+    // RUNNING_XACTS from primary or not.
+    pub primary_is_running: Option<bool>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -82,10 +109,16 @@ pub struct ComputeSpec {
 #[serde(rename_all = "snake_case")]
 pub enum ComputeFeature {
     // XXX: Add more feature flags here.
+    /// Enable the experimental activity monitor logic, which uses `pg_stat_database` to
+    /// track short-lived connections as user activity.
+    ActivityMonitorExperimental,
 
-    // This is a special feature flag that is used to represent unknown feature flags.
-    // Basically all unknown to enum flags are represented as this one. See unit test
-    // `parse_unknown_features()` for more details.
+    /// Pre-install and initialize anon extension for every database in the cluster
+    AnonExtension,
+
+    /// This is a special feature flag that is used to represent unknown feature flags.
+    /// Basically all unknown to enum flags are represented as this one. See unit test
+    /// `parse_unknown_features()` for more details.
     #[serde(other)]
     UnknownFeature,
 }
@@ -281,5 +314,24 @@ mod tests {
         assert!(spec.features.len() == 2);
         assert!(spec.features.contains(&ComputeFeature::UnknownFeature));
         assert_eq!(spec.features, vec![ComputeFeature::UnknownFeature; 2]);
+    }
+
+    #[test]
+    fn parse_known_features() {
+        // Test that we can properly parse known feature flags.
+        let file = File::open("tests/cluster_spec.json").unwrap();
+        let mut json: serde_json::Value = serde_json::from_reader(file).unwrap();
+        let ob = json.as_object_mut().unwrap();
+
+        // Add known feature flags.
+        let features = vec!["activity_monitor_experimental"];
+        ob.insert("features".into(), features.into());
+
+        let spec: ComputeSpec = serde_json::from_value(json).unwrap();
+
+        assert_eq!(
+            spec.features,
+            vec![ComputeFeature::ActivityMonitorExperimental]
+        );
     }
 }

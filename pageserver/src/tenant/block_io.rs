@@ -5,10 +5,10 @@
 use super::ephemeral_file::EphemeralFile;
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
-use crate::page_cache::{self, PageReadGuard, ReadBufResult, PAGE_SZ};
+use crate::page_cache::{self, FileId, PageReadGuard, PageWriteGuard, ReadBufResult, PAGE_SZ};
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 
 /// This is implemented by anything that can read 8 kB (PAGE_SZ)
 /// blocks, using the page cache
@@ -39,6 +39,8 @@ pub enum BlockLease<'a> {
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Arc(std::sync::Arc<[u8; PAGE_SZ]>),
+    #[cfg(test)]
+    Vec(Vec<u8>),
 }
 
 impl From<PageReadGuard<'static>> for BlockLease<'static> {
@@ -63,6 +65,10 @@ impl<'a> Deref for BlockLease<'a> {
             BlockLease::EphemeralFileMutableTail(v) => v,
             #[cfg(test)]
             BlockLease::Arc(v) => v.deref(),
+            #[cfg(test)]
+            BlockLease::Vec(v) => {
+                TryFrom::try_from(&v[..]).expect("caller must ensure that v has PAGE_SZ")
+            }
         }
     }
 }
@@ -72,7 +78,7 @@ impl<'a> Deref for BlockLease<'a> {
 ///
 /// Unlike traits, we also support the read function to be async though.
 pub(crate) enum BlockReaderRef<'a> {
-    FileBlockReader(&'a FileBlockReader),
+    FileBlockReader(&'a FileBlockReader<'a>),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
     #[cfg(test)]
@@ -96,7 +102,7 @@ impl<'a> BlockReaderRef<'a> {
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
             #[cfg(test)]
-            VirtualFile(r) => r.read_blk(blknum).await,
+            VirtualFile(r) => r.read_blk(blknum, ctx).await,
         }
     }
 }
@@ -154,25 +160,28 @@ impl<'a> BlockCursor<'a> {
 ///
 /// The file is assumed to be immutable. This doesn't provide any functions
 /// for modifying the file, nor for invalidating the cache if it is modified.
-pub struct FileBlockReader {
-    pub file: VirtualFile,
+pub struct FileBlockReader<'a> {
+    pub file: &'a VirtualFile,
 
     /// Unique ID of this file, used as key in the page cache.
     file_id: page_cache::FileId,
 }
 
-impl FileBlockReader {
-    pub fn new(file: VirtualFile) -> Self {
-        let file_id = page_cache::next_file_id();
-
+impl<'a> FileBlockReader<'a> {
+    pub fn new(file: &'a VirtualFile, file_id: FileId) -> Self {
         FileBlockReader { file_id, file }
     }
 
     /// Read a page from the underlying file into given buffer.
-    async fn fill_buffer(&self, buf: &mut [u8], blkno: u32) -> Result<(), std::io::Error> {
+    async fn fill_buffer(
+        &self,
+        buf: PageWriteGuard<'static>,
+        blkno: u32,
+        ctx: &RequestContext,
+    ) -> Result<PageWriteGuard<'static>, std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
         self.file
-            .read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+            .read_exact_at_page(buf, blkno as u64 * PAGE_SZ as u64, ctx)
             .await
     }
     /// Read a block.
@@ -180,11 +189,11 @@ impl FileBlockReader {
     /// Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
-    pub async fn read_blk(
+    pub async fn read_blk<'b>(
         &self,
         blknum: u32,
         ctx: &RequestContext,
-    ) -> Result<BlockLease, std::io::Error> {
+    ) -> Result<BlockLease<'b>, std::io::Error> {
         let cache = page_cache::get();
         match cache
             .read_immutable_buf(self.file_id, blknum, ctx)
@@ -196,16 +205,16 @@ impl FileBlockReader {
                 )
             })? {
             ReadBufResult::Found(guard) => Ok(guard.into()),
-            ReadBufResult::NotFound(mut write_guard) => {
+            ReadBufResult::NotFound(write_guard) => {
                 // Read the page from disk into the buffer
-                self.fill_buffer(write_guard.deref_mut(), blknum).await?;
+                let write_guard = self.fill_buffer(write_guard, blknum, ctx).await?;
                 Ok(write_guard.mark_valid().into())
             }
         }
     }
 }
 
-impl BlockReader for FileBlockReader {
+impl BlockReader for FileBlockReader<'_> {
     fn block_cursor(&self) -> BlockCursor<'_> {
         BlockCursor::new(BlockReaderRef::FileBlockReader(self))
     }

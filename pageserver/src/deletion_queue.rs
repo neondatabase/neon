@@ -20,10 +20,9 @@ use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
-use tokio;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use tracing::{self, debug, error};
+use tracing::{debug, error};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::generation::Generation;
 use utils::id::TimelineId;
@@ -39,7 +38,7 @@ use deleter::DeleterMessage;
 use list_writer::ListWriterQueueMessage;
 use validator::ValidatorQueueMessage;
 
-use crate::{config::PageServerConf, tenant::storage_layer::LayerFileName};
+use crate::{config::PageServerConf, tenant::storage_layer::LayerName};
 
 // TODO: configurable for how long to wait before executing deletions
 
@@ -234,7 +233,7 @@ impl DeletionHeader {
         let header_bytes = serde_json::to_vec(self).context("serialize deletion header")?;
         let header_path = conf.deletion_header_path();
         let temp_path = path_with_suffix_extension(&header_path, TEMP_SUFFIX);
-        VirtualFile::crashsafe_overwrite(&header_path, &temp_path, &header_bytes)
+        VirtualFile::crashsafe_overwrite(header_path, temp_path, header_bytes)
             .await
             .maybe_fatal_err("save deletion header")?;
 
@@ -312,7 +311,7 @@ impl DeletionList {
                 result.extend(
                     timeline_layers
                         .into_iter()
-                        .map(|l| timeline_remote_path.join(&Utf8PathBuf::from(l))),
+                        .map(|l| timeline_remote_path.join(Utf8PathBuf::from(l))),
                 );
             }
         }
@@ -325,7 +324,8 @@ impl DeletionList {
         let temp_path = path_with_suffix_extension(&path, TEMP_SUFFIX);
 
         let bytes = serde_json::to_vec(self).expect("Failed to serialize deletion list");
-        VirtualFile::crashsafe_overwrite(&path, &temp_path, &bytes)
+
+        VirtualFile::crashsafe_overwrite(path, temp_path, bytes)
             .await
             .maybe_fatal_err("save deletion list")
             .map_err(Into::into)
@@ -479,7 +479,7 @@ impl DeletionQueueClient {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
-        layers: Vec<(LayerFileName, LayerFileMetadata)>,
+        layers: Vec<(LayerName, LayerFileMetadata)>,
     ) -> Result<(), DeletionQueueError> {
         if current_generation.is_none() {
             debug!("Enqueuing deletions in legacy mode, skipping queue");
@@ -511,7 +511,7 @@ impl DeletionQueueClient {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
-        layers: Vec<(LayerFileName, LayerFileMetadata)>,
+        layers: Vec<(LayerName, LayerFileMetadata)>,
     ) -> Result<(), DeletionQueueError> {
         metrics::DELETION_QUEUE
             .keys_submitted
@@ -632,7 +632,7 @@ impl DeletionQueue {
     ///
     /// If remote_storage is None, then the returned workers will also be None.
     pub fn new<C>(
-        remote_storage: Option<GenericRemoteStorage>,
+        remote_storage: GenericRemoteStorage,
         control_plane_client: Option<C>,
         conf: &'static PageServerConf,
     ) -> (Self, Option<DeletionQueueWorkers<C>>)
@@ -657,23 +657,6 @@ impl DeletionQueue {
         // the general pageserver shutdown token, because it stays alive a bit
         // longer to flush after Tenants have all been torn down.
         let cancel = CancellationToken::new();
-
-        let remote_storage = match remote_storage {
-            None => {
-                return (
-                    Self {
-                        client: DeletionQueueClient {
-                            tx,
-                            executor_tx,
-                            lsn_table: lsn_table.clone(),
-                        },
-                        cancel,
-                    },
-                    None,
-                )
-            }
-            Some(r) => r,
-        };
 
         (
             Self {
@@ -700,8 +683,6 @@ impl DeletionQueue {
     }
 
     pub async fn shutdown(&mut self, timeout: Duration) {
-        self.cancel.cancel();
-
         match tokio::time::timeout(timeout, self.client.flush()).await {
             Ok(Ok(())) => {
                 tracing::info!("Deletion queue flushed successfully on shutdown")
@@ -715,6 +696,10 @@ impl DeletionQueue {
                 tracing::warn!("Timed out flushing deletion queue on shutdown")
             }
         }
+
+        // We only cancel _after_ flushing: otherwise we would be shutting down the
+        // components that do the flush.
+        self.cancel.cancel();
     }
 }
 
@@ -722,7 +707,7 @@ impl DeletionQueue {
 mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
-    use pageserver_api::shard::ShardIndex;
+    use pageserver_api::{shard::ShardIndex, upcall_api::ReAttachResponseTenant};
     use std::{io::ErrorKind, time::Duration};
     use tracing::info;
 
@@ -732,23 +717,20 @@ mod test {
     use crate::{
         control_plane_client::RetryForeverError,
         repository::Key,
-        tenant::{
-            harness::TenantHarness, remote_timeline_client::remote_timeline_path,
-            storage_layer::DeltaFileName,
-        },
+        tenant::{harness::TenantHarness, storage_layer::DeltaLayerName},
     };
 
     use super::*;
     pub const TIMELINE_ID: TimelineId =
         TimelineId::from_array(hex!("11223344556677881122334455667788"));
 
-    pub const EXAMPLE_LAYER_NAME: LayerFileName = LayerFileName::Delta(DeltaFileName {
+    pub const EXAMPLE_LAYER_NAME: LayerName = LayerName::Delta(DeltaLayerName {
         key_range: Key::from_i128(0x0)..Key::from_i128(0xFFFFFFFFFFFFFFFF),
         lsn_range: Lsn(0x00000000016B59D8)..Lsn(0x00000000016B5A51),
     });
 
     // When you need a second layer in a test.
-    pub const EXAMPLE_LAYER_NAME_ALT: LayerFileName = LayerFileName::Delta(DeltaFileName {
+    pub const EXAMPLE_LAYER_NAME_ALT: LayerName = LayerName::Delta(DeltaLayerName {
         key_range: Key::from_i128(0x0)..Key::from_i128(0xFFFFFFFFFFFFFFFF),
         lsn_range: Lsn(0x00000000016B5A51)..Lsn(0x00000000016B5A61),
     });
@@ -766,7 +748,7 @@ mod test {
         /// Simulate a pageserver restart by destroying and recreating the deletion queue
         async fn restart(&mut self) {
             let (deletion_queue, workers) = DeletionQueue::new(
-                Some(self.storage.clone()),
+                self.storage.clone(),
                 Some(self.mock_control_plane.clone()),
                 self.harness.conf,
             );
@@ -798,7 +780,7 @@ mod test {
         /// Returns remote layer file name, suitable for use in assert_remote_files
         fn write_remote_layer(
             &self,
-            file_name: LayerFileName,
+            file_name: LayerName,
             gen: Generation,
         ) -> anyhow::Result<String> {
             let tenant_shard_id = self.harness.tenant_shard_id;
@@ -831,12 +813,14 @@ mod test {
         }
     }
 
-    #[async_trait::async_trait]
     impl ControlPlaneGenerationsApi for MockControlPlane {
-        #[allow(clippy::diverging_sub_expression)] // False positive via async_trait
-        async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
+        async fn re_attach(
+            &self,
+            _conf: &PageServerConf,
+        ) -> Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError> {
             unimplemented!()
         }
+
         async fn validate(
             &self,
             tenants: Vec<(TenantShardId, Generation)>,
@@ -867,13 +851,14 @@ mod test {
         let remote_fs_dir = harness.conf.workdir.join("remote_fs").canonicalize_utf8()?;
         let storage_config = RemoteStorageConfig {
             storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
         };
         let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
 
         let mock_control_plane = MockControlPlane::new();
 
         let (deletion_queue, worker) = DeletionQueue::new(
-            Some(storage.clone()),
+            storage.clone(),
             Some(mock_control_plane.clone()),
             harness.conf,
         );
@@ -950,7 +935,7 @@ mod test {
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 
-        let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
+        let layer_file_name_1: LayerName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
         let tenant_shard_id = ctx.harness.tenant_shard_id;
 
         let content: Vec<u8> = "victim1 contents".into();
@@ -1159,17 +1144,13 @@ mod test {
 pub(crate) mod mock {
     use tracing::info;
 
-    use crate::tenant::remote_timeline_client::remote_layer_path;
-
     use super::*;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub struct ConsumerState {
         rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
         executor_rx: tokio::sync::mpsc::Receiver<DeleterMessage>,
+        cancel: CancellationToken,
     }
 
     impl ConsumerState {
@@ -1183,7 +1164,7 @@ pub(crate) mod mock {
                 match msg {
                     DeleterMessage::Delete(objects) => {
                         for path in objects {
-                            match remote_storage.delete(&path).await {
+                            match remote_storage.delete(&path, &self.cancel).await {
                                 Ok(_) => {
                                     debug!("Deleted {path}");
                                 }
@@ -1216,7 +1197,7 @@ pub(crate) mod mock {
 
                         for path in objects {
                             info!("Executing deletion {path}");
-                            match remote_storage.delete(&path).await {
+                            match remote_storage.delete(&path, &self.cancel).await {
                                 Ok(_) => {
                                     debug!("Deleted {path}");
                                 }
@@ -1266,7 +1247,11 @@ pub(crate) mod mock {
                 executor_tx,
                 executed,
                 remote_storage,
-                consumer: std::sync::Mutex::new(ConsumerState { rx, executor_rx }),
+                consumer: std::sync::Mutex::new(ConsumerState {
+                    rx,
+                    executor_rx,
+                    cancel: CancellationToken::new(),
+                }),
                 lsn_table: Arc::new(std::sync::RwLock::new(VisibleLsnUpdates::new())),
             }
         }

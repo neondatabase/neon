@@ -3,11 +3,13 @@
 import argparse
 import json
 import logging
+import os
 from collections import defaultdict
-from typing import DefaultDict, Dict
+from typing import Any, DefaultDict, Dict, Optional
 
 import psycopg2
 import psycopg2.extras
+import toml
 
 FLAKY_TESTS_QUERY = """
     SELECT
@@ -45,6 +47,36 @@ def main(args: argparse.Namespace):
         logging.error("cannot fetch flaky tests from the DB due to an error", exc)
         rows = []
 
+    # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_ENGINE (i.e. not empty, not tokio-epoll-uring),
+    # use it to parametrize test name along with build_type and pg_version
+    #
+    # See test_runner/fixtures/parametrize.py for details
+    if (io_engine := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in (
+        "",
+        "tokio-epoll-uring",
+    ):
+        pageserver_virtual_file_io_engine_parameter = f"-{io_engine}"
+    else:
+        pageserver_virtual_file_io_engine_parameter = ""
+
+    # re-use existing records of flaky tests from before parametrization by compaction_algorithm
+    def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+        """Duplicated from parametrize.py"""
+        toml_table = os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
+        if toml_table is None:
+            return None
+        v = toml.loads(toml_table)
+        assert isinstance(v, dict)
+        return v
+
+    pageserver_default_tenant_config_compaction_algorithm_parameter = ""
+    if (
+        explicit_default := get_pageserver_default_tenant_config_compaction_algorithm()
+    ) is not None:
+        pageserver_default_tenant_config_compaction_algorithm_parameter = (
+            f"-{explicit_default['kind']}"
+        )
+
     for row in rows:
         # We don't want to automatically rerun tests in a performance suite
         if row["parent_suite"] != "test_runner.regress":
@@ -53,10 +85,10 @@ def main(args: argparse.Namespace):
         if row["name"].endswith("]"):
             parametrized_test = row["name"].replace(
                 "[",
-                f"[{build_type}-pg{pg_version}-",
+                f"[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}-",
             )
         else:
-            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}]"
+            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}]"
 
         res[row["parent_suite"]][row["suite"]][parametrized_test] = True
 

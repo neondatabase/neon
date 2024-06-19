@@ -1,10 +1,11 @@
 self-hosted-runner:
   labels:
     - arm64
-    - dev
     - gen3
     - large
+    - large-arm64
     - small
+    - small-arm64
     - us-east-2
 config-variables:
   - REMOTE_STORAGE_AZURE_CONTAINER

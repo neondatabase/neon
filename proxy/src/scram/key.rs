@@ -1,15 +1,29 @@
 //! Tools for client/server/stored key management.
 
+use subtle::ConstantTimeEq;
+
 /// Faithfully taken from PostgreSQL.
 pub const SCRAM_KEY_LEN: usize = 32;
 
-/// One of the keys derived from the [password](super::password::SaltedPassword).
+/// One of the keys derived from the user's password.
 /// We use the same structure for all keys, i.e.
 /// `ClientKey`, `StoredKey`, and `ServerKey`.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, Eq, Debug)]
 #[repr(transparent)]
 pub struct ScramKey {
     bytes: [u8; SCRAM_KEY_LEN],
+}
+
+impl PartialEq for ScramKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.ct_eq(other).into()
+    }
+}
+
+impl ConstantTimeEq for ScramKey {
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        self.bytes.ct_eq(&other.bytes)
+    }
 }
 
 impl ScramKey {

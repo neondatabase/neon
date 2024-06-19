@@ -11,7 +11,6 @@ use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use postgres_protocol::message::frontend;
 use tokio::io::{AsyncReadExt, DuplexStream};
-use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::TlsConnect;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -35,12 +34,13 @@ async fn proxy_mitm(
     tokio::spawn(async move {
         // begin handshake with end_server
         let end_server = connect_tls(server2, client_config2.make_tls_connect().unwrap()).await;
-        // process handshake with end_client
-        let (end_client, startup) =
-            handshake(client1, Some(&server_config1), &CancelMap::default())
-                .await
-                .unwrap()
-                .unwrap();
+        let (end_client, startup) = match handshake(client1, Some(&server_config1), false)
+            .await
+            .unwrap()
+        {
+            HandshakeData::Startup(stream, params) => (stream, params),
+            HandshakeData::Cancel(_) => panic!("cancellation not supported"),
+        };
 
         let mut end_server = tokio_util::codec::Framed::new(end_server, PgFrame);
         let (end_client, buf) = end_client.framed.into_inner();
@@ -151,7 +151,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
-        Scram::new("password")?,
+        Scram::new("password").await?,
     ));
 
     let _client_err = tokio_postgres::Config::new()
@@ -234,7 +234,7 @@ async fn connect_failure(
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
-        Scram::new("password")?,
+        Scram::new("password").await?,
     ));
 
     let _client_err = tokio_postgres::Config::new()

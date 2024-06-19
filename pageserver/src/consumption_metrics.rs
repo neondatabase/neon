@@ -2,11 +2,13 @@
 //! and push them to a HTTP endpoint.
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::tenant::size::CalculateSyntheticSizeError;
 use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::{mgr, LogicalSizeCalculationCause, PageReconstructError, Tenant};
+use crate::tenant::{mgr::TenantManager, LogicalSizeCalculationCause, Tenant};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
+use remote_storage::{GenericRemoteStorage, RemoteStorageConfig};
 use reqwest::Url;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +19,7 @@ use tracing::*;
 use utils::id::NodeId;
 
 mod metrics;
-use metrics::MetricsKey;
+use crate::consumption_metrics::metrics::MetricsKey;
 mod disk_cache;
 mod upload;
 
@@ -40,7 +42,9 @@ type Cache = HashMap<MetricsKey, (EventType, u64)>;
 /// Main thread that serves metrics collection
 #[allow(clippy::too_many_arguments)]
 pub async fn collect_metrics(
+    tenant_manager: Arc<TenantManager>,
     metric_collection_endpoint: &Url,
+    metric_collection_bucket: &Option<RemoteStorageConfig>,
     metric_collection_interval: Duration,
     _cached_metric_collection_interval: Duration,
     synthetic_size_calculation_interval: Duration,
@@ -65,15 +69,19 @@ pub async fn collect_metrics(
         None,
         "synthetic size calculation",
         false,
-        async move {
-            calculate_synthetic_size_worker(
-                synthetic_size_calculation_interval,
-                &cancel,
-                &worker_ctx,
-            )
-            .instrument(info_span!("synthetic_size_worker"))
-            .await?;
-            Ok(())
+        {
+            let tenant_manager = tenant_manager.clone();
+            async move {
+                calculate_synthetic_size_worker(
+                    tenant_manager,
+                    synthetic_size_calculation_interval,
+                    &cancel,
+                    &worker_ctx,
+                )
+                .instrument(info_span!("synthetic_size_worker"))
+                .await?;
+                Ok(())
+            }
         },
     );
 
@@ -94,13 +102,27 @@ pub async fn collect_metrics(
         .build()
         .expect("Failed to create http client with timeout");
 
+    let bucket_client = if let Some(bucket_config) = metric_collection_bucket {
+        match GenericRemoteStorage::from_config(bucket_config) {
+            Ok(client) => Some(client),
+            Err(e) => {
+                // Non-fatal error: if we were given an invalid config, we will proceed
+                // with sending metrics over the network, but not to S3.
+                tracing::warn!("Invalid configuration for metric_collection_bucket: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let node_id = node_id.to_string();
 
     loop {
         let started_at = Instant::now();
 
         // these are point in time, with variable "now"
-        let metrics = metrics::collect_all_metrics(&cached_metrics, &ctx).await;
+        let metrics = metrics::collect_all_metrics(&tenant_manager, &cached_metrics, &ctx).await;
 
         let metrics = Arc::new(metrics);
 
@@ -118,10 +140,18 @@ pub async fn collect_metrics(
                     tracing::error!("failed to persist metrics to {path:?}: {e:#}");
                 }
             }
+
+            if let Some(bucket_client) = &bucket_client {
+                let res =
+                    upload::upload_metrics_bucket(bucket_client, &cancel, &node_id, &metrics).await;
+                if let Err(e) = res {
+                    tracing::error!("failed to upload to S3: {e:#}");
+                }
+            }
         };
 
         let upload = async {
-            let res = upload::upload_metrics(
+            let res = upload::upload_metrics_http(
                 &client,
                 metric_collection_endpoint,
                 &cancel,
@@ -132,7 +162,7 @@ pub async fn collect_metrics(
             .await;
             if let Err(e) = res {
                 // serialization error which should never happen
-                tracing::error!("failed to upload due to {e:#}");
+                tracing::error!("failed to upload via HTTP due to {e:#}");
             }
         };
 
@@ -247,6 +277,7 @@ async fn reschedule(
 
 /// Caclculate synthetic size for each active tenant
 async fn calculate_synthetic_size_worker(
+    tenant_manager: Arc<TenantManager>,
     synthetic_size_calculation_interval: Duration,
     cancel: &CancellationToken,
     ctx: &RequestContext,
@@ -259,7 +290,7 @@ async fn calculate_synthetic_size_worker(
     loop {
         let started_at = Instant::now();
 
-        let tenants = match mgr::list_tenants().await {
+        let tenants = match tenant_manager.list_tenants() {
             Ok(tenants) => tenants,
             Err(e) => {
                 warn!("cannot get tenant list: {e:#}");
@@ -267,20 +298,24 @@ async fn calculate_synthetic_size_worker(
             }
         };
 
-        for (tenant_shard_id, tenant_state) in tenants {
+        for (tenant_shard_id, tenant_state, _gen) in tenants {
             if tenant_state != TenantState::Active {
                 continue;
             }
 
-            if !tenant_shard_id.is_zero() {
+            if !tenant_shard_id.is_shard_zero() {
                 // We only send consumption metrics from shard 0, so don't waste time calculating
                 // synthetic size on other shards.
                 continue;
             }
 
-            let Ok(tenant) = mgr::get_tenant(tenant_shard_id, true) else {
+            let Ok(tenant) = tenant_manager.get_attached_tenant_shard(tenant_shard_id) else {
                 continue;
             };
+
+            if !tenant.is_active() {
+                continue;
+            }
 
             // there is never any reason to exit calculate_synthetic_size_worker following any
             // return value -- we don't need to care about shutdown because no tenant is found when
@@ -314,21 +349,12 @@ async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &Re
     // Same for the loop that fetches computed metrics.
     // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
     // which turns out is really handy to understand the system.
-    let Err(e) = tenant.calculate_synthetic_size(CAUSE, cancel, ctx).await else {
-        return;
-    };
-
-    // this error can be returned if timeline is shutting down, but it does not
-    // mean the synthetic size worker should terminate. we do not need any checks
-    // in this function because `mgr::get_tenant` will error out after shutdown has
-    // progressed to shutting down tenants.
-    let shutting_down = matches!(
-        e.downcast_ref::<PageReconstructError>(),
-        Some(PageReconstructError::Cancelled | PageReconstructError::AncestorStopping(_))
-    );
-
-    if !shutting_down {
-        let tenant_shard_id = tenant.tenant_shard_id();
-        error!("failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}");
+    match tenant.calculate_synthetic_size(CAUSE, cancel, ctx).await {
+        Ok(_) => {}
+        Err(CalculateSyntheticSizeError::Cancelled) => {}
+        Err(e) => {
+            let tenant_shard_id = tenant.tenant_shard_id();
+            error!("failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}");
+        }
     }
 }

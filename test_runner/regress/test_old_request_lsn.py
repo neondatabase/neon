@@ -1,6 +1,6 @@
+from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import TimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -16,11 +16,9 @@ from fixtures.utils import print_gc_result, query_scalar
 #
 def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     # Disable pitr, because here we want to test branch creation after GC
-    neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
     env.neon_cli.create_branch("test_old_request_lsn", "main")
     endpoint = env.endpoints.create_start("test_old_request_lsn")
-    log.info("postgres is running on test_old_request_lsn branch")
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()

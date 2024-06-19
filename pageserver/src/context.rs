@@ -88,13 +88,16 @@
 
 use crate::task_mgr::TaskKind;
 
+pub(crate) mod optional_counter;
+
 // The main structure of this module, see module-level comment.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
     access_stats_behavior: AccessStatsBehavior,
     page_content_kind: PageContentKind,
+    pub micros_spent_throttled: optional_counter::MicroSecondsCounterU32,
 }
 
 /// The kind of access to the page cache.
@@ -150,6 +153,7 @@ impl RequestContextBuilder {
                 download_behavior: DownloadBehavior::Download,
                 access_stats_behavior: AccessStatsBehavior::Update,
                 page_content_kind: PageContentKind::Unknown,
+                micros_spent_throttled: Default::default(),
             },
         }
     }
@@ -163,6 +167,7 @@ impl RequestContextBuilder {
                 download_behavior: original.download_behavior,
                 access_stats_behavior: original.access_stats_behavior,
                 page_content_kind: original.page_content_kind,
+                micros_spent_throttled: Default::default(),
             },
         }
     }

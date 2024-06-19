@@ -82,6 +82,9 @@ pub const XLOG_XACT_ABORT_PREPARED: u8 = 0x40;
 pub const XLOG_XACT_ASSIGNMENT: u8 = 0x50;
 pub const XLOG_XACT_INVALIDATIONS: u8 = 0x60;
 
+// From standbydefs.h
+pub const XLOG_RUNNING_XACTS: u8 = 0x10;
+
 // From srlu.h
 pub const SLRU_PAGES_PER_SEGMENT: u32 = 32;
 pub const SLRU_SEG_SIZE: usize = BLCKSZ as usize * SLRU_PAGES_PER_SEGMENT as usize;
@@ -101,7 +104,7 @@ pub const XACT_XINFO_HAS_SUBXACTS: u32 = 1u32 << 1;
 pub const XACT_XINFO_HAS_RELFILENODES: u32 = 1u32 << 2;
 pub const XACT_XINFO_HAS_INVALS: u32 = 1u32 << 3;
 pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
-// pub const XACT_XINFO_HAS_ORIGIN: u32 = 1u32 << 5;
+pub const XACT_XINFO_HAS_ORIGIN: u32 = 1u32 << 5;
 // pub const XACT_XINFO_HAS_AE_LOCKS: u32 = 1u32 << 6;
 // pub const XACT_XINFO_HAS_GID: u32 = 1u32 << 7;
 
@@ -251,6 +254,10 @@ pub const XLOG_OVERWRITE_CONTRECORD: u8 = 0xD0;
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 
+/* From xlog.h */
+pub const XLOG_REPLORIGIN_SET: u8 = 0x00;
+pub const XLOG_REPLORIGIN_DROP: u8 = 0x10;
+
 /* From replication/slot.h */
 pub const REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN: usize = 4*4  /* offset of `slotdata` in ReplicationSlotOnDisk  */
    + 64 /* NameData */  + 4*4;
@@ -264,6 +271,9 @@ pub const SLOTS_PER_FSM_PAGE: u32 = FSM_LEAF_NODES_PER_PAGE as u32;
 /* From visibilitymap.c */
 pub const VM_HEAPBLOCKS_PER_PAGE: u32 =
     (BLCKSZ as usize - SIZEOF_PAGE_HEADER_DATA) as u32 * (8 / 2); // MAPSIZE * (BITS_PER_BYTE / BITS_PER_HEAPBLOCK)
+
+/* From origin.c */
+pub const REPLICATION_STATE_MAGIC: u32 = 0x1257DADE;
 
 // List of subdirectories inside pgdata.
 // Copied from src/bin/initdb/initdb.c

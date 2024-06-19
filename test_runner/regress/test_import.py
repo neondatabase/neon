@@ -7,6 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -20,8 +21,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import subprocess_capture
+from fixtures.utils import assert_pageserver_backups_equal, subprocess_capture
 
 
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
@@ -90,21 +90,10 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         [
             ".*error importing base backup .*",
             ".*Timeline got dropped without initializing, cleaning its files.*",
-            ".*Removing intermediate uninit mark file.*",
             ".*InternalServerError.*timeline not found.*",
             ".*InternalServerError.*Tenant .* not found.*",
             ".*InternalServerError.*Timeline .* not found.*",
             ".*InternalServerError.*Cannot delete timeline which has child timelines.*",
-            ".*ignored .* unexpected bytes after the tar archive.*",
-        ]
-    )
-
-    env.pageserver.allowed_errors.extend(
-        [
-            # FIXME: we should clean up pageserver to not print this
-            ".*exited with error: unexpected message type: CopyData.*",
-            # FIXME: Is this expected?
-            ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*",
         ]
     )
 
@@ -142,12 +131,9 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     with pytest.raises(RuntimeError):
         import_tar(corrupt_base_tar, wal_tar)
 
-    # A tar with trailing garbage is currently accepted. It prints a warnings
-    # to the pageserver log, however. Check that.
-    import_tar(base_plus_garbage_tar, wal_tar)
-    assert env.pageserver.log_contains(
-        ".*WARN.*ignored .* unexpected bytes after the tar archive.*"
-    )
+    # Importing a tar with trailing garbage fails
+    with pytest.raises(RuntimeError):
+        import_tar(base_plus_garbage_tar, wal_tar)
 
     client = env.pageserver.http_client()
     timeline_delete_wait_completed(client, tenant, timeline)
@@ -163,6 +149,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
     assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
 
+    vanilla_pg.stop()
+
 
 def test_import_from_pageserver_small(
     pg_bin: PgBin, neon_env_builder: NeonEnvBuilder, test_output_dir: Path
@@ -170,17 +158,12 @@ def test_import_from_pageserver_small(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_small")
     endpoint = env.endpoints.create_start("test_import_from_pageserver_small")
 
     num_rows = 3000
     lsn = _generate_data(num_rows, endpoint)
-    _import(num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir, test_output_dir)
+    _import(num_rows, lsn, env, pg_bin, timeline, test_output_dir)
 
 
 @pytest.mark.timeout(1800)
@@ -210,9 +193,7 @@ def test_import_from_pageserver_multisegment(
     log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
     assert logical_size > 1024**3  # = 1GB
 
-    tar_output_file = _import(
-        num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir, test_output_dir
-    )
+    tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline, test_output_dir)
 
     # Check if the backup data contains multiple segment files
     cnt_seg_files = 0
@@ -252,7 +233,6 @@ def _import(
     env: NeonEnv,
     pg_bin: PgBin,
     timeline: TimelineId,
-    pg_distrib_dir: Path,
     test_output_dir: Path,
 ) -> Path:
     """Test importing backup data to the pageserver.
@@ -265,15 +245,9 @@ def _import(
     path to the backup archive file"""
     log.info(f"start_backup_lsn = {lsn}")
 
-    # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
-    # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
-
     # Get a fullbackup from pageserver
-    query = f"fullbackup { env.initial_tenant} {timeline} {lsn}"
     tar_output_file = test_output_dir / "fullbackup.tar"
-    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query, "-o", str(tar_output_file)]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.take_fullbackup(env.pageserver, env.initial_tenant, timeline, lsn, tar_output_file)
 
     # Stop the first pageserver instance, erase all its data
     env.endpoints.stop_all()
@@ -318,26 +292,15 @@ def _import(
     wait_for_upload(client, tenant, timeline, lsn)
 
     # Check it worked
-    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
+    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant, lsn=lsn)
     assert endpoint.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
 
     # Take another fullbackup
-    query = f"fullbackup { tenant} {timeline} {lsn}"
     new_tar_output_file = test_output_dir / "fullbackup-new.tar"
-    cmd = [
-        "psql",
-        "--no-psqlrc",
-        env.pageserver.connstr(),
-        "-c",
-        query,
-        "-o",
-        str(new_tar_output_file),
-    ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.take_fullbackup(env.pageserver, tenant, timeline, lsn, new_tar_output_file)
 
     # Check it's the same as the first fullbackup
-    # TODO pageserver should be checking checksum
-    assert os.path.getsize(tar_output_file) == os.path.getsize(new_tar_output_file)
+    assert_pageserver_backups_equal(tar_output_file, new_tar_output_file, set())
 
     # Check that gc works
     pageserver_http = env.pageserver.http_client()

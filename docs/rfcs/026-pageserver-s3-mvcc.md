@@ -162,7 +162,7 @@ struct Tenant {
   ...
 
   txns: HashMap<TxnId, Transaction>,
-  // the most recently started txn's id; only most recently sarted can win
+  // the most recently started txn's id; only most recently started can win
   next_winner_txn: Option<TxnId>,
 }
 struct Transaction {
@@ -186,7 +186,7 @@ A transaction T in state Committed has subsequent transactions that may or may n
 
 So, for garbage collection, we need to assess transactions in state Committed and RejectAcknowledged:
 
-- Commited: delete objects on the deadlist.
+- Committed: delete objects on the deadlist.
     - We don’t need a LIST request here, the deadlist is sufficient. So, it’s really cheap.
     - This is **not true MVCC garbage collection**; by deleting the objects on Committed transaction T ’s deadlist, we might delete data referenced by other transactions that were concurrent with T, i.e., they started while T was still open. However, the fact that T is committed means that the other transactions are RejectPending or RejectAcknowledged, so, they don’t matter. Pageservers executing these doomed RejectPending transactions must handle 404 for GETs gracefully, e.g., by trying to commit txn so they observe the rejection they’re destined to get anyways. 404’s for RejectAcknowledged is handled below.
 - RejectAcknowledged: delete all objects created in that txn, and discard deadlists.
@@ -242,15 +242,15 @@ If a pageserver is unresponsive from Control Plane’s / Compute’s perspective
 
 At this point, availability is restored and user pain relieved.
 
-What’s left is to somehow close the doomed transaction of the unresponsive pageserver, so that it beomes RejectAcknowledged, and GC can make progress. Since S3 is cheap, we can afford to wait a really long time here, especially if we put a soft bound on the amount of data a transaction may produce before it must commit. Procedure:
+What’s left is to somehow close the doomed transaction of the unresponsive pageserver, so that it becomes RejectAcknowledged, and GC can make progress. Since S3 is cheap, we can afford to wait a really long time here, especially if we put a soft bound on the amount of data a transaction may produce before it must commit. Procedure:
 
 1. Ensure the unresponsive pageserver is taken out of rotation for new attachments. That probably should happen as part of the routine above.
 2. Make a human operator investigate decide what to do (next morning, NO ONCALL ALERT):
     1. Inspect the instance, investigate logs, understand root cause.
     2. Try to re-establish connectivity between pageserver and Control Plane so that pageserver can retry commits, get rejected, ack rejection ⇒ enable GC.
-    3. Use below procedure to decomission pageserver.
+    3. Use below procedure to decommission pageserver.
 
-### Decomissioning A Pageserver (Dead or Alive-but-Unrespsonive)
+### Decommissioning A Pageserver (Dead or Alive-but-Unresponsive)
 
 The solution, enabled by this proposal:
 
@@ -310,7 +310,7 @@ Issues that we discussed:
     1. In abstract terms, this proposal provides a linearized history for a given S3 prefix.
     2. In concrete terms, this proposal provides a linearized history per tenant.
     3. There can be multiple writers at a given time, but only one of them will win to become part of the linearized history.
-4. ************************************************************************************Alternative ideas mentioned during meetings that should be turned into a written prospoal like this one:************************************************************************************
+4. ************************************************************************************Alternative ideas mentioned during meetings that should be turned into a written proposal like this one:************************************************************************************
     1. @Dmitry Rodionov : having linearized storage of index_part.json in some database that allows serializable transactions / atomic compare-and-swap PUT
     2. @Dmitry Rodionov :
     3. @Stas : something like this scheme, but somehow find a way to equate attachment duration with transaction duration, without losing work if pageserver dies months after attachment.

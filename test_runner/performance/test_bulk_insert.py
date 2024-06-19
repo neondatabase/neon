@@ -1,10 +1,11 @@
 from contextlib import closing
 
+import pytest
 from fixtures.benchmark_fixture import MetricReport
+from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare, PgCompare
 from fixtures.pageserver.utils import wait_tenant_status_404
 from fixtures.pg_version import PgVersion
-from fixtures.types import Lsn
 
 
 #
@@ -17,6 +18,7 @@ from fixtures.types import Lsn
 # 3. Disk space used
 # 4. Peak memory usage
 #
+@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/7124")
 def test_bulk_insert(neon_with_baseline: PgCompare):
     env = neon_with_baseline
 
@@ -56,12 +58,12 @@ def measure_recovery_time(env: NeonCompare):
     # Delete the Tenant in the pageserver: this will drop local and remote layers, such that
     # when we "create" the Tenant again, we will replay the WAL from the beginning.
     #
-    # This is a "weird" thing to do, and can confuse the attachment service as we're re-using
+    # This is a "weird" thing to do, and can confuse the storage controller as we're re-using
     # the same tenant ID for a tenant that is logically different from the pageserver's point
     # of view, but the same as far as the safekeeper/WAL is concerned.  To work around that,
     # we will explicitly create the tenant in the same generation that it was previously
     # attached in.
-    attach_status = env.env.attachment_service.inspect(tenant_id=env.tenant)
+    attach_status = env.env.storage_controller.inspect(tenant_shard_id=env.tenant)
     assert attach_status is not None
     (attach_gen, _) = attach_status
 

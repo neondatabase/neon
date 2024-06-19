@@ -14,14 +14,15 @@ OBJS = \
 	relsize_cache.o \
 	walproposer.o \
 	walproposer_pg.o \
-	control_plane_connector.o
+	control_plane_connector.o \
+	walsender_hooks.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
 SHLIB_LINK = -lcurl
 
 EXTENSION = neon
-DATA = neon--1.0.sql neon--1.0--1.1.sql
+DATA = neon--1.0.sql neon--1.0--1.1.sql neon--1.1--1.2.sql neon--1.2--1.3.sql neon--1.3--1.2.sql neon--1.2--1.1.sql neon--1.1--1.0.sql
 PGFILEDESC = "neon - cloud storage for PostgreSQL"
 
 EXTRA_CLEAN = \

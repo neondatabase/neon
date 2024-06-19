@@ -1,7 +1,7 @@
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::LayerFileName;
+use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::storage_layer::PersistentLayerDesc;
 use pageserver_api::shard::TenantShardId;
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
@@ -28,7 +28,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
     let mut updates = layer_map.batch_update();
     for fname in filenames {
         let fname = fname.unwrap();
-        let fname = LayerFileName::from_str(&fname).unwrap();
+        let fname = LayerName::from_str(&fname).unwrap();
         let layer = PersistentLayerDesc::from(fname);
 
         let lsn_range = layer.get_lsn_range();

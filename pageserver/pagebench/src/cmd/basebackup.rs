@@ -1,4 +1,6 @@
 use anyhow::Context;
+use pageserver_api::shard::TenantShardId;
+use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
 use pageserver_client::page_service::BasebackupRequest;
 
 use utils::id::TenantTimelineId;
@@ -7,7 +9,7 @@ use utils::lsn::Lsn;
 use rand::prelude::*;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -24,8 +26,8 @@ use crate::util::{request_stats, tokio_thread_local_stats};
 pub(crate) struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
-    #[clap(long, default_value = "localhost:64000")]
-    page_service_host_port: String,
+    #[clap(long, default_value = "postgres://postgres@localhost:64000")]
+    page_service_connstring: String,
     #[clap(long)]
     pageserver_jwt: Option<String>,
     #[clap(long, default_value = "1")]
@@ -92,10 +94,12 @@ async fn main_impl(
     for timeline in &timelines {
         js.spawn({
             let timeline = *timeline;
-            // FIXME: this triggers initial logical size calculation
-            // https://github.com/neondatabase/neon/issues/6168
             let info = mgmt_api_client
-                .timeline_info(timeline.tenant_id, timeline.timeline_id)
+                .timeline_info(
+                    TenantShardId::unsharded(timeline.tenant_id),
+                    timeline.timeline_id,
+                    ForceAwaitLogicalSize::No,
+                )
                 .await
                 .unwrap();
             async move {
@@ -227,12 +231,9 @@ async fn client(
 ) {
     start_work_barrier.wait().await;
 
-    let client = pageserver_client::page_service::Client::new(crate::util::connstring::connstring(
-        &args.page_service_host_port,
-        args.pageserver_jwt.as_deref(),
-    ))
-    .await
-    .unwrap();
+    let client = pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
+        .await
+        .unwrap();
 
     while let Some(Work { lsn, gzip }) = work.recv().await {
         let start = Instant::now();
@@ -260,7 +261,7 @@ async fn client(
                 }
             })
             .await;
-        debug!("basebackup size is {} bytes", size.load(Ordering::Relaxed));
+        info!("basebackup size is {} bytes", size.load(Ordering::Relaxed));
         let elapsed = start.elapsed();
         live_stats.inc();
         STATS.with(|stats| {

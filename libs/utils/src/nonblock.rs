@@ -5,10 +5,10 @@ use std::os::unix::io::RawFd;
 pub fn set_nonblock(fd: RawFd) -> Result<(), std::io::Error> {
     let bits = fcntl(fd, F_GETFL)?;
 
-    // Safety: If F_GETFL returns some unknown bits, they should be valid
+    // If F_GETFL returns some unknown bits, they should be valid
     // for passing back to F_SETFL, too. If we left them out, the F_SETFL
     // would effectively clear them, which is not what we want.
-    let mut flags = unsafe { OFlag::from_bits_unchecked(bits) };
+    let mut flags = OFlag::from_bits_retain(bits);
     flags |= OFlag::O_NONBLOCK;
 
     fcntl(fd, F_SETFL(flags))?;

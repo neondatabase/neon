@@ -9,7 +9,12 @@
 //! may lead to a data loss.
 //!
 use anyhow::bail;
-use pageserver_api::models;
+use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::CompactionAlgorithm;
+use pageserver_api::models::CompactionAlgorithmSettings;
+use pageserver_api::models::EvictionPolicy;
+use pageserver_api::models::LsnLease;
+use pageserver_api::models::{self, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -19,6 +24,7 @@ use std::time::Duration;
 use utils::generation::Generation;
 
 pub mod defaults {
+
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
     // would be more appropriate. But a low value forces the code to be exercised more,
     // which is good for now to trigger bugs.
@@ -26,12 +32,17 @@ pub mod defaults {
     pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
     pub const DEFAULT_CHECKPOINT_TIMEOUT: &str = "10 m";
 
+    // FIXME the below configs are only used by legacy algorithm. The new algorithm
+    // has different parameters.
+
     // Target file size, when creating image and delta layers.
     // This parameter determines L1 layer file size.
     pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
 
     pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
     pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
+    pub const DEFAULT_COMPACTION_ALGORITHM: super::CompactionAlgorithm =
+        super::CompactionAlgorithm::Legacy;
 
     pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
 
@@ -44,13 +55,19 @@ pub mod defaults {
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
-    pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
+    // The default limit on WAL lag should be set to avoid causing disconnects under high throughput
+    // scenarios: since the broker stats are updated ~1/s, a value of 1GiB should be sufficient for
+    // throughputs up to 1GiB/s per timeline.
+    pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 1024 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
+    // By default ingest enough WAL for two new L0 layers before checking if new image
+    // image layers should be created.
+    pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum AttachmentMode {
     /// Our generation is current as far as we know, and as far as we know we are the only attached
     /// pageserver.  This is the "normal" attachment mode.
@@ -65,7 +82,7 @@ pub(crate) enum AttachmentMode {
     Stale,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AttachedLocationConfig {
     pub(crate) generation: Generation,
     pub(crate) attach_mode: AttachmentMode,
@@ -167,14 +184,17 @@ impl LocationConf {
     /// For use when loading from a legacy configuration: presence of a tenant
     /// implies it is in AttachmentMode::Single, which used to be the only
     /// possible state.  This function should eventually be removed.
-    pub(crate) fn attached_single(tenant_conf: TenantConfOpt, generation: Generation) -> Self {
+    pub(crate) fn attached_single(
+        tenant_conf: TenantConfOpt,
+        generation: Generation,
+        shard_params: &models::ShardParameters,
+    ) -> Self {
         Self {
             mode: LocationMode::Attached(AttachedLocationConfig {
                 generation,
                 attach_mode: AttachmentMode::Single,
             }),
-            // Legacy configuration loads are always from tenants created before sharding existed.
-            shard: ShardIdentity::unsharded(),
+            shard: ShardIdentity::from_params(ShardNumber(0), shard_params),
             tenant_conf,
         }
     }
@@ -182,16 +202,17 @@ impl LocationConf {
     /// For use when attaching/re-attaching: update the generation stored in this
     /// structure.  If we were in a secondary state, promote to attached (posession
     /// of a fresh generation implies this).
-    pub(crate) fn attach_in_generation(&mut self, generation: Generation) {
+    pub(crate) fn attach_in_generation(&mut self, mode: AttachmentMode, generation: Generation) {
         match &mut self.mode {
             LocationMode::Attached(attach_conf) => {
                 attach_conf.generation = generation;
+                attach_conf.attach_mode = mode;
             }
             LocationMode::Secondary(_) => {
                 // We are promoted to attached by the control plane's re-attach response
                 self.mode = LocationMode::Attached(AttachedLocationConfig {
                     generation,
-                    attach_mode: AttachmentMode::Single,
+                    attach_mode: mode,
                 })
             }
         }
@@ -247,7 +268,7 @@ impl LocationConf {
         } else {
             ShardIdentity::new(
                 ShardNumber(conf.shard_number),
-                ShardCount(conf.shard_count),
+                ShardCount::new(conf.shard_count),
                 ShardStripeSize(conf.shard_stripe_size),
             )?
         };
@@ -281,7 +302,7 @@ impl Default for LocationConf {
 ///
 /// For storing and transmitting individual tenant's configuration, see
 /// TenantConfOpt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantConf {
     // Flush out an inmemory layer, if it's holding WAL older than this
     // This puts a backstop on how much WAL needs to be re-digested if the
@@ -301,6 +322,7 @@ pub struct TenantConf {
     pub compaction_period: Duration,
     // Level0 delta layer threshold for compaction.
     pub compaction_threshold: usize,
+    pub compaction_algorithm: CompactionAlgorithmSettings,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is #of bytes of WAL.
@@ -335,17 +357,42 @@ pub struct TenantConf {
     // See the corresponding metric's help string.
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Duration,
-    pub gc_feedback: bool,
 
     /// If non-zero, the period between uploads of a heatmap from attached tenants.  This
     /// may be disabled if a Tenant will not have secondary locations: only secondary
     /// locations will use the heatmap uploaded by attached locations.
+    #[serde(with = "humantime_serde")]
     pub heatmap_period: Duration,
+
+    /// If true then SLRU segments are dowloaded on demand, if false SLRU segments are included in basebackup
+    pub lazy_slru_download: bool,
+
+    pub timeline_get_throttle: pageserver_api::models::ThrottleConfig,
+
+    // How much WAL must be ingested before checking again whether a new image layer is required.
+    // Expresed in multiples of checkpoint distance.
+    pub image_layer_creation_check_threshold: u8,
+
+    /// Switch to a new aux file policy. Switching this flag requires the user has not written any aux file into
+    /// the storage before, and this flag cannot be switched back. Otherwise there will be data corruptions.
+    /// There is a `last_aux_file_policy` flag which gets persisted in `index_part.json` once the first aux
+    /// file is written.
+    pub switch_aux_file_policy: AuxFilePolicy,
+
+    /// The length for an explicit LSN lease request.
+    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length: Duration,
+
+    /// The length for an implicit LSN lease granted as part of `get_lsn_by_timestamp` request.
+    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length_for_ts: Duration,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
 /// which parameters are set and which are not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -368,6 +415,10 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub compaction_threshold: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -419,37 +470,33 @@ pub struct TenantConfOpt {
     pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
     #[serde(default)]
-    pub gc_feedback: Option<bool>,
+    pub heatmap_period: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub lazy_slru_download: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline_get_throttle: Option<pageserver_api::models::ThrottleConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_layer_creation_check_threshold: Option<u8>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub switch_aux_file_policy: Option<AuxFilePolicy>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     #[serde(default)]
-    pub heatmap_period: Option<Duration>,
-}
+    pub lsn_lease_length: Option<Duration>,
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum EvictionPolicy {
-    NoEviction,
-    LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
-}
-
-impl EvictionPolicy {
-    pub fn discriminant_str(&self) -> &'static str {
-        match self {
-            EvictionPolicy::NoEviction => "NoEviction",
-            EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvictionPolicyLayerAccessThreshold {
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
-    pub period: Duration,
-    #[serde(with = "humantime_serde")]
-    pub threshold: Duration,
+    #[serde(default)]
+    pub lsn_lease_length_for_ts: Option<Duration>,
 }
 
 impl TenantConfOpt {
@@ -470,6 +517,11 @@ impl TenantConfOpt {
             compaction_threshold: self
                 .compaction_threshold
                 .unwrap_or(global_conf.compaction_threshold),
+            compaction_algorithm: self
+                .compaction_algorithm
+                .as_ref()
+                .unwrap_or(&global_conf.compaction_algorithm)
+                .clone(),
             gc_horizon: self.gc_horizon.unwrap_or(global_conf.gc_horizon),
             gc_period: self.gc_period.unwrap_or(global_conf.gc_period),
             image_creation_threshold: self
@@ -493,8 +545,26 @@ impl TenantConfOpt {
             evictions_low_residence_duration_metric_threshold: self
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
-            gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
             heatmap_period: self.heatmap_period.unwrap_or(global_conf.heatmap_period),
+            lazy_slru_download: self
+                .lazy_slru_download
+                .unwrap_or(global_conf.lazy_slru_download),
+            timeline_get_throttle: self
+                .timeline_get_throttle
+                .clone()
+                .unwrap_or(global_conf.timeline_get_throttle),
+            image_layer_creation_check_threshold: self
+                .image_layer_creation_check_threshold
+                .unwrap_or(global_conf.image_layer_creation_check_threshold),
+            switch_aux_file_policy: self
+                .switch_aux_file_policy
+                .unwrap_or(global_conf.switch_aux_file_policy),
+            lsn_lease_length: self
+                .lsn_lease_length
+                .unwrap_or(global_conf.lsn_lease_length),
+            lsn_lease_length_for_ts: self
+                .lsn_lease_length_for_ts
+                .unwrap_or(global_conf.lsn_lease_length_for_ts),
         }
     }
 }
@@ -510,6 +580,9 @@ impl Default for TenantConf {
             compaction_period: humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
                 .expect("cannot parse default compaction period"),
             compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
+            compaction_algorithm: CompactionAlgorithmSettings {
+                kind: DEFAULT_COMPACTION_ALGORITHM,
+            },
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),
@@ -531,8 +604,13 @@ impl Default for TenantConf {
                 DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
-            gc_feedback: false,
             heatmap_period: Duration::ZERO,
+            lazy_slru_download: false,
+            timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
+            image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
+            switch_aux_file_policy: AuxFilePolicy::default_tenant_config(),
+            lsn_lease_length: LsnLease::DEFAULT_LENGTH,
+            lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
         }
     }
 }
@@ -572,6 +650,44 @@ impl TryFrom<toml_edit::Item> for TenantConfOpt {
             _ => {
                 bail!("expected non-inline table but found {item}")
             }
+        }
+    }
+}
+
+/// This is a conversion from our internal tenant config object to the one used
+/// in external APIs.
+impl From<TenantConfOpt> for models::TenantConfig {
+    fn from(value: TenantConfOpt) -> Self {
+        fn humantime(d: Duration) -> String {
+            format!("{}s", d.as_secs())
+        }
+        Self {
+            checkpoint_distance: value.checkpoint_distance,
+            checkpoint_timeout: value.checkpoint_timeout.map(humantime),
+            compaction_algorithm: value.compaction_algorithm,
+            compaction_target_size: value.compaction_target_size,
+            compaction_period: value.compaction_period.map(humantime),
+            compaction_threshold: value.compaction_threshold,
+            gc_horizon: value.gc_horizon,
+            gc_period: value.gc_period.map(humantime),
+            image_creation_threshold: value.image_creation_threshold,
+            pitr_interval: value.pitr_interval.map(humantime),
+            walreceiver_connect_timeout: value.walreceiver_connect_timeout.map(humantime),
+            lagging_wal_timeout: value.lagging_wal_timeout.map(humantime),
+            max_lsn_wal_lag: value.max_lsn_wal_lag,
+            trace_read_requests: value.trace_read_requests,
+            eviction_policy: value.eviction_policy,
+            min_resident_size_override: value.min_resident_size_override,
+            evictions_low_residence_duration_metric_threshold: value
+                .evictions_low_residence_duration_metric_threshold
+                .map(humantime),
+            heatmap_period: value.heatmap_period.map(humantime),
+            lazy_slru_download: value.lazy_slru_download,
+            timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
+            image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
+            switch_aux_file_policy: value.switch_aux_file_policy,
+            lsn_lease_length: value.lsn_lease_length.map(humantime),
+            lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
         }
     }
 }

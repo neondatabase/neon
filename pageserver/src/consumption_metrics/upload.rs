@@ -1,4 +1,9 @@
+use std::time::SystemTime;
+
+use chrono::{DateTime, Utc};
 use consumption_metrics::{Event, EventChunk, IdempotencyKey, CHUNK_SIZE};
+use remote_storage::{GenericRemoteStorage, RemotePath};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -13,8 +18,9 @@ struct Ids {
     pub(super) timeline_id: Option<TimelineId>,
 }
 
+/// Serialize and write metrics to an HTTP endpoint
 #[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
-pub(super) async fn upload_metrics(
+pub(super) async fn upload_metrics_http(
     client: &reqwest::Client,
     metric_collection_endpoint: &reqwest::Url,
     cancel: &CancellationToken,
@@ -69,6 +75,60 @@ pub(super) async fn upload_metrics(
         failed,
         elapsed_ms = elapsed.as_millis(),
         "done sending metrics"
+    );
+
+    Ok(())
+}
+
+/// Serialize and write metrics to a remote storage object
+#[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
+pub(super) async fn upload_metrics_bucket(
+    client: &GenericRemoteStorage,
+    cancel: &CancellationToken,
+    node_id: &str,
+    metrics: &[RawMetric],
+) -> anyhow::Result<()> {
+    if metrics.is_empty() {
+        // Skip uploads if we have no metrics, so that readers don't have to handle the edge case
+        // of an empty object.
+        return Ok(());
+    }
+
+    // Compose object path
+    let datetime: DateTime<Utc> = SystemTime::now().into();
+    let ts_prefix = datetime.format("year=%Y/month=%m/day=%d/%H:%M:%SZ");
+    let path = RemotePath::from_string(&format!("{ts_prefix}_{node_id}.ndjson.gz"))?;
+
+    // Set up a gzip writer into a buffer
+    let mut compressed_bytes: Vec<u8> = Vec::new();
+    let compressed_writer = std::io::Cursor::new(&mut compressed_bytes);
+    let mut gzip_writer = async_compression::tokio::write::GzipEncoder::new(compressed_writer);
+
+    // Serialize and write into compressed buffer
+    let started_at = std::time::Instant::now();
+    for res in serialize_in_chunks(CHUNK_SIZE, metrics, node_id) {
+        let (_chunk, body) = res?;
+        gzip_writer.write_all(&body).await?;
+    }
+    gzip_writer.flush().await?;
+    gzip_writer.shutdown().await?;
+    let compressed_length = compressed_bytes.len();
+
+    // Write to remote storage
+    client
+        .upload_storage_object(
+            futures::stream::once(futures::future::ready(Ok(compressed_bytes.into()))),
+            compressed_length,
+            &path,
+            cancel,
+        )
+        .await?;
+    let elapsed = started_at.elapsed();
+
+    tracing::info!(
+        compressed_length,
+        elapsed_ms = elapsed.as_millis(),
+        "write metrics bucket at {path}",
     );
 
     Ok(())
@@ -262,35 +322,33 @@ async fn upload(
 ) -> Result<(), UploadError> {
     let warn_after = 3;
     let max_attempts = 10;
+
+    // this is used only with tests so far
+    let last_value = if is_last { "true" } else { "false" };
+
     let res = utils::backoff::retry(
-        move || {
-            let body = body.clone();
-            async move {
-                let res = client
-                    .post(metric_collection_endpoint.clone())
-                    .header(reqwest::header::CONTENT_TYPE, "application/json")
-                    .header(
-                        LAST_IN_BATCH.clone(),
-                        if is_last { "true" } else { "false" },
-                    )
-                    .body(body)
-                    .send()
-                    .await;
+        || async {
+            let res = client
+                .post(metric_collection_endpoint.clone())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(LAST_IN_BATCH.clone(), last_value)
+                .body(body.clone())
+                .send()
+                .await;
 
-                let res = res.and_then(|res| res.error_for_status());
+            let res = res.and_then(|res| res.error_for_status());
 
-                // 10 redirects are normally allowed, so we don't need worry about 3xx
-                match res {
-                    Ok(_response) => Ok(()),
-                    Err(e) => {
-                        let status = e.status().filter(|s| s.is_client_error());
-                        if let Some(status) = status {
-                            // rejection used to be a thing when the server could reject a
-                            // whole batch of metrics if one metric was bad.
-                            Err(UploadError::Rejected(status))
-                        } else {
-                            Err(UploadError::Reqwest(e))
-                        }
+            // 10 redirects are normally allowed, so we don't need worry about 3xx
+            match res {
+                Ok(_response) => Ok(()),
+                Err(e) => {
+                    let status = e.status().filter(|s| s.is_client_error());
+                    if let Some(status) = status {
+                        // rejection used to be a thing when the server could reject a
+                        // whole batch of metrics if one metric was bad.
+                        Err(UploadError::Rejected(status))
+                    } else {
+                        Err(UploadError::Reqwest(e))
                     }
                 }
             }
@@ -299,9 +357,11 @@ async fn upload(
         warn_after,
         max_attempts,
         "upload consumption_metrics",
-        utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
+        cancel,
     )
-    .await;
+    .await
+    .ok_or_else(|| UploadError::Cancelled)
+    .and_then(|x| x);
 
     match &res {
         Ok(_) => {}

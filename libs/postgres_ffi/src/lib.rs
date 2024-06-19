@@ -3,7 +3,7 @@
 #![allow(non_snake_case)]
 // bindgen creates some unsafe code with no doc comments.
 #![allow(clippy::missing_safety_doc)]
-// noted at 1.63 that in many cases there's a u32 -> u32 transmutes in bindgen code.
+// noted at 1.63 that in many cases there's u32 -> u32 transmutes in bindgen code.
 #![allow(clippy::useless_transmute)]
 // modules included with the postgres_ffi macro depend on the types of the specific version's
 // types, and trigger a too eager lint.
@@ -110,6 +110,7 @@ pub mod pg_constants;
 pub mod relfile_utils;
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
+pub use v14::bindings::RepOriginId;
 pub use v14::bindings::{uint32, uint64, Oid};
 pub use v14::bindings::{BlockNumber, OffsetNumber};
 pub use v14::bindings::{MultiXactId, TransactionId};
@@ -118,7 +119,9 @@ pub use v14::bindings::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
 // Likewise for these, although the assumption that these don't change is a little more iffy.
 pub use v14::bindings::{MultiXactOffset, MultiXactStatus};
 pub use v14::bindings::{PageHeaderData, XLogRecord};
-pub use v14::xlog_utils::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
+pub use v14::xlog_utils::{
+    XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
+};
 
 pub use v14::bindings::{CheckPoint, ControlFileData};
 

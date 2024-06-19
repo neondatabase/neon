@@ -2,10 +2,10 @@ import threading
 import time
 
 import pytest
+from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.pageserver.http import TimelineCreate406
-from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar
 
 
@@ -120,12 +120,12 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
 
-    env.pageserver.allowed_errors.extend(
-        [
-            ".*invalid branch start lsn: less than latest GC cutoff.*",
-            ".*invalid branch start lsn: less than planned GC cutoff.*",
-        ]
-    )
+    error_regexes = [
+        ".*invalid branch start lsn: less than latest GC cutoff.*",
+        ".*invalid branch start lsn: less than planned GC cutoff.*",
+    ]
+    env.pageserver.allowed_errors.extend(error_regexes)
+    env.storage_controller.allowed_errors.extend(error_regexes)
 
     # Disable background GC but set the `pitr_interval` to be small, so GC can delete something
     tenant, _ = env.neon_cli.create_tenant(

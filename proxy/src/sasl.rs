@@ -10,7 +10,7 @@ mod channel_binding;
 mod messages;
 mod stream;
 
-use crate::error::UserFacingError;
+use crate::error::{ReportableError, UserFacingError};
 use std::io;
 use thiserror::Error;
 
@@ -33,6 +33,9 @@ pub enum Error {
     #[error("Internal error: missing digest")]
     MissingBinding,
 
+    #[error("could not decode salt: {0}")]
+    Base64(#[from] base64::DecodeError),
+
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -44,6 +47,19 @@ impl UserFacingError for Error {
             ChannelBindingFailed(m) => m.to_string(),
             ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
             _ => "authentication protocol violation".to_string(),
+        }
+    }
+}
+
+impl ReportableError for Error {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        match self {
+            Error::ChannelBindingFailed(_) => crate::error::ErrorKind::User,
+            Error::ChannelBindingBadMethod(_) => crate::error::ErrorKind::User,
+            Error::BadClientMessage(_) => crate::error::ErrorKind::User,
+            Error::MissingBinding => crate::error::ErrorKind::Service,
+            Error::Base64(_) => crate::error::ErrorKind::ControlPlane,
+            Error::Io(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }
 }

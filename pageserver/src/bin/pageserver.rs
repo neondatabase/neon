@@ -1,6 +1,9 @@
+#![recursion_limit = "300"]
+
 //! Main entry point for the Page Server executable.
 
 use std::env::{var, VarError};
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, ops::ControlFlow, str::FromStr};
@@ -16,6 +19,7 @@ use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
 use pageserver::tenant::{secondary, TenantSharedResources};
 use remote_storage::GenericRemoteStorage;
+use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
 use tracing::*;
 
@@ -33,12 +37,10 @@ use pageserver::{
 use postgres_backend::AuthType;
 use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
-use utils::signals::ShutdownSignals;
 use utils::{
     auth::{JwtAuth, SwappableJwtAuth},
     logging, project_build_tag, project_git_version,
     sentry_init::init_sentry,
-    signals::Signal,
     tcp_listener,
 };
 
@@ -120,6 +122,11 @@ fn main() -> anyhow::Result<()> {
         &[("node_id", &conf.id.to_string())],
     );
 
+    // after setting up logging, log the effective IO engine choice and read path implementations
+    info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
+    info!(?conf.get_impl, "starting with get page implementation");
+    info!(?conf.get_vectored_impl, "starting with vectored get page implementation");
+
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
         utils::crashsafe::create_dir_all(conf.tenants_path())
@@ -130,7 +137,7 @@ fn main() -> anyhow::Result<()> {
     let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
-    virtual_file::init(conf.max_file_descriptors);
+    virtual_file::init(conf.max_file_descriptors, conf.virtual_file_io_engine);
     page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
@@ -145,37 +152,34 @@ fn initialize_config(
     workdir: &Utf8Path,
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
     let init = arg_matches.get_flag("init");
-    let update_config = init || arg_matches.get_flag("update-config");
 
-    let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
-        if init {
-            anyhow::bail!(
-                "Config file '{cfg_file_path}' already exists, cannot init it, use --update-config to update it",
-            );
+    let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
+        Ok(mut f) => {
+            if init {
+                anyhow::bail!("config file already exists: {cfg_file_path}");
+            }
+            let md = f.metadata().context("stat config file")?;
+            if md.is_file() {
+                let mut s = String::new();
+                f.read_to_string(&mut s).context("read config file")?;
+                Some(s.parse().context("parse config file toml")?)
+            } else {
+                anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
+            }
         }
-        // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
-            .with_context(|| format!("Failed to read pageserver config at '{cfg_file_path}'"))?;
-        (
-            cfg_file_contents
-                .parse::<toml_edit::Document>()
-                .with_context(|| {
-                    format!("Failed to parse '{cfg_file_path}' as pageserver config")
-                })?,
-            true,
-        )
-    } else if cfg_file_path.exists() {
-        anyhow::bail!("Config file '{cfg_file_path}' exists but is not a regular file");
-    } else {
-        // We're initializing the tenant, so there's no config file yet
-        (
-            DEFAULT_CONFIG_FILE
-                .parse::<toml_edit::Document>()
-                .context("could not parse built-in config file")?,
-            false,
-        )
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
+        }
     };
 
+    let mut effective_config = file_contents.unwrap_or_else(|| {
+        DEFAULT_CONFIG_FILE
+            .parse()
+            .expect("unit tests ensure this works")
+    });
+
+    // Patch with overrides from the command line
     if let Some(values) = arg_matches.get_many::<String>("config-override") {
         for option_line in values {
             let doc = toml_edit::Document::from_str(option_line).with_context(|| {
@@ -183,22 +187,21 @@ fn initialize_config(
             })?;
 
             for (key, item) in doc.iter() {
-                if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
-                    anyhow::bail!("Pageserver config file exists at '{cfg_file_path}' and has node id already, it cannot be overridden");
-                }
-                toml.insert(key, item.clone());
+                effective_config.insert(key, item.clone());
             }
         }
     }
 
-    debug!("Resulting toml: {toml}");
-    let conf = PageServerConf::parse_and_validate(&toml, workdir)
+    debug!("Resulting toml: {effective_config}");
+
+    // Construct the runtime representation
+    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
-    if update_config {
+    if init {
         info!("Writing pageserver config to '{cfg_file_path}'");
 
-        std::fs::write(cfg_file_path, toml.to_string())
+        std::fs::write(cfg_file_path, effective_config.to_string())
             .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
         info!("Config successfully written to '{cfg_file_path}'")
     }
@@ -274,6 +277,12 @@ fn start_pageserver(
     );
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
     set_launch_timestamp_metric(launch_ts);
+    #[cfg(target_os = "linux")]
+    metrics::register_internal(Box::new(metrics::more_process_metrics::Collector::new())).unwrap();
+    metrics::register_internal(Box::new(
+        pageserver::metrics::tokio_epoll_uring::Collector::new(),
+    ))
+    .unwrap();
     pageserver::preinitialize_metrics();
 
     // If any failpoints were set from FAILPOINTS environment variable,
@@ -308,6 +317,7 @@ fn start_pageserver(
     let http_listener = tcp_listener::bind(http_addr)?;
 
     let pg_addr = &conf.listen_pg_addr;
+
     info!("Starting pageserver pg protocol handler on {pg_addr}");
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
@@ -505,16 +515,12 @@ fn start_pageserver(
         }
     });
 
-    let secondary_controller = if let Some(remote_storage) = &remote_storage {
-        secondary::spawn_tasks(
-            tenant_manager.clone(),
-            remote_storage.clone(),
-            background_jobs_barrier.clone(),
-            shutdown_pageserver.clone(),
-        )
-    } else {
-        secondary::null_controller()
-    };
+    let secondary_controller = secondary::spawn_tasks(
+        tenant_manager.clone(),
+        remote_storage.clone(),
+        background_jobs_barrier.clone(),
+        shutdown_pageserver.clone(),
+    );
 
     // shared state between the disk-usage backed eviction background task and the http endpoint
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
@@ -522,14 +528,13 @@ fn start_pageserver(
     // been configured.
     let disk_usage_eviction_state: Arc<disk_usage_eviction_task::State> = Arc::default();
 
-    if let Some(remote_storage) = &remote_storage {
-        launch_disk_usage_global_eviction_task(
-            conf,
-            remote_storage.clone(),
-            disk_usage_eviction_state.clone(),
-            background_jobs_barrier.clone(),
-        )?;
-    }
+    launch_disk_usage_global_eviction_task(
+        conf,
+        remote_storage.clone(),
+        disk_usage_eviction_state.clone(),
+        tenant_manager.clone(),
+        background_jobs_barrier.clone(),
+    )?;
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.
@@ -539,7 +544,7 @@ fn start_pageserver(
         let router_state = Arc::new(
             http::routes::State::new(
                 conf,
-                tenant_manager,
+                tenant_manager.clone(),
                 http_auth.clone(),
                 remote_storage.clone(),
                 broker_client.clone(),
@@ -589,32 +594,37 @@ fn start_pageserver(
             None,
             "consumption metrics collection",
             true,
-            async move {
-                // first wait until background jobs are cleared to launch.
-                //
-                // this is because we only process active tenants and timelines, and the
-                // Timeline::get_current_logical_size will spawn the logical size calculation,
-                // which will not be rate-limited.
-                let cancel = task_mgr::shutdown_token();
+            {
+                let tenant_manager = tenant_manager.clone();
+                async move {
+                    // first wait until background jobs are cleared to launch.
+                    //
+                    // this is because we only process active tenants and timelines, and the
+                    // Timeline::get_current_logical_size will spawn the logical size calculation,
+                    // which will not be rate-limited.
+                    let cancel = task_mgr::shutdown_token();
 
-                tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()); },
-                    _ = background_jobs_barrier.wait() => {}
-                };
+                    tokio::select! {
+                        _ = cancel.cancelled() => { return Ok(()); },
+                        _ = background_jobs_barrier.wait() => {}
+                    };
 
-                pageserver::consumption_metrics::collect_metrics(
-                    metric_collection_endpoint,
-                    conf.metric_collection_interval,
-                    conf.cached_metric_collection_interval,
-                    conf.synthetic_size_calculation_interval,
-                    conf.id,
-                    local_disk_storage,
-                    cancel,
-                    metrics_ctx,
-                )
-                .instrument(info_span!("metrics_collection"))
-                .await?;
-                Ok(())
+                    pageserver::consumption_metrics::collect_metrics(
+                        tenant_manager,
+                        metric_collection_endpoint,
+                        &conf.metric_collection_bucket,
+                        conf.metric_collection_interval,
+                        conf.cached_metric_collection_interval,
+                        conf.synthetic_size_calculation_interval,
+                        conf.id,
+                        local_disk_storage,
+                        cancel,
+                        metrics_ctx,
+                    )
+                    .instrument(info_span!("metrics_collection"))
+                    .await?;
+                    Ok(())
+                }
             },
         );
     }
@@ -637,17 +647,20 @@ fn start_pageserver(
             None,
             "libpq endpoint listener",
             true,
-            async move {
-                page_service::libpq_listener_main(
-                    conf,
-                    broker_client,
-                    pg_auth,
-                    pageserver_listener,
-                    conf.pg_auth_type,
-                    libpq_ctx,
-                    task_mgr::shutdown_token(),
-                )
-                .await
+            {
+                let tenant_manager = tenant_manager.clone();
+                async move {
+                    page_service::libpq_listener_main(
+                        tenant_manager,
+                        broker_client,
+                        pg_auth,
+                        pageserver_listener,
+                        conf.pg_auth_type,
+                        libpq_ctx,
+                        task_mgr::shutdown_token(),
+                    )
+                    .await
+                }
             },
         );
     }
@@ -655,44 +668,40 @@ fn start_pageserver(
     let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
     // All started up! Now just sit and wait for shutdown signal.
-    ShutdownSignals::handle(|signal| match signal {
-        Signal::Quit => {
-            info!(
-                "Got {}. Terminating in immediate shutdown mode",
-                signal.name()
-            );
-            std::process::exit(111);
-        }
 
-        Signal::Interrupt | Signal::Terminate => {
-            info!(
-                "Got {}. Terminating gracefully in fast shutdown mode",
-                signal.name()
-            );
+    {
+        BACKGROUND_RUNTIME.block_on(async move {
+            let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt()).unwrap();
+            let mut sigterm = tokio::signal::unix::signal(SignalKind::terminate()).unwrap();
+            let mut sigquit = tokio::signal::unix::signal(SignalKind::quit()).unwrap();
+            let signal = tokio::select! {
+                _ = sigquit.recv() => {
+                    info!("Got signal SIGQUIT. Terminating in immediate shutdown mode",);
+                    std::process::exit(111);
+                }
+                _ = sigint.recv() => { "SIGINT" },
+                _ = sigterm.recv() => { "SIGTERM" },
+            };
+
+            info!("Got signal {signal}. Terminating gracefully in fast shutdown mode",);
 
             // This cancels the `shutdown_pageserver` cancellation tree.
             // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
             // The plan is to change that over time.
             shutdown_pageserver.take();
-            let bg_remote_storage = remote_storage.clone();
-            let bg_deletion_queue = deletion_queue.clone();
-            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
-                bg_remote_storage.map(|_| bg_deletion_queue),
-                0,
-            ));
+            pageserver::shutdown_pageserver(&tenant_manager, deletion_queue.clone(), 0).await;
             unreachable!()
-        }
-    })
+        })
+    }
 }
 
 fn create_remote_storage_client(
     conf: &'static PageServerConf,
-) -> anyhow::Result<Option<GenericRemoteStorage>> {
+) -> anyhow::Result<GenericRemoteStorage> {
     let config = if let Some(config) = &conf.remote_storage_config {
         config
     } else {
-        tracing::warn!("no remote storage configured, this is a deprecated configuration");
-        return Ok(None);
+        anyhow::bail!("no remote storage configured, this is a deprecated configuration");
     };
 
     // Create the client
@@ -712,7 +721,7 @@ fn create_remote_storage_client(
             GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
     }
 
-    Ok(Some(remote_storage))
+    Ok(remote_storage)
 }
 
 fn cli() -> Command {
@@ -734,17 +743,12 @@ fn cli() -> Command {
         // See `settings.md` for more details on the extra configuration patameters pageserver can process
         .arg(
             Arg::new("config-override")
+                .long("config-override")
                 .short('c')
                 .num_args(1)
                 .action(ArgAction::Append)
                 .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there). \
                 Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
-        )
-        .arg(
-            Arg::new("update-config")
-                .long("update-config")
-                .action(ArgAction::SetTrue)
-                .help("Update the config file when started"),
         )
         .arg(
             Arg::new("enabled-features")

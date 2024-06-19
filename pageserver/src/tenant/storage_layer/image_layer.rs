@@ -25,31 +25,39 @@
 //! actual page images are stored in the "values" part.
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
-use crate::page_cache::PAGE_SZ;
-use crate::repository::{Key, KEY_SIZE};
+use crate::page_cache::{self, FileId, PAGE_SZ};
+use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
     LayerAccessStats, ValueReconstructResult, ValueReconstructState,
 };
-use crate::tenant::Timeline;
-use crate::virtual_file::VirtualFile;
+use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::vectored_blob_io::{
+    BlobFlag, MaxVectoredReadBytes, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
+};
+use crate::tenant::{PageReconstructError, Timeline};
+use crate::virtual_file::{self, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
-use anyhow::{bail, ensure, Context, Result};
-use bytes::Bytes;
+use anyhow::{anyhow, bail, ensure, Context, Result};
+use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
+use itertools::Itertools;
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use tokio_stream::StreamExt;
 use tracing::*;
 
 use utils::{
@@ -58,8 +66,10 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::ImageFileName;
-use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer};
+use super::layer_name::ImageLayerName;
+use super::{
+    AsLayerDesc, Layer, LayerName, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -148,10 +158,13 @@ pub struct ImageLayerInner {
     index_start_blk: u32,
     index_root_blk: u32,
 
+    key_range: Range<Key>,
     lsn: Lsn,
 
-    /// Reader object for reading blocks from the file.
-    file: FileBlockReader,
+    file: VirtualFile,
+    file_id: FileId,
+
+    max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
 }
 
 impl std::fmt::Debug for ImageLayerInner {
@@ -165,9 +178,12 @@ impl std::fmt::Debug for ImageLayerInner {
 
 impl ImageLayerInner {
     pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let file = &self.file;
-        let tree_reader =
-            DiskBtreeReader::<_, KEY_SIZE>::new(self.index_start_blk, self.index_root_blk, file);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader = DiskBtreeReader::<_, KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            block_reader,
+        );
 
         tree_reader.dump().await?;
 
@@ -219,7 +235,7 @@ impl ImageLayer {
         conf: &PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        fname: &ImageFileName,
+        fname: &ImageLayerName,
     ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -250,18 +266,18 @@ impl ImageLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, ctx)
+        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
             .await
             .and_then(|res| res)?;
 
         // not production code
-        let actual_filename = path.file_name().unwrap().to_owned();
-        let expected_filename = self.layer_desc().filename().file_name();
+        let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
+        let expected_layer_name = self.layer_desc().layer_name();
 
-        if actual_filename != expected_filename {
+        if actual_layer_name != expected_layer_name {
             println!("warning: filename does not match what is expected from in-file summary");
-            println!("actual: {:?}", actual_filename);
-            println!("expected: {:?}", expected_filename);
+            println!("actual: {:?}", actual_layer_name.to_string());
+            println!("expected: {:?}", expected_layer_name.to_string());
         }
 
         Ok(loaded)
@@ -325,34 +341,29 @@ impl ImageLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let file = VirtualFile::open_with_options(
+        let mut file = VirtualFile::open_with_options(
             path,
-            &*std::fs::OpenOptions::new().read(true).write(true),
+            virtual_file::OpenOptions::new().read(true).write(true),
+            ctx,
         )
         .await
         .with_context(|| format!("Failed to open file '{}'", path))?;
-        let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0, ctx).await?;
+        let file_id = page_cache::next_file_id();
+        let block_reader = FileBlockReader::new(&file, file_id);
+        let summary_blk = block_reader.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
-        let mut file = file.file;
         if actual_summary.magic != IMAGE_FILE_MAGIC {
             return Err(RewriteSummaryError::MagicMismatch);
         }
 
         let new_summary = rewrite(actual_summary);
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
-        if buf.spilled() {
-            // The code in ImageLayerWriterInner just warn!()s for this.
-            // It should probably error out as well.
-            return Err(RewriteSummaryError::Other(anyhow::anyhow!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            )));
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(buf, ctx).await;
+        res?;
         Ok(())
     }
 }
@@ -365,14 +376,16 @@ impl ImageLayerInner {
         path: &Utf8Path,
         lsn: Lsn,
         summary: Option<Summary>,
+        max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
-        let file = match VirtualFile::open(path).await {
+        let file = match VirtualFile::open(path, ctx).await {
             Ok(file) => file,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
         };
-        let file = FileBlockReader::new(file);
-        let summary_blk = match file.read_blk(0, ctx).await {
+        let file_id = page_cache::next_file_id();
+        let block_reader = FileBlockReader::new(&file, file_id);
+        let summary_blk = match block_reader.read_blk(0, ctx).await {
             Ok(blk) => blk,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
         };
@@ -388,6 +401,8 @@ impl ImageLayerInner {
             // production code path
             expected_summary.index_start_blk = actual_summary.index_start_blk;
             expected_summary.index_root_blk = actual_summary.index_root_blk;
+            // mask out the timeline_id, but still require the layers to be from the same tenant
+            expected_summary.timeline_id = actual_summary.timeline_id;
 
             if actual_summary != expected_summary {
                 bail!(
@@ -403,6 +418,9 @@ impl ImageLayerInner {
             index_root_blk: actual_summary.index_root_blk,
             lsn,
             file,
+            file_id,
+            max_vectored_read_bytes,
+            key_range: actual_summary.key_range,
         }))
     }
 
@@ -412,8 +430,9 @@ impl ImageLayerInner {
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
-        let file = &self.file;
-        let tree_reader = DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, file);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -426,7 +445,7 @@ impl ImageLayerInner {
             )
             .await?
         {
-            let blob = file
+            let blob = block_reader
                 .block_cursor()
                 .read_blob(
                     offset,
@@ -442,6 +461,232 @@ impl ImageLayerInner {
             Ok(ValueReconstructResult::Complete)
         } else {
             Ok(ValueReconstructResult::Missing)
+        }
+    }
+
+    // Look up the keys in the provided keyspace and update
+    // the reconstruct state with whatever is found.
+    pub(super) async fn get_values_reconstruct_data(
+        &self,
+        keyspace: KeySpace,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<(), GetVectoredError> {
+        let reads = self
+            .plan_reads(keyspace, None, ctx)
+            .await
+            .map_err(GetVectoredError::Other)?;
+
+        self.do_reads_and_update_state(reads, reconstruct_state, ctx)
+            .await;
+
+        reconstruct_state.on_image_layer_visited(&self.key_range);
+
+        Ok(())
+    }
+
+    /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
+    #[cfg(test)]
+    pub(super) async fn load_key_values(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
+        let mut result = Vec::new();
+        let mut stream = Box::pin(tree_reader.get_stream_from(&[0; KEY_SIZE], ctx));
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let cursor = block_reader.block_cursor();
+        while let Some(item) = stream.next().await {
+            // TODO: dedup code with get_reconstruct_value
+            let (raw_key, offset) = item?;
+            let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+            // TODO: ctx handling and sharding
+            let blob = cursor
+                .read_blob(offset, ctx)
+                .await
+                .with_context(|| format!("failed to read value from offset {}", offset))?;
+            let value = Bytes::from(blob);
+            result.push((key, self.lsn, Value::Image(value)));
+        }
+        Ok(result)
+    }
+
+    /// Traverse the layer's index to build read operations on the overlap of the input keyspace
+    /// and the keys in this layer.
+    ///
+    /// If shard_identity is provided, it will be used to filter keys down to those stored on
+    /// this shard.
+    async fn plan_reads(
+        &self,
+        keyspace: KeySpace,
+        shard_identity: Option<&ShardIdentity>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<VectoredRead>> {
+        let mut planner = VectoredReadPlanner::new(
+            self.max_vectored_read_bytes
+                .expect("Layer is loaded with max vectored bytes config")
+                .0
+                .into(),
+        );
+
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
+
+        let ctx = RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::ImageLayerBtreeNode)
+            .build();
+
+        for range in keyspace.ranges.iter() {
+            let mut range_end_handled = false;
+            let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+            range.start.write_to_byte_slice(&mut search_key);
+
+            let index_stream = tree_reader.get_stream_from(&search_key, &ctx);
+            let mut index_stream = std::pin::pin!(index_stream);
+
+            while let Some(index_entry) = index_stream.next().await {
+                let (raw_key, offset) = index_entry?;
+
+                let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                assert!(key >= range.start);
+
+                let flag = if let Some(shard_identity) = shard_identity {
+                    if shard_identity.is_key_disposable(&key) {
+                        BlobFlag::Ignore
+                    } else {
+                        BlobFlag::None
+                    }
+                } else {
+                    BlobFlag::None
+                };
+
+                if key >= range.end {
+                    planner.handle_range_end(offset);
+                    range_end_handled = true;
+                    break;
+                } else {
+                    planner.handle(key, self.lsn, offset, flag);
+                }
+            }
+
+            if !range_end_handled {
+                let payload_end = self.index_start_blk as u64 * PAGE_SZ as u64;
+                planner.handle_range_end(payload_end);
+            }
+        }
+
+        Ok(planner.finish())
+    }
+
+    /// Given a key range, select the parts of that range that should be retained by the ShardIdentity,
+    /// then execute vectored GET operations, passing the results of all read keys into the writer.
+    pub(super) async fn filter(
+        &self,
+        shard_identity: &ShardIdentity,
+        writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<usize> {
+        // Fragment the range into the regions owned by this ShardIdentity
+        let plan = self
+            .plan_reads(
+                KeySpace {
+                    // If asked for the total key space, plan_reads will give us all the keys in the layer
+                    ranges: vec![Key::MIN..Key::MAX],
+                },
+                Some(shard_identity),
+                ctx,
+            )
+            .await?;
+
+        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        let mut key_count = 0;
+        for read in plan.into_iter() {
+            let buf_size = read.size();
+
+            let buf = BytesMut::with_capacity(buf_size);
+            let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
+
+            let frozen_buf = blobs_buf.buf.freeze();
+
+            for meta in blobs_buf.blobs.iter() {
+                let img_buf = frozen_buf.slice(meta.start..meta.end);
+
+                key_count += 1;
+                writer
+                    .put_image(meta.meta.key, img_buf, ctx)
+                    .await
+                    .context(format!("Storing key {}", meta.meta.key))?;
+            }
+        }
+
+        Ok(key_count)
+    }
+
+    async fn do_reads_and_update_state(
+        &self,
+        reads: Vec<VectoredRead>,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) {
+        let max_vectored_read_bytes = self
+            .max_vectored_read_bytes
+            .expect("Layer is loaded with max vectored bytes config")
+            .0
+            .into();
+
+        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        for read in reads.into_iter() {
+            let buf_size = read.size();
+
+            if buf_size > max_vectored_read_bytes {
+                // If the read is oversized, it should only contain one key.
+                let offenders = read
+                    .blobs_at
+                    .as_slice()
+                    .iter()
+                    .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                    .join(", ");
+                tracing::warn!(
+                    "Oversized vectored read ({} > {}) for keys {}",
+                    buf_size,
+                    max_vectored_read_bytes,
+                    offenders
+                );
+            }
+
+            let buf = BytesMut::with_capacity(buf_size);
+            let res = vectored_blob_reader.read_blobs(&read, buf, ctx).await;
+
+            match res {
+                Ok(blobs_buf) => {
+                    let frozen_buf = blobs_buf.buf.freeze();
+
+                    for meta in blobs_buf.blobs.iter() {
+                        let img_buf = frozen_buf.slice(meta.start..meta.end);
+                        reconstruct_state.update_key(
+                            &meta.meta.key,
+                            self.lsn,
+                            Value::Image(img_buf),
+                        );
+                    }
+                }
+                Err(err) => {
+                    let kind = err.kind();
+                    for (_, blob_meta) in read.blobs_at.as_slice() {
+                        reconstruct_state.on_key_error(
+                            blob_meta.key,
+                            PageReconstructError::from(anyhow!(
+                                "Failed to read blobs from virtual file {}: {}",
+                                self.file.path,
+                                kind
+                            )),
+                        );
+                    }
+                }
+            };
         }
     }
 }
@@ -479,6 +724,7 @@ impl ImageLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
@@ -486,17 +732,22 @@ impl ImageLayerWriterInner {
             conf,
             timeline_id,
             tenant_shard_id,
-            &ImageFileName {
+            &ImageLayerName {
                 key_range: key_range.clone(),
                 lsn,
             },
         );
-        info!("new image layer {path}");
-        let mut file = VirtualFile::open_with_options(
-            &path,
-            std::fs::OpenOptions::new().write(true).create_new(true),
-        )
-        .await?;
+        trace!("creating image layer {}", path);
+        let mut file = {
+            VirtualFile::open_with_options(
+                &path,
+                virtual_file::OpenOptions::new()
+                    .write(true)
+                    .create_new(true),
+                ctx,
+            )
+            .await?
+        };
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
@@ -524,9 +775,16 @@ impl ImageLayerWriterInner {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
+    async fn put_image(
+        &mut self,
+        key: Key,
+        img: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let off = self.blob_writer.write_blob(img).await?;
+        let (_img, res) = self.blob_writer.write_blob(img, ctx).await;
+        // TODO: re-use the buffer for `img` further upstack
+        let off = res?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -538,7 +796,11 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    async fn finish(self, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
+    async fn finish(
+        self,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -549,7 +811,8 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref()).await?;
+            let (_buf, res) = file.write_all(buf, ctx).await;
+            res?;
         }
 
         // Fill in the summary on blk 0
@@ -564,17 +827,12 @@ impl ImageLayerWriterInner {
             index_root_blk,
         };
 
-        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        let mut buf = Vec::with_capacity(PAGE_SZ);
+        // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
-        if buf.spilled() {
-            // This is bad as we only have one free block for the summary
-            warn!(
-                "Used more than one page size for summary buffer: {}",
-                buf.len()
-            );
-        }
         file.seek(SeekFrom::Start(0)).await?;
-        file.write_all(&buf).await?;
+        let (_buf, res) = file.write_all(buf, ctx).await;
+        res?;
 
         let metadata = file
             .metadata()
@@ -599,7 +857,7 @@ impl ImageLayerWriterInner {
         // FIXME: why not carry the virtualfile here, it supports renaming?
         let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
 
-        trace!("created image layer {}", layer.local_path());
+        info!("created image layer {}", layer.local_path());
 
         Ok(layer)
     }
@@ -641,10 +899,11 @@ impl ImageLayerWriter {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn)
+                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn, ctx)
                     .await?,
             ),
         })
@@ -655,8 +914,13 @@ impl ImageLayerWriter {
     ///
     /// The page versions must be appended in blknum order.
     ///
-    pub async fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_image(key, img).await
+    pub async fn put_image(
+        &mut self,
+        key: Key,
+        img: Bytes,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
     ///
@@ -665,8 +929,9 @@ impl ImageLayerWriter {
     pub(crate) async fn finish(
         mut self,
         timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<super::ResidentLayer> {
-        self.inner.take().unwrap().finish(timeline).await
+        self.inner.take().unwrap().finish(timeline, ctx).await
     }
 }
 
@@ -674,6 +939,199 @@ impl Drop for ImageLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             inner.blob_writer.into_inner().remove();
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use pageserver_api::{
+        key::Key,
+        shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
+    };
+    use utils::{
+        generation::Generation,
+        id::{TenantId, TimelineId},
+        lsn::Lsn,
+    };
+
+    use crate::{
+        tenant::{config::TenantConf, harness::TenantHarness},
+        DEFAULT_PG_VERSION,
+    };
+
+    use super::ImageLayerWriter;
+
+    #[tokio::test]
+    async fn image_layer_rewrite() {
+        let tenant_conf = TenantConf {
+            gc_period: Duration::ZERO,
+            compaction_period: Duration::ZERO,
+            ..TenantConf::default()
+        };
+        let tenant_id = TenantId::generate();
+        let mut gen = Generation::new(0xdead0001);
+        let mut get_next_gen = || {
+            let ret = gen;
+            gen = gen.next();
+            ret
+        };
+        // The LSN at which we will create an image layer to filter
+        let lsn = Lsn(0xdeadbeef0000);
+        let timeline_id = TimelineId::generate();
+
+        //
+        // Create an unsharded parent with a layer.
+        //
+
+        let harness = TenantHarness::create_custom(
+            "test_image_layer_rewrite--parent",
+            tenant_conf.clone(),
+            tenant_id,
+            ShardIdentity::unsharded(),
+            get_next_gen(),
+        )
+        .unwrap();
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_test_timeline(timeline_id, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        // This key range contains several 0x8000 page stripes, only one of which belongs to shard zero
+        let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
+        let input_end = Key::from_hex("000000067f00000001000000ae0000020000").unwrap();
+        let range = input_start..input_end;
+
+        // Build an image layer to filter
+        let resident = {
+            let mut writer = ImageLayerWriter::new(
+                harness.conf,
+                timeline_id,
+                harness.tenant_shard_id,
+                &range,
+                lsn,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+            let foo_img = Bytes::from_static(&[1, 2, 3, 4]);
+            let mut key = range.start;
+            while key < range.end {
+                writer.put_image(key, foo_img.clone(), &ctx).await.unwrap();
+
+                key = key.next();
+            }
+            writer.finish(&timeline, &ctx).await.unwrap()
+        };
+        let original_size = resident.metadata().file_size;
+
+        //
+        // Create child shards and do the rewrite, exercising filter().
+        // TODO: abstraction in TenantHarness for splits.
+        //
+
+        // Filter for various shards: this exercises cases like values at start of key range, end of key
+        // range, middle of key range.
+        let shard_count = ShardCount::new(4);
+        for shard_number in 0..shard_count.count() {
+            //
+            // mimic the shard split
+            //
+            let shard_identity = ShardIdentity::new(
+                ShardNumber(shard_number),
+                shard_count,
+                ShardStripeSize(0x8000),
+            )
+            .unwrap();
+            let harness = TenantHarness::create_custom(
+                Box::leak(Box::new(format!(
+                    "test_image_layer_rewrite--child{}",
+                    shard_identity.shard_slug()
+                ))),
+                tenant_conf.clone(),
+                tenant_id,
+                shard_identity,
+                // NB: in reality, the shards would each fork off their own gen number sequence from the parent.
+                // But here, all we care about is that the gen number is unique.
+                get_next_gen(),
+            )
+            .unwrap();
+            let (tenant, ctx) = harness.load().await;
+            let timeline = tenant
+                .create_test_timeline(timeline_id, lsn, DEFAULT_PG_VERSION, &ctx)
+                .await
+                .unwrap();
+
+            //
+            // use filter() and make assertions
+            //
+
+            let mut filtered_writer = ImageLayerWriter::new(
+                harness.conf,
+                timeline_id,
+                harness.tenant_shard_id,
+                &range,
+                lsn,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+            let wrote_keys = resident
+                .filter(&shard_identity, &mut filtered_writer, &ctx)
+                .await
+                .unwrap();
+            let replacement = if wrote_keys > 0 {
+                Some(filtered_writer.finish(&timeline, &ctx).await.unwrap())
+            } else {
+                None
+            };
+
+            // This exact size and those below will need updating as/when the layer encoding changes, but
+            // should be deterministic for a given version of the format, as we used no randomness generating the input.
+            assert_eq!(original_size, 1597440);
+
+            match shard_number {
+                0 => {
+                    // We should have written out just one stripe for our shard identity
+                    assert_eq!(wrote_keys, 0x8000);
+                    let replacement = replacement.unwrap();
+
+                    // We should have dropped some of the data
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+
+                    // Assert that we dropped ~3/4 of the data.
+                    assert_eq!(replacement.metadata().file_size, 417792);
+                }
+                1 => {
+                    // Shard 1 has no keys in our input range
+                    assert_eq!(wrote_keys, 0x0);
+                    assert!(replacement.is_none());
+                }
+                2 => {
+                    // Shard 2 has one stripes in the input range
+                    assert_eq!(wrote_keys, 0x8000);
+                    let replacement = replacement.unwrap();
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+                    assert_eq!(replacement.metadata().file_size, 417792);
+                }
+                3 => {
+                    // Shard 3 has two stripes in the input range
+                    assert_eq!(wrote_keys, 0x10000);
+                    let replacement = replacement.unwrap();
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+                    assert_eq!(replacement.metadata().file_size, 811008);
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }

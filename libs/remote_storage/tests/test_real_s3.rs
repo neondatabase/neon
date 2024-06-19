@@ -1,173 +1,91 @@
-use std::collections::HashSet;
 use std::env;
+use std::fmt::{Debug, Display};
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
+use std::{collections::HashSet, time::SystemTime};
 
+use crate::common::{download_to_vec, upload_stream};
 use anyhow::Context;
 use camino::Utf8Path;
+use futures_util::StreamExt;
 use remote_storage::{
-    GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
+    DownloadError, GenericRemoteStorage, ListingMode, RemotePath, RemoteStorageConfig,
+    RemoteStorageKind, S3Config,
 };
-use test_context::{test_context, AsyncTestContext};
-use tracing::{debug, info};
+use test_context::test_context;
+use test_context::AsyncTestContext;
+use tokio::io::AsyncBufReadExt;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 mod common;
 
-use common::{
-    cleanup, download_to_vec, ensure_logging_ready, upload_remote_data, upload_simple_remote_data,
-    upload_stream, wrap_stream,
-};
+#[path = "common/tests.rs"]
+mod tests_s3;
+
+use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data};
+use utils::backoff;
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
-
 const BASE_PREFIX: &str = "test";
 
-/// Tests that S3 client can list all prefixes, even if the response come paginated and requires multiple S3 queries.
-/// Uses real S3 and requires [`ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME`] and related S3 cred env vars specified.
-/// See the client creation in [`create_s3_client`] for details on the required env vars.
-/// If real S3 tests are disabled, the test passes, skipping any real test run: currently, there's no way to mark the test ignored in runtime with the
-/// deafult test framework, see https://github.com/rust-lang/rust/issues/68007 for details.
-///
-/// First, the test creates a set of S3 objects with keys `/${random_prefix_part}/${base_prefix_str}/sub_prefix_${i}/blob_${i}` in [`upload_remote_data`]
-/// where
-/// * `random_prefix_part` is set for the entire S3 client during the S3 client creation in [`create_s3_client`], to avoid multiple test runs interference
-/// * `base_prefix_str` is a common prefix to use in the client requests: we would want to ensure that the client is able to list nested prefixes inside the bucket
-///
-/// Then, verifies that the client does return correct prefixes when queried:
-/// * with no prefix, it lists everything after its `${random_prefix_part}/` — that should be `${base_prefix_str}` value only
-/// * with `${base_prefix_str}/` prefix, it lists every `sub_prefix_${i}`
-///
-/// With the real S3 enabled and `#[cfg(test)]` Rust configuration used, the S3 client test adds a `max-keys` param to limit the response keys.
-/// This way, we are able to test the pagination implicitly, by ensuring all results are returned from the remote storage and avoid uploading too many blobs to S3,
-/// since current default AWS S3 pagination limit is 1000.
-/// (see https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax)
-///
-/// Lastly, the test attempts to clean up and remove all uploaded S3 files.
-/// If any errors appear during the clean up, they get logged, but the test is not failed or stopped until clean up is finished.
-#[test_context(MaybeEnabledS3WithTestBlobs)]
+#[test_context(MaybeEnabledStorage)]
 #[tokio::test]
-async fn s3_pagination_should_work(ctx: &mut MaybeEnabledS3WithTestBlobs) -> anyhow::Result<()> {
+async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
     let ctx = match ctx {
-        MaybeEnabledS3WithTestBlobs::Enabled(ctx) => ctx,
-        MaybeEnabledS3WithTestBlobs::Disabled => return Ok(()),
-        MaybeEnabledS3WithTestBlobs::UploadsFailed(e, _) => anyhow::bail!("S3 init failed: {e:?}"),
+        MaybeEnabledStorage::Enabled(ctx) => ctx,
+        MaybeEnabledStorage::Disabled => return Ok(()),
     };
+    // Our test depends on discrepancies in the clock between S3 and the environment the tests
+    // run in. Therefore, wait a little bit before and after. The alternative would be
+    // to take the time from S3 response headers.
+    const WAIT_TIME: Duration = Duration::from_millis(3_000);
 
-    let test_client = Arc::clone(&ctx.enabled.client);
-    let expected_remote_prefixes = ctx.remote_prefixes.clone();
-
-    let base_prefix = RemotePath::new(Utf8Path::new(ctx.enabled.base_prefix))
-        .context("common_prefix construction")?;
-    let root_remote_prefixes = test_client
-        .list_prefixes(None)
+    async fn retry<T, O, F, E>(op: O) -> Result<T, E>
+    where
+        E: Display + Debug + 'static,
+        O: FnMut() -> F,
+        F: Future<Output = Result<T, E>>,
+    {
+        let warn_threshold = 3;
+        let max_retries = 10;
+        backoff::retry(
+            op,
+            |_e| false,
+            warn_threshold,
+            max_retries,
+            "test retry",
+            &CancellationToken::new(),
+        )
         .await
-        .context("client list root prefixes failure")?
-        .into_iter()
-        .collect::<HashSet<_>>();
-    assert_eq!(
-        root_remote_prefixes, HashSet::from([base_prefix.clone()]),
-        "remote storage root prefixes list mismatches with the uploads. Returned prefixes: {root_remote_prefixes:?}"
-    );
+        .expect("never cancelled")
+    }
 
-    let nested_remote_prefixes = test_client
-        .list_prefixes(Some(&base_prefix))
-        .await
-        .context("client list nested prefixes failure")?
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let remote_only_prefixes = nested_remote_prefixes
-        .difference(&expected_remote_prefixes)
-        .collect::<HashSet<_>>();
-    let missing_uploaded_prefixes = expected_remote_prefixes
-        .difference(&nested_remote_prefixes)
-        .collect::<HashSet<_>>();
-    assert_eq!(
-        remote_only_prefixes.len() + missing_uploaded_prefixes.len(), 0,
-        "remote storage nested prefixes list mismatches with the uploads. Remote only prefixes: {remote_only_prefixes:?}, missing uploaded prefixes: {missing_uploaded_prefixes:?}",
-    );
+    async fn time_point() -> SystemTime {
+        tokio::time::sleep(WAIT_TIME).await;
+        let ret = SystemTime::now();
+        tokio::time::sleep(WAIT_TIME).await;
+        ret
+    }
 
-    Ok(())
-}
+    async fn list_files(
+        client: &Arc<GenericRemoteStorage>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<HashSet<RemotePath>> {
+        Ok(
+            retry(|| client.list(None, ListingMode::NoDelimiter, None, cancel))
+                .await
+                .context("list root files failure")?
+                .keys
+                .into_iter()
+                .collect::<HashSet<_>>(),
+        )
+    }
 
-/// Tests that S3 client can list all files in a folder, even if the response comes paginated and requirees multiple S3 queries.
-/// Uses real S3 and requires [`ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME`] and related S3 cred env vars specified. Test will skip real code and pass if env vars not set.
-/// See `s3_pagination_should_work` for more information.
-///
-/// First, create a set of S3 objects with keys `random_prefix/folder{j}/blob_{i}.txt` in [`upload_remote_data`]
-/// Then performs the following queries:
-///    1. `list_files(None)`. This should return all files `random_prefix/folder{j}/blob_{i}.txt`
-///    2. `list_files("folder1")`.  This  should return all files `random_prefix/folder1/blob_{i}.txt`
-#[test_context(MaybeEnabledS3WithSimpleTestBlobs)]
-#[tokio::test]
-async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> anyhow::Result<()> {
-    let ctx = match ctx {
-        MaybeEnabledS3WithSimpleTestBlobs::Enabled(ctx) => ctx,
-        MaybeEnabledS3WithSimpleTestBlobs::Disabled => return Ok(()),
-        MaybeEnabledS3WithSimpleTestBlobs::UploadsFailed(e, _) => {
-            anyhow::bail!("S3 init failed: {e:?}")
-        }
-    };
-    let test_client = Arc::clone(&ctx.enabled.client);
-    let base_prefix =
-        RemotePath::new(Utf8Path::new("folder1")).context("common_prefix construction")?;
-    let root_files = test_client
-        .list_files(None)
-        .await
-        .context("client list root files failure")?
-        .into_iter()
-        .collect::<HashSet<_>>();
-    assert_eq!(
-        root_files,
-        ctx.remote_blobs.clone(),
-        "remote storage list_files on root mismatches with the uploads."
-    );
-    let nested_remote_files = test_client
-        .list_files(Some(&base_prefix))
-        .await
-        .context("client list nested files failure")?
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let trim_remote_blobs: HashSet<_> = ctx
-        .remote_blobs
-        .iter()
-        .map(|x| x.get_path())
-        .filter(|x| x.starts_with("folder1"))
-        .map(|x| RemotePath::new(x).expect("must be valid path"))
-        .collect();
-    assert_eq!(
-        nested_remote_files, trim_remote_blobs,
-        "remote storage list_files on subdirrectory mismatches with the uploads."
-    );
-    Ok(())
-}
-
-#[test_context(MaybeEnabledS3)]
-#[tokio::test]
-async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
-    let ctx = match ctx {
-        MaybeEnabledS3::Enabled(ctx) => ctx,
-        MaybeEnabledS3::Disabled => return Ok(()),
-    };
-
-    let path = RemotePath::new(Utf8Path::new(
-        format!("{}/for_sure_there_is_nothing_there_really", ctx.base_prefix).as_str(),
-    ))
-    .with_context(|| "RemotePath conversion")?;
-
-    ctx.client.delete(&path).await.expect("should succeed");
-
-    Ok(())
-}
-
-#[test_context(MaybeEnabledS3)]
-#[tokio::test]
-async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
-    let ctx = match ctx {
-        MaybeEnabledS3::Enabled(ctx) => ctx,
-        MaybeEnabledS3::Disabled => return Ok(()),
-    };
+    let cancel = CancellationToken::new();
 
     let path1 = RemotePath::new(Utf8Path::new(format!("{}/path1", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
@@ -178,83 +96,95 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
     let path3 = RemotePath::new(Utf8Path::new(format!("{}/path3", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
 
-    let (data, len) = upload_stream("remote blob data1".as_bytes().into());
-    ctx.client.upload(data, len, &path1, None).await?;
+    retry(|| {
+        let (data, len) = upload_stream("remote blob data1".as_bytes().into());
+        ctx.client.upload(data, len, &path1, None, &cancel)
+    })
+    .await?;
 
-    let (data, len) = upload_stream("remote blob data2".as_bytes().into());
-    ctx.client.upload(data, len, &path2, None).await?;
+    let t0_files = list_files(&ctx.client, &cancel).await?;
+    let t0 = time_point().await;
+    println!("at t0: {t0_files:?}");
 
-    let (data, len) = upload_stream("remote blob data3".as_bytes().into());
-    ctx.client.upload(data, len, &path3, None).await?;
+    let old_data = "remote blob data2";
 
-    ctx.client.delete_objects(&[path1, path2]).await?;
+    retry(|| {
+        let (data, len) = upload_stream(old_data.as_bytes().into());
+        ctx.client.upload(data, len, &path2, None, &cancel)
+    })
+    .await?;
 
-    let prefixes = ctx.client.list_prefixes(None).await?;
+    let t1_files = list_files(&ctx.client, &cancel).await?;
+    let t1 = time_point().await;
+    println!("at t1: {t1_files:?}");
 
-    assert_eq!(prefixes.len(), 1);
+    // A little check to ensure that our clock is not too far off from the S3 clock
+    {
+        let dl = retry(|| ctx.client.download(&path2, &cancel)).await?;
+        let last_modified = dl.last_modified;
+        let half_wt = WAIT_TIME.mul_f32(0.5);
+        let t0_hwt = t0 + half_wt;
+        let t1_hwt = t1 - half_wt;
+        if !(t0_hwt..=t1_hwt).contains(&last_modified) {
+            panic!("last_modified={last_modified:?} is not between t0_hwt={t0_hwt:?} and t1_hwt={t1_hwt:?}. \
+                This likely means a large lock discrepancy between S3 and the local clock.");
+        }
+    }
 
-    ctx.client.delete_objects(&[path3]).await?;
+    retry(|| {
+        let (data, len) = upload_stream("remote blob data3".as_bytes().into());
+        ctx.client.upload(data, len, &path3, None, &cancel)
+    })
+    .await?;
 
-    Ok(())
-}
+    let new_data = "new remote blob data2";
 
-#[test_context(MaybeEnabledS3)]
-#[tokio::test]
-async fn s3_upload_download_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
-    let MaybeEnabledS3::Enabled(ctx) = ctx else {
-        return Ok(());
-    };
+    retry(|| {
+        let (data, len) = upload_stream(new_data.as_bytes().into());
+        ctx.client.upload(data, len, &path2, None, &cancel)
+    })
+    .await?;
 
-    let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))
-        .with_context(|| "RemotePath conversion")?;
+    retry(|| ctx.client.delete(&path1, &cancel)).await?;
+    let t2_files = list_files(&ctx.client, &cancel).await?;
+    let t2 = time_point().await;
+    println!("at t2: {t2_files:?}");
 
-    let orig = bytes::Bytes::from_static("remote blob data here".as_bytes());
-
-    let (data, len) = wrap_stream(orig.clone());
-
-    ctx.client.upload(data, len, &path, None).await?;
-
-    // Normal download request
-    let dl = ctx.client.download(&path).await?;
-    let buf = download_to_vec(dl).await?;
-    assert_eq!(&buf, &orig);
-
-    // Full range (end specified)
-    let dl = ctx
-        .client
-        .download_byte_range(&path, 0, Some(len as u64))
-        .await?;
-    let buf = download_to_vec(dl).await?;
-    assert_eq!(&buf, &orig);
-
-    // partial range (end specified)
-    let dl = ctx.client.download_byte_range(&path, 4, Some(10)).await?;
-    let buf = download_to_vec(dl).await?;
-    assert_eq!(&buf, &orig[4..10]);
-
-    // partial range (end beyond real end)
-    let dl = ctx
-        .client
-        .download_byte_range(&path, 8, Some(len as u64 * 100))
-        .await?;
-    let buf = download_to_vec(dl).await?;
-    assert_eq!(&buf, &orig[8..]);
-
-    // Partial range (end unspecified)
-    let dl = ctx.client.download_byte_range(&path, 4, None).await?;
-    let buf = download_to_vec(dl).await?;
-    assert_eq!(&buf, &orig[4..]);
-
-    // Full range (end unspecified)
-    let dl = ctx.client.download_byte_range(&path, 0, None).await?;
-    let buf = download_to_vec(dl).await?;
-    assert_eq!(&buf, &orig);
-
-    debug!("Cleanup: deleting file at path {path:?}");
+    // No changes after recovery to t2 (no-op)
+    let t_final = time_point().await;
     ctx.client
-        .delete(&path)
-        .await
-        .with_context(|| format!("{path:?} removal"))?;
+        .time_travel_recover(None, t2, t_final, &cancel)
+        .await?;
+    let t2_files_recovered = list_files(&ctx.client, &cancel).await?;
+    println!("after recovery to t2: {t2_files_recovered:?}");
+    assert_eq!(t2_files, t2_files_recovered);
+    let path2_recovered_t2 = download_to_vec(ctx.client.download(&path2, &cancel).await?).await?;
+    assert_eq!(path2_recovered_t2, new_data.as_bytes());
+
+    // after recovery to t1: path1 is back, path2 has the old content
+    let t_final = time_point().await;
+    ctx.client
+        .time_travel_recover(None, t1, t_final, &cancel)
+        .await?;
+    let t1_files_recovered = list_files(&ctx.client, &cancel).await?;
+    println!("after recovery to t1: {t1_files_recovered:?}");
+    assert_eq!(t1_files, t1_files_recovered);
+    let path2_recovered_t1 = download_to_vec(ctx.client.download(&path2, &cancel).await?).await?;
+    assert_eq!(path2_recovered_t1, old_data.as_bytes());
+
+    // after recovery to t0: everything is gone except for path1
+    let t_final = time_point().await;
+    ctx.client
+        .time_travel_recover(None, t0, t_final, &cancel)
+        .await?;
+    let t0_files_recovered = list_files(&ctx.client, &cancel).await?;
+    println!("after recovery to t0: {t0_files_recovered:?}");
+    assert_eq!(t0_files, t0_files_recovered);
+
+    // cleanup
+
+    let paths = &[path1, path2, path3];
+    retry(|| ctx.client.delete_objects(paths, &cancel)).await?;
 
     Ok(())
 }
@@ -275,15 +205,24 @@ impl EnabledS3 {
             base_prefix: BASE_PREFIX,
         }
     }
+
+    fn configure_request_timeout(&mut self, timeout: Duration) {
+        match Arc::get_mut(&mut self.client).expect("outer Arc::get_mut") {
+            GenericRemoteStorage::AwsS3(s3) => {
+                let s3 = Arc::get_mut(s3).expect("inner Arc::get_mut");
+                s3.timeout = timeout;
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
-enum MaybeEnabledS3 {
+enum MaybeEnabledStorage {
     Enabled(EnabledS3),
     Disabled,
 }
 
-#[async_trait::async_trait]
-impl AsyncTestContext for MaybeEnabledS3 {
+impl AsyncTestContext for MaybeEnabledStorage {
     async fn setup() -> Self {
         ensure_logging_ready();
 
@@ -299,7 +238,7 @@ impl AsyncTestContext for MaybeEnabledS3 {
     }
 }
 
-enum MaybeEnabledS3WithTestBlobs {
+enum MaybeEnabledStorageWithTestBlobs {
     Enabled(S3WithTestBlobs),
     Disabled,
     UploadsFailed(anyhow::Error, S3WithTestBlobs),
@@ -311,8 +250,7 @@ struct S3WithTestBlobs {
     remote_blobs: HashSet<RemotePath>,
 }
 
-#[async_trait::async_trait]
-impl AsyncTestContext for MaybeEnabledS3WithTestBlobs {
+impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();
         if env::var(ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME).is_err() {
@@ -359,11 +297,7 @@ impl AsyncTestContext for MaybeEnabledS3WithTestBlobs {
     }
 }
 
-// NOTE: the setups for the list_prefixes test and the list_files test are very similar
-// However, they are not idential. The list_prefixes function is concerned with listing prefixes,
-// whereas the list_files function is concerned with listing files.
-// See `RemoteStorage::list_files` documentation for more details
-enum MaybeEnabledS3WithSimpleTestBlobs {
+enum MaybeEnabledStorageWithSimpleTestBlobs {
     Enabled(S3WithSimpleTestBlobs),
     Disabled,
     UploadsFailed(anyhow::Error, S3WithSimpleTestBlobs),
@@ -373,8 +307,7 @@ struct S3WithSimpleTestBlobs {
     remote_blobs: HashSet<RemotePath>,
 }
 
-#[async_trait::async_trait]
-impl AsyncTestContext for MaybeEnabledS3WithSimpleTestBlobs {
+impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();
         if env::var(ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME).is_err() {
@@ -447,9 +380,176 @@ fn create_s3_client(
             endpoint: None,
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
+            upload_storage_class: None,
         }),
+        timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
     };
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,
     ))
+}
+
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn download_is_timeouted(ctx: &mut MaybeEnabledStorage) {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return;
+    };
+
+    let cancel = CancellationToken::new();
+
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/file_to_copy", ctx.base_prefix).as_str(),
+    ))
+    .unwrap();
+
+    let len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
+
+    let timeout = std::time::Duration::from_secs(5);
+
+    ctx.configure_request_timeout(timeout);
+
+    let started_at = std::time::Instant::now();
+    let mut stream = ctx
+        .client
+        .download(&path, &cancel)
+        .await
+        .expect("download succeeds")
+        .download_stream;
+
+    if started_at.elapsed().mul_f32(0.9) >= timeout {
+        tracing::warn!(
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "timeout might be too low, consumed most of it during headers"
+        );
+    }
+
+    let first = stream
+        .next()
+        .await
+        .expect("should have the first blob")
+        .expect("should have succeeded");
+
+    tracing::info!(len = first.len(), "downloaded first chunk");
+
+    assert!(
+        first.len() < len,
+        "uploaded file is too small, we downloaded all on first chunk"
+    );
+
+    tokio::time::sleep(timeout).await;
+
+    {
+        let started_at = std::time::Instant::now();
+        let next = stream
+            .next()
+            .await
+            .expect("stream should not have ended yet");
+
+        tracing::info!(
+            next.is_err = next.is_err(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "received item after timeout"
+        );
+
+        let e = next.expect_err("expected an error, but got a chunk?");
+
+        let inner = e.get_ref().expect("std::io::Error::inner should be set");
+        assert!(
+            inner
+                .downcast_ref::<DownloadError>()
+                .is_some_and(|e| matches!(e, DownloadError::Timeout)),
+            "{inner:?}"
+        );
+    }
+
+    ctx.configure_request_timeout(RemoteStorageConfig::DEFAULT_TIMEOUT);
+
+    ctx.client.delete_objects(&[path], &cancel).await.unwrap()
+}
+
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn download_is_cancelled(ctx: &mut MaybeEnabledStorage) {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return;
+    };
+
+    let cancel = CancellationToken::new();
+
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/file_to_copy", ctx.base_prefix).as_str(),
+    ))
+    .unwrap();
+
+    let file_len = upload_large_enough_file(&ctx.client, &path, &cancel).await;
+
+    {
+        let stream = ctx
+            .client
+            .download(&path, &cancel)
+            .await
+            .expect("download succeeds")
+            .download_stream;
+
+        let mut reader = std::pin::pin!(tokio_util::io::StreamReader::new(stream));
+
+        let first = reader.fill_buf().await.expect("should have the first blob");
+
+        let len = first.len();
+        tracing::info!(len, "downloaded first chunk");
+
+        assert!(
+            first.len() < file_len,
+            "uploaded file is too small, we downloaded all on first chunk"
+        );
+
+        reader.consume(len);
+
+        cancel.cancel();
+
+        let next = reader.fill_buf().await;
+
+        let e = next.expect_err("expected an error, but got a chunk?");
+
+        let inner = e.get_ref().expect("std::io::Error::inner should be set");
+        assert!(
+            inner
+                .downcast_ref::<DownloadError>()
+                .is_some_and(|e| matches!(e, DownloadError::Cancelled)),
+            "{inner:?}"
+        );
+
+        let e = DownloadError::from(e);
+
+        assert!(matches!(e, DownloadError::Cancelled), "{e:?}");
+    }
+
+    let cancel = CancellationToken::new();
+
+    ctx.client.delete_objects(&[path], &cancel).await.unwrap();
+}
+
+/// Upload a long enough file so that we cannot download it in single chunk
+///
+/// For s3 the first chunk seems to be less than 10kB, so this has a bit of a safety margin
+async fn upload_large_enough_file(
+    client: &GenericRemoteStorage,
+    path: &RemotePath,
+    cancel: &CancellationToken,
+) -> usize {
+    let header = bytes::Bytes::from_static("remote blob data content".as_bytes());
+    let body = bytes::Bytes::from(vec![0u8; 1024]);
+    let contents = std::iter::once(header).chain(std::iter::repeat(body).take(128));
+
+    let len = contents.clone().fold(0, |acc, next| acc + next.len());
+
+    let contents = futures::stream::iter(contents.map(std::io::Result::Ok));
+
+    client
+        .upload(contents, len, path, None, cancel)
+        .await
+        .expect("upload succeeds");
+
+    len
 }

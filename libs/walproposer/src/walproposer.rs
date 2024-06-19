@@ -1,30 +1,33 @@
 use std::ffi::CString;
 
-use postgres_ffi::WAL_SEGMENT_SIZE;
-use utils::id::TenantTimelineId;
-
 use crate::{
     api_bindings::{create_api, take_vec_u8, Level},
     bindings::{
-        NeonWALReadResult, Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate,
-        WalProposerFree, WalProposerStart,
+        NeonWALReadResult, Safekeeper, WalProposer, WalProposerBroadcast, WalProposerConfig,
+        WalProposerCreate, WalProposerFree, WalProposerPoll, WalProposerStart,
     },
 };
+use postgres_ffi::WAL_SEGMENT_SIZE;
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 /// Rust high-level wrapper for C walproposer API. Many methods are not required
 /// for simple cases, hence todo!() in default implementations.
 ///
 /// Refer to `pgxn/neon/walproposer.h` for documentation.
 pub trait ApiImpl {
-    fn get_shmem_state(&self) -> &mut crate::bindings::WalproposerShmemState {
+    fn get_shmem_state(&self) -> *mut crate::bindings::WalproposerShmemState {
         todo!()
     }
 
-    fn start_streaming(&self, _startpos: u64) {
+    fn start_streaming(&self, _startpos: u64, _callback: &StreamingCallback) {
         todo!()
     }
 
     fn get_flush_rec_ptr(&self) -> u64 {
+        todo!()
+    }
+
+    fn update_donor(&self, _donor: &mut Safekeeper, _donor_lsn: u64) {
         todo!()
     }
 
@@ -70,7 +73,11 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn conn_async_read(&self, _sk: &mut Safekeeper) -> (&[u8], crate::bindings::PGAsyncReadResult) {
+    fn conn_async_read(
+        &self,
+        _sk: &mut Safekeeper,
+        _vec: &mut Vec<u8>,
+    ) -> crate::bindings::PGAsyncReadResult {
         todo!()
     }
 
@@ -138,7 +145,7 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn process_safekeeper_feedback(&self, _wp: &mut WalProposer, _commit_lsn: u64) {
+    fn process_safekeeper_feedback(&mut self, _wp: &mut WalProposer, _sk: &mut Safekeeper) {
         todo!()
     }
 
@@ -151,12 +158,14 @@ pub trait ApiImpl {
     }
 }
 
+#[derive(Debug)]
 pub enum WaitResult {
     Latch,
     Timeout,
     Network(*mut Safekeeper, u32),
 }
 
+#[derive(Clone)]
 pub struct Config {
     /// Tenant and timeline id
     pub ttid: TenantTimelineId,
@@ -242,6 +251,24 @@ impl Drop for Wrapper {
     }
 }
 
+pub struct StreamingCallback {
+    wp: *mut WalProposer,
+}
+
+impl StreamingCallback {
+    pub fn new(wp: *mut WalProposer) -> StreamingCallback {
+        StreamingCallback { wp }
+    }
+
+    pub fn broadcast(&self, startpos: Lsn, endpos: Lsn) {
+        unsafe { WalProposerBroadcast(self.wp, startpos.0, endpos.0) }
+    }
+
+    pub fn poll(&self) {
+        unsafe { WalProposerPoll(self.wp) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::panic;
@@ -250,6 +277,7 @@ mod tests {
         sync::{atomic::AtomicUsize, mpsc::sync_channel},
     };
 
+    use std::cell::UnsafeCell;
     use utils::id::TenantTimelineId;
 
     use crate::{api_bindings::Level, bindings::NeonWALReadResult, walproposer::Wrapper};
@@ -273,6 +301,8 @@ mod tests {
         replies_ptr: AtomicUsize,
         // channel to send LSN to the main thread
         sync_channel: std::sync::mpsc::SyncSender<u64>,
+        // Shmem state, used for storing donor info
+        shmem: UnsafeCell<crate::bindings::WalproposerShmemState>,
     }
 
     impl MockImpl {
@@ -303,9 +333,20 @@ mod tests {
     }
 
     impl ApiImpl for MockImpl {
+        fn get_shmem_state(&self) -> *mut crate::bindings::WalproposerShmemState {
+            self.shmem.get()
+        }
+
         fn get_current_timestamp(&self) -> i64 {
             println!("get_current_timestamp");
             0
+        }
+
+        fn update_donor(&self, donor: &mut crate::bindings::Safekeeper, donor_lsn: u64) {
+            let mut shmem = unsafe { *self.get_shmem_state() };
+            shmem.propEpochStartLsn.value = donor_lsn;
+            shmem.donor_conninfo = donor.conninfo;
+            shmem.donor_lsn = donor_lsn;
         }
 
         fn conn_status(
@@ -344,14 +385,13 @@ mod tests {
         fn conn_async_read(
             &self,
             _: &mut crate::bindings::Safekeeper,
-        ) -> (&[u8], crate::bindings::PGAsyncReadResult) {
+            vec: &mut Vec<u8>,
+        ) -> crate::bindings::PGAsyncReadResult {
             println!("conn_async_read");
             let reply = self.next_safekeeper_reply();
             println!("conn_async_read result: {:?}", reply);
-            (
-                reply,
-                crate::bindings::PGAsyncReadResult_PG_ASYNC_READ_SUCCESS,
-            )
+            vec.extend_from_slice(reply);
+            crate::bindings::PGAsyncReadResult_PG_ASYNC_READ_SUCCESS
         }
 
         fn conn_blocking_write(&self, _: &mut crate::bindings::Safekeeper, buf: &[u8]) -> bool {
@@ -453,9 +493,12 @@ mod tests {
                 event_mask: 0,
             }),
             expected_messages: vec![
-                // Greeting(ProposerGreeting { protocol_version: 2, pg_version: 160001, proposer_id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], system_id: 0, timeline_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tenant_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tli: 1, wal_seg_size: 16777216 })
+                // TODO: When updating Postgres versions, this test will cause
+                // problems. Postgres version in message needs updating.
+                //
+                // Greeting(ProposerGreeting { protocol_version: 2, pg_version: 160003, proposer_id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], system_id: 0, timeline_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tenant_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tli: 1, wal_seg_size: 16777216 })
                 vec![
-                    103, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 113, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    103, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3, 113, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 158, 76, 143, 54, 6, 60, 108, 110,
                     147, 188, 32, 214, 90, 130, 15, 61, 158, 76, 143, 54, 6, 60, 108, 110, 147,
                     188, 32, 214, 90, 130, 15, 61, 1, 0, 0, 0, 0, 0, 0, 1,
@@ -481,6 +524,7 @@ mod tests {
             ],
             replies_ptr: AtomicUsize::new(0),
             sync_channel: sender,
+            shmem: UnsafeCell::new(crate::api_bindings::empty_shmem()),
         });
         let config = crate::walproposer::Config {
             ttid,
