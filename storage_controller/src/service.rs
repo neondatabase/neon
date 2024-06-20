@@ -5282,7 +5282,6 @@ impl Service {
         let mut last_inspected_shard: Option<TenantShardId> = None;
         let mut inspected_all_shards = false;
         let mut waiters = Vec::new();
-        let mut schedule_context = ScheduleContext::default();
 
         while !inspected_all_shards {
             if cancel.is_cancelled() {
@@ -5323,11 +5322,7 @@ impl Service {
                         }
                     };
 
-                    match tenant_shard.reschedule_to_secondary(
-                        node_id,
-                        scheduler,
-                        &mut schedule_context,
-                    ) {
+                    match tenant_shard.reschedule_to_secondary(Some(node_id), None, scheduler) {
                         Err(e) => {
                             tracing::warn!(
                                 tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
@@ -5489,9 +5484,7 @@ impl Service {
         // secondaries are warm. This is not always true (e.g. we just migrated the
         // tenant). Take that into consideration by checking the secondary status.
         let mut tids_to_promote = self.fill_node_plan(node_id);
-
         let mut waiters = Vec::new();
-        let mut schedule_context = ScheduleContext::default();
 
         // Execute the plan we've composed above. Before aplying each move from the plan,
         // we validate to ensure that it has not gone stale in the meantime.
@@ -5527,9 +5520,11 @@ impl Service {
                             }
 
                             let previously_attached_to = *tenant_shard.intent.get_attached();
-
-                            tenant_shard.intent.promote_attached(scheduler, node_id);
-                            match tenant_shard.schedule(scheduler, &mut schedule_context) {
+                            match tenant_shard.reschedule_to_secondary(
+                                previously_attached_to,
+                                Some(node_id),
+                                scheduler,
+                            ) {
                                 Err(e) => {
                                     tracing::warn!(
                                         tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
