@@ -6,18 +6,24 @@ from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.utils import query_scalar
 
 
-#
-# Create read-only compute nodes, anchored at historical points in time.
-#
-# This is very similar to the 'test_branch_behind' test, but instead of
-# creating branches, creates read-only nodes.
-#
 def test_readonly_node(neon_simple_env: NeonEnv):
+    """
+    Create read-only compute nodes, anchored at historical points in time.
+
+    This is very similar to the 'test_branch_behind' test, but instead of
+    creating branches, creates read-only nodes.
+    """
+
     env = neon_simple_env
     env.neon_cli.create_branch("test_readonly_node", "empty")
     endpoint_main = env.endpoints.create_start("test_readonly_node")
 
-    env.pageserver.allowed_errors.append(".*basebackup .* failed: invalid basebackup lsn.*")
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*basebackup .* failed: invalid basebackup lsn.*",
+            ".*page_service.*error obtaining lsn lease.*.*tried to request a page version that was garbage collected",
+        ]
+    )
 
     main_pg_conn = endpoint_main.connect()
     main_cur = main_pg_conn.cursor()

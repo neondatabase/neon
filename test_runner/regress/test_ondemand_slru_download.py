@@ -88,6 +88,9 @@ def test_ondemand_download_replica(neon_env_builder: NeonEnvBuilder, shard_count
         initial_tenant_conf=tenant_conf, initial_tenant_shard_count=shard_count
     )
 
+    for ps in env.pageservers:
+        ps.allowed_errors.append(".*page_service.*error obtaining lsn lease.*Tenant .* not found")
+
     endpoint = env.endpoints.create_start("main")
 
     pg_conn = endpoint.connect()
