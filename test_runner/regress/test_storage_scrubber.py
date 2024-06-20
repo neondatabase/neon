@@ -6,7 +6,7 @@ import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    S3Scrubber,
+    StorageScrubber,
 )
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.workload import Workload
@@ -60,7 +60,7 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     output_path = neon_env_builder.test_output_dir / "snapshot"
     os.makedirs(output_path)
 
-    scrubber = S3Scrubber(neon_env_builder)
+    scrubber = StorageScrubber(neon_env_builder)
     scrubber.tenant_snapshot(tenant_id, output_path)
 
     assert len(os.listdir(output_path)) > 0
@@ -143,18 +143,18 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
         workload.write_rows(1)
 
     # With a high min_age, the scrubber should decline to delete anything
-    gc_summary = S3Scrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=3600)
+    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=3600)
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == 0
 
     # If targeting a different tenant, the scrubber shouldn't do anything
-    gc_summary = S3Scrubber(neon_env_builder).pageserver_physical_gc(
+    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(
         min_age_secs=1, tenant_ids=[TenantId.generate()]
     )
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == 0
 
     #  With a low min_age, the scrubber should go ahead and clean up all but the latest 2 generations
-    gc_summary = S3Scrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=1)
+    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=1)
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == (expect_indices_per_shard - 2) * shard_count

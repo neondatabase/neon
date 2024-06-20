@@ -141,7 +141,7 @@ pub async fn serve_websocket(
         .client_connections
         .guard(crate::metrics::Protocol::Ws);
 
-    let res = handle_client(
+    let res = Box::pin(handle_client(
         config,
         &mut ctx,
         cancellation_handler,
@@ -149,7 +149,7 @@ pub async fn serve_websocket(
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,
         conn_gauge,
-    )
+    ))
     .await;
 
     match res {

@@ -7,7 +7,7 @@ use tokio::runtime::Runtime;
 use std::time::Duration;
 use storage_broker::Uri;
 
-use utils::{auth::SwappableJwtAuth, id::NodeId};
+use utils::{auth::SwappableJwtAuth, id::NodeId, logging::SecretString};
 
 mod auth;
 pub mod broker;
@@ -78,6 +78,8 @@ pub struct SafeKeeperConf {
     pub pg_auth: Option<Arc<JwtAuth>>,
     pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
     pub http_auth: Option<Arc<SwappableJwtAuth>>,
+    /// JWT token to connect to other safekeepers with.
+    pub sk_auth_token: Option<SecretString>,
     pub current_thread_runtime: bool,
     pub walsenders_keep_horizon: bool,
     pub partial_backup_enabled: bool,
@@ -114,6 +116,7 @@ impl SafeKeeperConf {
             pg_auth: None,
             pg_tenant_only_auth: None,
             http_auth: None,
+            sk_auth_token: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,

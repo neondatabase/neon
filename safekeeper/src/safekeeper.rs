@@ -780,6 +780,9 @@ where
 
             // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
             state.backup_lsn = max(state.backup_lsn, state.timeline_start_lsn);
+            // similar for remote_consistent_lsn
+            state.remote_consistent_lsn =
+                max(state.remote_consistent_lsn, state.timeline_start_lsn);
 
             state.acceptor_state.term_history = msg.term_history.clone();
             self.state.finish_change(&state).await?;

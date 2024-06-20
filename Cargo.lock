@@ -5110,54 +5110,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f91339c0467de62360649f8d3e185ca8de4224ff281f66000de5eb2a77a79041"
 
 [[package]]
-name = "s3_scrubber"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "aws-config",
- "aws-sdk-s3",
- "aws-smithy-async",
- "bincode",
- "bytes",
- "camino",
- "chrono",
- "clap",
- "crc32c",
- "either",
- "futures",
- "futures-util",
- "hex",
- "histogram",
- "humantime",
- "itertools",
- "once_cell",
- "pageserver",
- "pageserver_api",
- "postgres_ffi",
- "rand 0.8.5",
- "remote_storage",
- "reqwest 0.12.4",
- "rustls 0.22.4",
- "rustls-native-certs 0.7.0",
- "serde",
- "serde_json",
- "serde_with",
- "thiserror",
- "tokio",
- "tokio-postgres",
- "tokio-postgres-rustls",
- "tokio-rustls 0.25.0",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "utils",
- "workspace_hack",
-]
-
-[[package]]
 name = "safekeeper"
 version = "0.1.0"
 dependencies = [
@@ -5206,6 +5158,7 @@ dependencies = [
  "tokio-io-timeout",
  "tokio-postgres",
  "tokio-stream",
+ "tokio-tar",
  "tokio-util",
  "toml_edit",
  "tracing",
@@ -5801,6 +5754,7 @@ dependencies = [
  "r2d2",
  "reqwest 0.12.4",
  "routerify",
+ "scopeguard",
  "serde",
  "serde_json",
  "strum",
@@ -5814,12 +5768,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "storage_scrubber"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-smithy-async",
+ "bincode",
+ "bytes",
+ "camino",
+ "chrono",
+ "clap",
+ "crc32c",
+ "either",
+ "futures",
+ "futures-util",
+ "hex",
+ "histogram",
+ "humantime",
+ "itertools",
+ "once_cell",
+ "pageserver",
+ "pageserver_api",
+ "postgres_ffi",
+ "rand 0.8.5",
+ "remote_storage",
+ "reqwest 0.12.4",
+ "rustls 0.22.4",
+ "rustls-native-certs 0.7.0",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tokio-rustls 0.25.0",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "storcon_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "comfy-table",
+ "futures",
  "humantime",
  "hyper 0.14.26",
  "pageserver_api",

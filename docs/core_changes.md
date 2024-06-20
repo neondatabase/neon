@@ -11,14 +11,27 @@ page server. We currently use the same binary for both, with --wal-redo runtime 
 the WAL redo mode. Some PostgreSQL changes are needed in the compute node, while others are just for
 the WAL redo process.
 
-In addition to core PostgreSQL changes, there is a Neon extension in contrib/neon, to hook into the
-smgr interface. Once all the core changes have been submitted to upstream or eliminated some other
-way, the extension could live outside the postgres repository and build against vanilla PostgreSQL.
+In addition to core PostgreSQL changes, there is a Neon extension in the pgxn/neon directory that
+hooks into the smgr interface, and rmgr extension in pgxn/neon_rmgr. The extensions are loaded into
+the Postgres processes with shared_preload_libraries. Most of the Neon-specific code is in the
+extensions, and for any new features, that is preferred over modifying core PostgreSQL code.
 
 Below is a list of all the PostgreSQL source code changes, categorized into changes needed for
 compute, and changes needed for the WAL redo process:
 
 # Changes for Compute node
+
+## Prefetching
+
+There are changes in many places to perform prefetching, for example for sequential scans. Neon
+doesn't benefit from OS readahead, and the latency to pageservers is quite high compared to local
+disk, so prefetching is critical for performance, also for sequential scans.
+
+### How to get rid of the patch
+
+Upcoming "streaming read" work in v17 might simplify this. And async I/O work in v18 will hopefully
+do more.
+
 
 ## Add t_cid to heap WAL records
 
@@ -37,53 +50,10 @@ The problem is that the XLOG_HEAP_INSERT record does not include the command id 
 
 Bite the bullet and submit the patch to PostgreSQL, to add the t_cid to the WAL records. It makes the WAL records larger, which could make this unpopular in the PostgreSQL community. However, it might simplify some logical decoding code; Andres Freund briefly mentioned in PGCon 2022 discussion on Heikki's Neon presentation that logical decoding currently needs to jump through some hoops to reconstruct the same information.
 
+Update from Heikki (2024-04-17): I tried to write an upstream patch for that, to use the t_cid field for logical decoding, but it was not as straightforward as it first sounded.
 
 ### Alternatives
 Perhaps we could write an extra WAL record with the t_cid information, when a page is evicted that contains rows that were touched a transaction that's still running. However, that seems very complicated.
-
-## ginfast.c
-
-```
-diff --git a/src/backend/access/gin/ginfast.c b/src/backend/access/gin/ginfast.c
-index e0d9940946..2d964c02e9 100644
---- a/src/backend/access/gin/ginfast.c
-+++ b/src/backend/access/gin/ginfast.c
-@@ -285,6 +285,17 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
-                memset(&sublist, 0, sizeof(GinMetaPageData));
-                makeSublist(index, collector->tuples, collector->ntuples, &sublist);
- 
-+               if (metadata->head != InvalidBlockNumber)
-+               {
-+                       /*
-+                        * ZENITH: Get buffer before XLogBeginInsert() to avoid recursive call
-+                        * of XLogBeginInsert(). Reading a new buffer might evict a dirty page from
-+                        * the buffer cache, and if that page happens to be an FSM or VM page, zenith_write()
-+                        * will try to WAL-log an image of the page.
-+                        */
-+                       buffer = ReadBuffer(index, metadata->tail);
-+               }
-+
-                if (needWal)
-                        XLogBeginInsert();
- 
-@@ -316,7 +327,6 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
-                        data.prevTail = metadata->tail;
-                        data.newRightlink = sublist.head;
- 
--                       buffer = ReadBuffer(index, metadata->tail);
-                        LockBuffer(buffer, GIN_EXCLUSIVE);
-                        page = BufferGetPage(buffer);
-```
-
-The problem is explained in the comment above
-
-### How to get rid of the patch
-
-Can we stop WAL-logging FSM or VM pages? Or delay the WAL logging until we're out of the critical
-section or something.
-
-Maybe some bigger rewrite of FSM and VM would help to avoid WAL-logging FSM and VM page images?
-
 
 ## Mark index builds that use buffer manager without logging explicitly
 
@@ -94,6 +64,8 @@ Maybe some bigger rewrite of FSM and VM would help to avoid WAL-logging FSM and 
 
 also some changes in src/backend/storage/smgr/smgr.c
 ```
+
+pgvector 0.6.0 also needs a similar change, which would be very nice to get rid of too.
 
 When a GIN index is built, for example, it is built by inserting the entries into the index more or
 less normally, but without WAL-logging anything. After the index has been built, we iterate through
@@ -109,6 +81,10 @@ an operation: `smgr_start_unlogged_build`, `smgr_finish_unlogged_build_phase_1` 
 I think it would make sense to be more explicit about that in PostgreSQL too. So extract these
 changes to a patch and post to pgsql-hackers.
 
+Perhaps we could deduce that an unlogged index build has started when we see a page being evicted
+with zero LSN. How to be sure it's an unlogged index build rather than a bug? Currently we have a
+check for that and PANIC if we see page with zero LSN being evicted. And how do we detect when the
+index build has finished? See https://github.com/neondatabase/neon/pull/7440 for an attempt at that.
 
 ## Track last-written page LSN
 
@@ -138,57 +114,6 @@ The old method is still available, though.
 ### How to get rid of the patch
 
 Wait until v15?
-
-
-## Cache relation sizes
-
-The Neon extension contains a little cache for smgrnblocks() and smgrexists() calls, to avoid going
-to the page server every time. It might be useful to cache those in PostgreSQL, maybe in the
-relcache? (I think we do cache nblocks in relcache already, check why that's not good enough for
-Neon)
-
-
-## Use buffer manager when extending VM or FSM
-
-```
- src/backend/storage/freespace/freespace.c                   |   14 +-
- src/backend/access/heap/visibilitymap.c                     |   15 +-
-
-diff --git a/src/backend/access/heap/visibilitymap.c b/src/backend/access/heap/visibilitymap.c
-index e198df65d8..addfe93eac 100644
---- a/src/backend/access/heap/visibilitymap.c
-+++ b/src/backend/access/heap/visibilitymap.c
-@@ -652,10 +652,19 @@ vm_extend(Relation rel, BlockNumber vm_nblocks)
-        /* Now extend the file */
-        while (vm_nblocks_now < vm_nblocks)
-        {
--               PageSetChecksumInplace((Page) pg.data, vm_nblocks_now);
-+               /*
-+                * ZENITH: Initialize VM pages through buffer cache to prevent loading
-+                * them from pageserver.
-+                */
-+               Buffer  buffer = ReadBufferExtended(rel, VISIBILITYMAP_FORKNUM, P_NEW,
-+                                                                                       RBM_ZERO_AND_LOCK, NULL);
-+               Page    page = BufferGetPage(buffer);
-+
-+               PageInit((Page) page, BLCKSZ, 0);
-+               PageSetChecksumInplace(page, vm_nblocks_now);
-+               MarkBufferDirty(buffer);
-+               UnlockReleaseBuffer(buffer);
- 
--               smgrextend(rel->rd_smgr, VISIBILITYMAP_FORKNUM, vm_nblocks_now,
--                                  pg.data, false);
-                vm_nblocks_now++;
-        }
-```
-
-### Problem we're trying to solve
-
-???
-
-### How to get rid of the patch
-
-Maybe this would be a reasonable change in PostgreSQL too?
 
 
 ## Allow startup without reading checkpoint record
@@ -231,7 +156,7 @@ index 0415df9ccb..9f9db3c8bc 100644
   * crash we can lose (skip over) as many values as we pre-logged.
   */
 -#define SEQ_LOG_VALS   32
-+/* Zenith XXX: to ensure sequence order of sequence in Zenith we need to WAL log each sequence update. */
++/* Neon XXX: to ensure sequence order of sequence in Zenith we need to WAL log each sequence update. */
 +/* #define SEQ_LOG_VALS        32 */
 +#define SEQ_LOG_VALS   0
 ```
@@ -250,66 +175,6 @@ would be weird if the sequence moved backwards though, think of PITR.
 Or add a GUC for the amount to prefix to PostgreSQL, and force it to 1 in Neon.
 
 
-## Walproposer
-
-```
- src/Makefile                                                |    1 +
- src/backend/replication/libpqwalproposer/Makefile           |   37 +
- src/backend/replication/libpqwalproposer/libpqwalproposer.c |  416 ++++++++++++
- src/backend/postmaster/bgworker.c                           |    4 +
- src/backend/postmaster/postmaster.c                         |    6 +
- src/backend/replication/Makefile                            |    4 +-
- src/backend/replication/walproposer.c                       | 2350 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- src/backend/replication/walproposer_utils.c                 |  402 +++++++++++
- src/backend/replication/walreceiver.c                       |    7 +
- src/backend/replication/walsender.c                         |  320 ++++++---
- src/backend/storage/ipc/ipci.c                              |    6 +
- src/include/replication/walproposer.h                       |  565 ++++++++++++++++
-```
-
-WAL proposer is communicating with safekeeper and ensures WAL durability by quorum writes.  It is
-currently implemented as patch to standard WAL sender.
-
-### How to get rid of the patch
-
-Refactor into an extension. Submit hooks or APIs into upstream if necessary.
-
-@MMeent did some work on this already: https://github.com/neondatabase/postgres/pull/96
-
-## Ignore unexpected data beyond EOF in bufmgr.c
-
-```
-@@ -922,11 +928,14 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
-                 */
-                bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
-                if (!PageIsNew((Page) bufBlock))
--                       ereport(ERROR,
-+               {
-+                        // XXX-ZENITH
-+                        MemSet((char *) bufBlock, 0, BLCKSZ);
-+                        ereport(DEBUG1,
-                                        (errmsg("unexpected data beyond EOF in block %u of relation %s",
-                                                        blockNum, relpath(smgr->smgr_rnode, forkNum)),
-                                         errhint("This has been seen to occur with buggy kernels; consider updating your system.")));
--
-+               }
-                /*
-                 * We *must* do smgrextend before succeeding, else the page will not
-                 * be reserved by the kernel, and the next P_NEW call will decide to
-```
-
-PostgreSQL is a bit sloppy with extending relations. Usually, the relation is extended with zeros
-first, then the page is filled, and finally the new page WAL-logged. But if multiple backends extend
-a relation at the same time, the pages can be WAL-logged in different order.
-
-I'm not sure what scenario exactly required this change in Neon, though.
-
-### How to get rid of the patch
-
-Submit patches to pgsql-hackers, to tighten up the WAL-logging around relation extension. It's a bit
-confusing even in PostgreSQL. Maybe WAL log the intention to extend first, then extend the relation,
-and finally WAL-log that the extension succeeded.
-
 ## Make smgr interface available to extensions
 
 ```
@@ -321,6 +186,8 @@ and finally WAL-log that the extension succeeded.
 
 Submit to upstream. This could be useful for the Disk Encryption patches too, or for compression.
 
+We have submitted this to upstream, but it's moving at glacial a speed.
+https://commitfest.postgresql.org/47/4428/
 
 ## Added relpersistence argument to smgropen()
 
@@ -444,6 +311,148 @@ Ignore it. This is only needed for disaster recovery, so once we've eliminated a
 patches, we can just keep it around as a patch or as separate branch in a repo.
 
 
+## pg_waldump flags to ignore errors
+
+After creating a new project or branch in Neon, the first timeline can begin in the middle of a WAL segment. pg_waldump chokes on that, so we added some flags to make it possible to ignore errors.
+
+### How to get rid of the patch
+
+Like previous one, ignore it.
+
+
+
+## Backpressure if pageserver doesn't ingest WAL fast enough
+
+```
+@@ -3200,6 +3202,7 @@ ProcessInterrupts(void)
+                return;
+        InterruptPending = false;
+ 
++retry:
+        if (ProcDiePending)
+        {
+                ProcDiePending = false;
+@@ -3447,6 +3450,13 @@ ProcessInterrupts(void)
+ 
+        if (ParallelApplyMessagePending)
+                HandleParallelApplyMessages();
++
++       /* Call registered callback if any */
++       if (ProcessInterruptsCallback)
++       {
++               if (ProcessInterruptsCallback())
++                       goto retry;
++       }
+ }
+```
+
+
+### How to get rid of the patch
+
+Submit a patch to upstream, for a hook in ProcessInterrupts. Could be useful for other extensions
+too.
+
+
+## SLRU on-demand download
+
+```
+ src/backend/access/transam/slru.c | 105 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 92 insertions(+), 13 deletions(-)
+```
+
+### Problem we're trying to solve
+
+Previously, SLRU files were included in the basebackup, but the total size of them can be large,
+several GB, and downloading them all made the startup time too long.
+
+### Alternatives
+
+FUSE hook or LD_PRELOAD trick to intercept the reads on SLRU files
+
+
+## WAL-log an all-zeros page as one large hole
+
+- In XLogRecordAssemble()
+
+### Problem we're trying to solve
+
+This change was made in v16. Starting with v16, when PostgreSQL extends a relation, it first extends
+it with zeros, and it can extend the relation more than one block at a time. The all-zeros page is WAL-ogged, but it's very wasteful to include 8 kB of zeros in the WAL for that. This hack was made so that we WAL logged a compact record with a whole-page "hole". However, PostgreSQL has assertions that prevent that such WAL records from being replayed, so this breaks compatibility such that unmodified PostreSQL cannot process Neon-generated WAL.
+
+### How to get rid of the patch
+
+Find another compact representation for a full-page image of an all-zeros page. A compressed image perhaps.
+
+
+## Shut down walproposer after checkpointer
+
+```
++                       /* Neon: Also allow walproposer background worker to be treated like a WAL sender, so that it's shut down last */
++                       if ((bp->bkend_type == BACKEND_TYPE_NORMAL || bp->bkend_type == BACKEND_TYPE_BGWORKER) &&
+```
+
+This changes was needed so that postmaster shuts down the walproposer process only after the shutdown checkpoint record is written. Otherwise, the shutdown record will never make it to the safekeepers.
+
+### How to get rid of the patch
+
+Do a bigger refactoring of the postmaster state machine, such that a background worker can specify
+the shutdown ordering by itself. The postmaster state machine has grown pretty complicated, and
+would benefit from a refactoring for the sake of readability anyway.
+
+
+## EXPLAIN changes for prefetch and LFC
+
+### How to get rid of the patch
+
+Konstantin submitted a patch to -hackers already: https://commitfest.postgresql.org/47/4643/. Get that into a committable state.
+
+
+## On-demand download of extensions
+
+### How to get rid of the patch
+
+FUSE or LD_PRELOAD trickery to intercept reads?
+
+
+## Publication superuser checks
+
+We have hacked CreatePublication so that also neon_superuser can create them.
+
+### How to get rid of the patch
+
+Create an upstream patch with more fine-grained privileges for publications CREATE/DROP that can be GRANTed to users.
+
+
+## WAL log replication slots
+
+### How to get rid of the patch
+
+Utilize the upcoming v17 "slot sync worker", or a similar neon-specific background worker process, to periodically WAL-log the slots, or to export them somewhere else.
+
+
+## WAL-log replication snapshots
+
+### How to get rid of the patch
+
+WAL-log them periodically, from a backgound worker.
+
+
+## WAL-log relmapper files
+
+Similarly to replications snapshot files, the CID mapping files generated during VACUUM FULL of a catalog table are WAL-logged
+
+### How to get rid of the patch
+
+WAL-log them periodically, from a backgound worker.
+
+
+## XLogWaitForReplayOf()
+
+??
+
+
+
+
 # Not currently committed but proposed
 
 ## Disable ring buffer buffer manager strategies
@@ -472,23 +481,10 @@ hint bits are set. Wal logging hint bits updates requires FPI which significantl
 
 Add special WAL record for setting page hints.
 
-## Prefetching
-
-### Why?
-
-As far as pages in Neon are loaded on demand, to reduce node startup time
-and also speedup some massive queries we need some mechanism for bulk loading to
-reduce page request round-trip overhead.
-
-Currently Postgres is supporting prefetching only for bitmap scan.
-In Neon we should also use prefetch for sequential and index scans, because the OS is not doing it for us.
-For sequential scan we could prefetch some number of following pages. For index scan we could prefetch pages
-of heap relation addressed by TIDs.
-
 ## Prewarming
 
 ### Why?
 
-Short downtime (or, in other words, fast compute node restart time) is one of the key feature of Zenith.
+Short downtime (or, in other words, fast compute node restart time) is one of the key feature of Neon.
 But overhead of request-response round-trip for loading pages on demand can make started node warm-up quite slow.
 We can capture state of compute node buffer cache and send bulk request for this pages at startup.

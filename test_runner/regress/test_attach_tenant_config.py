@@ -195,6 +195,8 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "walreceiver_connect_timeout": "13m",
         "image_layer_creation_check_threshold": 1,
         "switch_aux_file_policy": "cross-validation",
+        "lsn_lease_length": "1m",
+        "lsn_lease_length_for_ts": "5s",
     }
 
     ps_http = env.pageserver.http_client()
