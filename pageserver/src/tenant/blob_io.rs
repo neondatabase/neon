@@ -6,10 +6,13 @@
 //! is written as a one byte. If it's larger than that, the length
 //! is written as a four-byte integer, in big-endian, with the high
 //! bit set. This way, we can detect whether it's 1- or 4-byte header
-//! by peeking at the first byte.
+//! by peeking at the first byte. For blobs larger than 128 bits,
+//! we also specify three reserved bits, only one of the three bit
+//! patterns is currently in use (0b011) and signifies compression
+//! with zstd.
 //!
 //! len <  128: 0XXXXXXX
-//! len >= 128: 1XXXXXXX XXXXXXXX XXXXXXXX XXXXXXXX
+//! len >= 128: 1CCCXXXX XXXXXXXX XXXXXXXX XXXXXXXX
 //!
 use async_compression::Level;
 use bytes::{BufMut, BytesMut};
