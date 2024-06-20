@@ -1347,17 +1347,23 @@ static COMPUTE_STARTUP_BUCKETS: Lazy<[f64; 28]> = Lazy::new(|| {
     .map(|ms| (ms as f64) / 1000.0)
 });
 
-pub(crate) struct BasebackupQueryTime(HistogramVec);
+pub(crate) struct BasebackupQueryTime {
+    ok: Histogram,
+    error: Histogram,
+}
+
 pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
-    BasebackupQueryTime({
-        register_histogram_vec!(
-            "pageserver_basebackup_query_seconds",
-            "Histogram of basebackup queries durations, by result type",
-            &["result"],
-            COMPUTE_STARTUP_BUCKETS.to_vec(),
-        )
-        .expect("failed to define a metric")
-    })
+    let vec = register_histogram_vec!(
+        "pageserver_basebackup_query_seconds",
+        "Histogram of basebackup queries durations, by result type",
+        &["result"],
+        COMPUTE_STARTUP_BUCKETS.to_vec(),
+    )
+    .expect("failed to define a metric");
+    BasebackupQueryTime {
+        ok: vec.get_metric_with_label_values(&["ok"]).unwrap(),
+        error: vec.get_metric_with_label_values(&["error"]).unwrap(),
+    }
 });
 
 pub(crate) struct BasebackupQueryTimeOngoingRecording<'a, 'c> {
@@ -1412,12 +1418,11 @@ impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
                 elapsed
             }
         };
-        let label_value = if res.is_ok() { "ok" } else { "error" };
-        let metric = self
-            .parent
-            .0
-            .get_metric_with_label_values(&[label_value])
-            .unwrap();
+        let metric = if res.is_ok() {
+            &self.parent.ok
+        } else {
+            &self.parent.error
+        };
         metric.observe(ex_throttled.as_secs_f64());
     }
 }
@@ -2926,4 +2931,5 @@ pub fn preinitialize_metrics() {
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&tenant_throttling::TIMELINE_GET);
+    Lazy::force(&BASEBACKUP_QUERY_TIME);
 }
