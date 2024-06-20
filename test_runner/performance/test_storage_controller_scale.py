@@ -300,9 +300,6 @@ def test_storage_controller_many_tenants(
         ps.restart()
         poll_node_status(env, ps.id, "Active", max_attempts=24, backoff=1)
 
-        env.storage_controller.reconcile_until_idle()
-        env.storage_controller.consistency_check()
-
         retryable_node_operation(
             lambda ps_id: env.storage_controller.node_fill(ps_id), ps.id, max_attempts=3, backoff=2
         )
@@ -312,6 +309,9 @@ def test_storage_controller_many_tenants(
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
 
         assert_consistent_balanced_attachments(env, total_shards)
+
+        env.storage_controller.reconcile_until_idle()
+        env.storage_controller.consistency_check()
 
     # Consistency check is safe here: restarting pageservers should not have caused any Reconcilers to spawn,
     # as they were not offline long enough to trigger any scheduling changes.
