@@ -12,12 +12,15 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion
+from typing import Dict
 
 def get_consistent_node_shard_counts(env: NeonEnv, total_shards):
     tenants = env.storage_controller.tenant_list()
 
     intent = dict()
     observed = dict()
+
+    tenant_placement: defaultdict[str, Dict] = defaultdict(lambda: {"observed": {"attached": None, "secondary": []}, "intent": {"attached": None, "secondary": []}})
 
     for t in tenants:
         for node_id, loc_state in t["observed"]["locations"].items():
@@ -28,9 +31,24 @@ def get_consistent_node_shard_counts(env: NeonEnv, total_shards):
                 and loc_state["conf"]["mode"] in set(["AttachedSingle", "AttachedMulti", "AttachedStale"])
             ):
                 observed[t["tenant_shard_id"]] = int(node_id)
+                tenant_placement[t["tenant_shard_id"]]["observed"]["attached"] = int(node_id)
+
+            if (
+                loc_state is not None
+                and "conf" in loc_state
+                and loc_state["conf"] is not None
+                and loc_state["conf"]["mode"] == "Secondary"
+            ):
+                tenant_placement[t["tenant_shard_id"]]["observed"]["secondary"].append(int(node_id))
 
         if "attached" in t["intent"]:
             intent[t["tenant_shard_id"]] = t["intent"]["attached"]
+            tenant_placement[t["tenant_shard_id"]]["intent"]["attached"] = t["intent"]["attached"]
+
+        if "secondary" in t["intent"]:
+            tenant_placement[t["tenant_shard_id"]]["intent"]["secondary"] += t["intent"]["secondary"]
+
+    log.info(f"{tenant_placement=}")
 
     matching = {tid: intent[tid] for tid in observed if tid in intent and intent[tid] == observed[tid]}
     assert len(matching) == total_shards
