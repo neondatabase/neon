@@ -465,13 +465,10 @@ pub enum CompactionAlgorithm {
     Deserialize,
     strum_macros::FromRepr,
     strum_macros::EnumString,
-    enum_map::Enum,
 )]
 #[strum(serialize_all = "kebab-case")]
 pub enum ImageCompressionAlgorithm {
-    ZstdLow,
-    Zstd,
-    ZstdHigh,
+    Zstd { level: Option<i8> },
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
