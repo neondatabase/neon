@@ -301,6 +301,8 @@ def test_storage_controller_many_tenants(
     shard_counts = get_consistent_node_shard_counts(env, total_shards)
     log.info(f"Shard counts before rolling restart: {shard_counts}")
 
+    assert_consistent_balanced_attachments(env, total_shards)
+
     # Restart pageservers: this exercises the /re-attach API
     for ps in env.pageservers:
         retryable_node_operation(
