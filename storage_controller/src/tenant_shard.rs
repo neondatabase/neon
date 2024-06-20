@@ -1632,14 +1632,10 @@ pub(crate) mod tests {
 
         // We should see equal number of locations on the two nodes.
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 4);
-        // Scheduling does not consider the number of attachments picking the initial
-        // pageserver to attach to (hence the assertion that all primaries are on the
-        // same node)
-        // TODO: Tweak the scheduling to evenly distribute attachments for new shards.
-        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 4);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 2);
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 4);
-        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 0);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 2);
 
         // Add another two nodes: we should see the shards spread out when their optimize
         // methods are called
