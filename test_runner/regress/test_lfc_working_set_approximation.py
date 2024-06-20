@@ -81,6 +81,7 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create_start(
         branch_name="main",
         config_lines=[
+            "autovacuum = off",
             "shared_buffers=1MB",
             "neon.max_file_cache_size=256MB",
             "neon.file_cache_size_limit=245MB",
