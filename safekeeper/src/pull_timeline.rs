@@ -160,6 +160,7 @@ impl FullAccessTimeline {
         ar: &mut tokio_tar::Builder<W>,
     ) -> Result<SnapshotContext> {
         let mut shared_state = self.write_shared_state().await;
+        let wal_seg_size = shared_state.get_wal_seg_size();
 
         let cf_path = self.get_timeline_dir().join(CONTROL_FILE_NAME);
         let mut cf = File::open(cf_path).await?;
@@ -181,11 +182,11 @@ impl FullAccessTimeline {
             // elected message
             bail!("snapshot is called on uninitialized timeline");
         }
-        let from_segno = from_lsn.segment_number(shared_state.get_wal_seg_size());
+        let from_segno = from_lsn.segment_number(wal_seg_size);
         let term = shared_state.sk.get_term();
         let last_log_term = shared_state.sk.get_last_log_term();
         let flush_lsn = shared_state.sk.flush_lsn();
-        let upto_segno = flush_lsn.segment_number(shared_state.get_wal_seg_size());
+        let upto_segno = flush_lsn.segment_number(wal_seg_size);
         // have some limit on max number of segments as a sanity check
         const MAX_ALLOWED_SEGS: u64 = 1000;
         let num_segs = upto_segno - from_segno + 1;
@@ -206,6 +207,9 @@ impl FullAccessTimeline {
         }
         shared_state.wal_removal_on_hold = true;
 
+        // Drop shared_state to release the lock, before calling full_access_guard().
+        drop(shared_state);
+
         let tli_copy = self.full_access_guard().await?;
         let bctx = SnapshotContext {
             from_segno,
@@ -213,7 +217,7 @@ impl FullAccessTimeline {
             term,
             last_log_term,
             flush_lsn,
-            wal_seg_size: shared_state.get_wal_seg_size(),
+            wal_seg_size,
             tli: tli_copy,
         };
 

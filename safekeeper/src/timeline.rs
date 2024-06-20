@@ -814,6 +814,7 @@ impl Timeline {
     /// while someone is holding FullAccessTimeline guard.
     ///
     /// NB: don't use this function from timeline_manager, it will deadlock.
+    /// Don't use this function while holding shared_state lock.
     pub async fn full_access_guard(self: &Arc<Self>) -> Result<FullAccessTimeline> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
