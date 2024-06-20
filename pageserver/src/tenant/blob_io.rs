@@ -72,10 +72,10 @@ impl<'a> BlockCursor<'a> {
                 len_buf.copy_from_slice(&buf[off..off + 4]);
                 off += 4;
             }
-            len_buf[0] &= 0x0f;
+            len_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
             u32::from_be_bytes(len_buf) as usize
         };
-        let compression_bits = first_len_byte & 0xf0;
+        let compression_bits = first_len_byte & LEN_COMPRESSION_BIT_MASK;
 
         let mut tmp_buf = Vec::new();
         let buf_to_write;
@@ -127,6 +127,8 @@ impl<'a> BlockCursor<'a> {
     }
 }
 
+/// Reserved bits for length and compression
+const LEN_COMPRESSION_BIT_MASK: u8 = 0xf0;
 const BYTE_UNCOMPRESSED: u8 = 0x80;
 const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 
