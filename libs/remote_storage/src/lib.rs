@@ -551,7 +551,7 @@ pub enum RemoteStorageKind {
 }
 
 /// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct S3Config {
     /// Name of the bucket to connect to.
     pub bucket_name: String,
@@ -570,6 +570,7 @@ pub struct S3Config {
     /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
     pub concurrency_limit: NonZeroUsize,
     pub max_keys_per_list_response: Option<i32>,
+    #[serde(deserialize_with = "deserialize_storage_class")]
     pub upload_storage_class: Option<StorageClass>,
 }
 
@@ -589,7 +590,7 @@ impl Debug for S3Config {
 }
 
 /// Azure  bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AzureConfig {
     /// Name of the container to connect to.
     pub container_name: String,
@@ -619,6 +620,38 @@ impl Debug for AzureConfig {
             )
             .finish()
     }
+}
+
+fn deserialize_storage_class<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<StorageClass>, D::Error> {
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Option<StorageClass>;
+        fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            let storage_class = StorageClass::from_str(s).expect("infallible");
+            #[allow(deprecated)]
+            if matches!(storage_class, StorageClass::Unknown(_)) {
+                return Err(E::custom(format!(
+                    "Specified storage class unknown to SDK: '{s}'. Allowed values: {:?}",
+                    StorageClass::values()
+                )));
+            }
+            Ok(Some(storage_class))
+        }
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error, {
+            Ok(None)
+        }
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(formatter, "one of the following string values: {:?}", StorageClass::values())
+        }
+    }
+    deserializer.deserialize_str(Visitor)
 }
 
 impl RemoteStorageConfig {
