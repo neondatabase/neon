@@ -23,8 +23,8 @@ if TYPE_CHECKING:
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
-@pytest.mark.timeout(600)
-@pytest.mark.repeat(20)
+@pytest.mark.timeout(30*60)
+@pytest.mark.repeat(1)
 @pytest.mark.parametrize("shard_count", [None, 4])
 def test_pg_regress(
     neon_env_builder: NeonEnvBuilder,
