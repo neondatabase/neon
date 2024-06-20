@@ -82,7 +82,6 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
         branch_name="main",
         config_lines=[
             "shared_buffers=1MB",
-            "neon.wss_max_duration=100s",
             "neon.max_file_cache_size=256MB",
             "neon.file_cache_size_limit=245MB",
         ],
