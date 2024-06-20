@@ -1527,13 +1527,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         )
 
     # Give things a chance to settle.
-    # A call to `reconcile_until_idle` could be used here instead,
-    # however since all attachments are placed on the same node,
-    # we'd have to wait for a long time (2 minutes-ish) for optimizations
-    # to quiesce.
-    # TODO: once the initial attachment selection is fixed, update this
-    # to use `reconcile_until_idle`.
-    time.sleep(2)
+    env.storage_controller.reconcile_until_idle(timeout_secs=30)
 
     nodes = env.storage_controller.node_list()
     assert len(nodes) == 2
