@@ -605,7 +605,7 @@ prefetch_read(PrefetchRequest *slot)
 	}
 	else
 	{
-		neon_shard_log(slot->shard_no, WARNING,
+		neon_shard_log(slot->shard_no, LOG,
 					   "No response from reading prefetch entry %lu: %u/%u/%u.%u block %u. This can be caused by a concurrent disconnect",
 					   (long)slot->my_ring_index,
 					   RelFileInfoFmt(BufTagGetNRelFileInfo(slot->buftag)),
@@ -3112,12 +3112,12 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 		request_lsn = UINT64_MAX;
 
 	/*
-	 * GetRedoStartLsn() returns LSN of basebackup. We know that the SLRU
+	 * GetRedoStartLsn() returns LSN of the basebackup. We know that the SLRU
 	 * segment has not changed since the basebackup, because in order to
 	 * modify it, we would have had to download it already. And once
 	 * downloaded, we never evict SLRU segments from local disk.
 	 */
-	not_modified_since = GetRedoStartLsn();
+	not_modified_since = nm_adjust_lsn(GetRedoStartLsn());
 
 	SlruKind kind;
 

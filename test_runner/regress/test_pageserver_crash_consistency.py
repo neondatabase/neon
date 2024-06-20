@@ -1,11 +1,8 @@
-import time
-
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
-from fixtures.pageserver.common_types import parse_layer_file_name
+from fixtures.pageserver.common_types import ImageLayerName, parse_layer_file_name
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
-    wait_for_upload_queue_empty,
     wait_until_tenant_active,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
@@ -25,10 +22,9 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
 
     env = neon_env_builder.init_start(
         initial_tenant_conf={
-            "checkpoint_distance": f"{1024 ** 2}",
-            "compaction_target_size": f"{1024 ** 2}",
+            "checkpoint_distance": f"{10 * 1024**2}",
             "compaction_period": "0 s",
-            "compaction_threshold": "3",
+            "compaction_threshold": "999999",
         }
     )
     pageserver_http = env.pageserver.http_client()
@@ -42,13 +38,13 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
     pg_bin.run_capture(["pgbench", "-i", "-s1", connstr])
 
     lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-    endpoint.stop()
 
     # make sure we receive no new wal after this, so that we'll write over the same L1 file.
     endpoint.stop()
     for sk in env.safekeepers:
         sk.stop()
 
+    pageserver_http.patch_tenant_config_client_side(tenant_id, {"compaction_threshold": 3})
     # hit the exit failpoint
     with pytest.raises(ConnectionError, match="Remote end closed connection without response"):
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
@@ -72,9 +68,15 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
             # L0
             continue
 
+        candidate = parse_layer_file_name(path.name)
+
+        if isinstance(candidate, ImageLayerName):
+            continue
+
         if l1_found is not None:
-            raise RuntimeError(f"found multiple L1: {l1_found.name} and {path.name}")
-        l1_found = parse_layer_file_name(path.name)
+            raise RuntimeError(f"found multiple L1: {l1_found.to_str()} and {path.name}")
+
+        l1_found = candidate
 
     assert l1_found is not None, "failed to find L1 locally"
 
@@ -93,14 +95,9 @@ def test_local_only_layers_after_crash(neon_env_builder: NeonEnvBuilder, pg_bin:
     # wait for us to catch up again
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)
 
-    pageserver_http.timeline_compact(tenant_id, timeline_id)
-
-    # give time for log flush
-    time.sleep(1)
+    pageserver_http.timeline_compact(tenant_id, timeline_id, wait_until_uploaded=True)
 
     assert env.pageserver.layer_exists(tenant_id, timeline_id, l1_found), "the L1 reappears"
-
-    wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
 
     uploaded = env.pageserver_remote_storage.remote_layer_path(
         tenant_id, timeline_id, l1_found.to_str()

@@ -513,7 +513,7 @@ impl<'a> TenantDownloader<'a> {
         // cover our access to local storage.
         let Ok(_guard) = self.secondary_state.gate.enter() else {
             // Shutting down
-            return Ok(());
+            return Err(UpdateError::Cancelled);
         };
 
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
@@ -846,7 +846,7 @@ impl<'a> TenantDownloader<'a> {
         for layer in timeline.layers {
             if self.secondary_state.cancel.is_cancelled() {
                 tracing::debug!("Cancelled -- dropping out of layer loop");
-                return Ok(());
+                return Err(UpdateError::Cancelled);
             }
 
             // Existing on-disk layers: just update their access time.

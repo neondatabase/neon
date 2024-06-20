@@ -6,6 +6,7 @@ use self::no_leak_child::NoLeakChild;
 use crate::{
     config::PageServerConf,
     metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER},
+    span::debug_assert_current_span_has_tenant_id,
     walrecord::NeonWalRecord,
 };
 use anyhow::Context;
@@ -26,6 +27,7 @@ use utils::{lsn::Lsn, poison::Poison};
 pub struct WalRedoProcess {
     #[allow(dead_code)]
     conf: &'static PageServerConf,
+    #[cfg(feature = "testing")]
     tenant_shard_id: TenantShardId,
     // Some() on construction, only becomes None on Drop.
     child: Option<NoLeakChild>,
@@ -143,6 +145,7 @@ impl WalRedoProcess {
 
         Ok(Self {
             conf,
+            #[cfg(feature = "testing")]
             tenant_shard_id,
             child: Some(child),
             stdin: tokio::sync::Mutex::new(Poison::new(
@@ -178,7 +181,7 @@ impl WalRedoProcess {
     /// # Cancel-Safety
     ///
     /// Cancellation safe.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
+    #[instrument(skip_all, fields(pid=%self.id()))]
     pub(crate) async fn apply_wal_records(
         &self,
         rel: RelTag,
@@ -187,6 +190,8 @@ impl WalRedoProcess {
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
     ) -> anyhow::Result<Bytes> {
+        debug_assert_current_span_has_tenant_id();
+
         let tag = protocol::BufferTag { rel, blknum };
 
         // Serialize all the messages to send the WAL redo process first.

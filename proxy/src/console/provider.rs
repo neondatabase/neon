@@ -25,8 +25,8 @@ use tracing::info;
 
 pub mod errors {
     use crate::{
+        console::messages::{self, ConsoleError},
         error::{io_error, ReportableError, UserFacingError},
-        http,
         proxy::retry::ShouldRetry,
     };
     use thiserror::Error;
@@ -34,17 +34,14 @@ pub mod errors {
     use super::ApiLockError;
 
     /// A go-to error message which doesn't leak any detail.
-    const REQUEST_FAILED: &str = "Console request failed";
+    pub const REQUEST_FAILED: &str = "Console request failed";
 
     /// Common console API error.
     #[derive(Debug, Error)]
     pub enum ApiError {
         /// Error returned by the console itself.
-        #[error("{REQUEST_FAILED} with {}: {}", .status, .text)]
-        Console {
-            status: http::StatusCode,
-            text: Box<str>,
-        },
+        #[error("{REQUEST_FAILED} with {0}")]
+        Console(ConsoleError),
 
         /// Various IO errors like broken pipe or malformed payload.
         #[error("{REQUEST_FAILED}: {0}")]
@@ -53,11 +50,11 @@ pub mod errors {
 
     impl ApiError {
         /// Returns HTTP status code if it's the reason for failure.
-        pub fn http_status_code(&self) -> Option<http::StatusCode> {
+        pub fn get_reason(&self) -> messages::Reason {
             use ApiError::*;
             match self {
-                Console { status, .. } => Some(*status),
-                _ => None,
+                Console(e) => e.get_reason(),
+                _ => messages::Reason::Unknown,
             }
         }
     }
@@ -67,22 +64,7 @@ pub mod errors {
             use ApiError::*;
             match self {
                 // To minimize risks, only select errors are forwarded to users.
-                // Ask @neondatabase/control-plane for review before adding more.
-                Console { status, .. } => match *status {
-                    http::StatusCode::NOT_FOUND => {
-                        // Status 404: failed to get a project-related resource.
-                        format!("{REQUEST_FAILED}: endpoint cannot be found")
-                    }
-                    http::StatusCode::NOT_ACCEPTABLE => {
-                        // Status 406: endpoint is disabled (we don't allow connections).
-                        format!("{REQUEST_FAILED}: endpoint is disabled")
-                    }
-                    http::StatusCode::LOCKED | http::StatusCode::UNPROCESSABLE_ENTITY => {
-                        // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
-                        format!("{REQUEST_FAILED}: endpoint is temporarily unavailable. Check your quotas and/or contact our support.")
-                    }
-                    _ => REQUEST_FAILED.to_owned(),
-                },
+                Console(c) => c.get_user_facing_message(),
                 _ => REQUEST_FAILED.to_owned(),
             }
         }
@@ -91,29 +73,56 @@ pub mod errors {
     impl ReportableError for ApiError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                ApiError::Console {
-                    status: http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
-                    ..
-                } => crate::error::ErrorKind::User,
-                ApiError::Console {
-                    status: http::StatusCode::UNPROCESSABLE_ENTITY,
-                    text,
-                } if text.contains("compute time quota of non-primary branches is exceeded") => {
-                    crate::error::ErrorKind::User
+                ApiError::Console(e) => {
+                    use crate::error::ErrorKind::*;
+                    match e.get_reason() {
+                        crate::console::messages::Reason::RoleProtected => User,
+                        crate::console::messages::Reason::ResourceNotFound => User,
+                        crate::console::messages::Reason::ProjectNotFound => User,
+                        crate::console::messages::Reason::EndpointNotFound => User,
+                        crate::console::messages::Reason::BranchNotFound => User,
+                        crate::console::messages::Reason::RateLimitExceeded => ServiceRateLimit,
+                        crate::console::messages::Reason::NonPrimaryBranchComputeTimeExceeded => {
+                            User
+                        }
+                        crate::console::messages::Reason::ActiveTimeQuotaExceeded => User,
+                        crate::console::messages::Reason::ComputeTimeQuotaExceeded => User,
+                        crate::console::messages::Reason::WrittenDataQuotaExceeded => User,
+                        crate::console::messages::Reason::DataTransferQuotaExceeded => User,
+                        crate::console::messages::Reason::LogicalSizeQuotaExceeded => User,
+                        crate::console::messages::Reason::Unknown => match &e {
+                            ConsoleError {
+                                http_status_code:
+                                    http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
+                                ..
+                            } => crate::error::ErrorKind::User,
+                            ConsoleError {
+                                http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
+                                error,
+                                ..
+                            } if error.contains(
+                                "compute time quota of non-primary branches is exceeded",
+                            ) =>
+                            {
+                                crate::error::ErrorKind::User
+                            }
+                            ConsoleError {
+                                http_status_code: http::StatusCode::LOCKED,
+                                error,
+                                ..
+                            } if error.contains("quota exceeded")
+                                || error.contains("the limit for current plan reached") =>
+                            {
+                                crate::error::ErrorKind::User
+                            }
+                            ConsoleError {
+                                http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
+                                ..
+                            } => crate::error::ErrorKind::ServiceRateLimit,
+                            ConsoleError { .. } => crate::error::ErrorKind::ControlPlane,
+                        },
+                    }
                 }
-                ApiError::Console {
-                    status: http::StatusCode::LOCKED,
-                    text,
-                } if text.contains("quota exceeded")
-                    || text.contains("the limit for current plan reached") =>
-                {
-                    crate::error::ErrorKind::User
-                }
-                ApiError::Console {
-                    status: http::StatusCode::TOO_MANY_REQUESTS,
-                    ..
-                } => crate::error::ErrorKind::ServiceRateLimit,
-                ApiError::Console { .. } => crate::error::ErrorKind::ControlPlane,
                 ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
@@ -124,31 +133,7 @@ pub mod errors {
             match self {
                 // retry some transport errors
                 Self::Transport(io) => io.could_retry(),
-                // retry some temporary failures because the compute was in a bad state
-                // (bad request can be returned when the endpoint was in transition)
-                Self::Console {
-                    status: http::StatusCode::BAD_REQUEST,
-                    ..
-                } => true,
-                // don't retry when quotas are exceeded
-                Self::Console {
-                    status: http::StatusCode::UNPROCESSABLE_ENTITY,
-                    ref text,
-                } => !text.contains("compute time quota of non-primary branches is exceeded"),
-                // locked can be returned when the endpoint was in transition
-                // or when quotas are exceeded. don't retry when quotas are exceeded
-                Self::Console {
-                    status: http::StatusCode::LOCKED,
-                    ref text,
-                } => {
-                    // written data quota exceeded
-                    // data transfer quota exceeded
-                    // compute time quota exceeded
-                    // logical size quota exceeded
-                    !text.contains("quota exceeded")
-                        && !text.contains("the limit for current plan reached")
-                }
-                _ => false,
+                Self::Console(e) => e.could_retry(),
             }
         }
     }
@@ -509,7 +494,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         self.metrics
             .semaphore_acquire_seconds
             .observe(now.elapsed().as_secs_f64());
-
+        info!("acquired permit {:?}", now.elapsed().as_secs_f64());
         Ok(WakeComputePermit { permit: permit? })
     }
 

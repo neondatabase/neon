@@ -112,6 +112,45 @@ RUN for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JS
     && make install \
     && rm -rf ../lcov.tar.gz
 
+# Compile and install the static OpenSSL library
+ENV OPENSSL_VERSION=3.2.2
+ENV OPENSSL_PREFIX=/usr/local/openssl
+RUN wget -O /tmp/openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz && \
+    echo "197149c18d9e9f292c43f0400acaba12e5f52cacfe050f3d199277ea738ec2e7 /tmp/openssl-${OPENSSL_VERSION}.tar.gz" | sha256sum --check && \
+    cd /tmp && \
+    tar xzvf /tmp/openssl-${OPENSSL_VERSION}.tar.gz && \
+    rm /tmp/openssl-${OPENSSL_VERSION}.tar.gz && \
+    cd /tmp/openssl-${OPENSSL_VERSION} && \
+    ./config --prefix=${OPENSSL_PREFIX}  -static --static no-shared -fPIC && \
+    make -j "$(nproc)" && \
+    make install && \
+    cd /tmp && \
+    rm -rf /tmp/openssl-${OPENSSL_VERSION}
+
+# Use the same version of libicu as the compute nodes so that
+# clusters created using inidb on pageserver can be used by computes.
+#
+# TODO: at this time, Dockerfile.compute-node uses the debian bullseye libicu
+# package, which is 67.1. We're duplicating that knowledge here, and also, technically,
+# Debian has a few patches on top of 67.1 that we're not adding here.
+ENV ICU_VERSION=67.1
+ENV ICU_PREFIX=/usr/local/icu
+
+# Download and build static ICU
+RUN wget -O /tmp/libicu-${ICU_VERSION}.tgz https://github.com/unicode-org/icu/releases/download/release-${ICU_VERSION//./-}/icu4c-${ICU_VERSION//./_}-src.tgz && \
+    echo "94a80cd6f251a53bd2a997f6f1b5ac6653fe791dfab66e1eb0227740fb86d5dc /tmp/libicu-${ICU_VERSION}.tgz" | sha256sum --check && \
+    mkdir /tmp/icu && \
+    pushd /tmp/icu && \
+    tar -xzf /tmp/libicu-${ICU_VERSION}.tgz && \
+    pushd icu/source && \
+    ./configure --prefix=${ICU_PREFIX}  --enable-static --enable-shared=no CXXFLAGS="-fPIC" CFLAGS="-fPIC" && \
+    make -j "$(nproc)" && \
+    make install && \
+    popd && \
+    rm -rf icu && \
+    rm -f /tmp/libicu-${ICU_VERSION}.tgz && \
+    popd
+
 # Switch to nonroot user
 USER nonroot:nonroot
 WORKDIR /home/nonroot
@@ -141,7 +180,7 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.78.0
+ENV RUSTC_VERSION=1.79.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
@@ -170,3 +209,6 @@ RUN whoami \
     && rustup --version --verbose \
     && rustc --version --verbose \
     && clang --version
+
+# Set following flag to check in Makefile if its running in Docker
+RUN touch /home/nonroot/.docker_build

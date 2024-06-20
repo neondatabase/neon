@@ -17,7 +17,7 @@ use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::task;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_utils::http::OtelName;
 use utils::http::request::must_get_query_param;
 
@@ -48,7 +48,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
     match (req.method(), req.uri().path()) {
         // Serialized compute state.
         (&Method::GET, "/status") => {
-            info!("serving /status GET request");
+            debug!("serving /status GET request");
             let state = compute.state.lock().unwrap();
             let status_response = status_response_from_state(&state);
             Response::new(Body::from(serde_json::to_string(&status_response).unwrap()))

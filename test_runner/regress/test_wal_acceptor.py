@@ -317,9 +317,9 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
         time.sleep(1)
 
     # Ensure that safekeepers don't lose remote_consistent_lsn on restart.
-    # Control file is persisted each 5s. TODO: do that on shutdown and remove sleep.
-    time.sleep(6)
     for sk in env.safekeepers:
+        # force persist cfile
+        sk.http_client().checkpoint(tenant_id, timeline_id)
         sk.stop()
         sk.start()
     stat_after_restart = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
@@ -374,7 +374,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         http_cli_other = env.safekeepers[0].http_client(
             auth_token=env.auth_keys.generate_tenant_token(TenantId.generate())
         )
-        http_cli_noauth = env.safekeepers[0].http_client()
+        http_cli_noauth = env.safekeepers[0].http_client(gen_sk_wide_token=False)
 
     # Pretend WAL is offloaded to s3.
     if auth_enabled:
@@ -830,7 +830,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             auth_token=env.auth_keys.generate_tenant_token(TenantId.generate())
         )
         wa_http_cli_bad.check_status()
-        wa_http_cli_noauth = wa.http_client()
+        wa_http_cli_noauth = wa.http_client(gen_sk_wide_token=False)
         wa_http_cli_noauth.check_status()
 
         # debug endpoint requires safekeeper scope
@@ -964,7 +964,7 @@ def test_sk_auth(neon_env_builder: NeonEnvBuilder):
 
     # By default, neon_local enables auth on all services if auth is configured,
     # so http must require the token.
-    sk_http_cli_noauth = sk.http_client()
+    sk_http_cli_noauth = sk.http_client(gen_sk_wide_token=False)
     sk_http_cli_auth = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
     with pytest.raises(sk_http_cli_noauth.HTTPError, match="Forbidden|Unauthorized"):
         sk_http_cli_noauth.timeline_status(tenant_id, timeline_id)
@@ -1640,7 +1640,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         sk_http_other = sk.http_client(
             auth_token=env.auth_keys.generate_tenant_token(tenant_id_other)
         )
-        sk_http_noauth = sk.http_client()
+        sk_http_noauth = sk.http_client(gen_sk_wide_token=False)
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_1)).is_dir()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_2)).is_dir()
     assert (sk_data_dir / str(tenant_id) / str(timeline_id_3)).is_dir()
@@ -1723,7 +1723,10 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
             cur.execute("INSERT INTO t (key) VALUES (123)")
 
 
+# Basic pull_timeline test.
 def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
+
     def execute_payload(endpoint: Endpoint):
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
@@ -1739,7 +1742,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 
     def show_statuses(safekeepers: List[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
         for sk in safekeepers:
-            http_cli = sk.http_client()
+            http_cli = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
             try:
                 status = http_cli.timeline_status(tenant_id, timeline_id)
                 log.info(f"Safekeeper {sk.id} status: {status}")
@@ -1749,11 +1752,11 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 4
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_pull_timeline")
+    timeline_id = env.initial_timeline
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
-    endpoint = env.endpoints.create("test_pull_timeline")
+    endpoint = env.endpoints.create("main")
     endpoint.active_safekeepers = [1, 2, 3]
     endpoint.start()
 
@@ -1769,7 +1772,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 
     res = (
         env.safekeepers[3]
-        .http_client()
+        .http_client(auth_token=env.auth_keys.generate_safekeeper_token())
         .pull_timeline(
             {
                 "tenant_id": str(tenant_id),
@@ -1787,7 +1790,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
     log.info("Restarting compute with new config to verify that it works")
-    endpoint.stop_and_destroy().create("test_pull_timeline")
+    endpoint.stop_and_destroy().create("main")
     endpoint.active_safekeepers = [1, 3, 4]
     endpoint.start()
 
@@ -1816,8 +1819,8 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 # 4) Do some write, verify integrity with timeline_digest.
 # Expected to fail while holding off WAL gc plus fetching commit_lsn WAL
 # segment is not implemented.
-@pytest.mark.xfail
 def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     env = neon_env_builder.init_start()
@@ -1836,26 +1839,35 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     src_flush_lsn = src_sk.get_flush_lsn(tenant_id, timeline_id)
     log.info(f"flush_lsn on src before pull_timeline: {src_flush_lsn}")
 
-    dst_http = dst_sk.http_client()
+    src_http = src_sk.http_client()
     # run pull_timeline which will halt before downloading files
-    dst_http.configure_failpoints(("sk-pull-timeline-after-list-pausable", "pause"))
+    src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "pause"))
     pt_handle = PropagatingThread(
         target=dst_sk.pull_timeline, args=([src_sk], tenant_id, timeline_id)
     )
     pt_handle.start()
-    dst_sk.wait_until_paused("sk-pull-timeline-after-list-pausable")
+    src_sk.wait_until_paused("sk-snapshot-after-list-pausable")
 
     # ensure segment exists
     endpoint.safe_psql("insert into t select generate_series(1, 180000), 'papaya'")
-    lsn = last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+    lsn = last_flush_lsn_upload(
+        env,
+        endpoint,
+        tenant_id,
+        timeline_id,
+        auth_token=env.auth_keys.generate_tenant_token(tenant_id),
+    )
     assert lsn > Lsn("0/2000000")
     # Checkpoint timeline beyond lsn.
-    src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn)
+    src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn, wait_wal_removal=False)
     first_segment_p = src_sk.timeline_dir(tenant_id, timeline_id) / "000000010000000000000001"
     log.info(f"first segment exist={os.path.exists(first_segment_p)}")
 
-    dst_http.configure_failpoints(("sk-pull-timeline-after-list-pausable", "off"))
+    src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "off"))
     pt_handle.join()
+
+    # after pull_timeline is finished WAL should be removed on donor
+    src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn, wait_wal_removal=True)
 
     timeline_start_lsn = src_sk.get_timeline_start_lsn(tenant_id, timeline_id)
     dst_flush_lsn = dst_sk.get_flush_lsn(tenant_id, timeline_id)
@@ -1883,8 +1895,8 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
 # enough, so it won't be affected by term change anymore.
 #
 # Expected to fail while term check is not implemented.
-@pytest.mark.xfail
 def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     env = neon_env_builder.init_start()
@@ -1900,14 +1912,14 @@ def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
     ep.safe_psql("create table t(key int, value text)")
     ep.safe_psql("insert into t select generate_series(1, 1000), 'pear'")
 
-    dst_http = dst_sk.http_client()
+    src_http = src_sk.http_client()
     # run pull_timeline which will halt before downloading files
-    dst_http.configure_failpoints(("sk-pull-timeline-after-list-pausable", "pause"))
+    src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "pause"))
     pt_handle = PropagatingThread(
         target=dst_sk.pull_timeline, args=([src_sk], tenant_id, timeline_id)
     )
     pt_handle.start()
-    dst_sk.wait_until_paused("sk-pull-timeline-after-list-pausable")
+    src_sk.wait_until_paused("sk-snapshot-after-list-pausable")
 
     src_http = src_sk.http_client()
     term_before = src_http.timeline_status(tenant_id, timeline_id).term
@@ -1922,7 +1934,7 @@ def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
     term_after = src_http.timeline_status(tenant_id, timeline_id).term
     assert term_after > term_before, f"term_after={term_after}, term_before={term_before}"
 
-    dst_http.configure_failpoints(("sk-pull-timeline-after-list-pausable", "off"))
+    src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "off"))
     with pytest.raises(requests.exceptions.HTTPError):
         pt_handle.join()
 

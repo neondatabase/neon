@@ -283,7 +283,13 @@ impl ComputeHook {
         // all calls to this function
         let _locked = self.neon_local_lock.lock().await;
 
-        let env = match LocalEnv::load_config() {
+        let Some(repo_dir) = self.config.neon_local_repo_dir.as_deref() else {
+            tracing::warn!(
+                "neon_local_repo_dir not set, likely a bug in neon_local; skipping compute update"
+            );
+            return Ok(());
+        };
+        let env = match LocalEnv::load_config(repo_dir) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("Couldn't load neon_local config, skipping compute update ({e})");

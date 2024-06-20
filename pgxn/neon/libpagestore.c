@@ -382,6 +382,15 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		shard->last_reconnect_time = now;
 
 		/*
+		 * Make sure we don't do exponential backoff with a constant multiplier
+		 * of 0 us, as that doesn't really do much for timeouts...
+		 *
+		 * cf. https://github.com/neondatabase/neon/issues/7897
+		 */
+		if (shard->delay_us == 0)
+			shard->delay_us = MIN_RECONNECT_INTERVAL_USEC;
+
+		/*
 		 * If we did other tasks between reconnect attempts, then we won't
 		 * need to wait as long as a full delay.
 		 */

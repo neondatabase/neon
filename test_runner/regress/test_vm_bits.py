@@ -1,7 +1,9 @@
 import time
+from contextlib import closing
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, fork_at_current_lsn
+from fixtures.utils import query_scalar
 
 
 #
@@ -113,11 +115,88 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     assert cur_new.fetchall() == []
 
 
-#
-# Test that the ALL_FROZEN VM bit is cleared correctly at a HEAP_LOCK
-# record.
-#
-def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
+def test_vm_bit_clear_on_heap_lock_whitebox(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that the ALL_FROZEN VM bit is cleared correctly at a HEAP_LOCK record.
+
+    This is a repro for the bug fixed in commit 66fa176cc8.
+    """
+    env = neon_env_builder.init_start()
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            # If auto-analyze runs at the same time that we run VACUUM FREEZE, it
+            # can hold a snasphot that prevent the tuples from being frozen.
+            "autovacuum=off",
+            "log_checkpoints=on",
+        ],
+    )
+
+    # Run the tests in a dedicated database, because the activity monitor
+    # periodically runs some queries on to the 'postgres' database. If that
+    # happens at the same time that we're trying to freeze, the activity
+    # monitor's queries can hold back the xmin horizon and prevent freezing.
+    with closing(endpoint.connect()) as pg_conn:
+        pg_conn.cursor().execute("CREATE DATABASE vmbitsdb")
+    pg_conn = endpoint.connect(dbname="vmbitsdb")
+    cur = pg_conn.cursor()
+
+    # Install extension containing function needed for test
+    cur.execute("CREATE EXTENSION neon_test_utils")
+    cur.execute("CREATE EXTENSION pageinspect")
+
+    # Create a test table and freeze it to set the all-frozen VM bit on all pages.
+    cur.execute("CREATE TABLE vmtest_lock (id integer PRIMARY KEY)")
+    cur.execute("BEGIN")
+    cur.execute("INSERT INTO vmtest_lock SELECT g FROM generate_series(1, 50000) g")
+    xid = int(query_scalar(cur, "SELECT txid_current()"))
+    cur.execute("COMMIT")
+    cur.execute("VACUUM (FREEZE, DISABLE_PAGE_SKIPPING true, VERBOSE) vmtest_lock")
+    for notice in pg_conn.notices:
+        log.info(f"{notice}")
+
+    # This test has been flaky in the past, because background activity like
+    # auto-analyze and compute_ctl's activity monitor queries have prevented the
+    # tuples from being frozen. Check that they were frozen.
+    relfrozenxid = int(
+        query_scalar(cur, "SELECT relfrozenxid FROM pg_class WHERE relname='vmtest_lock'")
+    )
+    assert (
+        relfrozenxid > xid
+    ), f"Inserted rows were not frozen. This can be caused by concurrent activity in the database. (XID {xid}, relfrozenxid {relfrozenxid}"
+
+    # Lock a row. This clears the all-frozen VM bit for that page.
+    cur.execute("BEGIN")
+    cur.execute("SELECT * FROM vmtest_lock WHERE id = 40000 FOR UPDATE")
+    cur.execute("COMMIT")
+
+    # The VM page in shared buffer cache, and the same page as reconstructed by
+    # the pageserver, should be equal. Except for the LSN: Clearing a bit in the
+    # VM doesn't bump the LSN in PostgreSQL, but the pageserver updates the LSN
+    # when it replays the VM-bit clearing record (since commit 387a36874c)
+    #
+    # This is a bit fragile, we've had lot of flakiness in this test before. For
+    # example, because all the VM bits were not set because concurrent
+    # autoanalyze prevented the VACUUM FREEZE from freezing the tuples. Or
+    # because autoavacuum kicked in and re-froze the page between the
+    # get_raw_page() and get_raw_page_at_lsn() calls. We disable autovacuum now,
+    # which should make this deterministic.
+    cur.execute("select get_raw_page( 'vmtest_lock', 'vm', 0 )")
+    vm_page_in_cache = (cur.fetchall()[0][0])[8:100].hex()
+    cur.execute(
+        "select get_raw_page_at_lsn( 'vmtest_lock', 'vm', 0, pg_current_wal_insert_lsn(), NULL )"
+    )
+    vm_page_at_pageserver = (cur.fetchall()[0][0])[8:100].hex()
+
+    assert vm_page_at_pageserver == vm_page_in_cache
+
+
+def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
+    """
+    The previous test is enough to verify the bug that was fixed in
+    commit 66fa176cc8. But for good measure, we also reproduce the
+    original problem that the missing VM page update caused.
+    """
     tenant_conf = {
         "checkpoint_distance": f"{128 * 1024}",
         "compaction_target_size": f"{128 * 1024}",
@@ -130,9 +209,9 @@ def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_vm_bit_clear_on_heap_lock")
+    timeline_id = env.initial_timeline
     endpoint = env.endpoints.create_start(
-        "test_vm_bit_clear_on_heap_lock",
+        "main",
         config_lines=[
             "log_autovacuum_min_duration = 0",
             # Perform anti-wraparound vacuuming aggressively
@@ -146,12 +225,10 @@ def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
 
     # Install extension containing function needed for test
     cur.execute("CREATE EXTENSION neon_test_utils")
-    cur.execute("CREATE EXTENSION pageinspect")
 
     # Create a test table and freeze it to set the all-frozen VM bit on all pages.
     cur.execute("CREATE TABLE vmtest_lock (id integer PRIMARY KEY)")
     cur.execute("INSERT INTO vmtest_lock SELECT g FROM generate_series(1, 50000) g")
-
     cur.execute("VACUUM (FREEZE, DISABLE_PAGE_SKIPPING true) vmtest_lock")
 
     # Lock a row. This clears the all-frozen VM bit for that page.
@@ -164,27 +241,6 @@ def test_vm_bit_clear_on_heap_lock(neon_env_builder: NeonEnvBuilder):
     locking_xid = int(cur.fetchall()[0][0])
 
     cur.execute("COMMIT")
-
-    # The VM page in shared buffer cache, and the same page as reconstructed
-    # by the pageserver, should be equal.
-    #
-    # Ignore page header (24 bytes) of visibility map.
-    # If the dirty VM page is flushed from the cache for some reason,
-    # it gets WAL-logged, which changes the LSN on the page.
-    # Also in neon SMGR we can replace empty heap page with zero (uninitialized) heap page.
-    cur.execute("select get_raw_page( 'vmtest_lock', 'vm', 0 )")
-    vm_page_in_cache = (cur.fetchall()[0][0])[24:100].hex()
-    cur.execute(
-        "select get_raw_page_at_lsn( 'vmtest_lock', 'vm', 0, pg_current_wal_insert_lsn(), NULL )"
-    )
-    vm_page_at_pageserver = (cur.fetchall()[0][0])[24:100].hex()
-
-    assert vm_page_at_pageserver == vm_page_in_cache
-
-    # The above assert is enough to verify the bug that was fixed in
-    # commit 66fa176cc8. But for good measure, we also reproduce the
-    # original problem that the missing VM page update caused. The
-    # rest of the test does that.
 
     # Kill and restart postgres, to clear the buffer cache.
     #

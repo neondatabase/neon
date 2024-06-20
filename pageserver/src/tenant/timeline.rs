@@ -1,3 +1,4 @@
+pub(crate) mod analysis;
 mod compaction;
 pub mod delete;
 pub(crate) mod detach_ancestor;
@@ -46,7 +47,6 @@ use utils::{
     vec_map::VecMap,
 };
 
-use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -60,7 +60,12 @@ use std::{
     cmp::{max, min, Ordering},
     ops::ControlFlow,
 };
+use std::{
+    collections::btree_map::Entry,
+    ops::{Deref, Range},
+};
 
+use crate::metrics::GetKind;
 use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -74,7 +79,6 @@ use crate::{
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     pgdatadir_mapping::CollectKeySpaceError,
 };
-use crate::{deletion_queue::DeletionQueueClient, metrics::GetKind};
 use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
@@ -204,7 +208,6 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
-    pub deletion_queue_client: DeletionQueueClient,
     pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
@@ -321,6 +324,8 @@ pub struct Timeline {
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
+    ///
+    /// The state is cleared upon freezing.
     write_lock: tokio::sync::Mutex<Option<TimelineWriterState>>,
 
     /// Used to avoid multiple `flush_loop` tasks running
@@ -423,6 +428,14 @@ pub struct Timeline {
 
     /// Indicate whether aux file v2 storage is enabled.
     pub(crate) last_aux_file_policy: AtomicAuxFilePolicy,
+
+    /// Some test cases directly place keys into the timeline without actually modifying the directory
+    /// keys (i.e., DB_DIR). The test cases creating such keys will put the keyspaces here, so that
+    /// these keys won't get garbage-collected during compaction/GC. This field only modifies the dense
+    /// keyspace return value of `collect_keyspace`. For sparse keyspaces, use AUX keys for testing, and
+    /// in the future, add `extra_test_sparse_keyspace` if necessary.
+    #[cfg(test)]
+    pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
 }
 
 pub struct WalReceiverInfo {
@@ -444,6 +457,9 @@ pub(crate) struct GcInfo {
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
+
+    /// Leases granted to particular LSNs.
+    pub(crate) leases: BTreeMap<Lsn, LsnLease>,
 }
 
 impl GcInfo {
@@ -1545,17 +1561,46 @@ impl Timeline {
         Ok(())
     }
 
-    /// Obtains a temporary lease blocking garbage collection for the given LSN
+    /// Obtains a temporary lease blocking garbage collection for the given LSN.
+    ///
+    /// This function will error if the requesting LSN is less than the `latest_gc_cutoff_lsn` and there is also
+    /// no existing lease to renew. If there is an existing lease in the map, the lease will be renewed only if
+    /// the request extends the lease. The returned lease is therefore the maximum between the existing lease and
+    /// the requesting lease.
     pub(crate) fn make_lsn_lease(
         &self,
-        _lsn: Lsn,
+        lsn: Lsn,
+        length: Duration,
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
-        const LEASE_LENGTH: Duration = Duration::from_secs(5 * 60);
-        let lease = LsnLease {
-            valid_until: SystemTime::now() + LEASE_LENGTH,
+        let lease = {
+            let mut gc_info = self.gc_info.write().unwrap();
+
+            let valid_until = SystemTime::now() + length;
+
+            let entry = gc_info.leases.entry(lsn);
+
+            let lease = {
+                if let Entry::Occupied(mut occupied) = entry {
+                    let existing_lease = occupied.get_mut();
+                    if valid_until > existing_lease.valid_until {
+                        existing_lease.valid_until = valid_until;
+                    }
+                    existing_lease.clone()
+                } else {
+                    // Reject already GC-ed LSN (lsn < latest_gc_cutoff)
+                    let latest_gc_cutoff_lsn = self.get_latest_gc_cutoff_lsn();
+                    if lsn < *latest_gc_cutoff_lsn {
+                        bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
+                    }
+
+                    entry.or_insert(LsnLease { valid_until }).clone()
+                }
+            };
+
+            lease
         };
-        // TODO: dummy implementation
+
         Ok(lease)
     }
 
@@ -1568,7 +1613,15 @@ impl Timeline {
     // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
     // polluting the span hierarchy.
     pub(crate) async fn freeze_and_flush0(&self) -> Result<(), FlushLayerError> {
-        let to_lsn = self.freeze_inmem_layer(false).await;
+        let to_lsn = {
+            // Freeze the current open in-memory layer. It will be written to disk on next
+            // iteration.
+            let mut g = self.write_lock.lock().await;
+
+            let to_lsn = self.get_last_record_lsn();
+            self.freeze_inmem_layer_at(to_lsn, &mut g).await;
+            to_lsn
+        };
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
 
@@ -1577,7 +1630,7 @@ impl Timeline {
     // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
     // ephemeral layer bytes has been breached.
     pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
-        let Ok(_write_guard) = self.write_lock.try_lock() else {
+        let Ok(mut write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
             return;
@@ -1654,24 +1707,35 @@ impl Timeline {
             self.last_freeze_at.load(),
             open_layer.get_opened_at(),
         ) {
-            match open_layer.info() {
+            let at_lsn = match open_layer.info() {
                 InMemoryLayerInfo::Frozen { lsn_start, lsn_end } => {
                     // We may reach this point if the layer was already frozen by not yet flushed: flushing
                     // happens asynchronously in the background.
                     tracing::debug!(
                         "Not freezing open layer, it's already frozen ({lsn_start}..{lsn_end})"
                     );
+                    None
                 }
                 InMemoryLayerInfo::Open { .. } => {
                     // Upgrade to a write lock and freeze the layer
                     drop(layers_guard);
                     let mut layers_guard = self.layers.write().await;
-                    layers_guard
-                        .try_freeze_in_memory_layer(current_lsn, &self.last_freeze_at)
+                    let froze = layers_guard
+                        .try_freeze_in_memory_layer(
+                            current_lsn,
+                            &self.last_freeze_at,
+                            &mut write_guard,
+                        )
                         .await;
+                    Some(current_lsn).filter(|_| froze)
+                }
+            };
+            if let Some(lsn) = at_lsn {
+                let res: Result<u64, _> = self.flush_frozen_layers(lsn);
+                if let Err(e) = res {
+                    tracing::info!("failed to flush frozen layer after background freeze: {e:#}");
                 }
             }
-            self.flush_frozen_layers();
         }
     }
 
@@ -2035,11 +2099,11 @@ impl Timeline {
             true
         } else if distance > 0 && opened_at.elapsed() >= self.get_checkpoint_timeout() {
             info!(
-                    "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
-                    projected_lsn,
-                    layer_size,
-                    opened_at.elapsed()
-                );
+                "Will roll layer at {} with layer size {} due to time since first write to the layer ({:?})",
+                projected_lsn,
+                layer_size,
+                opened_at.elapsed()
+            );
 
             true
         } else {
@@ -2053,6 +2117,24 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
+    pub(crate) fn get_lsn_lease_length(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .lsn_lease_length
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+    }
+
+    // TODO(yuchen): remove unused flag after implementing https://github.com/neondatabase/neon/issues/8072
+    #[allow(unused)]
+    pub(crate) fn get_lsn_lease_length_for_ts(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .lsn_lease_length_for_ts
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
+    }
+
     pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2322,6 +2404,9 @@ impl Timeline {
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
 
                 last_aux_file_policy: AtomicAuxFilePolicy::new(aux_file_policy),
+
+                #[cfg(test)]
+                extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -2380,7 +2465,7 @@ impl Timeline {
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
-                assert!(matches!(*flush_loop_state, FlushLoopState::Running{ ..}));
+                assert!(matches!(*flush_loop_state, FlushLoopState::Running{..}));
                 *flush_loop_state  = FlushLoopState::Exited;
                 Ok(())
             }
@@ -3643,28 +3728,21 @@ impl Timeline {
         self.last_record_lsn.advance(new_lsn);
     }
 
-    /// Whether there was a layer to freeze or not, return the value of get_last_record_lsn
-    /// before we attempted the freeze: this guarantees that ingested data is frozen up to this lsn (inclusive).
-    async fn freeze_inmem_layer(&self, write_lock_held: bool) -> Lsn {
-        // Freeze the current open in-memory layer. It will be written to disk on next
-        // iteration.
-
-        let _write_guard = if write_lock_held {
-            None
-        } else {
-            Some(self.write_lock.lock().await)
+    async fn freeze_inmem_layer_at(
+        &self,
+        at: Lsn,
+        write_lock: &mut tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
+    ) {
+        let frozen = {
+            let mut guard = self.layers.write().await;
+            guard
+                .try_freeze_in_memory_layer(at, &self.last_freeze_at, write_lock)
+                .await
         };
-
-        let to_lsn = self.get_last_record_lsn();
-        self.freeze_inmem_layer_at(to_lsn).await;
-        to_lsn
-    }
-
-    async fn freeze_inmem_layer_at(&self, at: Lsn) {
-        let mut guard = self.layers.write().await;
-        guard
-            .try_freeze_in_memory_layer(at, &self.last_freeze_at)
-            .await;
+        if frozen {
+            let now = Instant::now();
+            *(self.last_freeze_ts.write().unwrap()) = now;
+        }
     }
 
     /// Layer flusher task's main loop.
@@ -3758,18 +3836,14 @@ impl Timeline {
         }
     }
 
-    /// Request the flush loop to write out all frozen layers up to `to_lsn` as Delta L0 files to disk.
-    /// The caller is responsible for the freezing, e.g., [`Self::freeze_inmem_layer`].
+    /// Request the flush loop to write out all frozen layers up to `at_lsn` as Delta L0 files to disk.
+    /// The caller is responsible for the freezing, e.g., [`Self::freeze_inmem_layer_at`].
     ///
-    /// `last_record_lsn` may be higher than the highest LSN of a frozen layer: if this is the case,
-    /// it means no data will be written between the top of the highest frozen layer and to_lsn,
-    /// e.g. because this tenant shard has ingested up to to_lsn and not written any data locally for that part of the WAL.
-    async fn flush_frozen_layers_and_wait(
-        &self,
-        last_record_lsn: Lsn,
-    ) -> Result<(), FlushLayerError> {
-        let mut rx = self.layer_flush_done_tx.subscribe();
-
+    /// `at_lsn` may be higher than the highest LSN of a frozen layer: if this is the
+    /// case, it means no data will be written between the top of the highest frozen layer and
+    /// to_lsn, e.g. because this tenant shard has ingested up to to_lsn and not written any data
+    /// locally for that part of the WAL.
+    fn flush_frozen_layers(&self, at_lsn: Lsn) -> Result<u64, FlushLayerError> {
         // Increment the flush cycle counter and wake up the flush task.
         // Remember the new value, so that when we listen for the flush
         // to finish, we know when the flush that we initiated has
@@ -3784,13 +3858,18 @@ impl Timeline {
         self.layer_flush_start_tx.send_modify(|(counter, lsn)| {
             my_flush_request = *counter + 1;
             *counter = my_flush_request;
-            *lsn = std::cmp::max(last_record_lsn, *lsn);
+            *lsn = std::cmp::max(at_lsn, *lsn);
         });
 
+        Ok(my_flush_request)
+    }
+
+    async fn wait_flush_completion(&self, request: u64) -> Result<(), FlushLayerError> {
+        let mut rx = self.layer_flush_done_tx.subscribe();
         loop {
             {
                 let (last_result_counter, last_result) = &*rx.borrow();
-                if *last_result_counter >= my_flush_request {
+                if *last_result_counter >= request {
                     if let Err(err) = last_result {
                         // We already logged the original error in
                         // flush_loop. We cannot propagate it to the caller
@@ -3817,12 +3896,9 @@ impl Timeline {
         }
     }
 
-    fn flush_frozen_layers(&self) {
-        self.layer_flush_start_tx.send_modify(|(counter, lsn)| {
-            *counter += 1;
-
-            *lsn = std::cmp::max(*lsn, Lsn(self.last_freeze_at.load().0 - 1));
-        });
+    async fn flush_frozen_layers_and_wait(&self, at_lsn: Lsn) -> Result<(), FlushLayerError> {
+        let token = self.flush_frozen_layers(at_lsn)?;
+        self.wait_flush_completion(token).await
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
@@ -4446,6 +4522,12 @@ impl Timeline {
                 if mode == ImageLayerCreationMode::Initial {
                     return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
                 }
+                if mode == ImageLayerCreationMode::Try && !check_for_image_layers {
+                    // Skip compaction if there are not enough updates. Metadata compaction will do a scan and
+                    // might mess up with evictions.
+                    start = img_range.end;
+                    continue;
+                }
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
@@ -4793,7 +4875,7 @@ impl Timeline {
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<GcCutoffs> {
+    ) -> Result<GcCutoffs, PageReconstructError> {
         let _timer = self
             .metrics
             .find_gc_cutoffs_histo
@@ -4878,13 +4960,25 @@ impl Timeline {
             return Err(GcError::TimelineCancelled);
         }
 
-        let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
+        let (horizon_cutoff, pitr_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
             let gc_info = self.gc_info.read().unwrap();
 
             let horizon_cutoff = min(gc_info.cutoffs.horizon, self.get_disk_consistent_lsn());
             let pitr_cutoff = gc_info.cutoffs.pitr;
             let retain_lsns = gc_info.retain_lsns.clone();
-            (horizon_cutoff, pitr_cutoff, retain_lsns)
+
+            // Gets the maximum LSN that holds the valid lease.
+            //
+            // Caveat: `refresh_gc_info` is in charged of updating the lease map.
+            // Here, we do not check for stale leases again.
+            let max_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
+
+            (
+                horizon_cutoff,
+                pitr_cutoff,
+                retain_lsns,
+                max_lsn_with_valid_lease,
+            )
         };
 
         let mut new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
@@ -4915,7 +5009,13 @@ impl Timeline {
             .set(Lsn::INVALID.0 as i64);
 
         let res = self
-            .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
+            .gc_timeline(
+                horizon_cutoff,
+                pitr_cutoff,
+                retain_lsns,
+                max_lsn_with_valid_lease,
+                new_gc_cutoff,
+            )
             .instrument(
                 info_span!("gc_timeline", timeline_id = %self.timeline_id, cutoff = %new_gc_cutoff),
             )
@@ -4932,6 +5032,7 @@ impl Timeline {
         horizon_cutoff: Lsn,
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
+        max_lsn_with_valid_lease: Option<Lsn>,
         new_gc_cutoff: Lsn,
     ) -> Result<GcResult, GcError> {
         // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
@@ -4980,7 +5081,8 @@ impl Timeline {
         // 1. it is older than cutoff LSN;
         // 2. it is older than PITR interval;
         // 3. it doesn't need to be retained for 'retain_lsns';
-        // 4. newer on-disk image layers cover the layer's whole key range
+        // 4. it does not need to be kept for LSNs holding valid leases.
+        // 5. newer on-disk image layers cover the layer's whole key range
         //
         // TODO holding a write lock is too agressive and avoidable
         let mut guard = self.layers.write().await;
@@ -5031,7 +5133,21 @@ impl Timeline {
                 }
             }
 
-            // 4. Is there a later on-disk layer for this relation?
+            // 4. Is there a valid lease that requires us to keep this layer?
+            if let Some(lsn) = &max_lsn_with_valid_lease {
+                // keep if layer start <= any of the lease
+                if &l.get_lsn_range().start <= lsn {
+                    debug!(
+                        "keeping {} because there is a valid lease preventing GC at {}",
+                        l.layer_name(),
+                        lsn,
+                    );
+                    result.layers_needed_by_leases += 1;
+                    continue 'outer;
+                }
+            }
+
+            // 5. Is there a later on-disk layer for this relation?
             //
             // The end-LSN is exclusive, while disk_consistent_lsn is
             // inclusive. For example, if disk_consistent_lsn is 100, it is
@@ -5409,6 +5525,11 @@ impl Timeline {
         self.last_record_lsn.advance(new_lsn);
     }
 
+    #[cfg(test)]
+    pub(super) fn force_set_disk_consistent_lsn(&self, new_value: Lsn) {
+        self.disk_consistent_lsn.store(new_value);
+    }
+
     /// Force create an image layer and place it into the layer map.
     ///
     /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
@@ -5530,10 +5651,33 @@ impl Timeline {
         all_data.sort();
         Ok(all_data)
     }
+
+    /// Get all historic layer descriptors in the layer map
+    #[cfg(test)]
+    pub(crate) async fn inspect_historic_layers(
+        self: &Arc<Timeline>,
+    ) -> anyhow::Result<Vec<super::storage_layer::PersistentLayerKey>> {
+        let mut layers = Vec::new();
+        let guard = self.layers.read().await;
+        for layer in guard.layer_map().iter_historic_layers() {
+            layers.push(layer.key());
+        }
+        Ok(layers)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_extra_test_dense_keyspace(&self, ks: KeySpace) {
+        let mut keyspace = self.extra_test_dense_keyspace.load().as_ref().clone();
+        keyspace.merge(&ks);
+        self.extra_test_dense_keyspace.store(Arc::new(keyspace));
+    }
 }
 
 type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
 
+/// Tracking writes ingestion does to a particular in-memory layer.
+///
+/// Cleared upon freezing a layer.
 struct TimelineWriterState {
     open_layer: Arc<InMemoryLayer>,
     current_size: u64,
@@ -5571,12 +5715,6 @@ impl Deref for TimelineWriter<'_> {
 
     fn deref(&self) -> &Self::Target {
         self.tl
-    }
-}
-
-impl Drop for TimelineWriter<'_> {
-    fn drop(&mut self) {
-        self.write_guard.take();
     }
 }
 
@@ -5662,17 +5800,16 @@ impl<'a> TimelineWriter<'a> {
     }
 
     async fn roll_layer(&mut self, freeze_at: Lsn) -> anyhow::Result<()> {
-        assert!(self.write_guard.is_some());
-
-        self.tl.freeze_inmem_layer_at(freeze_at).await;
-
-        let now = Instant::now();
-        *(self.last_freeze_ts.write().unwrap()) = now;
-
-        self.tl.flush_frozen_layers();
-
         let current_size = self.write_guard.as_ref().unwrap().current_size;
-        if current_size > self.get_checkpoint_distance() {
+
+        // self.write_guard will be taken by the freezing
+        self.tl
+            .freeze_inmem_layer_at(freeze_at, &mut self.write_guard)
+            .await;
+
+        self.tl.flush_frozen_layers(freeze_at)?;
+
+        if current_size >= self.get_checkpoint_distance() * 2 {
             warn!("Flushed oversized open layer with size {}", current_size)
         }
 
@@ -5685,9 +5822,27 @@ impl<'a> TimelineWriter<'a> {
             return OpenLayerAction::Open;
         };
 
+        #[cfg(feature = "testing")]
+        if state.cached_last_freeze_at < self.tl.last_freeze_at.load() {
+            // this check and assertion are not really needed because
+            // LayerManager::try_freeze_in_memory_layer will always clear out the
+            // TimelineWriterState if something is frozen. however, we can advance last_freeze_at when there
+            // is no TimelineWriterState.
+            assert!(
+                state.open_layer.end_lsn.get().is_some(),
+                "our open_layer must be outdated"
+            );
+
+            // this would be a memory leak waiting to happen because the in-memory layer always has
+            // an index
+            panic!("BUG: TimelineWriterState held on to frozen in-memory layer.");
+        }
+
         if state.prev_lsn == Some(lsn) {
-            // Rolling mid LSN is not supported by downstream code.
+            // Rolling mid LSN is not supported by [downstream code].
             // Hence, only roll at LSN boundaries.
+            //
+            // [downstream code]: https://github.com/neondatabase/neon/pull/7993#discussion_r1633345422
             return OpenLayerAction::None;
         }
 

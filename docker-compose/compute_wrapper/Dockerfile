@@ -8,6 +8,11 @@ USER root
 RUN apt-get update &&       \
     apt-get install -y curl \
                        jq   \
+                       python3-pip \
                        netcat
+#Faker is required for the pg_anon test
+RUN pip3 install Faker
+#This is required for the pg_hintplan test
+RUN mkdir -p /ext-src/pg_hint_plan-src && chown postgres /ext-src/pg_hint_plan-src 
 
 USER postgres
