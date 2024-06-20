@@ -23,17 +23,12 @@ def assert_lsn_lease_granted(result, with_lease: bool):
         assert result.get("valid_until") is None
 
 
-def assert_lsn_lease_not_granted(result):
-    """
-    Asserts no LSN lease is not granted.
-    """
-    assert result.get("valid_until") is None
-
-
 @pytest.mark.parametrize("with_lease", [True, False])
 def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
     """
     Test pageserver get_lsn_by_timestamp API.
+
+    :param with_lease: Whether to get a lease associated with returned LSN.
     """
     env = neon_env_builder.init_start()
 
@@ -100,7 +95,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
             tenant_id, timeline_id, probe_timestamp, with_lease=with_lease
         )
         assert result["kind"] == "past"
-        assert_lsn_lease_not_granted(result)
+        assert_lsn_lease_granted(result, with_lease)
 
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) < start_lsn
@@ -138,7 +133,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
             tenant_id, timeline_id_child, probe_timestamp, with_lease=with_lease
         )
         assert result["kind"] == "past"
-        assert_lsn_lease_not_granted(result)
+        assert_lsn_lease_granted(result, with_lease)
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) >= last_flush_lsn
 
