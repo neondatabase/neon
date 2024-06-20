@@ -129,6 +129,11 @@ impl<'a> BlockCursor<'a> {
 
 /// Reserved bits for length and compression
 const LEN_COMPRESSION_BIT_MASK: u8 = 0xf0;
+
+/// The maximum size of blobs we support. The highest few bits
+/// are reserved for compression and other further uses.
+const MAX_SUPPORTED_LEN: usize = 0x0fff_ffff;
+
 const BYTE_UNCOMPRESSED: u8 = 0x80;
 const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 
@@ -287,7 +292,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 )
             } else {
                 // Write a 4-byte length header
-                if len > 0x0fff_ffff {
+                if len > MAX_SUPPORTED_LEN {
                     return (
                         (
                             io_buf,
