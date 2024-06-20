@@ -53,6 +53,7 @@ fn lsn_lease_loop(compute: Arc<ComputeNode>, lsn: Lsn) {
         let configs = postgres_configs_from_state(&state);
 
         let cmd = format!("lease lsn {} {} {} ", spec.tenant_id, spec.timeline_id, lsn);
+        drop(state);
 
         match lsn_lease_request(&configs, &cmd) {
             Ok(valid_until) => {
