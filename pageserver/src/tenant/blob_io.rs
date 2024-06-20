@@ -26,7 +26,7 @@ impl<'a> BlockCursor<'a> {
     pub async fn read_blob(
         &self,
         offset: u64,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
         self.read_blob_into_buf(offset, &mut buf, ctx).await?;
@@ -38,7 +38,7 @@ impl<'a> BlockCursor<'a> {
         &self,
         offset: u64,
         dstbuf: &mut Vec<u8>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), std::io::Error> {
         let mut blknum = (offset / PAGE_SZ as u64) as u32;
         let mut off = (offset % PAGE_SZ as u64) as usize;
@@ -130,7 +130,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     async fn write_all_unbuffered<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         src_buf: B,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> (B::Buf, Result<(), Error>) {
         let (src_buf, res) = self.inner.write_all(src_buf, ctx).await;
         let nbytes = match res {
@@ -143,7 +143,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
 
     #[inline(always)]
     /// Flushes the internal buffer to the underlying `VirtualFile`.
-    pub async fn flush_buffer(&mut self, ctx: &RequestContext) -> Result<(), Error> {
+    pub async fn flush_buffer(&mut self, ctx: &mut RequestContext) -> Result<(), Error> {
         let buf = std::mem::take(&mut self.buf);
         let (mut buf, res) = self.inner.write_all(buf, ctx).await;
         res?;
@@ -166,7 +166,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         src_buf: B,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> (B::Buf, Result<(), Error>) {
         if !BUFFERED {
             assert!(self.buf.is_empty());
@@ -218,7 +218,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     pub async fn write_blob<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         srcbuf: B,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
         let offset = self.offset;
 
@@ -267,7 +267,7 @@ impl BlobWriter<true> {
     ///
     /// This function flushes the internal buffer before giving access
     /// to the underlying `VirtualFile`.
-    pub async fn into_inner(mut self, ctx: &RequestContext) -> Result<VirtualFile, Error> {
+    pub async fn into_inner(mut self, ctx: &mut RequestContext) -> Result<VirtualFile, Error> {
         self.flush_buffer(ctx).await?;
         Ok(self.inner)
     }

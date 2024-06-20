@@ -333,7 +333,7 @@ pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMet
 });
 
 impl PageCacheMetrics {
-    pub(crate) fn for_ctx(&self, ctx: &RequestContext) -> &PageCacheMetricsForTaskKind {
+    pub(crate) fn for_ctx(&self, ctx: &mut RequestContext) -> &PageCacheMetricsForTaskKind {
         &self.map[ctx.task_kind()][ctx.page_content_kind()]
     }
 }

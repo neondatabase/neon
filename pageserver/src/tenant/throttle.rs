@@ -130,7 +130,7 @@ where
         self.inner.load().config.steady_rps()
     }
 
-    pub async fn throttle(&self, ctx: &RequestContext, key_count: usize) -> Option<Duration> {
+    pub async fn throttle(&self, ctx: &mut RequestContext, key_count: usize) -> Option<Duration> {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
         if !inner.task_kinds.contains(ctx.task_kind()) {
             return None;

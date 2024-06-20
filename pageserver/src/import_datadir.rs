@@ -53,7 +53,7 @@ pub async fn import_timeline_from_postgres_datadir(
     tline: &Timeline,
     pgdata_path: &Utf8Path,
     pgdata_lsn: Lsn,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
 
@@ -121,7 +121,7 @@ async fn import_rel(
     dboid: Oid,
     reader: &mut (impl AsyncRead + Unpin),
     len: usize,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> anyhow::Result<()> {
     // Does it look like a relation file?
     trace!("importing rel file {}", path.display());
@@ -210,7 +210,7 @@ async fn import_slru(
     path: &Path,
     reader: &mut (impl AsyncRead + Unpin),
     len: usize,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> anyhow::Result<()> {
     info!("importing slru file {path:?}");
 
@@ -268,7 +268,7 @@ async fn import_wal(
     tline: &Timeline,
     startpoint: Lsn,
     endpoint: Lsn,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> anyhow::Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint, tline.pg_version);
 
@@ -346,7 +346,7 @@ pub async fn import_basebackup_from_tar(
     tline: &Timeline,
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     base_lsn: Lsn,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<()> {
     info!("importing base at {base_lsn}");
     let mut modification = tline.begin_modification(base_lsn);
@@ -397,7 +397,7 @@ pub async fn import_wal_from_tar(
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     start_lsn: Lsn,
     end_lsn: Lsn,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<()> {
     // Set up walingest mutable state
     let mut waldecoder = WalStreamDecoder::new(start_lsn, tline.pg_version);
@@ -489,7 +489,7 @@ async fn import_file(
     file_path: &Path,
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     len: usize,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<Option<ControlFileData>> {
     let file_name = match file_path.file_name() {
         Some(name) => name.to_string_lossy(),

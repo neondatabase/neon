@@ -547,7 +547,7 @@ impl Tenant {
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
-        _ctx: &RequestContext,
+        _ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
 
@@ -656,7 +656,7 @@ impl Tenant {
         init_order: Option<InitializationOrder>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
         mode: SpawnMode,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf,
@@ -965,7 +965,7 @@ impl Tenant {
         self: &Arc<Tenant>,
         preload: Option<TenantPreload>,
         mode: SpawnMode,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
@@ -1175,7 +1175,7 @@ impl Tenant {
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
         resources: TimelineResources,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
@@ -1358,7 +1358,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
-        _ctx: &RequestContext,
+        _ctx: &mut RequestContext,
     ) -> anyhow::Result<UninitializedTimeline> {
         anyhow::ensure!(
             self.is_active(),
@@ -1401,7 +1401,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let uninit_tl = self
             .create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
@@ -1440,7 +1440,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
@@ -1477,7 +1477,7 @@ impl Tenant {
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
         broker_client: storage_broker::BrokerClientChannel,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         if !self.is_active() {
             if matches!(self.current_state(), TenantState::Stopping { .. }) {
@@ -1650,7 +1650,7 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<GcResult, GcError> {
         // Don't start doing work during shutdown
         if let TenantState::Stopping { .. } = self.current_state() {
@@ -1682,7 +1682,7 @@ impl Tenant {
     async fn compaction_iteration(
         &self,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<(), timeline::CompactionError> {
         // Don't start doing work during shutdown, or when broken, we do not need those in the logs
         if !self.is_active() {
@@ -1779,7 +1779,7 @@ impl Tenant {
         self: &Arc<Self>,
         broker_client: BrokerClientChannel,
         background_jobs_can_start: Option<&completion::Barrier>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) {
         span::debug_assert_current_span_has_tenant_id();
 
@@ -2834,7 +2834,7 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<GcResult, GcError> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
@@ -2894,7 +2894,7 @@ impl Tenant {
     pub(crate) async fn refresh_gc_info(
         &self,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Vec<Arc<Timeline>>, GcError> {
         // since this method can now be called at different rates than the configured gc loop, it
         // might be that these configuration values get applied faster than what it was previously,
@@ -2915,7 +2915,7 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Vec<Arc<Timeline>>, GcError> {
         // before taking the gc_cs lock, do the heavier weight finding of gc_cutoff points for
         // currently visible timelines.
@@ -3053,7 +3053,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         ancestor_lsn: Option<Lsn>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let create_guard = self.create_timeline_create_guard(dst_id).unwrap();
         let tl = self
@@ -3071,7 +3071,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         ancestor_lsn: Option<Lsn>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
@@ -3108,7 +3108,7 @@ impl Tenant {
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
         timeline_create_guard: TimelineCreateGuard<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         self.branch_timeline_impl(src_timeline, dst_id, start_lsn, timeline_create_guard, ctx)
             .await
@@ -3120,7 +3120,7 @@ impl Tenant {
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
         timeline_create_guard: TimelineCreateGuard<'_>,
-        _ctx: &RequestContext,
+        _ctx: &mut RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
 
@@ -3233,7 +3233,7 @@ impl Tenant {
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let create_guard = self.create_timeline_create_guard(timeline_id).unwrap();
         self.bootstrap_timeline(
@@ -3305,7 +3305,7 @@ impl Tenant {
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
         timeline_create_guard: TimelineCreateGuard<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
@@ -3563,7 +3563,7 @@ impl Tenant {
         max_retention_period: Option<u64>,
         cause: LogicalSizeCalculationCause,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<size::ModelInputs, size::CalculateSyntheticSizeError> {
         let logical_sizes_at_once = self
             .conf
@@ -3603,7 +3603,7 @@ impl Tenant {
         &self,
         cause: LogicalSizeCalculationCause,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<u64, size::CalculateSyntheticSizeError> {
         let inputs = self.gather_size_inputs(None, cause, cancel, ctx).await?;
 
@@ -3756,7 +3756,7 @@ async fn run_initdb(
 pub async fn dump_layerfile_from_path(
     path: &Utf8Path,
     verbose: bool,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> anyhow::Result<()> {
     use std::os::unix::fs::FileExt;
 
@@ -3960,7 +3960,7 @@ pub(crate) mod harness {
         #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
         pub(crate) async fn do_try_load(
             &self,
-            ctx: &RequestContext,
+            ctx: &mut RequestContext,
         ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
@@ -4219,7 +4219,7 @@ mod tests {
     async fn make_some_layers(
         tline: &Timeline,
         start_lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let mut lsn = start_lsn;
         {
@@ -4707,7 +4707,7 @@ mod tests {
     async fn bulk_insert_compact_gc(
         tenant: &Tenant,
         timeline: &Arc<Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         lsn: Lsn,
         repeat: usize,
         key_count: usize,
@@ -4719,7 +4719,7 @@ mod tests {
     async fn bulk_insert_maybe_compact_gc(
         tenant: &Tenant,
         timeline: &Arc<Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         mut lsn: Lsn,
         repeat: usize,
         key_count: usize,
@@ -6249,7 +6249,7 @@ mod tests {
             tline: &Timeline,
             keyspace: &KeySpace,
             lsn: Lsn,
-            ctx: &RequestContext,
+            ctx: &mut RequestContext,
         ) -> anyhow::Result<(BTreeMap<Key, Result<Bytes, PageReconstructError>>, usize)> {
             let mut reconstruct_state = ValuesReconstructState::default();
             let res = tline
@@ -6365,7 +6365,7 @@ mod tests {
             tline: &Arc<Timeline>,
             key: Key,
             lsn: Lsn,
-            ctx: &RequestContext,
+            ctx: &mut RequestContext,
         ) -> Result<Option<Bytes>, GetVectoredError> {
             let mut reconstruct_state = ValuesReconstructState::new();
             let mut res = tline
@@ -6461,7 +6461,7 @@ mod tests {
             tline: &Arc<Timeline>,
             key: Key,
             lsn: Lsn,
-            ctx: &RequestContext,
+            ctx: &mut RequestContext,
         ) -> Result<Option<Bytes>, GetVectoredError> {
             let mut reconstruct_state = ValuesReconstructState::new();
             let mut res = tline
@@ -6515,7 +6515,7 @@ mod tests {
         tline: &Arc<Timeline>,
         key: Key,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Option<Bytes>, GetVectoredError> {
         let mut reconstruct_state = ValuesReconstructState::new();
         let mut res = tline

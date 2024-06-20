@@ -177,7 +177,7 @@ impl std::fmt::Debug for ImageLayerInner {
 }
 
 impl ImageLayerInner {
-    pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub(super) async fn dump(&self, ctx: &mut RequestContext) -> anyhow::Result<()> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, KEY_SIZE>::new(
             self.index_start_blk,
@@ -217,7 +217,7 @@ impl AsLayerDesc for ImageLayer {
 }
 
 impl ImageLayer {
-    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &mut RequestContext) -> Result<()> {
         self.desc.dump();
 
         if !verbose {
@@ -254,7 +254,7 @@ impl ImageLayer {
     async fn load(
         &self,
         access_kind: LayerAccessKind,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<&ImageLayerInner> {
         self.access_stats.record_access(access_kind, ctx);
         self.inner
@@ -263,7 +263,7 @@ impl ImageLayer {
             .with_context(|| format!("Failed to load image layer {}", self.path()))
     }
 
-    async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
+    async fn load_inner(&self, ctx: &mut RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
         let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
@@ -336,7 +336,7 @@ impl ImageLayer {
     pub async fn rewrite_summary<F>(
         path: &Utf8Path,
         rewrite: F,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), RewriteSummaryError>
     where
         F: Fn(Summary) -> Summary,
@@ -377,7 +377,7 @@ impl ImageLayerInner {
         lsn: Lsn,
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
         let file = match VirtualFile::open(path, ctx).await {
             Ok(file) => file,
@@ -428,7 +428,7 @@ impl ImageLayerInner {
         &self,
         key: Key,
         reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
@@ -439,7 +439,7 @@ impl ImageLayerInner {
         if let Some(offset) = tree_reader
             .get(
                 &keybuf,
-                &RequestContextBuilder::extend(ctx)
+                &mut RequestContextBuilder::extend(ctx)
                     .page_content_kind(PageContentKind::ImageLayerBtreeNode)
                     .build(),
             )
@@ -449,7 +449,7 @@ impl ImageLayerInner {
                 .block_cursor()
                 .read_blob(
                     offset,
-                    &RequestContextBuilder::extend(ctx)
+                    &mut RequestContextBuilder::extend(ctx)
                         .page_content_kind(PageContentKind::ImageLayerValue)
                         .build(),
                 )
@@ -470,7 +470,7 @@ impl ImageLayerInner {
         &self,
         keyspace: KeySpace,
         reconstruct_state: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), GetVectoredError> {
         let reads = self
             .plan_reads(keyspace, None, ctx)
@@ -489,7 +489,7 @@ impl ImageLayerInner {
     #[cfg(test)]
     pub(super) async fn load_key_values(
         &self,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
@@ -522,7 +522,7 @@ impl ImageLayerInner {
         &self,
         keyspace: KeySpace,
         shard_identity: Option<&ShardIdentity>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>> {
         let mut planner = VectoredReadPlanner::new(
             self.max_vectored_read_bytes
@@ -535,7 +535,7 @@ impl ImageLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
 
-        let ctx = RequestContextBuilder::extend(ctx)
+        let mut ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::ImageLayerBtreeNode)
             .build();
 
@@ -544,7 +544,7 @@ impl ImageLayerInner {
             let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
             range.start.write_to_byte_slice(&mut search_key);
 
-            let index_stream = tree_reader.get_stream_from(&search_key, &ctx);
+            let index_stream = tree_reader.get_stream_from(&search_key, &mut ctx);
             let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {
@@ -587,7 +587,7 @@ impl ImageLayerInner {
         &self,
         shard_identity: &ShardIdentity,
         writer: &mut ImageLayerWriter,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<usize> {
         // Fragment the range into the regions owned by this ShardIdentity
         let plan = self
@@ -629,7 +629,7 @@ impl ImageLayerInner {
         &self,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) {
         let max_vectored_read_bytes = self
             .max_vectored_read_bytes
@@ -724,7 +724,7 @@ impl ImageLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
@@ -779,7 +779,7 @@ impl ImageLayerWriterInner {
         &mut self,
         key: Key,
         img: Bytes,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
         let (_img, res) = self.blob_writer.write_blob(img, ctx).await;
@@ -799,7 +799,7 @@ impl ImageLayerWriterInner {
     async fn finish(
         self,
         timeline: &Arc<Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
@@ -899,7 +899,7 @@ impl ImageLayerWriter {
         tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
@@ -918,7 +918,7 @@ impl ImageLayerWriter {
         &mut self,
         key: Key,
         img: Bytes,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
@@ -929,7 +929,7 @@ impl ImageLayerWriter {
     pub(crate) async fn finish(
         mut self,
         timeline: &Arc<Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<super::ResidentLayer> {
         self.inner.take().unwrap().finish(timeline, ctx).await
     }

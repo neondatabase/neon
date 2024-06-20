@@ -87,7 +87,7 @@ pub(super) async fn prepare(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
     options: Options,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<(completion::Completion, PreparedTimelineDetach), Error> {
     use Error::*;
 
@@ -325,7 +325,7 @@ async fn upload_rewritten_layer(
     layer: &Layer,
     target: &Arc<Timeline>,
     cancel: &CancellationToken,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<Option<Layer>, Error> {
     use Error::UploadRewritten;
     let copied = copy_lsn_prefix(end_lsn, layer, target, ctx).await?;
@@ -348,7 +348,7 @@ async fn copy_lsn_prefix(
     end_lsn: Lsn,
     layer: &Layer,
     target_timeline: &Arc<Timeline>,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<Option<ResidentLayer>, Error> {
     use Error::{CopyDeltaPrefix, RewrittenDeltaDownloadFailed};
 
@@ -437,7 +437,7 @@ pub(super) async fn complete(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
     prepared: PreparedTimelineDetach,
-    _ctx: &RequestContext,
+    _ctx: &mut RequestContext,
 ) -> Result<Vec<TimelineId>, anyhow::Error> {
     let PreparedTimelineDetach { layers } = prepared;
 

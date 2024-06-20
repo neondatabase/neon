@@ -38,7 +38,7 @@ where
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
         let (nwritten, buf) = self.dst.write_all(buf, ctx).await?;
         self.bytes_amount += u64::try_from(nwritten).unwrap();

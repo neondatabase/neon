@@ -60,7 +60,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     req_lsn: Option<Lsn>,
     prev_lsn: Option<Lsn>,
     full_backup: bool,
-    ctx: &'a RequestContext,
+    ctx: &'a mut RequestContext,
 ) -> Result<(), BasebackupError>
 where
     W: AsyncWrite + Send + Sync + Unpin,
@@ -141,7 +141,7 @@ where
     lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
-    ctx: &'a RequestContext,
+    ctx: &'a mut RequestContext,
 }
 
 /// A sink that accepts SLRU blocks ordered by key and forwards

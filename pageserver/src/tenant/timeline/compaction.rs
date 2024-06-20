@@ -49,7 +49,7 @@ impl Timeline {
         self: &Arc<Self>,
         _cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), CompactionError> {
         // High level strategy for compaction / image creation:
         //
@@ -175,7 +175,7 @@ impl Timeline {
     async fn compact_shard_ancestors(
         self: &Arc<Self>,
         rewrite_max: usize,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let mut drop_layers = Vec::new();
         let mut layers_to_rewrite: Vec<Layer> = Vec::new();
@@ -359,7 +359,7 @@ impl Timeline {
     async fn compact_level0(
         self: &Arc<Self>,
         target_file_size: u64,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), CompactionError> {
         let CompactLevel0Phase1Result {
             new_layers,
@@ -400,7 +400,7 @@ impl Timeline {
         guard: tokio::sync::OwnedRwLockReadGuard<LayerManager>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         stats.read_lock_held_spawn_blocking_startup_micros =
             stats.read_lock_acquisition_micros.till_now(); // set by caller
@@ -907,7 +907,7 @@ impl Timeline {
     pub(crate) async fn compact_tiered(
         self: &Arc<Self>,
         _cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), CompactionError> {
         let fanout = self.get_compaction_threshold() as u64;
         let target_file_size = self.get_checkpoint_distance();
@@ -963,7 +963,7 @@ impl Timeline {
     pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
         _cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), CompactionError> {
         use crate::tenant::storage_layer::ValueReconstructState;
         // Step 0: pick all delta layers + image layers below/intersect with the GC horizon.
@@ -1190,7 +1190,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         &mut self,
         key_range: &Range<Key>,
         lsn_range: &Range<Lsn>,
-        _ctx: &RequestContext,
+        _ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<OwnArc<PersistentLayerDesc>>> {
         self.flush_updates().await?;
 
@@ -1211,7 +1211,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         &mut self,
         key_range: &Range<Key>,
         lsn: Lsn,
-        _ctx: &RequestContext,
+        _ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<Range<Key>>> {
         if lsn == self.keyspace.0 {
             Ok(pageserver_compaction::helpers::intersect_keyspace(
@@ -1247,7 +1247,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         &mut self,
         lsn: Lsn,
         key_range: &Range<Key>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         Ok(self.create_image_impl(lsn, key_range, ctx).await?)
     }
@@ -1257,7 +1257,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         lsn_range: &Range<Lsn>,
         key_range: &Range<Key>,
         input_layers: &[ResidentDeltaLayer],
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
 
@@ -1329,7 +1329,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
     async fn delete_layer(
         &mut self,
         layer: &OwnArc<PersistentLayerDesc>,
-        _ctx: &RequestContext,
+        _ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         self.layers_to_delete.push(layer.clone().0);
         Ok(())
@@ -1341,7 +1341,7 @@ impl TimelineAdaptor {
         &mut self,
         lsn: Lsn,
         key_range: &Range<Key>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), CreateImageLayersError> {
         let timer = self.timeline.metrics.create_images_time_histo.start_timer();
 
@@ -1468,7 +1468,7 @@ impl CompactionLayer<Key> for ResidentDeltaLayer {
 impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 
-    async fn load_keys<'a>(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
+    async fn load_keys<'a>(&self, ctx: &mut RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
         self.0.load_keys(ctx).await
     }
 }

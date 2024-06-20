@@ -242,7 +242,7 @@ where
     ///
     /// Read the value for given key. Returns the value, or None if it doesn't exist.
     ///
-    pub async fn get(&self, search_key: &[u8; L], ctx: &RequestContext) -> Result<Option<u64>> {
+    pub async fn get(&self, search_key: &[u8; L], ctx: &mut RequestContext) -> Result<Option<u64>> {
         let mut result: Option<u64> = None;
         self.visit(
             search_key,
@@ -278,7 +278,7 @@ where
     pub fn get_stream_from<'a>(
         &'a self,
         start_key: &'a [u8; L],
-        ctx: &'a RequestContext,
+        ctx: &'a mut RequestContext,
     ) -> impl Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a {
         try_stream! {
             let mut stack = Vec::new();
@@ -363,7 +363,7 @@ where
         search_key: &[u8; L],
         dir: VisitDirection,
         mut visitor: V,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<bool>
     where
         V: FnMut(&[u8], u64) -> bool,

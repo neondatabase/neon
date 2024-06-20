@@ -148,7 +148,7 @@ pub(super) async fn gather_inputs(
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
     cause: LogicalSizeCalculationCause,
     cancel: &CancellationToken,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<ModelInputs, CalculateSyntheticSizeError> {
     // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
     tenant.refresh_gc_info(cancel, ctx).await?;
@@ -379,7 +379,7 @@ async fn fill_logical_sizes(
     limit: &Arc<Semaphore>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
     cause: LogicalSizeCalculationCause,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<(), CalculateSyntheticSizeError> {
     let timeline_hash: HashMap<TimelineId, Arc<Timeline>> = HashMap::from_iter(
         timelines

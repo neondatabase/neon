@@ -425,7 +425,7 @@ impl ReadableLayer {
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), GetVectoredError> {
         match self {
             ReadableLayer::PersistentLayer(layer) => {
@@ -574,7 +574,7 @@ impl LayerAccessStats {
         });
     }
 
-    fn record_access(&self, access_kind: LayerAccessKind, ctx: &RequestContext) {
+    fn record_access(&self, access_kind: LayerAccessKind, ctx: &mut RequestContext) {
         if ctx.access_stats_behavior() == AccessStatsBehavior::Skip {
             return;
         }

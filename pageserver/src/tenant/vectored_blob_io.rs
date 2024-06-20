@@ -286,7 +286,7 @@ impl<'a> VectoredBlobReader<'a> {
         &self,
         read: &VectoredRead,
         buf: BytesMut,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<VectoredBlobsBuf, std::io::Error> {
         assert!(read.size() > 0);
         assert!(

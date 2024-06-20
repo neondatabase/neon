@@ -184,7 +184,7 @@ impl MetricsKey {
 pub(super) async fn collect_all_metrics(
     tenant_manager: &Arc<TenantManager>,
     cached_metrics: &Cache,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Vec<RawMetric> {
     use pageserver_api::models::TenantState;
 
@@ -220,7 +220,7 @@ pub(super) async fn collect_all_metrics(
     res
 }
 
-async fn collect<S>(tenants: S, cache: &Cache, ctx: &RequestContext) -> Vec<RawMetric>
+async fn collect<S>(tenants: S, cache: &Cache, ctx: &mut RequestContext) -> Vec<RawMetric>
 where
     S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::Tenant>)>,
 {
@@ -342,7 +342,7 @@ impl TimelineSnapshot {
     /// [`Timeline::get_current_logical_size`]: crate::tenant::Timeline::get_current_logical_size
     fn collect(
         t: &Arc<crate::tenant::Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Option<Self>> {
         if !t.is_active() {
             // no collection for broken or stopping needed, we will still keep the cached values

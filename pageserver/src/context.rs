@@ -158,7 +158,7 @@ impl RequestContextBuilder {
         }
     }
 
-    pub fn extend(original: &RequestContext) -> Self {
+    pub fn extend(original: &mut RequestContext) -> Self {
         Self {
             // This is like a Copy, but avoid implementing Copy because ordinary users of
             // RequestContext should always move or ref it.

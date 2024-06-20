@@ -346,7 +346,7 @@ impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open<P: AsRef<Utf8Path>>(
         path: P,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(path.as_ref(), OpenOptions::new().read(true), ctx).await
     }
@@ -355,7 +355,7 @@ impl VirtualFile {
     /// Like File::create.
     pub async fn create<P: AsRef<Utf8Path>>(
         path: P,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(
             path.as_ref(),
@@ -373,7 +373,7 @@ impl VirtualFile {
     pub async fn open_with_options<P: AsRef<Utf8Path>>(
         path: P,
         open_options: &OpenOptions,
-        _ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+        _ctx: &mut RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
     ) -> Result<VirtualFile, std::io::Error> {
         let path_ref = path.as_ref();
         let path_str = path_ref.to_string();
@@ -589,7 +589,7 @@ impl VirtualFile {
         &self,
         buf: B,
         offset: u64,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<B, Error>
     where
         B: IoBufMut + Send,
@@ -606,7 +606,7 @@ impl VirtualFile {
         buf: B,
         offset: u64,
         count: usize,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<B, Error>
     where
         B: IoBufMut + Send,
@@ -623,7 +623,7 @@ impl VirtualFile {
         &self,
         page: PageWriteGuard<'static>,
         offset: u64,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<PageWriteGuard<'static>, Error> {
         let buf = PageWriteGuardBuf {
             page,
@@ -639,7 +639,7 @@ impl VirtualFile {
         &self,
         buf: B,
         mut offset: u64,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> (B::Buf, Result<(), Error>) {
         let buf_len = buf.bytes_init();
         if buf_len == 0 {
@@ -677,7 +677,7 @@ impl VirtualFile {
     pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> (B::Buf, Result<usize, Error>) {
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
@@ -710,7 +710,7 @@ impl VirtualFile {
     async fn write<B: IoBuf + Send>(
         &mut self,
         buf: Slice<B>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> (Slice<B>, Result<usize, std::io::Error>) {
         let pos = self.pos;
         let (buf, res) = self.write_at(buf, pos, ctx).await;
@@ -726,7 +726,7 @@ impl VirtualFile {
         &self,
         buf: B,
         offset: u64,
-        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+        _ctx: &mut RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
     ) -> (B, Result<usize, Error>)
     where
         B: tokio_epoll_uring::BoundedBufMut + Send,
@@ -756,7 +756,7 @@ impl VirtualFile {
         &self,
         buf: Slice<B>,
         offset: u64,
-        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+        _ctx: &mut RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
     ) -> (Slice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
@@ -1048,7 +1048,7 @@ impl VirtualFile {
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
         let buf = vec![0; PAGE_SZ];
@@ -1058,7 +1058,7 @@ impl VirtualFile {
         Ok(crate::tenant::block_io::BlockLease::Vec(buf))
     }
 
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &mut RequestContext) -> Result<(), Error> {
         let mut tmp = vec![0; 128];
         loop {
             let res;
@@ -1122,7 +1122,7 @@ impl OwnedAsyncWriter for VirtualFile {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
         let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
         res.map(move |v| (v, buf))
@@ -1208,7 +1208,7 @@ mod tests {
             &self,
             mut buf: Vec<u8>,
             offset: u64,
-            ctx: &RequestContext,
+            ctx: &mut RequestContext,
         ) -> Result<Vec<u8>, Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(buf, offset, ctx).await,
@@ -1219,7 +1219,7 @@ mod tests {
             &self,
             buf: B,
             offset: u64,
-            ctx: &RequestContext,
+            ctx: &mut RequestContext,
         ) -> Result<(), Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
@@ -1244,7 +1244,7 @@ mod tests {
         async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
             &mut self,
             buf: B,
-            ctx: &RequestContext,
+            ctx: &mut RequestContext,
         ) -> Result<(), Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
@@ -1263,7 +1263,7 @@ mod tests {
 
         // Helper function to slurp contents of a file, starting at the current position,
         // into a string
-        async fn read_string(&mut self, ctx: &RequestContext) -> Result<String, Error> {
+        async fn read_string(&mut self, ctx: &mut RequestContext) -> Result<String, Error> {
             use std::io::Read;
             let mut buf = String::new();
             match self {
@@ -1284,7 +1284,7 @@ mod tests {
             &mut self,
             pos: u64,
             len: usize,
-            ctx: &RequestContext,
+            ctx: &mut RequestContext,
         ) -> Result<String, Error> {
             let buf = vec![0; len];
             let buf = self.read_exact_at(buf, pos, ctx).await?;
@@ -1307,7 +1307,7 @@ mod tests {
             async fn open(
                 path: Utf8PathBuf,
                 opts: OpenOptions,
-                ctx: &RequestContext,
+                ctx: &mut RequestContext,
             ) -> Result<MaybeVirtualFile, anyhow::Error> {
                 let vf = VirtualFile::open_with_options(&path, &opts, ctx).await?;
                 Ok(MaybeVirtualFile::VirtualFile(vf))
@@ -1324,7 +1324,7 @@ mod tests {
             async fn open(
                 path: Utf8PathBuf,
                 opts: OpenOptions,
-                _ctx: &RequestContext,
+                _ctx: &mut RequestContext,
             ) -> Result<MaybeVirtualFile, anyhow::Error> {
                 Ok(MaybeVirtualFile::File({
                     let owned_fd = opts.open(path.as_std_path()).await?;
@@ -1343,7 +1343,7 @@ mod tests {
         async fn open(
             path: Utf8PathBuf,
             opts: OpenOptions,
-            ctx: &RequestContext,
+            ctx: &mut RequestContext,
         ) -> Result<MaybeVirtualFile, anyhow::Error>;
     }
 

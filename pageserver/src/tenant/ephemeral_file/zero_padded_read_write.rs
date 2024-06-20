@@ -64,7 +64,7 @@ where
     pub async fn write_all_borrowed(
         &mut self,
         buf: &[u8],
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> std::io::Result<usize> {
         self.buffered_writer.write_buffered_borrowed(buf, ctx).await
     }

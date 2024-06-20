@@ -188,7 +188,7 @@ impl Timeline {
         tag: RelTag,
         blknum: BlockNumber,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
@@ -218,7 +218,7 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
 
@@ -236,7 +236,7 @@ impl Timeline {
         &self,
         tag: RelTag,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
@@ -272,7 +272,7 @@ impl Timeline {
         &self,
         tag: RelTag,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
@@ -307,7 +307,7 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<HashSet<RelTag>, PageReconstructError> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
@@ -335,7 +335,7 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let n_blocks = self
             .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
@@ -357,7 +357,7 @@ impl Timeline {
         segno: u32,
         blknum: BlockNumber,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let key = slru_block_to_key(kind, segno, blknum);
         self.get(key, lsn, ctx).await
@@ -369,7 +369,7 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         let key = slru_segment_size_to_key(kind, segno);
         let mut buf = version.get(self, key, ctx).await?;
@@ -382,7 +382,7 @@ impl Timeline {
         kind: SlruKind,
         segno: u32,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<bool, PageReconstructError> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
@@ -408,7 +408,7 @@ impl Timeline {
         &self,
         search_timestamp: TimestampTz,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
         pausable_failpoint!("find-lsn-for-timestamp-pausable");
 
@@ -499,7 +499,7 @@ impl Timeline {
         probe_lsn: Lsn,
         found_smaller: &mut bool,
         found_larger: &mut bool,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<bool, PageReconstructError> {
         self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
             if timestamp >= search_timestamp {
@@ -519,7 +519,7 @@ impl Timeline {
     pub(crate) async fn get_timestamp_for_lsn(
         &self,
         probe_lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Option<TimestampTz>, PageReconstructError> {
         let mut max: Option<TimestampTz> = None;
         self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
@@ -542,7 +542,7 @@ impl Timeline {
     async fn map_all_timestamps<T: Default>(
         &self,
         probe_lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         mut f: impl FnMut(TimestampTz) -> ControlFlow<T>,
     ) -> Result<T, PageReconstructError> {
         for segno in self
@@ -575,7 +575,7 @@ impl Timeline {
     pub(crate) async fn get_slru_keyspace(
         &self,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<KeySpace, PageReconstructError> {
         let mut accum = KeySpaceAccum::new();
 
@@ -604,7 +604,7 @@ impl Timeline {
         &self,
         kind: SlruKind,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<HashSet<u32>, PageReconstructError> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
@@ -621,7 +621,7 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         version: Version<'_>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let key = relmap_file_key(spcnode, dbnode);
 
@@ -632,7 +632,7 @@ impl Timeline {
     pub(crate) async fn list_dbdirs(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<HashMap<(Oid, Oid), bool>, PageReconstructError> {
         // fetch directory entry
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
@@ -647,7 +647,7 @@ impl Timeline {
         &self,
         xid: TransactionId,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let key = twophase_file_key(xid);
         let buf = self.get(key, lsn, ctx).await?;
@@ -657,7 +657,7 @@ impl Timeline {
     pub(crate) async fn list_twophase_files(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<HashSet<TransactionId>, PageReconstructError> {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
@@ -671,7 +671,7 @@ impl Timeline {
     pub(crate) async fn get_control_file(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         self.get(CONTROLFILE_KEY, lsn, ctx).await
     }
@@ -679,7 +679,7 @@ impl Timeline {
     pub(crate) async fn get_checkpoint(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
@@ -687,7 +687,7 @@ impl Timeline {
     async fn list_aux_files_v1(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         match self.get(AUX_FILES_KEY, lsn, ctx).await {
             Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
@@ -705,7 +705,7 @@ impl Timeline {
     async fn list_aux_files_v2(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let kv = self
             .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
@@ -729,7 +729,7 @@ impl Timeline {
     pub(crate) async fn trigger_aux_file_size_computation(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), PageReconstructError> {
         let current_policy = self.last_aux_file_policy.load();
         if let Some(AuxFilePolicy::V2) | Some(AuxFilePolicy::CrossValidation) = current_policy {
@@ -741,7 +741,7 @@ impl Timeline {
     pub(crate) async fn list_aux_files(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let current_policy = self.last_aux_file_policy.load();
         match current_policy {
@@ -779,7 +779,7 @@ impl Timeline {
     pub(crate) async fn get_replorigins(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
         let kv = self
             .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
@@ -809,7 +809,7 @@ impl Timeline {
     pub(crate) async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
@@ -845,7 +845,7 @@ impl Timeline {
     pub(crate) async fn collect_keyspace(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(KeySpace, SparseKeySpace), CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
@@ -1145,7 +1145,7 @@ impl<'a> DatadirModification<'a> {
         spcnode: Oid,
         dbnode: Oid,
         img: Bytes,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY, ctx).await?;
@@ -1182,7 +1182,7 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         xid: TransactionId,
         img: Bytes,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // Add it to the directory entry
         let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
@@ -1229,7 +1229,7 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         spcnode: Oid,
         dbnode: Oid,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let total_blocks = self
             .tline
@@ -1266,7 +1266,7 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         rel: RelTag,
         nblocks: BlockNumber,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), RelationError> {
         if rel.relnode == 0 {
             return Err(RelationError::InvalidRelnode);
@@ -1328,7 +1328,7 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         rel: RelTag,
         nblocks: BlockNumber,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         if self
@@ -1362,7 +1362,7 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         rel: RelTag,
         nblocks: BlockNumber,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
 
@@ -1384,7 +1384,7 @@ impl<'a> DatadirModification<'a> {
     }
 
     /// Drop a relation.
-    pub async fn put_rel_drop(&mut self, rel: RelTag, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn put_rel_drop(&mut self, rel: RelTag, ctx: &mut RequestContext) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
 
         // Remove it from the directory entry
@@ -1420,7 +1420,7 @@ impl<'a> DatadirModification<'a> {
         kind: SlruKind,
         segno: u32,
         nblocks: BlockNumber,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // Add it to the directory entry
         let dir_key = slru_dir_to_key(kind);
@@ -1466,7 +1466,7 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         kind: SlruKind,
         segno: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // Remove it from the directory entry
         let dir_key = slru_dir_to_key(kind);
@@ -1499,7 +1499,7 @@ impl<'a> DatadirModification<'a> {
     pub async fn drop_twophase_file(
         &mut self,
         xid: TransactionId,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // Remove it from the directory entry
         let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
@@ -1538,7 +1538,7 @@ impl<'a> DatadirModification<'a> {
         &mut self,
         path: &str,
         content: &[u8],
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let switch_policy = self.tline.get_switch_aux_file_policy();
 
@@ -1731,7 +1731,7 @@ impl<'a> DatadirModification<'a> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn flush(&mut self, ctx: &mut RequestContext) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -1777,7 +1777,7 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn commit(&mut self, ctx: &mut RequestContext) -> anyhow::Result<()> {
         let mut writer = self.tline.writer().await;
 
         let pending_nblocks = self.pending_nblocks;
@@ -1828,7 +1828,7 @@ impl<'a> DatadirModification<'a> {
 
     // Internal helper functions to batch the modifications
 
-    async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
+    async fn get(&self, key: Key, ctx: &mut RequestContext) -> Result<Bytes, PageReconstructError> {
         // Have we already updated the same key? Read the latest pending updated
         // version in that case.
         //
@@ -1895,7 +1895,7 @@ impl<'a> Version<'a> {
         &self,
         timeline: &Timeline,
         key: Key,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         match self {
             Version::Lsn(lsn) => timeline.get(key, *lsn, ctx).await,

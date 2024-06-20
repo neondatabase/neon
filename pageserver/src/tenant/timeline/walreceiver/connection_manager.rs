@@ -59,7 +59,7 @@ pub(crate) struct Cancelled;
 pub(super) async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     connection_manager_state: &mut ConnectionManagerState,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
     cancel: &CancellationToken,
     manager_status: &std::sync::RwLock<Option<ConnectionManagerStatus>>,
 ) -> Result<(), Cancelled> {
@@ -523,7 +523,7 @@ impl ConnectionManagerState {
     }
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
-    async fn change_connection(&mut self, new_sk: NewWalConnectionCandidate, ctx: &RequestContext) {
+    async fn change_connection(&mut self, new_sk: NewWalConnectionCandidate, ctx: &mut RequestContext) {
         WALRECEIVER_SWITCHES
             .with_label_values(&[new_sk.reason.name()])
             .inc();

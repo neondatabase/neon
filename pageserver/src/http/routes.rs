@@ -352,7 +352,7 @@ async fn build_timeline_info(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
     force_await_initial_logical_size: bool,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -381,7 +381,7 @@ async fn build_timeline_info(
 
 async fn build_timeline_info_common(
     timeline: &Arc<Timeline>,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
     logical_size_task_priority: tenant::timeline::GetLogicalSizePriority,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();

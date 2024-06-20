@@ -59,7 +59,7 @@ impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
         startpoint: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
@@ -90,7 +90,7 @@ impl WalIngest {
         lsn: Lsn,
         modification: &mut DatadirModification<'_>,
         decoded: &mut DecodedWALRecord,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<bool> {
         WAL_INGEST.records_received.inc();
         let pg_version = modification.tline.pg_version;
@@ -449,7 +449,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification<'_>,
         blk: &DecodedBkpBlock,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), PageReconstructError> {
         let rel = RelTag {
             spcnode: blk.rnode_spcnode,
@@ -467,7 +467,7 @@ impl WalIngest {
         lsn: Lsn,
         decoded: &DecodedWALRecord,
         blk: &DecodedBkpBlock,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), PageReconstructError> {
         let rel = RelTag {
             spcnode: blk.rnode_spcnode,
@@ -530,7 +530,7 @@ impl WalIngest {
         buf: &mut Bytes,
         modification: &mut DatadirModification<'_>,
         decoded: &DecodedWALRecord,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
 
@@ -836,7 +836,7 @@ impl WalIngest {
         buf: &mut Bytes,
         modification: &mut DatadirModification<'_>,
         decoded: &DecodedWALRecord,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
 
@@ -1007,7 +1007,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification<'_>,
         rec: &XlCreateDatabase,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let db_id = rec.db_id;
         let tablespace_id = rec.tablespace_id;
@@ -1102,7 +1102,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification<'_>,
         rec: &XlSmgrCreate,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let rel = RelTag {
             spcnode: rec.rnode.spcnode,
@@ -1121,7 +1121,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification<'_>,
         rec: &XlSmgrTruncate,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let spcnode = rec.rnode.spcnode;
         let dbnode = rec.rnode.dbnode;
@@ -1193,7 +1193,7 @@ impl WalIngest {
         parsed: &XlXactParsedRecord,
         is_commit: bool,
         origin_id: u16,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // Record update of CLOG pages
         let mut pageno = parsed.xid / pg_constants::CLOG_XACTS_PER_PAGE;
@@ -1270,7 +1270,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification<'_>,
         xlrec: &XlClogTruncate,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         info!(
             "RM_CLOG_ID truncate pageno {} oldestXid {} oldestXidDB {}",
@@ -1416,7 +1416,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification<'_>,
         xlrec: &XlMultiXactTruncate,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<()> {
         self.checkpoint.oldestMulti = xlrec.end_trunc_off;
         self.checkpoint.oldestMultiDB = xlrec.oldest_multi_db;
@@ -1454,7 +1454,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         xlrec: &XlRelmapUpdate,
         decoded: &DecodedWALRecord,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<()> {
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -1475,7 +1475,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification<'_>,
         rel: RelTag,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<()> {
         modification.put_rel_creation(rel, 0, ctx).await?;
         Ok(())
@@ -1487,7 +1487,7 @@ impl WalIngest {
         rel: RelTag,
         blknum: BlockNumber,
         img: Bytes,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), PageReconstructError> {
         self.handle_rel_extend(modification, rel, blknum, ctx)
             .await?;
@@ -1501,7 +1501,7 @@ impl WalIngest {
         rel: RelTag,
         blknum: BlockNumber,
         rec: NeonWalRecord,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<()> {
         self.handle_rel_extend(modification, rel, blknum, ctx)
             .await?;
@@ -1514,7 +1514,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         rel: RelTag,
         nblocks: BlockNumber,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         modification.put_rel_truncation(rel, nblocks, ctx).await?;
         Ok(())
@@ -1524,7 +1524,7 @@ impl WalIngest {
         &mut self,
         modification: &mut DatadirModification<'_>,
         rel: RelTag,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<()> {
         modification.put_rel_drop(rel, ctx).await?;
         Ok(())
@@ -1535,7 +1535,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         rel: RelTag,
         blknum: BlockNumber,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), PageReconstructError> {
         let new_nblocks = blknum + 1;
         // Check if the relation exists. We implicitly create relations on first
@@ -1597,7 +1597,7 @@ impl WalIngest {
         segno: u32,
         blknum: BlockNumber,
         img: Bytes,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<()> {
         self.handle_slru_extend(modification, kind, segno, blknum, ctx)
             .await?;
@@ -1611,7 +1611,7 @@ impl WalIngest {
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // we don't use a cache for this like we do for relations. SLRUS are explcitly
         // extended with ZEROPAGE records, not with commit records, so it happens
@@ -1660,7 +1660,7 @@ impl WalIngest {
 async fn get_relsize(
     modification: &DatadirModification<'_>,
     rel: RelTag,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> anyhow::Result<BlockNumber> {
     let nblocks = if !modification
         .tline
@@ -1701,7 +1701,7 @@ mod tests {
 
     static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
 
-    async fn init_walingest_test(tline: &Timeline, ctx: &RequestContext) -> Result<WalIngest> {
+    async fn init_walingest_test(tline: &Timeline, ctx: &mut RequestContext) -> Result<WalIngest> {
         let mut m = tline.begin_modification(Lsn(0x10));
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""), ctx).await?; // dummy relmapper file

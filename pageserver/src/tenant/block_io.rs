@@ -92,7 +92,7 @@ impl<'a> BlockReaderRef<'a> {
     async fn read_blk(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BlockLease, std::io::Error> {
         use BlockReaderRef::*;
         match self {
@@ -150,7 +150,7 @@ impl<'a> BlockCursor<'a> {
     pub async fn read_blk(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BlockLease, std::io::Error> {
         self.reader.read_blk(blknum, ctx).await
     }
@@ -177,7 +177,7 @@ impl<'a> FileBlockReader<'a> {
         &self,
         buf: PageWriteGuard<'static>,
         blkno: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<PageWriteGuard<'static>, std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
         self.file
@@ -192,7 +192,7 @@ impl<'a> FileBlockReader<'a> {
     pub async fn read_blk<'b>(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BlockLease<'b>, std::io::Error> {
         let cache = page_cache::get();
         match cache

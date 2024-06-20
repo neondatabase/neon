@@ -51,7 +51,7 @@ pub async fn collect_metrics(
     node_id: NodeId,
     local_disk_storage: Utf8PathBuf,
     cancel: CancellationToken,
-    ctx: RequestContext,
+    mut ctx: RequestContext,
 ) -> anyhow::Result<()> {
     if _cached_metric_collection_interval != Duration::ZERO {
         tracing::warn!(
@@ -60,7 +60,7 @@ pub async fn collect_metrics(
     }
 
     // spin up background worker that caclulates tenant sizes
-    let worker_ctx =
+    let mut worker_ctx =
         ctx.detached_child(TaskKind::CalculateSyntheticSize, DownloadBehavior::Download);
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
@@ -76,7 +76,7 @@ pub async fn collect_metrics(
                     tenant_manager,
                     synthetic_size_calculation_interval,
                     &cancel,
-                    &worker_ctx,
+                    &mut worker_ctx,
                 )
                 .instrument(info_span!("synthetic_size_worker"))
                 .await?;
@@ -122,7 +122,7 @@ pub async fn collect_metrics(
         let started_at = Instant::now();
 
         // these are point in time, with variable "now"
-        let metrics = metrics::collect_all_metrics(&tenant_manager, &cached_metrics, &ctx).await;
+        let metrics = metrics::collect_all_metrics(&tenant_manager, &cached_metrics, &mut ctx).await;
 
         let metrics = Arc::new(metrics);
 
@@ -280,7 +280,7 @@ async fn calculate_synthetic_size_worker(
     tenant_manager: Arc<TenantManager>,
     synthetic_size_calculation_interval: Duration,
     cancel: &CancellationToken,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> anyhow::Result<()> {
     info!("starting calculate_synthetic_size_worker");
     scopeguard::defer! {
@@ -340,7 +340,7 @@ async fn calculate_synthetic_size_worker(
     }
 }
 
-async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &RequestContext) {
+async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &mut RequestContext) {
     const CAUSE: LogicalSizeCalculationCause =
         LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize;
 

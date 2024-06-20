@@ -850,7 +850,7 @@ impl LayerMap {
 
     /// debugging function to print out the contents of the layer map
     #[allow(unused)]
-    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub async fn dump(&self, verbose: bool, ctx: &mut RequestContext) -> Result<()> {
         println!("Begin dump LayerMap");
 
         println!("open_layer:");

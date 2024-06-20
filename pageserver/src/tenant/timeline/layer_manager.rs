@@ -73,7 +73,7 @@ impl LayerManager {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
 

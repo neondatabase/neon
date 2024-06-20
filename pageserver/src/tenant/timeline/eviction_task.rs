@@ -127,7 +127,7 @@ impl Timeline {
         policy: &EvictionPolicy,
         cancel: &CancellationToken,
         gate: &GateGuard,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> ControlFlow<(), Instant> {
         debug!("eviction iteration: {policy:?}");
         let start = Instant::now();
@@ -184,7 +184,7 @@ impl Timeline {
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
@@ -309,7 +309,7 @@ impl Timeline {
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
         gate: &GateGuard,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> ControlFlow<()> {
         let permit = self.acquire_imitation_permit(cancel, ctx).await?;
 
@@ -320,7 +320,7 @@ impl Timeline {
     async fn acquire_imitation_permit(
         &self,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> ControlFlow<(), tokio::sync::SemaphorePermit<'static>> {
         let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
             BackgroundLoopKind::Eviction,
@@ -366,7 +366,7 @@ impl Timeline {
         cancel: &CancellationToken,
         gate: &GateGuard,
         permit: tokio::sync::SemaphorePermit<'static>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> ControlFlow<()> {
         if !self.tenant_shard_id.is_shard_zero() {
             // Shards !=0 do not maintain accurate relation sizes, and do not need to calculate logical size
@@ -442,7 +442,7 @@ impl Timeline {
     async fn imitate_timeline_cached_layer_accesses(
         &self,
         guard: &GateGuard,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) {
         let lsn = self.get_last_record_lsn();
 
@@ -499,7 +499,7 @@ impl Timeline {
         &self,
         tenant: &Tenant,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) {
         if self.conf.metric_collection_endpoint.is_none() {
             // We don't start the consumption metrics task if this is not set in the config.

@@ -28,7 +28,7 @@ impl EphemeralFile {
         conf: &PageServerConf,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<EphemeralFile, io::Error> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
         let filename_disambiguator =
@@ -68,7 +68,7 @@ impl EphemeralFile {
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BlockLease, io::Error> {
         self.rw.read_blk(blknum, ctx).await
     }
@@ -76,7 +76,7 @@ impl EphemeralFile {
     pub(crate) async fn write_blob(
         &mut self,
         srcbuf: &[u8],
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<u64, io::Error> {
         let pos = self.rw.bytes_written();
 

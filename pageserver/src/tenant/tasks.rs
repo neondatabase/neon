@@ -73,7 +73,7 @@ static PERMIT_GAUGES: once_cell::sync::Lazy<
 /// Cancellation safe.
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
-    _ctx: &RequestContext,
+    _ctx: &mut RequestContext,
 ) -> tokio::sync::SemaphorePermit<'static> {
     let _guard = PERMIT_GAUGES[loop_kind].guard();
 

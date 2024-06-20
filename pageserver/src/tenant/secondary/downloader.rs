@@ -506,7 +506,7 @@ impl<'a> TenantDownloader<'a> {
         }
     }
 
-    async fn download(&self, ctx: &RequestContext) -> Result<(), UpdateError> {
+    async fn download(&self, ctx: &mut RequestContext) -> Result<(), UpdateError> {
         debug_assert_current_span_has_tenant_id();
 
         // For the duration of a download, we must hold the SecondaryTenant::gate, to ensure
@@ -831,7 +831,7 @@ impl<'a> TenantDownloader<'a> {
         &self,
         timeline: HeatMapTimeline,
         timeline_state: SecondaryDetailTimeline,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), UpdateError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
@@ -978,7 +978,7 @@ impl<'a> TenantDownloader<'a> {
         tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         layer: HeatMapLayer,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Option<HeatMapLayer>, UpdateError> {
         // Failpoint for simulating slow remote storage
         failpoint_support::sleep_millis_async!(

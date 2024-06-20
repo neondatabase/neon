@@ -404,7 +404,7 @@ impl DeleteTenantFlow {
         tenant: &Arc<Tenant>,
         preload: Option<TenantPreload>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), DeleteTenantError> {
         let (_, progress) = completion::channel();
 

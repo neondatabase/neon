@@ -57,7 +57,7 @@ pub(crate) enum LayerCmd {
     },
 }
 
-async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
+async fn read_delta_file(path: impl AsRef<Path>, ctx: &mut RequestContext) -> Result<()> {
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
     virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
     page_cache::init(100);

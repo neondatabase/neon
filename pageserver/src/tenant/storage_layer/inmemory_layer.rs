@@ -256,7 +256,7 @@ impl InMemoryLayer {
     /// debugging function to print out the contents of the layer
     ///
     /// this is likely completly unused
-    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub async fn dump(&self, verbose: bool, ctx: &mut RequestContext) -> Result<()> {
         let inner = self.inner.read().await;
 
         let end_str = self.end_lsn_or_max();
@@ -308,12 +308,12 @@ impl InMemoryLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
-        let ctx = RequestContextBuilder::extend(ctx)
+        let mut ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
             .build();
 
@@ -325,7 +325,7 @@ impl InMemoryLayer {
         if let Some(vec_map) = inner.index.get(&key) {
             let slice = vec_map.slice_range(lsn_range);
             for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos, &ctx).await?;
+                let buf = reader.read_blob(*pos, &mut ctx).await?;
                 let value = Value::des(&buf)?;
                 match value {
                     Value::Image(img) => {
@@ -365,9 +365,9 @@ impl InMemoryLayer {
         keyspace: KeySpace,
         end_lsn: Lsn,
         reconstruct_state: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), GetVectoredError> {
-        let ctx = RequestContextBuilder::extend(ctx)
+        let mut ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
             .build();
 
@@ -410,7 +410,7 @@ impl InMemoryLayer {
                 continue;
             }
 
-            let buf = reader.read_blob(block_read.block_offset, &ctx).await;
+            let buf = reader.read_blob(block_read.block_offset, &mut ctx).await;
             if let Err(e) = buf {
                 reconstruct_state
                     .on_key_error(block_read.key, PageReconstructError::from(anyhow!(e)));
@@ -473,7 +473,7 @@ impl InMemoryLayer {
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<InMemoryLayer> {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
@@ -512,7 +512,7 @@ impl InMemoryLayer {
         key: Key,
         lsn: Lsn,
         buf: &[u8],
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
@@ -525,7 +525,7 @@ impl InMemoryLayer {
         key: Key,
         lsn: Lsn,
         buf: &[u8],
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
 
@@ -534,7 +534,7 @@ impl InMemoryLayer {
                 .file
                 .write_blob(
                     buf,
-                    &RequestContextBuilder::extend(ctx)
+                    &mut RequestContextBuilder::extend(ctx)
                         .page_content_kind(PageContentKind::InMemoryLayer)
                         .build(),
                 )
@@ -606,7 +606,7 @@ impl InMemoryLayer {
     pub(crate) async fn write_to_disk(
         &self,
         timeline: &Arc<Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         key_range: Option<Range<Key>>,
     ) -> Result<Option<ResidentLayer>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this

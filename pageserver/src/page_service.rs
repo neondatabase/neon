@@ -867,7 +867,7 @@ impl PageServerHandler {
         request_lsn: Lsn,
         not_modified_since: Lsn,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Lsn, PageStreamError> {
         let last_record_lsn = timeline.get_last_record_lsn();
 
@@ -926,7 +926,7 @@ impl PageServerHandler {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
@@ -958,7 +958,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         req: &PagestreamExistsRequest,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
         let _timer = timeline
@@ -990,7 +990,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         req: &PagestreamNblocksRequest,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
 
@@ -1023,7 +1023,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         req: &PagestreamDbSizeRequest,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
 
@@ -1173,7 +1173,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         req: &PagestreamGetPageRequest,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = match self.get_cached_timeline_for_page(req) {
             Ok(tl) => {
@@ -1233,7 +1233,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         req: &PagestreamGetSlruSegmentRequest,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
 
@@ -1275,7 +1275,7 @@ impl PageServerHandler {
         prev_lsn: Option<Lsn>,
         full_backup: bool,
         gzip: bool,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,

@@ -696,7 +696,7 @@ fn tenant_spawn(
     init_order: Option<InitializationOrder>,
     tenants: &'static std::sync::RwLock<TenantsMap>,
     mode: SpawnMode,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
         tenant_path.is_dir(),
@@ -956,7 +956,7 @@ impl TenantManager {
         new_location_config: LocationConf,
         flush: Option<Duration>,
         mut spawn_mode: SpawnMode,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Option<Arc<Tenant>>, UpsertLocationError> {
         debug_assert_current_span_has_tenant_id();
         info!("configuring tenant location to state {new_location_config:?}");
@@ -1247,7 +1247,7 @@ impl TenantManager {
         &self,
         tenant_shard_id: TenantShardId,
         drop_cache: bool,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
         let Some(old_slot) = slot_guard.get_old_value() else {
@@ -1509,7 +1509,7 @@ impl TenantManager {
         tenant: Arc<Tenant>,
         new_shard_count: ShardCount,
         new_stripe_size: Option<ShardStripeSize>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<TenantShardId>> {
         let tenant_shard_id = *tenant.get_tenant_shard_id();
         let r = self
@@ -1539,7 +1539,7 @@ impl TenantManager {
         tenant: Arc<Tenant>,
         new_shard_count: ShardCount,
         new_stripe_size: Option<ShardStripeSize>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<TenantShardId>> {
         let tenant_shard_id = *tenant.get_tenant_shard_id();
 
@@ -1994,7 +1994,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Vec<TimelineId>, anyhow::Error> {
         struct RevertOnDropSlot(Option<SlotGuard>);
 
@@ -2229,7 +2229,7 @@ pub(crate) async fn load_tenant(
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: GenericRemoteStorage,
     deletion_queue_client: DeletionQueueClient,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
@@ -2837,7 +2837,7 @@ pub(crate) async fn immediate_gc(
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,
     cancel: CancellationToken,
-    ctx: &RequestContext,
+    ctx: &mut RequestContext,
 ) -> Result<GcResult, ApiError> {
     let tenant = {
         let guard = TENANTS.read().unwrap();

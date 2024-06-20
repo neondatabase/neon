@@ -331,7 +331,7 @@ impl PageCache {
         &self,
         file_id: FileId,
         blkno: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ReadBufResult> {
         self.lock_for_read(&(CacheKey::ImmutableFilePage { file_id, blkno }), ctx)
             .await
@@ -422,7 +422,7 @@ impl PageCache {
     async fn lock_for_read(
         &self,
         cache_key: &CacheKey,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ReadBufResult> {
         let mut permit = Some(self.try_get_pinned_slot_permit().await?);
 

@@ -518,7 +518,7 @@ impl RemoteTimelineClient {
         layer_metadata: &LayerFileMetadata,
         local_path: &Utf8Path,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<u64> {
         let downloaded_size = {
             let _unfinished_gauge_guard = self.metrics.call_begin(

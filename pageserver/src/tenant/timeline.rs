@@ -871,7 +871,7 @@ impl Timeline {
         &self,
         key: Key,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
@@ -946,7 +946,7 @@ impl Timeline {
         key: Key,
         lsn: Lsn,
         mut reconstruct_state: ValueReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         // XXX: structured stats collection for layer eviction here.
         trace!(
@@ -1004,7 +1004,7 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
             return Err(GetVectoredError::InvalidLsn(lsn));
@@ -1101,7 +1101,7 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         if !lsn.is_valid() {
             return Err(GetVectoredError::InvalidLsn(lsn));
@@ -1158,7 +1158,7 @@ impl Timeline {
         &self,
         keyspace: KeySpace,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let mut values = BTreeMap::new();
 
@@ -1217,7 +1217,7 @@ impl Timeline {
         keyspace: KeySpace,
         lsn: Lsn,
         reconstruct_state: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
         let get_kind = if keyspace.total_raw_size() == 1 {
             GetKind::Singular
@@ -1274,7 +1274,7 @@ impl Timeline {
         vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
         keyspace: KeySpace,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) {
         if keyspace.overlaps(&Key::metadata_key_range()) {
             // skip validation for metadata key range
@@ -1444,7 +1444,7 @@ impl Timeline {
         &self,
         lsn: Lsn,
         who_is_waiting: WaitLsnWaiter<'_>,
-        ctx: &RequestContext, /* Prepare for use by cancellation */
+        ctx: &mut RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
         let state = self.current_state();
         if self.cancel.is_cancelled() || matches!(state, TimelineState::Stopping) {
@@ -1540,7 +1540,7 @@ impl Timeline {
         &self,
         lsn: Lsn,
         length: Duration,
-        _ctx: &RequestContext,
+        _ctx: &mut RequestContext,
     ) -> anyhow::Result<LsnLease> {
         let lease = {
             let mut gc_info = self.gc_info.write().unwrap();
@@ -1713,7 +1713,7 @@ impl Timeline {
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
@@ -1765,7 +1765,7 @@ impl Timeline {
         parent: Arc<crate::tenant::Tenant>,
         broker_client: BrokerClientChannel,
         background_jobs_can_start: Option<&completion::Barrier>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) {
         if self.tenant_shard_id.is_shard_zero() {
             // Logical size is only maintained accurately on shard zero.
@@ -1946,7 +1946,7 @@ impl Timeline {
 
     pub(crate) async fn wait_to_become_active(
         &self,
-        _ctx: &RequestContext, // Prepare for use by cancellation
+        _ctx: &mut RequestContext, // Prepare for use by cancellation
     ) -> Result<(), TimelineState> {
         let mut receiver = self.state.subscribe();
         loop {
@@ -2448,7 +2448,7 @@ impl Timeline {
     /// when the timeline is activated.
     fn launch_wal_receiver(
         self: &Arc<Self>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         broker_client: BrokerClientChannel,
     ) {
         info!(
@@ -2678,7 +2678,7 @@ impl Timeline {
     pub(crate) fn get_current_logical_size(
         self: &Arc<Self>,
         priority: GetLogicalSizePriority,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> logical_size::CurrentLogicalSize {
         if !self.tenant_shard_id.is_shard_zero() {
             // Logical size is only accurately maintained on shard zero: when called elsewhere, for example
@@ -2745,7 +2745,7 @@ impl Timeline {
         current_size
     }
 
-    fn spawn_initial_logical_size_computation_task(self: &Arc<Self>, ctx: &RequestContext) {
+    fn spawn_initial_logical_size_computation_task(self: &Arc<Self>, ctx: &mut RequestContext) {
         let Some(initial_part_end) = self.current_logical_size.initial_part_end else {
             // nothing to do for freshly created timelines;
             assert_eq!(
@@ -2963,7 +2963,7 @@ impl Timeline {
         self: &Arc<Self>,
         lsn: Lsn,
         cause: LogicalSizeCalculationCause,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         crate::span::debug_assert_current_span_has_tenant_and_timeline_id();
         // We should never be calculating logical sizes on shard !=0, because these shards do not have
@@ -3006,7 +3006,7 @@ impl Timeline {
         up_to_lsn: Lsn,
         cause: LogicalSizeCalculationCause,
         _guard: &GateGuard,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         info!(
             "Calculating logical size for timeline {} at {}",
@@ -3169,7 +3169,7 @@ impl Timeline {
         key: Key,
         request_lsn: Lsn,
         reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Vec<TraversalPathItem>, PageReconstructError> {
         // Start from the current timeline.
         let mut timeline_owned;
@@ -3370,7 +3370,7 @@ impl Timeline {
         mut keyspace: KeySpace,
         request_lsn: Lsn,
         reconstruct_state: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), GetVectoredError> {
         let mut timeline_owned: Arc<Timeline>;
         let mut timeline = self;
@@ -3477,7 +3477,7 @@ impl Timeline {
         mut cont_lsn: Lsn,
         reconstruct_state: &mut ValuesReconstructState,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<TimelineVisitOutcome, GetVectoredError> {
         let mut unmapped_keyspace = keyspace.clone();
         let mut fringe = LayerFringe::new();
@@ -3585,7 +3585,7 @@ impl Timeline {
     async fn get_ready_ancestor_timeline(
         &self,
         ancestor: &Arc<Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Arc<Timeline>, GetReadyAncestorError> {
         // It's possible that the ancestor timeline isn't active yet, or
         // is active but hasn't yet caught up to the branch point. Wait
@@ -3653,7 +3653,7 @@ impl Timeline {
     async fn get_layer_for_write(
         &self,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
         let layer = guard
@@ -3697,7 +3697,7 @@ impl Timeline {
     async fn flush_loop(
         self: &Arc<Self>,
         mut layer_flush_start_rx: tokio::sync::watch::Receiver<(u64, Lsn)>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) {
         info!("started flush loop");
         loop {
@@ -3856,7 +3856,7 @@ impl Timeline {
     async fn flush_frozen_layer(
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Lsn, FlushLayerError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -4085,7 +4085,7 @@ impl Timeline {
         self: &Arc<Self>,
         frozen_layer: &Arc<InMemoryLayer>,
         key_range: Option<Range<Key>>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Option<ResidentLayer>> {
         let self_clone = Arc::clone(self);
         let frozen_layer = Arc::clone(frozen_layer);
@@ -4142,7 +4142,7 @@ impl Timeline {
         lsn: Lsn,
         partition_size: u64,
         flags: EnumSet<CompactFlags>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<((KeyPartitioning, SparseKeyPartitioning), Lsn)> {
         let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
@@ -4239,7 +4239,7 @@ impl Timeline {
         partition: &KeySpace,
         mut image_layer_writer: ImageLayerWriter,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         img_range: Range<Key>,
         start: Key,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
@@ -4339,7 +4339,7 @@ impl Timeline {
         partition: &KeySpace,
         mut image_layer_writer: ImageLayerWriter,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
         img_range: Range<Key>,
         mode: ImageLayerCreationMode,
         start: Key,
@@ -4423,7 +4423,7 @@ impl Timeline {
         partitioning: &KeyPartitioning,
         lsn: Lsn,
         mode: ImageLayerCreationMode,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Vec<ResidentLayer>, CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers = Vec::new();
@@ -4624,7 +4624,7 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         options: detach_ancestor::Options,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<
         (
             completion::Completion,
@@ -4644,7 +4644,7 @@ impl Timeline {
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Vec<TimelineId>, anyhow::Error> {
         detach_ancestor::complete(self, tenant, prepared, ctx).await
     }
@@ -4822,7 +4822,7 @@ impl Timeline {
         cutoff_horizon: Lsn,
         pitr: Duration,
         cancel: &CancellationToken,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<GcCutoffs, PageReconstructError> {
         let _timer = self
             .metrics
@@ -5469,7 +5469,7 @@ impl Timeline {
         lsn: Lsn,
         mut images: Vec<(Key, Bytes)>,
         check_start_lsn: Option<Lsn>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let last_record_lsn = self.get_last_record_lsn();
         assert!(
@@ -5513,7 +5513,7 @@ impl Timeline {
         self: &Arc<Timeline>,
         mut deltas: Vec<(Key, Lsn, Value)>,
         check_start_lsn: Option<Lsn>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let last_record_lsn = self.get_last_record_lsn();
         deltas.sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
@@ -5556,7 +5556,7 @@ impl Timeline {
     pub(crate) async fn inspect_image_layers(
         self: &Arc<Timeline>,
         lsn: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
         let mut all_data = Vec::new();
         let guard = self.layers.read().await;
@@ -5664,7 +5664,7 @@ impl<'a> TimelineWriter<'a> {
         key: Key,
         lsn: Lsn,
         value: &Value,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         // Avoid doing allocations for "small" values.
         // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
@@ -5697,7 +5697,7 @@ impl<'a> TimelineWriter<'a> {
         &mut self,
         at: Lsn,
         action: OpenLayerAction,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<&Arc<InMemoryLayer>> {
         match action {
             OpenLayerAction::Roll => {
@@ -5714,7 +5714,7 @@ impl<'a> TimelineWriter<'a> {
         Ok(&self.write_guard.as_ref().unwrap().open_layer)
     }
 
-    async fn open_layer(&mut self, at: Lsn, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn open_layer(&mut self, at: Lsn, ctx: &mut RequestContext) -> anyhow::Result<()> {
         let layer = self.tl.get_layer_for_write(at, ctx).await?;
         let initial_size = layer.size().await?;
 
@@ -5800,7 +5800,7 @@ impl<'a> TimelineWriter<'a> {
     pub(crate) async fn put_batch(
         &mut self,
         batch: VecMap<Lsn, (Key, Value)>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         for (lsn, (key, val)) in batch {
             self.put(key, lsn, &val, ctx).await?
@@ -5812,7 +5812,7 @@ impl<'a> TimelineWriter<'a> {
     pub(crate) async fn delete_batch(
         &mut self,
         batch: &[(Range<Key>, Lsn)],
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         if let Some((_, lsn)) = batch.first() {
             let action = self.get_open_layer_action(*lsn, 0);

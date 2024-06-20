@@ -9,7 +9,7 @@ pub trait OwnedAsyncWriter {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> std::io::Result<(usize, B::Buf)>;
 }
 
@@ -60,7 +60,7 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn flush_and_into_inner(mut self, ctx: &RequestContext) -> std::io::Result<W> {
+    pub async fn flush_and_into_inner(mut self, ctx: &mut RequestContext) -> std::io::Result<W> {
         self.flush(ctx).await?;
 
         let Self { buf, writer } = self;
@@ -79,7 +79,7 @@ where
     pub async fn write_buffered<S: IoBuf + Send>(
         &mut self,
         chunk: Slice<S>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> std::io::Result<(usize, S)> {
         let chunk_len = chunk.len();
         // avoid memcpy for the middle of the chunk
@@ -124,7 +124,7 @@ where
     pub async fn write_buffered_borrowed(
         &mut self,
         mut chunk: &[u8],
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> std::io::Result<usize> {
         let chunk_len = chunk.len();
         while !chunk.is_empty() {
@@ -142,7 +142,7 @@ where
         Ok(chunk_len)
     }
 
-    async fn flush(&mut self, ctx: &RequestContext) -> std::io::Result<()> {
+    async fn flush(&mut self, ctx: &mut RequestContext) -> std::io::Result<()> {
         let buf = self.buf.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
@@ -215,7 +215,7 @@ impl OwnedAsyncWriter for Vec<u8> {
     async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
         &mut self,
         buf: B,
-        _: &RequestContext,
+        _: &mut RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
@@ -243,7 +243,7 @@ mod tests {
         async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
             &mut self,
             buf: B,
-            _: &RequestContext,
+            _: &mut RequestContext,
         ) -> std::io::Result<(usize, B::Buf)> {
             let nbytes = buf.bytes_init();
             if nbytes == 0 {

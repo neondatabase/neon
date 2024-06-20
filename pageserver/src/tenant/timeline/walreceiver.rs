@@ -68,7 +68,7 @@ impl WalReceiver {
         timeline: Arc<Timeline>,
         conf: WalReceiverConf,
         mut broker_client: BrokerClientChannel,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Self {
         let tenant_shard_id = timeline.tenant_shard_id;
         let timeline_id = timeline.timeline_id;

@@ -331,7 +331,7 @@ impl Layer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         use anyhow::ensure;
 
@@ -361,7 +361,7 @@ impl Layer {
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), GetVectoredError> {
         let layer = self
             .0
@@ -392,7 +392,7 @@ impl Layer {
     #[cfg(test)]
     pub(crate) async fn load_key_values(
         &self,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
         let layer = self
             .0
@@ -479,7 +479,7 @@ impl Layer {
 
     /// Traditional debug dumping facility
     #[allow(unused)]
-    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &mut RequestContext) -> anyhow::Result<()> {
         self.0.desc.dump();
 
         if verbose {
@@ -898,7 +898,7 @@ impl LayerInner {
     async fn get_or_maybe_download(
         self: &Arc<Self>,
         allow_download: bool,
-        ctx: Option<&RequestContext>,
+        ctx: Option<&mut RequestContext>,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
         let (weak, permit) = {
             // get_or_init_detached can:
@@ -988,7 +988,7 @@ impl LayerInner {
             return Err(DownloadError::NotFile(ft));
         }
 
-        if let Some(ctx) = ctx {
+        if let Some(ref ctx) = ctx {
             self.check_expected_download(ctx)?;
         }
 
@@ -1049,7 +1049,7 @@ impl LayerInner {
         self: &Arc<Self>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -1079,7 +1079,7 @@ impl LayerInner {
                     .await
                     .unwrap();
 
-                let res = this.download_and_init(timeline, permit, &ctx).await;
+                let res = this.download_and_init(timeline, permit, &mut ctx).await;
 
                 if let Err(res) = tx.send(res) {
                     match res {
@@ -1122,7 +1122,7 @@ impl LayerInner {
         self: &Arc<LayerInner>,
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Arc<DownloadedLayer>> {
         let result = timeline
             .remote_client
@@ -1662,7 +1662,7 @@ impl DownloadedLayer {
     async fn get<'a>(
         &'a self,
         owner: &Arc<LayerInner>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<&'a LayerKind> {
         let init = || async {
             assert_eq!(
@@ -1736,7 +1736,7 @@ impl DownloadedLayer {
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
         owner: &Arc<LayerInner>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         use LayerKind::*;
 
@@ -1758,7 +1758,7 @@ impl DownloadedLayer {
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValuesReconstructState,
         owner: &Arc<LayerInner>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), GetVectoredError> {
         use LayerKind::*;
 
@@ -1778,7 +1778,7 @@ impl DownloadedLayer {
     async fn load_key_values(
         &self,
         owner: &Arc<LayerInner>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
         use LayerKind::*;
 
@@ -1788,7 +1788,7 @@ impl DownloadedLayer {
         }
     }
 
-    async fn dump(&self, owner: &Arc<LayerInner>, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn dump(&self, owner: &Arc<LayerInner>, ctx: &mut RequestContext) -> anyhow::Result<()> {
         use LayerKind::*;
         match self.get(owner, ctx).await? {
             Delta(d) => d.dump(ctx).await?,
@@ -1837,7 +1837,7 @@ impl ResidentLayer {
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(layer=%self))]
     pub(crate) async fn load_keys<'a>(
         &'a self,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<DeltaEntry<'a>>> {
         use LayerKind::*;
 
@@ -1866,7 +1866,7 @@ impl ResidentLayer {
         &'a self,
         shard_identity: &ShardIdentity,
         writer: &mut ImageLayerWriter,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<usize> {
         use LayerKind::*;
 
@@ -1881,7 +1881,7 @@ impl ResidentLayer {
         &self,
         writer: &mut super::delta_layer::DeltaLayerWriter,
         until: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<usize> {
         use LayerKind::*;
 
@@ -1907,7 +1907,7 @@ impl ResidentLayer {
     #[cfg(test)]
     pub(crate) async fn as_delta(
         &self,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
         use LayerKind::*;
         match self.downloaded.get(&self.owner.0, ctx).await? {

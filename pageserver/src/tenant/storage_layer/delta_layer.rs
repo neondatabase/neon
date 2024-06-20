@@ -249,7 +249,7 @@ impl AsLayerDesc for DeltaLayer {
 }
 
 impl DeltaLayer {
-    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &mut RequestContext) -> Result<()> {
         self.desc.dump();
 
         if !verbose {
@@ -292,7 +292,7 @@ impl DeltaLayer {
     async fn load(
         &self,
         access_kind: LayerAccessKind,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<&Arc<DeltaLayerInner>> {
         self.access_stats.record_access(access_kind, ctx);
         // Quick exit if already loaded
@@ -302,7 +302,7 @@ impl DeltaLayer {
             .with_context(|| format!("Failed to load delta layer {}", self.path()))
     }
 
-    async fn load_inner(&self, ctx: &RequestContext) -> Result<Arc<DeltaLayerInner>> {
+    async fn load_inner(&self, ctx: &mut RequestContext) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
         let loaded = DeltaLayerInner::load(&path, None, None, ctx)
@@ -393,7 +393,7 @@ impl DeltaLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename. We don't know
         // the end key yet, so we cannot form the final filename yet. We will
@@ -435,7 +435,7 @@ impl DeltaLayerWriterInner {
         key: Key,
         lsn: Lsn,
         val: Value,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         let (_, res) = self
             .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init(), ctx)
@@ -449,7 +449,7 @@ impl DeltaLayerWriterInner {
         lsn: Lsn,
         val: Vec<u8>,
         will_init: bool,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
         let (val, res) = self.blob_writer.write_blob(val, ctx).await;
@@ -476,7 +476,7 @@ impl DeltaLayerWriterInner {
         self,
         key_end: Key,
         timeline: &Arc<Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
         let temp_path = self.path.clone();
         let result = self.finish0(key_end, timeline, ctx).await;
@@ -493,7 +493,7 @@ impl DeltaLayerWriterInner {
         self,
         key_end: Key,
         timeline: &Arc<Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
@@ -603,7 +603,7 @@ impl DeltaLayerWriter {
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             inner: Some(
@@ -630,7 +630,7 @@ impl DeltaLayerWriter {
         key: Key,
         lsn: Lsn,
         val: Value,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<()> {
         self.inner
             .as_mut()
@@ -645,7 +645,7 @@ impl DeltaLayerWriter {
         lsn: Lsn,
         val: Vec<u8>,
         will_init: bool,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         self.inner
             .as_mut()
@@ -665,7 +665,7 @@ impl DeltaLayerWriter {
         mut self,
         key_end: Key,
         timeline: &Arc<Timeline>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
         self.inner
             .take()
@@ -704,7 +704,7 @@ impl DeltaLayer {
     pub async fn rewrite_summary<F>(
         path: &Utf8Path,
         rewrite: F,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), RewriteSummaryError>
     where
         F: Fn(Summary) -> Summary,
@@ -744,7 +744,7 @@ impl DeltaLayerInner {
         path: &Utf8Path,
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
         let file = match VirtualFile::open(path, ctx).await {
             Ok(file) => file,
@@ -793,7 +793,7 @@ impl DeltaLayerInner {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         let mut need_image = true;
         // Scan the page versions backwards, starting from `lsn`.
@@ -824,13 +824,13 @@ impl DeltaLayerInner {
 
                     !blob_ref.will_init()
                 },
-                &RequestContextBuilder::extend(ctx)
+                &mut RequestContextBuilder::extend(ctx)
                     .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
                     .build(),
             )
             .await?;
 
-        let ctx = &RequestContextBuilder::extend(ctx)
+        let ctx = &mut RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::DeltaLayerValue)
             .build();
 
@@ -889,7 +889,7 @@ impl DeltaLayerInner {
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<(), GetVectoredError> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let index_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
@@ -931,7 +931,7 @@ impl DeltaLayerInner {
     #[cfg(test)]
     pub(super) async fn load_key_values(
         &self,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let index_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
@@ -973,12 +973,12 @@ impl DeltaLayerInner {
         index_reader: DiskBtreeReader<Reader, DELTA_KEY_SIZE>,
         mut planner: VectoredReadPlanner,
         reconstruct_state: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>>
     where
         Reader: BlockReader,
     {
-        let ctx = RequestContextBuilder::extend(ctx)
+        let mut ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
             .build();
 
@@ -986,7 +986,7 @@ impl DeltaLayerInner {
             let mut range_end_handled = false;
 
             let start_key = DeltaKey::from_key_lsn(&range.start, lsn_range.start);
-            let index_stream = index_reader.get_stream_from(&start_key.0, &ctx);
+            let index_stream = index_reader.get_stream_from(&start_key.0, &mut ctx);
             let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {
@@ -1062,7 +1062,7 @@ impl DeltaLayerInner {
         &self,
         reads: Vec<VectoredRead>,
         reconstruct_state: &mut ValuesReconstructState,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) {
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
         let mut ignore_key_with_err = None;
@@ -1140,7 +1140,7 @@ impl DeltaLayerInner {
 
     pub(super) async fn load_keys<'a>(
         &'a self,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<Vec<DeltaEntry<'a>>> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
@@ -1179,7 +1179,7 @@ impl DeltaLayerInner {
                     all_keys.push(entry);
                     true
                 },
-                &RequestContextBuilder::extend(ctx)
+                &mut RequestContextBuilder::extend(ctx)
                     .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
                     .build(),
             )
@@ -1199,7 +1199,7 @@ impl DeltaLayerInner {
         &self,
         writer: &mut DeltaLayerWriter,
         until: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<usize> {
         use crate::tenant::vectored_blob_io::{
             BlobMeta, VectoredReadBuilder, VectoredReadExtended,
@@ -1387,7 +1387,7 @@ impl DeltaLayerInner {
         Ok(records)
     }
 
-    pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub(super) async fn dump(&self, ctx: &mut RequestContext) -> anyhow::Result<()> {
         println!(
             "index_start_blk: {}, root {}",
             self.index_start_blk, self.index_root_blk
@@ -1404,7 +1404,7 @@ impl DeltaLayerInner {
 
         let keys = self.load_keys(ctx).await?;
 
-        async fn dump_blob(val: &ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
+        async fn dump_blob(val: &ValueRef<'_>, ctx: &mut RequestContext) -> anyhow::Result<String> {
             let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
             let val = Value::des(&buf)?;
             let desc = match val {
@@ -1513,7 +1513,7 @@ pub struct ValueRef<'a> {
 
 impl<'a> ValueRef<'a> {
     /// Loads the value from disk
-    pub async fn load(&self, ctx: &RequestContext) -> Result<Value> {
+    pub async fn load(&self, ctx: &mut RequestContext) -> Result<Value> {
         // theoretically we *could* record an access time for each, but it does not really matter
         let buf = self.reader.read_blob(self.blob_ref.pos(), ctx).await?;
         let val = Value::des(&buf)?;
@@ -1527,7 +1527,7 @@ impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> Result<BlockLease, std::io::Error> {
         let block_reader = FileBlockReader::new(&self.0.as_ref().file, self.0.as_ref().file_id);
         block_reader.read_blk(blknum, ctx).await
@@ -2060,7 +2060,7 @@ mod test {
         source: &DeltaLayerInner,
         truncated: &DeltaLayerInner,
         truncated_at: Lsn,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) {
         use futures::future::ready;
         use futures::stream::TryStreamExt;

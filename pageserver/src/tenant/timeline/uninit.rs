@@ -90,7 +90,7 @@ impl<'t> UninitializedTimeline<'t> {
         copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
         broker_client: storage_broker::BrokerClientChannel,
-        ctx: &RequestContext,
+        ctx: &mut RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
 
