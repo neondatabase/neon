@@ -5281,7 +5281,6 @@ impl Service {
         let mut last_inspected_shard: Option<TenantShardId> = None;
         let mut inspected_all_shards = false;
         let mut waiters = Vec::new();
-        let mut schedule_context = ScheduleContext::default();
 
         while !inspected_all_shards {
             if cancel.is_cancelled() {
@@ -5322,34 +5321,22 @@ impl Service {
                         }
                     };
 
-                    // Reset the scheduling context if we have moved over to a new tenant.
-                    // This is required since the affinity scores stored in the scheduling
-                    // context should be tenant specific. Note that we are relying on
-                    // [`ServiceState::tenants`] being ordered by tenant id.
-                    if last_inspected_shard.map(|tid| tid.tenant_id) != Some(tid.tenant_id) {
-                        schedule_context = ScheduleContext::default();
-                    }
-
-                    match tenant_shard.reschedule_to_secondary(
-                        node_id,
-                        scheduler,
-                        &mut schedule_context,
-                    ) {
-                            Err(e) => {
-                                tracing::warn!(
-                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                    "Scheduling error when draining pageserver {} : {e}", node_id
-                                );
-                            }
-                            Ok(()) => {
-                                let scheduled_to = tenant_shard.intent.get_attached();
-                                tracing::info!(
-                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                    "Rescheduled shard while draining node {}: {} -> {:?}",
-                                    node_id,
-                                    node_id,
-                                    scheduled_to
-                                );
+                    match tenant_shard.reschedule_to_secondary(Some(node_id), None, scheduler) {
+                        Err(e) => {
+                            tracing::warn!(
+                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                "Scheduling error when draining pageserver {} : {e}", node_id
+                            );
+                        }
+                        Ok(()) => {
+                            let scheduled_to = tenant_shard.intent.get_attached();
+                            tracing::info!(
+                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                "Rescheduled shard while draining node {}: {} -> {:?}",
+                                node_id,
+                                node_id,
+                                scheduled_to
+                            );
 
                             let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
                             if let Some(some) = waiter {
@@ -5496,9 +5483,7 @@ impl Service {
         // secondaries are warm. This is not always true (e.g. we just migrated the
         // tenant). Take that into consideration by checking the secondary status.
         let mut tids_to_promote = self.fill_node_plan(node_id);
-
         let mut waiters = Vec::new();
-        let mut schedule_context = ScheduleContext::default();
 
         // Execute the plan we've composed above. Before aplying each move from the plan,
         // we validate to ensure that it has not gone stale in the meantime.
@@ -5524,17 +5509,8 @@ impl Service {
                     ));
                 }
 
-                let mut last_inspected_tenant = None;
                 while waiters.len() < MAX_RECONCILES_PER_OPERATION {
                     if let Some(tid) = tids_to_promote.pop() {
-                        // Reset the scheduling context if we have moved over to a new tenant.
-                        // This is required since the affinity scores stored in the scheduling
-                        // context should be tenant specific. Note that we are relying on the
-                        // result [`Service::fill_node_plan`] being ordered by tenant id.
-                        if last_inspected_tenant != Some(tid.tenant_id) {
-                            schedule_context = ScheduleContext::default();
-                        }
-
                         if let Some(tenant_shard) = tenants.get_mut(&tid) {
                             // If the node being filled is not a secondary anymore,
                             // skip the promotion.
@@ -5543,9 +5519,11 @@ impl Service {
                             }
 
                             let previously_attached_to = *tenant_shard.intent.get_attached();
-
-                            tenant_shard.intent.promote_attached(scheduler, node_id);
-                            match tenant_shard.schedule(scheduler, &mut schedule_context) {
+                            match tenant_shard.reschedule_to_secondary(
+                                previously_attached_to,
+                                Some(node_id),
+                                scheduler,
+                            ) {
                                 Err(e) => {
                                     tracing::warn!(
                                         tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
@@ -5569,8 +5547,6 @@ impl Service {
                                 }
                             }
                         }
-
-                        last_inspected_tenant = Some(tid.tenant_id);
                     } else {
                         break;
                     }

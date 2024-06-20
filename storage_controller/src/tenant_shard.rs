@@ -646,45 +646,33 @@ impl TenantShard {
         Ok(())
     }
 
-    /// Attempt to reschedule the tenant shard to one of its secondary locations.
-    /// If no schedulable secondary is found, roll back any changes to the intent state.
-    /// If the `attached_to` node argument doesn't match the intent state, no changes
-    /// are made and the function returns successfully.
+    // TODO: comment
     pub(crate) fn reschedule_to_secondary(
         &mut self,
-        attached_to: NodeId,
+        attached_to: Option<NodeId>,
+        promote_to: Option<NodeId>,
         scheduler: &mut Scheduler,
-        context: &mut ScheduleContext,
     ) -> Result<(), ScheduleError> {
-        let original_secondaries = self.intent.get_secondary().clone();
-
-        if self.intent.demote_attached(scheduler, attached_to) {
-            let res = match self.schedule(scheduler, context) {
-                Ok(()) => {
-                    let rescheduled_to_secondary =
-                        self.intent.get_attached().map_or(false, |node| {
-                            original_secondaries.iter().any(|sec| *sec == node)
-                        });
-
-                    if rescheduled_to_secondary {
-                        Ok(())
-                    } else {
-                        Err(ScheduleError::ImpossibleConstraint)
-                    }
+        let promote_to = match promote_to {
+            Some(node) => node,
+            None => match scheduler.node_preferred(self.intent.get_secondary()) {
+                Some(node) => node,
+                None => {
+                    return Err(ScheduleError::ImpossibleConstraint);
                 }
-                Err(e) => Err(e),
-            };
+            },
+        };
 
-            if res.is_err() {
-                self.intent.set_attached(scheduler, Some(attached_to));
-                self.intent.clear_secondary(scheduler);
-                for sec in original_secondaries {
-                    self.intent.push_secondary(scheduler, sec);
-                }
+        assert!(self.intent.get_secondary().contains(&promote_to));
+
+        if let Some(node) = attached_to {
+            let demoted = self.intent.demote_attached(scheduler, node);
+            if !demoted {
+                return Err(ScheduleError::ImpossibleConstraint);
             }
-
-            return res;
         }
+
+        self.intent.promote_attached(scheduler, promote_to);
 
         Ok(())
     }
