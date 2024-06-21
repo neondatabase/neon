@@ -5322,6 +5322,12 @@ impl Service {
                         }
                     };
 
+                    // If the shard is not attached to the node being drained, skip it.
+                    if *tenant_shard.intent.get_attached() != Some(node_id) {
+                        last_inspected_shard = Some(*tid);
+                        continue;
+                    }
+
                     match tenant_shard.reschedule_to_secondary(Some(node_id), None, scheduler) {
                         Err(e) => {
                             tracing::warn!(
