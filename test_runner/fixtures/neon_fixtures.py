@@ -2747,6 +2747,13 @@ class PgBin:
         env.update(env_add)
         return env
 
+    def _log_env(self, env):
+        env_s = {}
+        for k, v in env.items():
+            if k.startswith("PG") and k != "PGPASSWORD":
+                env_s[k] = v
+        log.debug(f"Environment: {env_s}")
+
     def run_nonblocking(
         self,
         command: List[str],
@@ -2768,6 +2775,7 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
+        self._log_env(env)
         return subprocess.Popen(command, env=env, cwd=cwd, stdout=subprocess.PIPE, text=True)
 
     def run(
@@ -2811,6 +2819,7 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
+        self._log_env(env)
         base_path, _, _ = subprocess_capture(
             self.log_dir,
             command,

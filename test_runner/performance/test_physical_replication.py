@@ -74,6 +74,7 @@ def test_ro_replica_lag(
             project_id,
             branch_id,
             endpoint_type="read_only",
+            settings={"pg_settings": {"hot_standby_feedback": "on"}},
         )
         replica_env = master_env.copy()
         replica_env["PGHOST"] = replica["endpoint"]["host"]
@@ -195,6 +196,7 @@ def test_replication_start_stop(
                     project_id,
                     branch_id,
                     endpoint_type="read_only",
+                    settings={"pg_settings": {"hot_standby_feedback": "on"}},
                 )
             )
             neon_api.wait_for_operation_to_finish(project_id)

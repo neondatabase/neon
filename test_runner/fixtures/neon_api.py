@@ -157,14 +157,18 @@ class NeonAPI:
         project_id: str,
         branch_id: str,
         endpoint_type: Literal["read_write", "read_only"],
+        settings: Dict[str, Any],
     ) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "endpoint": {
                 "branch_id": branch_id,
             },
         }
+
         if endpoint_type:
             data["endpoint"]["type"] = endpoint_type
+        if settings:
+            data["endpoint"]["settings"] = settings
 
         resp = self.__request(
             "POST",
