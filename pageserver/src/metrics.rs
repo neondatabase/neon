@@ -1085,7 +1085,6 @@ impl GlobalAndPerTimelineHistogram {
 
 struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
     h: &'a GlobalAndPerTimelineHistogram,
-    ctx: &'c RequestContext,
     start: std::time::Instant,
     op: SmgrQueryType,
 }
@@ -1093,31 +1092,10 @@ struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
 impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
-        let ex_throttled = self
-            .ctx
-            .micros_spent_throttled
-            .close_and_checked_sub_from(elapsed);
-        let ex_throttled = match ex_throttled {
-            Ok(res) => res,
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
-                    Lazy::new(|| {
-                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
-                            RateLimit::new(Duration::from_secs(10))
-                        })))
-                    });
-                let mut guard = LOGGED.lock().unwrap();
-                let rate_limit = &mut guard[self.op];
-                rate_limit.call(|| {
-                    warn!(op=?self.op, error, "error deducting time spent throttled; this message is logged at a global rate limit");
-                });
-                elapsed
-            }
-        };
-        self.h.observe(ex_throttled.as_secs_f64());
+        self.h.observe(elapsed.as_secs_f64());
     }
 }
+
 
 #[derive(
     Debug,
@@ -1233,33 +1211,11 @@ impl SmgrQueryTimePerTimeline {
         });
         Self { metrics }
     }
-    pub(crate) fn start_timer<'c: 'a, 'a>(
-        &'a self,
-        op: SmgrQueryType,
-        ctx: &'c RequestContext,
-    ) -> impl Drop + 'a {
+    pub(crate) fn start_timer<'a>(&'a self, op: SmgrQueryType) -> impl Drop + 'a {
         let metric = &self.metrics[op as usize];
         let start = Instant::now();
-        match ctx.micros_spent_throttled.open() {
-            Ok(()) => (),
-            Err(error) => {
-                use utils::rate_limit::RateLimit;
-                static LOGGED: Lazy<Mutex<enum_map::EnumMap<SmgrQueryType, RateLimit>>> =
-                    Lazy::new(|| {
-                        Mutex::new(enum_map::EnumMap::from_array(std::array::from_fn(|_| {
-                            RateLimit::new(Duration::from_secs(10))
-                        })))
-                    });
-                let mut guard = LOGGED.lock().unwrap();
-                let rate_limit = &mut guard[op];
-                rate_limit.call(|| {
-                    warn!(?op, error, "error opening micros_spent_throttled; this message is logged at a global rate limit");
-                });
-            }
-        }
         GlobalAndPerTimelineHistogramTimer {
             h: metric,
-            ctx,
             start,
             op,
         }
@@ -1326,7 +1282,7 @@ mod smgr_query_time_tests {
             assert_eq!(pre_per_tenant_timeline, 0);
 
             let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Download);
-            let timer = metrics.start_timer(*op, &ctx);
+            let timer = metrics.start_timer(*op);
             drop(timer);
 
             let (post_global, post_per_tenant_timeline) = get_counts();

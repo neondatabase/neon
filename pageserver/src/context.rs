@@ -97,8 +97,9 @@ pub struct RequestContext {
     download_behavior: DownloadBehavior,
     access_stats_behavior: AccessStatsBehavior,
     page_content_kind: PageContentKind,
-    pub micros_spent_throttled: optional_counter::MicroSecondsCounterU32,
 }
+
+pub(crate) struct MicrosSpentThrottled(optional_counter::MicroSecondsCounterU32);
 
 /// The kind of access to the page cache.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, enum_map::Enum, strum_macros::IntoStaticStr)]

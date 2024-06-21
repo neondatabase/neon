@@ -882,8 +882,6 @@ impl Timeline {
         // page_service.
         debug_assert!(!self.shard_identity.is_key_disposable(&key));
 
-        self.timeline_get_throttle.throttle(ctx, 1).await;
-
         match self.conf.get_impl {
             GetImpl::Legacy => {
                 let reconstruct_state = ValueReconstructState {
@@ -1035,12 +1033,7 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(|metric| (metric, Instant::now()));
 
-        // start counting after throttle so that throttle time
-        // is always less than observation time
-        let throttled = self
-            .timeline_get_throttle
-            .throttle(ctx, key_count as usize)
-            .await;
+        let throttled = None;
 
         let res = match self.conf.get_vectored_impl {
             GetVectoredImpl::Sequential => {
@@ -1129,13 +1122,7 @@ impl Timeline {
             .for_task_kind(ctx.task_kind())
             .map(ScanLatencyOngoingRecording::start_recording);
 
-        // start counting after throttle so that throttle time
-        // is always less than observation time
-        let throttled = self
-            .timeline_get_throttle
-            // assume scan = 1 quota for now until we find a better way to process this
-            .throttle(ctx, 1)
-            .await;
+        let throttled = None;
 
         let vectored_res = self
             .get_vectored_impl(

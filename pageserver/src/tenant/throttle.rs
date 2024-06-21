@@ -130,7 +130,7 @@ where
         self.inner.load().config.steady_rps()
     }
 
-    pub async fn throttle(&self, ctx: &mut RequestContext, key_count: usize) -> Option<Duration> {
+    pub async fn throttle(&self, ctx: &RequestContext, key_count: usize) -> Option<Duration> {
         let inner = self.inner.load_full(); // clones the `Inner` Arc
         if !inner.task_kinds.contains(ctx.task_kind()) {
             return None;
@@ -157,19 +157,6 @@ where
                 .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
             let observation = Observation { wait_time };
             self.metric.observe_throttling(&observation);
-            match ctx.micros_spent_throttled.add(wait_time) {
-                Ok(res) => res,
-                Err(error) => {
-                    use once_cell::sync::Lazy;
-                    use utils::rate_limit::RateLimit;
-                    static WARN_RATE_LIMIT: Lazy<Mutex<RateLimit>> =
-                        Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                    let mut guard = WARN_RATE_LIMIT.lock().unwrap();
-                    guard.call(move || {
-                        warn!(error, "error adding time spent throttled; this message is logged at a global rate limit");
-                    });
-                }
-            }
             Some(wait_time)
         } else {
             None
