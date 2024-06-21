@@ -554,7 +554,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         protocol_version: PagestreamProtocolVersion,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
@@ -624,7 +624,7 @@ impl PageServerHandler {
                     fail::fail_point!("ps::handle-pagerequest-message::exists");
                     let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
-                        self.handle_get_rel_exists_request(tenant_id, timeline_id, &req, &ctx)
+                        self.handle_get_rel_exists_request(tenant_id, timeline_id, &req, &mut ctx)
                             .instrument(span.clone())
                             .await,
                         span,
@@ -634,7 +634,7 @@ impl PageServerHandler {
                     fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                     let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
-                        self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &ctx)
+                        self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &mut ctx)
                             .instrument(span.clone())
                             .await,
                         span,
@@ -645,7 +645,7 @@ impl PageServerHandler {
                     // shard_id is filled in by the handler
                     let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.request_lsn);
                     (
-                        self.handle_get_page_at_lsn_request(tenant_id, timeline_id, &req, &ctx)
+                        self.handle_get_page_at_lsn_request(tenant_id, timeline_id, &req, &mut ctx)
                             .instrument(span.clone())
                             .await,
                         span,
@@ -655,7 +655,7 @@ impl PageServerHandler {
                     fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                     let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
                     (
-                        self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
+                        self.handle_db_size_request(tenant_id, timeline_id, &req, &mut ctx)
                             .instrument(span.clone())
                             .await,
                         span,
@@ -665,7 +665,7 @@ impl PageServerHandler {
                     fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                     let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
                     (
-                        self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &ctx)
+                        self.handle_get_slru_segment_request(tenant_id, timeline_id, &req, &mut ctx)
                             .instrument(span.clone())
                             .await,
                         span,
@@ -728,7 +728,7 @@ impl PageServerHandler {
         base_lsn: Lsn,
         _end_lsn: Lsn,
         pg_version: u32,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
@@ -741,7 +741,7 @@ impl PageServerHandler {
             .get_active_tenant_with_timeout(tenant_id, ShardSelector::Zero, ACTIVE_TENANT_TIMEOUT)
             .await?;
         let timeline = tenant
-            .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
+            .create_empty_timeline(timeline_id, base_lsn, pg_version, &mut ctx)
             .await?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
@@ -766,7 +766,7 @@ impl PageServerHandler {
                 &mut copyin_reader,
                 base_lsn,
                 self.broker_client.clone(),
-                &ctx,
+                &mut ctx,
             )
             .await?;
 
@@ -791,7 +791,7 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         start_lsn: Lsn,
         end_lsn: Lsn,
-        ctx: RequestContext,
+        mut ctx: RequestContext,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
@@ -814,7 +814,7 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
         self.flush_cancellable(pgb, &timeline.cancel).await?;
         let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &timeline.cancel)));
-        import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &ctx).await?;
+        import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &mut ctx).await?;
         info!("wal import complete");
 
         // Read the end of the tar archive.
@@ -1534,7 +1534,7 @@ where
 
         fail::fail_point!("ps::connection-start::process-query");
 
-        let ctx = self.connection_ctx.attached_child();
+        let mut ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
         let parts = query_string.split_whitespace().collect::<Vec<_>>();
         if let Some(params) = parts.strip_prefix(&["pagestream_v2"]) {
@@ -1624,7 +1624,7 @@ where
                 }
             };
 
-            let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&ctx);
+            let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&mut ctx);
             let res = async {
                 self.handle_basebackup_request(
                     pgb,
@@ -1634,7 +1634,7 @@ where
                     None,
                     false,
                     gzip,
-                    &ctx,
+                    &mut ctx,
                 )
                 .await?;
                 pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
@@ -1732,7 +1732,7 @@ where
                 prev_lsn,
                 true,
                 false,
-                &ctx,
+                &mut ctx,
             )
             .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
@@ -1860,7 +1860,7 @@ where
                 .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
 
             match self
-                .handle_make_lsn_lease(pgb, tenant_shard_id, timeline_id, lsn, &ctx)
+                .handle_make_lsn_lease(pgb, tenant_shard_id, timeline_id, lsn, &mut ctx)
                 .await
             {
                 Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,

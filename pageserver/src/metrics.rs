@@ -1237,7 +1237,7 @@ impl SmgrQueryTimePerTimeline {
         &'a self,
         op: SmgrQueryType,
         ctx: &'c RequestContext,
-    ) -> impl Drop + '_ {
+    ) -> impl Drop + 'a {
         let metric = &self.metrics[op as usize];
         let start = Instant::now();
         match ctx.micros_spent_throttled.open() {
