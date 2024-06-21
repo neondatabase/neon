@@ -657,19 +657,6 @@ fn deserialize_storage_class<'de, D: serde::Deserializer<'de>>(
     })
 }
 
-/*
-impl<'de> Deserialize<'de> for RemoteStorageConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error;
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let config = RemoteStorageConfig::from_json_value(value).map_err(|e| D::Error::custom(e))?;
-        Ok(config.unwrap())
-    }
-}*/
-
 impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
 
