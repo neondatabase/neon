@@ -4540,7 +4540,8 @@ impl Service {
                 self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Draining))
                     .await?;
 
-                let cancel = CancellationToken::new();
+                let cancel = self.cancel.child_token();
+                let gate_guard = self.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
 
                 self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
                     operation: Operation::Drain(Drain { node_id }),
@@ -4551,6 +4552,8 @@ impl Service {
                     let service = self.clone();
                     let cancel = cancel.clone();
                     async move {
+                        let _gate_guard = gate_guard;
+
                         scopeguard::defer! {
                             let prev = service.inner.write().unwrap().ongoing_operation.take();
 
@@ -4672,7 +4675,8 @@ impl Service {
                 self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Filling))
                     .await?;
 
-                let cancel = CancellationToken::new();
+                let cancel = self.cancel.child_token();
+                let gate_guard = self.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
 
                 self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
                     operation: Operation::Fill(Fill { node_id }),
@@ -4683,6 +4687,8 @@ impl Service {
                     let service = self.clone();
                     let cancel = cancel.clone();
                     async move {
+                        let _gate_guard = gate_guard;
+
                         scopeguard::defer! {
                             let prev = service.inner.write().unwrap().ongoing_operation.take();
 
