@@ -568,10 +568,15 @@ pub struct S3Config {
     pub endpoint: Option<String>,
     /// AWS S3 has various limits on its API calls, we need not to exceed those.
     /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
+    #[serde(default = "default_remote_storage_s3_concurrency_limit")]
     pub concurrency_limit: NonZeroUsize,
     pub max_keys_per_list_response: Option<i32>,
-    #[serde(deserialize_with = "deserialize_storage_class")]
+    #[serde(deserialize_with = "deserialize_storage_class", default)]
     pub upload_storage_class: Option<StorageClass>,
+}
+
+fn default_remote_storage_s3_concurrency_limit() -> NonZeroUsize {
+    DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT.try_into().unwrap()
 }
 
 impl Debug for S3Config {
@@ -602,8 +607,13 @@ pub struct AzureConfig {
     pub prefix_in_container: Option<String>,
     /// Azure has various limits on its API calls, we need not to exceed those.
     /// See [`DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT`] for more details.
+    #[serde(default = "default_remote_storage_azure_concurrency_limit")]
     pub concurrency_limit: NonZeroUsize,
     pub max_keys_per_list_response: Option<i32>,
+}
+
+fn default_remote_storage_azure_concurrency_limit() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT).unwrap()
 }
 
 impl Debug for AzureConfig {
