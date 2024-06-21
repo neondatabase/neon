@@ -10,7 +10,7 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 # Ensures that walreceiver does not run without any data inserted and only starts after the insertion.
 def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
     # Trigger WAL wait timeout faster
-    neon_env_builder.pageserver_config_override = "wait_lsn_timeout = '1s'"
+    neon_env_builder.pageserver_config_override = "wait_lsn_timeout = '3s'"
     env = neon_env_builder.init_start()
     env.pageserver.http_client()
 
@@ -44,7 +44,7 @@ def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
 def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuilder):
     # Trigger WAL wait timeout faster
     def customize_pageserver_toml(ps_cfg: Dict[str, Any]):
-        ps_cfg["wait_lsn_timeout"] = "1s"
+        ps_cfg["wait_lsn_timeout"] = "3s"
         tenant_config = ps_cfg.setdefault("tenant_config", {})
         tenant_config["walreceiver_connect_timeout"] = "2s"
         tenant_config["lagging_wal_timeout"] = "2s"
