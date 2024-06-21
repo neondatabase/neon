@@ -450,7 +450,7 @@ impl GenericRemoteStorage {
     pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         let timeout = storage_config.timeout;
         Ok(match &storage_config.storage {
-            RemoteStorageKind::LocalFs(path) => {
+            RemoteStorageKind::LocalFs { local_path: path } => {
                 info!("Using fs root '{path}' as a remote storage");
                 Self::LocalFs(LocalFs::new(path.clone(), timeout)?)
             }
@@ -526,21 +526,24 @@ impl<const N: usize> From<[(&str, &str); N]> for StorageMetadata {
 }
 
 /// External backup storage configuration, enough for creating a client for that storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RemoteStorageConfig {
     /// The storage connection configuration.
+    #[serde(flatten)]
     pub storage: RemoteStorageKind,
     /// A common timeout enforced for all requests after concurrency limiter permit has been
     /// acquired.
+    #[serde(with = "humantime_serde")]
     pub timeout: Duration,
 }
 
 /// A kind of a remote storage to connect to, with its connection configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
 pub enum RemoteStorageKind {
     /// Storage based on local file system.
     /// Specify a root folder to place all stored files into.
-    LocalFs(Utf8PathBuf),
+    LocalFs { local_path: Utf8PathBuf },
     /// AWS S3 based storage, storing all files in the S3 bucket
     /// specified by the config
     AwsS3(S3Config),
@@ -654,6 +657,7 @@ fn deserialize_storage_class<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+/*
 impl<'de> Deserialize<'de> for RemoteStorageConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -664,7 +668,7 @@ impl<'de> Deserialize<'de> for RemoteStorageConfig {
         let config = RemoteStorageConfig::from_json_value(value).map_err(|e| D::Error::custom(e))?;
         Ok(config.unwrap())
     }
-}
+}*/
 
 impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
@@ -736,9 +740,9 @@ impl RemoteStorageConfig {
             (None, None, None, Some(_container_name), Some(_container_region)) => {
                 RemoteStorageKind::AzureContainer(serde_json::value::from_value(value)?)
             }
-            (Some(local_path), None, None, None, None) => RemoteStorageKind::LocalFs(
-                Utf8PathBuf::from(parse_toml_string("local_path", local_path)?),
-            ),
+            (Some(local_path), None, None, None, None) => RemoteStorageKind::LocalFs {
+                local_path: Utf8PathBuf::from(parse_toml_string("local_path", local_path)?),
+            },
             (Some(_), Some(_), ..) => {
                 bail!("'local_path' and 'bucket_name' are mutually exclusive")
             }
@@ -841,7 +845,9 @@ timeout = '5s'";
         assert_eq!(
             config,
             RemoteStorageConfig {
-                storage: RemoteStorageKind::LocalFs(Utf8PathBuf::from(".")),
+                storage: RemoteStorageKind::LocalFs {
+                    local_path: Utf8PathBuf::from(".")
+                },
                 timeout: Duration::from_secs(5)
             }
         );
