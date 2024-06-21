@@ -122,7 +122,8 @@ pub async fn collect_metrics(
         let started_at = Instant::now();
 
         // these are point in time, with variable "now"
-        let metrics = metrics::collect_all_metrics(&tenant_manager, &cached_metrics, &mut ctx).await;
+        let metrics =
+            metrics::collect_all_metrics(&tenant_manager, &cached_metrics, &mut ctx).await;
 
         let metrics = Arc::new(metrics);
 

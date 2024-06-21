@@ -523,7 +523,11 @@ impl ConnectionManagerState {
     }
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
-    async fn change_connection(&mut self, new_sk: NewWalConnectionCandidate, ctx: &mut RequestContext) {
+    async fn change_connection(
+        &mut self,
+        new_sk: NewWalConnectionCandidate,
+        ctx: &mut RequestContext,
+    ) {
         WALRECEIVER_SWITCHES
             .with_label_values(&[new_sk.reason.name()])
             .inc();

@@ -1384,7 +1384,11 @@ impl<'a> DatadirModification<'a> {
     }
 
     /// Drop a relation.
-    pub async fn put_rel_drop(&mut self, rel: RelTag, ctx: &mut RequestContext) -> anyhow::Result<()> {
+    pub async fn put_rel_drop(
+        &mut self,
+        rel: RelTag,
+        ctx: &mut RequestContext,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
 
         // Remove it from the directory entry
