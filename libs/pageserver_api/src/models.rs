@@ -468,6 +468,8 @@ pub enum CompactionAlgorithm {
 )]
 #[strum(serialize_all = "kebab-case")]
 pub enum ImageCompressionAlgorithm {
+    /// Zstandard compression. Level 0 means and None mean the same (default level). Levels can be negative as well.
+    /// For details, see the [manual](http://facebook.github.io/zstd/zstd_manual.html).
     Zstd { level: Option<i8> },
 }
 
