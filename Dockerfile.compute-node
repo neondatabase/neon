@@ -467,31 +467,6 @@ RUN case "${PG_VERSION}" in \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_hint_plan.control
 
-#########################################################################################
-#
-# Layer "kq-imcx-pg-build"
-# compile kq_imcx extension
-#
-#########################################################################################
-FROM build-deps AS kq-imcx-pg-build
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
-RUN apt-get update && \
-    apt-get install -y git libgtk2.0-dev libpq-dev libpam-dev libxslt-dev libkrb5-dev cmake && \
-    wget https://github.com/ketteq-neon/postgres-exts/archive/e0bd1a9d9313d7120c1b9c7bb15c48c0dede4c4e.tar.gz -O kq_imcx.tar.gz && \
-    echo "dc93a97ff32d152d32737ba7e196d9687041cda15e58ab31344c2f2de8855336 kq_imcx.tar.gz" | sha256sum --check && \
-    mkdir kq_imcx-src && cd kq_imcx-src && tar xzf ../kq_imcx.tar.gz --strip-components=1 -C . && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
-    mkdir build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release .. && \
-    make -j $(getconf _NPROCESSORS_ONLN) && \
-    make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/kq_imcx.control && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
-    mkdir -p /extensions/kq_imcx && cp /usr/local/pgsql/share/extension/kq_imcx.control /extensions/kq_imcx && \
-    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/kq_imcx.tar.zst -T -
 
 #########################################################################################
 #
@@ -840,7 +815,6 @@ COPY --from=hll-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=kq-imcx-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -961,7 +935,6 @@ COPY --from=plpgsql-check-pg-build /plpgsql_check.tar.gz /ext-src
 #COPY --from=timescaledb-pg-build /timescaledb.tar.gz /ext-src
 COPY --from=pg-hint-plan-pg-build /pg_hint_plan.tar.gz /ext-src
 COPY patches/pg_hintplan.patch /ext-src
-#COPY --from=kq-imcx-pg-build /kq_imcx.tar.gz /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
 COPY patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
