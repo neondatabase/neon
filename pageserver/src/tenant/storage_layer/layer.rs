@@ -1664,7 +1664,7 @@ impl DownloadedLayer {
         owner: &Arc<LayerInner>,
         ctx: &mut RequestContext,
     ) -> anyhow::Result<&'a LayerKind> {
-        let init = || async {
+        let init = async {
             assert_eq!(
                 Weak::as_ptr(&self.owner),
                 Arc::as_ptr(owner),
@@ -1719,7 +1719,7 @@ impl DownloadedLayer {
             }
         };
         self.kind
-            .get_or_try_init(init)
+            .get_or_try_init(move || init)
             // return transient errors using `?`
             .await?
             .as_ref()
