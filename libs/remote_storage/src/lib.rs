@@ -36,7 +36,6 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use toml_edit::Item;
 use tracing::info;
 
 pub use self::{
@@ -655,17 +654,41 @@ fn deserialize_storage_class<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+impl<'de> Deserialize<'de> for RemoteStorageConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let config = RemoteStorageConfig::from_json_value(&value).map_err(|e| D::Error::custom(e))?;
+        Ok(config.unwrap())
+    }
+}
+
 impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
 
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
-        let local_path = toml.get("local_path");
-        let bucket_name = toml.get("bucket_name");
-        let bucket_region = toml.get("bucket_region");
-        let container_name = toml.get("container_name");
-        let container_region = toml.get("container_region");
+        let toml_edit::Item::Table(toml) = toml else {
+            bail!("toml not a table");
+        };
 
-        let timeout = toml
+        let toml: toml_edit::Document = toml.clone().into();
+
+        Ok(Some(toml_edit::de::from_document(toml)?))
+    }
+
+    pub fn from_json_value(
+        value: &serde_json::Value,
+    ) -> anyhow::Result<Option<RemoteStorageConfig>> {
+        let local_path = value.get("local_path");
+        let bucket_name = value.get("bucket_name");
+        let bucket_region = value.get("bucket_region");
+        let container_name = value.get("container_name");
+        let container_region = value.get("container_region");
+
+        let timeout = value
             .get("timeout")
             .map(|timeout| {
                 timeout
@@ -686,12 +709,6 @@ impl RemoteStorageConfig {
             bail!("timeout was specified as {timeout:?} which is too low");
         }
 
-        let toml_edit::Item::Table(toml) = toml else {
-            bail!("toml not a table");
-        };
-
-        let toml: toml_edit::Document = toml.clone().into();
-
         let storage = match (
             local_path,
             bucket_name,
@@ -708,7 +725,7 @@ impl RemoteStorageConfig {
                 bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
             }
             (None, Some(_bucket_name), Some(_bucket_region), ..) => {
-                RemoteStorageKind::AwsS3(toml_edit::de::from_document(toml)?)
+                RemoteStorageKind::AwsS3(serde_json::value::from_value(value.clone())?)
             }
             (_, _, _, Some(_), None) => {
                 bail!("'container_name' option is mandatory if 'container_region' is given ")
@@ -717,7 +734,7 @@ impl RemoteStorageConfig {
                 bail!("'container_name' option is mandatory if 'container_region' is given ")
             }
             (None, None, None, Some(_container_name), Some(_container_region)) => {
-                RemoteStorageKind::AzureContainer(toml_edit::de::from_document(toml)?)
+                RemoteStorageKind::AzureContainer(serde_json::value::from_value(value.clone())?)
             }
             (Some(local_path), None, None, None, None) => RemoteStorageKind::LocalFs(
                 Utf8PathBuf::from(parse_toml_string("local_path", local_path)?),
@@ -734,8 +751,8 @@ impl RemoteStorageConfig {
     }
 }
 
-fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
-    let s = item
+fn parse_toml_string(name: &str, value: &serde_json::Value) -> anyhow::Result<String> {
+    let s = value
         .as_str()
         .with_context(|| format!("configure option {name} is not a string"))?;
     Ok(s.to_string())
