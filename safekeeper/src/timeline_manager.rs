@@ -9,10 +9,9 @@
 use std::{sync::Arc, time::Duration};
 
 use postgres_ffi::XLogSegNo;
-use tokio::{
-    io::AsyncWriteExt,
-    task::{JoinError, JoinHandle},
-};
+use tokio::
+    task::{JoinError, JoinHandle}
+;
 use tracing::{info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
 
