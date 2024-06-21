@@ -572,6 +572,7 @@ pub struct S3Config {
     /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
     #[serde(default = "default_remote_storage_s3_concurrency_limit")]
     pub concurrency_limit: NonZeroUsize,
+    #[serde(default = "default_max_keys_per_list_response")]
     pub max_keys_per_list_response: Option<i32>,
     #[serde(deserialize_with = "deserialize_storage_class", default)]
     pub upload_storage_class: Option<StorageClass>,
@@ -581,6 +582,10 @@ fn default_remote_storage_s3_concurrency_limit() -> NonZeroUsize {
     DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
         .try_into()
         .unwrap()
+}
+
+fn default_max_keys_per_list_response() -> Option<i32> {
+    DEFAULT_MAX_KEYS_PER_LIST_RESPONSE
 }
 
 impl Debug for S3Config {
@@ -613,6 +618,7 @@ pub struct AzureConfig {
     /// See [`DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT`] for more details.
     #[serde(default = "default_remote_storage_azure_concurrency_limit")]
     pub concurrency_limit: NonZeroUsize,
+    #[serde(default = "default_max_keys_per_list_response")]
     pub max_keys_per_list_response: Option<i32>,
 }
 
