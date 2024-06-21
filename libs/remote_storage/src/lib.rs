@@ -674,28 +674,6 @@ impl RemoteStorageConfig {
         let container_name = toml.get("container_name");
         let container_region = toml.get("container_region");
 
-        let use_azure = container_name.is_some() && container_region.is_some();
-
-        let default_concurrency_limit = if use_azure {
-            DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT
-        } else {
-            DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
-        };
-        let concurrency_limit = NonZeroUsize::new(
-            parse_optional_integer("concurrency_limit", toml)?.unwrap_or(default_concurrency_limit),
-        )
-        .context("Failed to parse 'concurrency_limit' as a positive integer")?;
-
-        let max_keys_per_list_response =
-            parse_optional_integer::<i32, _>("max_keys_per_list_response", toml)
-                .context("Failed to parse 'max_keys_per_list_response' as a positive integer")?
-                .or(DEFAULT_MAX_KEYS_PER_LIST_RESPONSE);
-
-        let endpoint = toml
-            .get("endpoint")
-            .map(|endpoint| parse_toml_string("endpoint", endpoint))
-            .transpose()?;
-
         let timeout = toml
             .get("timeout")
             .map(|timeout| {
@@ -717,6 +695,12 @@ impl RemoteStorageConfig {
             bail!("timeout was specified as {timeout:?} which is too low");
         }
 
+        let toml_edit::Item::Table(toml) = toml else {
+            bail!("toml not a table");
+        };
+
+        let toml: toml_edit::Document = toml.clone().into();
+
         let storage = match (
             local_path,
             bucket_name,
@@ -732,32 +716,8 @@ impl RemoteStorageConfig {
             (_, None, Some(_), ..) => {
                 bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
             }
-            (None, Some(bucket_name), Some(bucket_region), ..) => {
-                RemoteStorageKind::AwsS3(S3Config {
-                    bucket_name: parse_toml_string("bucket_name", bucket_name)?,
-                    bucket_region: parse_toml_string("bucket_region", bucket_region)?,
-                    prefix_in_bucket: toml
-                        .get("prefix_in_bucket")
-                        .map(|prefix_in_bucket| {
-                            parse_toml_string("prefix_in_bucket", prefix_in_bucket)
-                        })
-                        .transpose()?,
-                    endpoint,
-                    concurrency_limit,
-                    max_keys_per_list_response,
-                    upload_storage_class: toml
-                        .get("upload_storage_class")
-                        .map(|prefix_in_bucket| -> anyhow::Result<_> {
-                            let s = parse_toml_string("upload_storage_class", prefix_in_bucket)?;
-                            let storage_class = StorageClass::from_str(&s).expect("infallible");
-                            #[allow(deprecated)]
-                            if matches!(storage_class, StorageClass::Unknown(_)) {
-                                bail!("Specified storage class unknown to SDK: '{s}'. Allowed values: {:?}", StorageClass::values());
-                            }
-                            Ok(storage_class)
-                        })
-                        .transpose()?,
-                })
+            (None, Some(_bucket_name), Some(_bucket_region), ..) => {
+                RemoteStorageKind::AwsS3(toml_edit::de::from_document(toml)?)
             }
             (_, _, _, Some(_), None) => {
                 bail!("'container_name' option is mandatory if 'container_region' is given ")
@@ -765,25 +725,8 @@ impl RemoteStorageConfig {
             (_, _, _, None, Some(_)) => {
                 bail!("'container_name' option is mandatory if 'container_region' is given ")
             }
-            (None, None, None, Some(container_name), Some(container_region)) => {
-                RemoteStorageKind::AzureContainer(AzureConfig {
-                    container_name: parse_toml_string("container_name", container_name)?,
-                    storage_account: toml
-                        .get("storage_account")
-                        .map(|storage_account| {
-                            parse_toml_string("storage_account", storage_account)
-                        })
-                        .transpose()?,
-                    container_region: parse_toml_string("container_region", container_region)?,
-                    prefix_in_container: toml
-                        .get("prefix_in_container")
-                        .map(|prefix_in_container| {
-                            parse_toml_string("prefix_in_container", prefix_in_container)
-                        })
-                        .transpose()?,
-                    concurrency_limit,
-                    max_keys_per_list_response,
-                })
+            (None, None, None, Some(_container_name), Some(_container_region)) => {
+                RemoteStorageKind::AzureContainer(toml_edit::de::from_document(toml)?)
             }
             (Some(local_path), None, None, None, None) => RemoteStorageKind::LocalFs(
                 Utf8PathBuf::from(parse_toml_string("local_path", local_path)?),
@@ -798,24 +741,6 @@ impl RemoteStorageConfig {
 
         Ok(Some(RemoteStorageConfig { storage, timeout }))
     }
-}
-
-// Helper functions to parse a toml Item
-fn parse_optional_integer<I, E>(name: &str, item: &toml_edit::Item) -> anyhow::Result<Option<I>>
-where
-    I: TryFrom<i64, Error = E>,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    let toml_integer = match item.get(name) {
-        Some(item) => item
-            .as_integer()
-            .with_context(|| format!("configure option {name} is not an integer"))?,
-        None => return Ok(None),
-    };
-
-    I::try_from(toml_integer)
-        .map(Some)
-        .with_context(|| format!("configure option {name} is too large"))
 }
 
 fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
