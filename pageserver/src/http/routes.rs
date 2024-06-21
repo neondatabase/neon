@@ -334,13 +334,10 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
         use crate::tenant::delete::DeleteTenantError::*;
         match value {
             Get(g) => ApiError::from(g),
-            e @ AlreadyInProgress => ApiError::Conflict(e.to_string()),
             Timeline(t) => ApiError::from(t),
-            NotAttached => ApiError::NotFound(anyhow::anyhow!("Tenant is not attached").into()),
             SlotError(e) => e.into(),
             SlotUpsertError(e) => e.into(),
             Other(o) => ApiError::InternalServerError(o),
-            e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
             Cancelled => ApiError::ShuttingDown,
         }
     }
@@ -1015,23 +1012,16 @@ async fn tenant_delete_handler(
 
     let state = get_state(&request);
 
-    let status = state
+    state
         .tenant_manager
-        .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
+        .delete_tenant(tenant_shard_id)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
             shard_id = %tenant_shard_id.shard_slug()
         ))
         .await?;
 
-    // Callers use 404 as success for deletions, for historical reasons.
-    if status == StatusCode::NOT_FOUND {
-        return Err(ApiError::NotFound(
-            anyhow::anyhow!("Deletion complete").into(),
-        ));
-    }
-
-    json_response(status, ())
+    json_response(StatusCode::OK, ())
 }
 
 /// HTTP endpoint to query the current tenant_size of a tenant.
