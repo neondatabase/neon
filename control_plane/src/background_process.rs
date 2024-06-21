@@ -235,7 +235,7 @@ pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
                     print!(".");
                     io::stdout().flush().unwrap();
                 }
-                thread::sleep(STOP_RETRY_TIMEOUT);
+                thread::sleep(RETRY_INTERVAL);
             }
             Err(e) => {
                 println!("{process_name} with pid {pid} failed to stop: {e:#}");
