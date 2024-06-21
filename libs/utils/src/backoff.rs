@@ -37,6 +37,20 @@ pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_sec
     }
 }
 
+pub trait Op<T, E> {
+    async fn call(&mut self) -> Result<T, E>;
+}
+
+impl<T, E, F, Fut> Op<T, E> for F
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    async fn call(&mut self) -> Result<T, E> {
+        (&mut *self)().await
+    }
+}
+
 /// Retries passed operation until one of the following conditions are met:
 /// - encountered error is considered as permanent (non-retryable)
 /// - retries have been exhausted
@@ -51,8 +65,8 @@ pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_sec
 /// for any other error type. Final failed attempt is logged with `{:?}`.
 ///
 /// Returns `None` if cancellation was noticed during backoff or the terminal result.
-pub async fn retry<T, O, F, E>(
-    mut op: O,
+pub async fn retry<T, E>(
+    mut op: impl Op<T, E>,
     is_permanent: impl Fn(&E) -> bool,
     warn_threshold: u32,
     max_retries: u32,
@@ -63,8 +77,6 @@ where
     // Not std::error::Error because anyhow::Error doesnt implement it.
     // For context see https://github.com/dtolnay/anyhow/issues/63
     E: Display + Debug + 'static,
-    O: FnMut() -> F,
-    F: Future<Output = Result<T, E>>,
 {
     let mut attempts = 0;
     loop {
@@ -72,7 +84,7 @@ where
             return None;
         }
 
-        let result = op().await;
+        let result = op.call().await;
         match &result {
             Ok(_) => {
                 if attempts > 0 {

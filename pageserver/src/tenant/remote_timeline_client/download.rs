@@ -78,8 +78,33 @@ pub async fn download_layer_file<'a>(
     // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
     let temp_file_path = path_with_suffix_extension(local_path, TEMP_DOWNLOAD_EXTENSION);
 
+    struct DownloadObjectClosure<'a> {
+        storage: &'a GenericRemoteStorage,
+        remote_path: &'a RemotePath,
+        temp_file_path: &'a Utf8PathBuf,
+        cancel: &'a CancellationToken,
+        ctx: &'a mut RequestContext,
+    }
+    impl backoff::Op<u64, DownloadError> for DownloadObjectClosure<'_> {
+        async fn call(&mut self) -> Result<u64, DownloadError> {
+            let DownloadObjectClosure {
+                storage,
+                remote_path,
+                temp_file_path,
+                cancel,
+                ctx,
+            } = self;
+            download_object(storage, remote_path, temp_file_path, cancel, ctx).await
+        }
+    }
     let bytes_amount = download_retry(
-        || async { download_object(storage, &remote_path, &temp_file_path, cancel, ctx).await },
+        DownloadObjectClosure {
+            storage,
+            remote_path: &remote_path,
+            temp_file_path: &temp_file_path,
+            cancel,
+            ctx,
+        },
         &format!("download {remote_path:?}"),
         cancel,
     )
@@ -568,15 +593,11 @@ pub(crate) async fn download_initdb_tar_zst(
 /// with backoff.
 ///
 /// (See similar logic for uploads in `perform_upload_task`)
-pub(super) async fn download_retry<T, O, F>(
-    op: O,
+pub(super) async fn download_retry<T>(
+    op: impl backoff::Op<T, DownloadError>,
     description: &str,
     cancel: &CancellationToken,
-) -> Result<T, DownloadError>
-where
-    O: FnMut() -> F,
-    F: Future<Output = Result<T, DownloadError>>,
-{
+) -> Result<T, DownloadError> {
     backoff::retry(
         op,
         DownloadError::is_permanent,
