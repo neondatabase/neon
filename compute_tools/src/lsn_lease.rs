@@ -47,12 +47,14 @@ fn postgres_configs_from_state(compute_state: &ComputeState) -> Vec<postgres::Co
 
 fn lsn_lease_loop(compute: Arc<ComputeNode>, lsn: Lsn) {
     loop {
-        let state = compute.state.lock().unwrap();
+        let (configs, cmd) = {
+            let state = compute.state.lock().unwrap();
 
-        let spec = state.pspec.as_ref().expect("spec must be set");
-        let configs = postgres_configs_from_state(&state);
-
-        let cmd = format!("lease lsn {} {} {} ", spec.tenant_id, spec.timeline_id, lsn);
+            let spec = state.pspec.as_ref().expect("spec must be set");
+            let configs = postgres_configs_from_state(&state);
+            let cmd = format!("lease lsn {} {} {} ", spec.tenant_id, spec.timeline_id, lsn);
+            (configs, cmd)
+        };
 
         match lsn_lease_request(&configs, &cmd) {
             Ok(valid_until) => {
