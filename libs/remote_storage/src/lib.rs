@@ -661,7 +661,7 @@ impl<'de> Deserialize<'de> for RemoteStorageConfig {
     {
         use serde::de::Error;
         let value = serde_json::Value::deserialize(deserializer)?;
-        let config = RemoteStorageConfig::from_json_value(&value).map_err(|e| D::Error::custom(e))?;
+        let config = RemoteStorageConfig::from_json_value(value).map_err(|e| D::Error::custom(e))?;
         Ok(config.unwrap())
     }
 }
@@ -680,7 +680,7 @@ impl RemoteStorageConfig {
     }
 
     pub fn from_json_value(
-        value: &serde_json::Value,
+        value: serde_json::Value,
     ) -> anyhow::Result<Option<RemoteStorageConfig>> {
         let local_path = value.get("local_path");
         let bucket_name = value.get("bucket_name");
@@ -725,7 +725,7 @@ impl RemoteStorageConfig {
                 bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
             }
             (None, Some(_bucket_name), Some(_bucket_region), ..) => {
-                RemoteStorageKind::AwsS3(serde_json::value::from_value(value.clone())?)
+                RemoteStorageKind::AwsS3(serde_json::value::from_value(value)?)
             }
             (_, _, _, Some(_), None) => {
                 bail!("'container_name' option is mandatory if 'container_region' is given ")
@@ -734,7 +734,7 @@ impl RemoteStorageConfig {
                 bail!("'container_name' option is mandatory if 'container_region' is given ")
             }
             (None, None, None, Some(_container_name), Some(_container_region)) => {
-                RemoteStorageKind::AzureContainer(serde_json::value::from_value(value.clone())?)
+                RemoteStorageKind::AzureContainer(serde_json::value::from_value(value)?)
             }
             (Some(local_path), None, None, None, None) => RemoteStorageKind::LocalFs(
                 Utf8PathBuf::from(parse_toml_string("local_path", local_path)?),
