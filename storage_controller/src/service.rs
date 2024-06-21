@@ -5395,6 +5395,9 @@ impl Service {
     /// throughout the cluster. We achieve this by picking tenant shards from each node,
     /// starting from the ones with the largest number of attached shards, until the node
     /// reaches the expected cluster average.
+    /// 3. Avoid promoting more shards of the same tenant than required. The upper bound
+    /// for the number of tenants from the same shard promoted to the node being filled is:
+    /// shard count for the tenant divided by the number of nodes in the cluster.
     fn fill_node_plan(&self, node_id: NodeId) -> Vec<TenantShardId> {
         let mut locked = self.inner.write().unwrap();
         let fill_requirement = locked.scheduler.compute_fill_requirement(node_id);
@@ -5416,8 +5419,18 @@ impl Service {
         let expected_attached = locked.scheduler.expected_attached_shard_count();
         let nodes_by_load = locked.scheduler.nodes_by_attached_shard_count();
 
+        let mut promoted_per_tenant: HashMap<TenantId, usize> = HashMap::new();
         let mut plan = Vec::new();
+
         for (node_id, attached) in nodes_by_load {
+            let available = locked
+                .nodes
+                .get(&node_id)
+                .map_or(false, |n| n.is_available());
+            if !available {
+                continue;
+            }
+
             if plan.len() >= fill_requirement
                 || tids_by_node.is_empty()
                 || attached <= expected_attached
@@ -5425,13 +5438,22 @@ impl Service {
                 break;
             }
 
-            let can_take = attached - expected_attached;
+            let mut can_take = attached - expected_attached;
             let mut remove_node = false;
-            for _ in 0..can_take {
+            while can_take > 0 {
                 match tids_by_node.get_mut(&node_id) {
                     Some(tids) => match tids.pop() {
                         Some(tid) => {
-                            plan.push(tid);
+                            let max_promote_for_tenant = std::cmp::max(
+                                tid.shard_count.count() as usize / locked.nodes.len(),
+                                1,
+                            );
+                            let promoted = promoted_per_tenant.entry(tid.tenant_id).or_default();
+                            if *promoted < max_promote_for_tenant {
+                                plan.push(tid);
+                                *promoted += 1;
+                                can_take -= 1;
+                            }
                         }
                         None => {
                             remove_node = true;
