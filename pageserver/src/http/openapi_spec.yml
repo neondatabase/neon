@@ -78,23 +78,14 @@ paths:
 
     delete:
       description: |
-        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried until 404 is retrieved.
-        404 means that deletion successfully finished"
+        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried.  Deleting
+        a non-existent tenant is considered successful (returns 200).
       responses:
         "200":
           description: Tenant was successfully deleted, or was already not found.
-        "404":
-          description: Tenant not found. This is a success result, equivalent to 200.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "409":
-          description: Deletion is already in progress, continue polling
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ConflictError"
+        "503":
+          description: Service is unavailable, or tenant is already being modified (perhaps concurrently deleted)
+
 
   /v1/tenant/{tenant_id}/time_travel_remote_storage:
     parameters:
