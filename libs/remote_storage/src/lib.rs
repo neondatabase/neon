@@ -637,38 +637,22 @@ impl Debug for AzureConfig {
 fn deserialize_storage_class<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<StorageClass>, D::Error> {
-    struct Visitor;
-    impl<'de> serde::de::Visitor<'de> for Visitor {
-        type Value = Option<StorageClass>;
-        fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            let storage_class = StorageClass::from_str(s).expect("infallible");
+    Option::<String>::deserialize(deserializer).and_then(|s| {
+        if let Some(s) = s {
+            use serde::de::Error;
+            let storage_class = StorageClass::from_str(&s).expect("infallible");
             #[allow(deprecated)]
             if matches!(storage_class, StorageClass::Unknown(_)) {
-                return Err(E::custom(format!(
+                return Err(D::Error::custom(format!(
                     "Specified storage class unknown to SDK: '{s}'. Allowed values: {:?}",
                     StorageClass::values()
                 )));
             }
             Ok(Some(storage_class))
-        }
-        fn visit_none<E>(self) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
+        } else {
             Ok(None)
         }
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(
-                formatter,
-                "one of the following string values: {:?}",
-                StorageClass::values()
-            )
-        }
-    }
-    deserializer.deserialize_str(Visitor)
+    })
 }
 
 impl RemoteStorageConfig {
