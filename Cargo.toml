@@ -252,6 +252,9 @@ parquet_derive = { git = "https://github.com/apache/arrow-rs", branch = "master"
 # This is useful for profiling and, to some extent, debug.
 # Besides, debug info should not affect the performance.
 debug = true
+strip = true  # Automatically strip symbols from the binary.
+opt-level = "z"  # Optimize for size.
+lto = true
 
 # disable debug symbols for all packages except this one to decrease binaries size
 [profile.release.package."*"]
