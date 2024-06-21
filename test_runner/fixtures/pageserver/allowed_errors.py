@@ -109,7 +109,7 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     # Tests that stop endpoints & use the storage controller's neon_local notification
     # mechanism might fail (neon_local's stopping and endpoint isn't atomic wrt the storage
     # controller's attempts to notify the endpoint).
-    ".*reconciler.*Local notification hook failed.*",
+    ".*reconciler.*neon_local notification hook failed.*",
     ".*reconciler.*neon_local error.*",
 ]
 
