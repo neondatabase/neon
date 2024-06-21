@@ -467,6 +467,24 @@ static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static PITR_HISTORY_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_pitr_history_size",
+        "Data written since PITR cutoff on this timeline",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static WITHIN_ANCESTOR_PITR: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_within_ancestor_pitr",
+        "Whether this timeline's ancestor_lsn is within the parent's PITR cutoff",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 static STANDBY_HORIZON: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_standby_horizon",
@@ -2047,6 +2065,8 @@ pub(crate) struct TimelineMetrics {
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
+    pub pitr_history_size: IntGauge,
+    pub within_ancestor_pitr: IntGauge,
     pub standby_horizon_gauge: IntGauge,
     pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -2118,6 +2138,15 @@ impl TimelineMetrics {
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
+
+        let pitr_history_size = PITR_HISTORY_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
+        let within_ancestor_pitr = WITHIN_ANCESTOR_PITR
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         let standby_horizon_gauge = STANDBY_HORIZON
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -2166,6 +2195,8 @@ impl TimelineMetrics {
             find_gc_cutoffs_histo,
             load_layer_map_histo,
             last_record_gauge,
+            pitr_history_size,
+            within_ancestor_pitr,
             standby_horizon_gauge,
             resident_physical_size_gauge,
             current_logical_size_gauge,
