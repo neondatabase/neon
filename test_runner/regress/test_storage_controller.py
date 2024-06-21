@@ -1384,7 +1384,8 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     env.storage_controller.allowed_errors.extend(
         [
-            ".*Lock on.*",
+            ".*Exclusive lock by.*",
+            ".*Shared lock by.*",
             ".*Scheduling is disabled by policy.*",
             f".*Operation TimelineCreate on key {tenant_id} has waited.*",
         ]
@@ -1416,9 +1417,23 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     )
     thread_update_tenant_policy.join()
 
-    env.storage_controller.assert_log_contains("Lock on UpdatePolicy was held for")
-    env.storage_controller.assert_log_contains(
+    env.storage_controller.assert_log_contains("Exclusive lock by UpdatePolicy was held for")
+    _, last_log_cursor = env.storage_controller.assert_log_contains(
         f"Operation TimelineCreate on key {tenant_id} has waited"
+    )
+
+    # Test out shared lock
+    env.storage_controller.configure_failpoints(
+        ("tenant-create-timeline-shared-lock", "return(31000)")
+    )
+
+    timeline_id = TimelineId.generate()
+    # This will hold the shared lock for enough time to cause an warning
+    env.storage_controller.pageserver_api().timeline_create(
+        pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
+    )
+    env.storage_controller.assert_log_contains(
+        "Shared lock by TimelineCreate was held for", offset=last_log_cursor
     )
 
 
