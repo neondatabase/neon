@@ -171,6 +171,7 @@ def test_subscriber_lag(
                             sub_project_id,
                             sub_endpoint_id,
                         )
+                        neon_api.wait_for_operation_to_finish(sub_project_id)
                         sub_workload = pg_bin.run_nonblocking(
                             ["pgbench", "-c10", pgbench_duration, "-S"],
                             env=sub_env,
@@ -292,6 +293,7 @@ def test_publisher_restart(
                             pub_project_id,
                             pub_endpoint_id,
                         )
+                        neon_api.wait_for_operation_to_finish(pub_project_id)
                         pub_workload = pg_bin.run_nonblocking(
                             ["pgbench", "-c10", pgbench_duration, "-Mprepared"],
                             env=pub_env,
