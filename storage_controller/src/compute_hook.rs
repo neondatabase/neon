@@ -514,7 +514,7 @@ impl ComputeHook {
         } else {
             self.do_notify_local(&request).await.map_err(|e| {
                 // This path is for testing only, so munge the error into our prod-style error type.
-                tracing::error!("Local notification hook failed: {e}");
+                tracing::error!("neon_local notification hook failed: {e}");
                 NotifyError::Fatal(StatusCode::INTERNAL_SERVER_ERROR)
             })
         };
