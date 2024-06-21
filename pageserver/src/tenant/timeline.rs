@@ -47,7 +47,6 @@ use utils::{
     vec_map::VecMap,
 };
 
-use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -60,6 +59,10 @@ use std::{
 use std::{
     cmp::{max, min, Ordering},
     ops::ControlFlow,
+};
+use std::{
+    collections::btree_map::Entry,
+    ops::{Deref, Range},
 };
 
 use crate::metrics::GetKind;
@@ -98,9 +101,7 @@ use crate::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::{
-    TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
-};
+use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
@@ -117,7 +118,6 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
-use crate::page_cache;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::task_mgr;
@@ -131,7 +131,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::{config::TenantConf, storage_layer::VectoredValueReconstructState};
+use super::config::TenantConf;
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -454,6 +454,9 @@ pub(crate) struct GcInfo {
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
+
+    /// Leases granted to particular LSNs.
+    pub(crate) leases: BTreeMap<Lsn, LsnLease>,
 }
 
 impl GcInfo {
@@ -881,32 +884,11 @@ impl Timeline {
 
         self.timeline_get_throttle.throttle(ctx, 1).await;
 
-        // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
-        // The cached image can be returned directly if there is no WAL between the cached image
-        // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
-        // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn, ctx).await {
-            Some((cached_lsn, cached_img)) => {
-                match cached_lsn.cmp(&lsn) {
-                    Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => {
-                        MATERIALIZED_PAGE_CACHE_HIT_DIRECT.inc();
-                        return Ok(cached_img); // exact LSN match, return the image
-                    }
-                    Ordering::Greater => {
-                        unreachable!("the returned lsn should never be after the requested lsn")
-                    }
-                }
-                Some((cached_lsn, cached_img))
-            }
-            None => None,
-        };
-
         match self.conf.get_impl {
             GetImpl::Legacy => {
                 let reconstruct_state = ValueReconstructState {
                     records: Vec::new(),
-                    img: cached_page_img,
+                    img: None,
                 };
 
                 self.get_impl(key, lsn, reconstruct_state, ctx).await
@@ -919,13 +901,6 @@ impl Timeline {
                 // Initialise the reconstruct state for the key with the cache
                 // entry returned above.
                 let mut reconstruct_state = ValuesReconstructState::new();
-
-                // Only add the cached image to the reconstruct state when it exists.
-                if cached_page_img.is_some() {
-                    let mut key_state = VectoredValueReconstructState::default();
-                    key_state.img = cached_page_img;
-                    reconstruct_state.keys.insert(key, Ok(key_state));
-                }
 
                 let vectored_res = self
                     .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
@@ -1555,17 +1530,46 @@ impl Timeline {
         Ok(())
     }
 
-    /// Obtains a temporary lease blocking garbage collection for the given LSN
+    /// Obtains a temporary lease blocking garbage collection for the given LSN.
+    ///
+    /// This function will error if the requesting LSN is less than the `latest_gc_cutoff_lsn` and there is also
+    /// no existing lease to renew. If there is an existing lease in the map, the lease will be renewed only if
+    /// the request extends the lease. The returned lease is therefore the maximum between the existing lease and
+    /// the requesting lease.
     pub(crate) fn make_lsn_lease(
         &self,
-        _lsn: Lsn,
+        lsn: Lsn,
+        length: Duration,
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
-        const LEASE_LENGTH: Duration = Duration::from_secs(5 * 60);
-        let lease = LsnLease {
-            valid_until: SystemTime::now() + LEASE_LENGTH,
+        let lease = {
+            let mut gc_info = self.gc_info.write().unwrap();
+
+            let valid_until = SystemTime::now() + length;
+
+            let entry = gc_info.leases.entry(lsn);
+
+            let lease = {
+                if let Entry::Occupied(mut occupied) = entry {
+                    let existing_lease = occupied.get_mut();
+                    if valid_until > existing_lease.valid_until {
+                        existing_lease.valid_until = valid_until;
+                    }
+                    existing_lease.clone()
+                } else {
+                    // Reject already GC-ed LSN (lsn < latest_gc_cutoff)
+                    let latest_gc_cutoff_lsn = self.get_latest_gc_cutoff_lsn();
+                    if lsn < *latest_gc_cutoff_lsn {
+                        bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
+                    }
+
+                    entry.or_insert(LsnLease { valid_until }).clone()
+                }
+            };
+
+            lease
         };
-        // TODO: dummy implementation
+
         Ok(lease)
     }
 
@@ -2082,6 +2086,24 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
+    pub(crate) fn get_lsn_lease_length(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .lsn_lease_length
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+    }
+
+    // TODO(yuchen): remove unused flag after implementing https://github.com/neondatabase/neon/issues/8072
+    #[allow(unused)]
+    pub(crate) fn get_lsn_lease_length_for_ts(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .lsn_lease_length_for_ts
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
+    }
+
     pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -3187,7 +3209,6 @@ impl Timeline {
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
-                        MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
                         return Ok(traversal_path);
                     }
                     if let Some(prev) = prev_lsn {
@@ -3559,26 +3580,6 @@ impl Timeline {
             completed_keyspace,
             image_covered_keyspace: image_covered_keyspace.consume_keyspace(),
         })
-    }
-
-    /// # Cancel-safety
-    ///
-    /// This method is cancellation-safe.
-    async fn lookup_cached_page(
-        &self,
-        key: &Key,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Option<(Lsn, Bytes)> {
-        let cache = page_cache::get();
-
-        // FIXME: It's pointless to check the cache for things that are not 8kB pages.
-        // We should look at the key to determine if it's a cacheable object
-        let (lsn, read_guard) = cache
-            .lookup_materialized_page(self.tenant_shard_id, self.timeline_id, key, lsn, ctx)
-            .await?;
-        let img = Bytes::from(read_guard.to_vec());
-        Some((lsn, img))
     }
 
     async fn get_ready_ancestor_timeline(
@@ -4907,13 +4908,25 @@ impl Timeline {
             return Err(GcError::TimelineCancelled);
         }
 
-        let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
+        let (horizon_cutoff, pitr_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
             let gc_info = self.gc_info.read().unwrap();
 
             let horizon_cutoff = min(gc_info.cutoffs.horizon, self.get_disk_consistent_lsn());
             let pitr_cutoff = gc_info.cutoffs.pitr;
             let retain_lsns = gc_info.retain_lsns.clone();
-            (horizon_cutoff, pitr_cutoff, retain_lsns)
+
+            // Gets the maximum LSN that holds the valid lease.
+            //
+            // Caveat: `refresh_gc_info` is in charged of updating the lease map.
+            // Here, we do not check for stale leases again.
+            let max_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
+
+            (
+                horizon_cutoff,
+                pitr_cutoff,
+                retain_lsns,
+                max_lsn_with_valid_lease,
+            )
         };
 
         let mut new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
@@ -4944,7 +4957,13 @@ impl Timeline {
             .set(Lsn::INVALID.0 as i64);
 
         let res = self
-            .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
+            .gc_timeline(
+                horizon_cutoff,
+                pitr_cutoff,
+                retain_lsns,
+                max_lsn_with_valid_lease,
+                new_gc_cutoff,
+            )
             .instrument(
                 info_span!("gc_timeline", timeline_id = %self.timeline_id, cutoff = %new_gc_cutoff),
             )
@@ -4961,6 +4980,7 @@ impl Timeline {
         horizon_cutoff: Lsn,
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
+        max_lsn_with_valid_lease: Option<Lsn>,
         new_gc_cutoff: Lsn,
     ) -> Result<GcResult, GcError> {
         // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
@@ -5009,7 +5029,8 @@ impl Timeline {
         // 1. it is older than cutoff LSN;
         // 2. it is older than PITR interval;
         // 3. it doesn't need to be retained for 'retain_lsns';
-        // 4. newer on-disk image layers cover the layer's whole key range
+        // 4. it does not need to be kept for LSNs holding valid leases.
+        // 5. newer on-disk image layers cover the layer's whole key range
         //
         // TODO holding a write lock is too agressive and avoidable
         let mut guard = self.layers.write().await;
@@ -5060,7 +5081,21 @@ impl Timeline {
                 }
             }
 
-            // 4. Is there a later on-disk layer for this relation?
+            // 4. Is there a valid lease that requires us to keep this layer?
+            if let Some(lsn) = &max_lsn_with_valid_lease {
+                // keep if layer start <= any of the lease
+                if &l.get_lsn_range().start <= lsn {
+                    debug!(
+                        "keeping {} because there is a valid lease preventing GC at {}",
+                        l.layer_name(),
+                        lsn,
+                    );
+                    result.layers_needed_by_leases += 1;
+                    continue 'outer;
+                }
+            }
+
+            // 5. Is there a later on-disk layer for this relation?
             //
             // The end-LSN is exclusive, while disk_consistent_lsn is
             // inclusive. For example, if disk_consistent_lsn is 100, it is
@@ -5193,8 +5228,6 @@ impl Timeline {
                     trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
                 };
 
-                let last_rec_lsn = data.records.last().unwrap().0;
-
                 let img = match self
                     .walredo_mgr
                     .as_ref()
@@ -5207,23 +5240,6 @@ impl Timeline {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::WalRedo(e)),
                 };
-
-                if img.len() == page_cache::PAGE_SZ {
-                    let cache = page_cache::get();
-                    if let Err(e) = cache
-                        .memorize_materialized_page(
-                            self.tenant_shard_id,
-                            self.timeline_id,
-                            key,
-                            last_rec_lsn,
-                            &img,
-                        )
-                        .await
-                        .context("Materialized page memoization failed")
-                    {
-                        return Err(PageReconstructError::from(e));
-                    }
-                }
 
                 Ok(img)
             }
@@ -5436,6 +5452,11 @@ impl Timeline {
     #[cfg(test)]
     pub(super) fn force_advance_lsn(self: &Arc<Timeline>, new_lsn: Lsn) {
         self.last_record_lsn.advance(new_lsn);
+    }
+
+    #[cfg(test)]
+    pub(super) fn force_set_disk_consistent_lsn(&self, new_value: Lsn) {
+        self.disk_consistent_lsn.store(new_value);
     }
 
     /// Force create an image layer and place it into the layer map.

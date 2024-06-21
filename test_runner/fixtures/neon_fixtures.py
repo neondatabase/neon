@@ -2159,12 +2159,19 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return time.time() - t1
 
     def attach_hook_issue(
-        self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
+        self,
+        tenant_shard_id: Union[TenantId, TenantShardId],
+        pageserver_id: int,
+        generation_override: Optional[int] = None,
     ) -> int:
+        body = {"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id}
+        if generation_override is not None:
+            body["generation_override"] = generation_override
+
         response = self.request(
             "POST",
             f"{self.env.storage_controller_api}/debug/v1/attach-hook",
-            json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
+            json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
         gen = response.json()["gen"]
@@ -2212,6 +2219,30 @@ class NeonStorageController(MetricsGetter, LogUtils):
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
+
+    def node_drain(self, node_id):
+        log.info(f"node_drain({node_id})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_fill(self, node_id):
+        log.info(f"node_fill({node_id})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_status(self, node_id):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
 
     def node_list(self):
         response = self.request(
@@ -2611,6 +2642,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         config: None | Dict[str, Any] = None,
         config_null: bool = False,
         generation: Optional[int] = None,
+        override_storage_controller_generation: bool = False,
     ):
         """
         Tenant attachment passes through here to acquire a generation number before proceeding
@@ -2619,6 +2651,10 @@ class NeonPageserver(PgProtocol, LogUtils):
         client = self.http_client()
         if generation is None:
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
+        elif override_storage_controller_generation:
+            generation = self.env.storage_controller.attach_hook_issue(
+                tenant_id, self.id, generation
+            )
         return client.tenant_attach(
             tenant_id,
             config,
@@ -2663,12 +2699,6 @@ class NeonPageserver(PgProtocol, LogUtils):
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         client = self.http_client(auth_token=auth_token)
         return client.tenant_create(tenant_id, conf, generation=generation)
-
-    def tenant_load(self, tenant_id: TenantId):
-        client = self.http_client()
-        return client.tenant_load(
-            tenant_id, generation=self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
-        )
 
     def list_layers(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
@@ -3410,6 +3440,13 @@ class Endpoint(PgProtocol, LogUtils):
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
+        # Semaphore is set to 1 when we start, and acquire'd back to zero when we stop
+        #
+        # We use a semaphore rather than a bool so that racing calls to stop() don't
+        # try and stop the same process twice, as stop() is called by test teardown and
+        # potentially by some __del__ chains in other threads.
+        self._running = threading.Semaphore(0)
+
     def http_client(
         self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
     ) -> EndpointHttpClient:
@@ -3487,7 +3524,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
         )
-        self.running = True
+        self._running.release(1)
 
         return self
 
@@ -3535,8 +3572,11 @@ class Endpoint(PgProtocol, LogUtils):
             conf_file.write("\n".join(hba) + "\n")
             conf_file.write(data)
 
-        if self.running:
+        if self.is_running():
             self.safe_psql("SELECT pg_reload_conf()")
+
+    def is_running(self):
+        return self._running._value > 0
 
     def reconfigure(self, pageserver_id: Optional[int] = None):
         assert self.endpoint_id is not None
@@ -3579,15 +3619,19 @@ class Endpoint(PgProtocol, LogUtils):
     def stop(self, mode: str = "fast") -> "Endpoint":
         """
         Stop the Postgres instance if it's running.
+
+        Because test teardown might try and stop an endpoint concurrently with test code
+        stopping the endpoint, this method is thread safe
+
         Returns self.
         """
 
-        if self.running:
+        running = self._running.acquire(blocking=False)
+        if running:
             assert self.endpoint_id is not None
             self.env.neon_cli.endpoint_stop(
                 self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
             )
-            self.running = False
 
         return self
 
@@ -3597,12 +3641,13 @@ class Endpoint(PgProtocol, LogUtils):
         Returns self.
         """
 
-        assert self.endpoint_id is not None
-        self.env.neon_cli.endpoint_stop(
-            self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
-        )
-        self.endpoint_id = None
-        self.running = False
+        running = self._running.acquire(blocking=False)
+        if running:
+            assert self.endpoint_id is not None
+            self.env.neon_cli.endpoint_stop(
+                self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
+            )
+            self.endpoint_id = None
 
         return self
 
@@ -3847,7 +3892,15 @@ class Safekeeper(LogUtils):
                 assert isinstance(res, dict)
                 return res
 
-    def http_client(self, auth_token: Optional[str] = None) -> SafekeeperHttpClient:
+    def http_client(
+        self, auth_token: Optional[str] = None, gen_sk_wide_token: bool = True
+    ) -> SafekeeperHttpClient:
+        """
+        When auth_token is None but gen_sk_wide is True creates safekeeper wide
+        token, which is a reasonable default.
+        """
+        if auth_token is None and gen_sk_wide_token:
+            auth_token = self.env.auth_keys.generate_safekeeper_token()
         is_testing_enabled = '"testing"' in self.env.get_binary_version("safekeeper")
         return SafekeeperHttpClient(
             port=self.port.http, auth_token=auth_token, is_testing_enabled=is_testing_enabled
@@ -3897,11 +3950,13 @@ class Safekeeper(LogUtils):
         segments.sort()
         return segments
 
-    def checkpoint_up_to(self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn):
+    def checkpoint_up_to(
+        self, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn, wait_wal_removal=True
+    ):
         """
         Assuming pageserver(s) uploaded to s3 up to `lsn`,
         1) wait for remote_consistent_lsn and wal_backup_lsn on safekeeper to reach it.
-        2) checkpoint timeline on safekeeper, which should remove WAL before this LSN.
+        2) checkpoint timeline on safekeeper, which should remove WAL before this LSN; optionally wait for that.
         """
         cli = self.http_client()
 
@@ -3925,7 +3980,8 @@ class Safekeeper(LogUtils):
         # pageserver to this safekeeper
         wait_until(30, 1, are_lsns_advanced)
         cli.checkpoint(tenant_id, timeline_id)
-        wait_until(30, 1, are_segments_removed)
+        if wait_wal_removal:
+            wait_until(30, 1, are_segments_removed)
 
     def wait_until_paused(self, failpoint: str):
         msg = f"at failpoint {failpoint}"
@@ -4447,6 +4503,7 @@ def wait_for_last_flush_lsn(
     tenant: TenantId,
     timeline: TimelineId,
     pageserver_id: Optional[int] = None,
+    auth_token: Optional[str] = None,
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
 
@@ -4460,7 +4517,7 @@ def wait_for_last_flush_lsn(
             f"wait_for_last_flush_lsn: waiting for {last_flush_lsn} on shard {tenant_shard_id} on pageserver {pageserver.id})"
         )
         waited = wait_for_last_record_lsn(
-            pageserver.http_client(), tenant_shard_id, timeline, last_flush_lsn
+            pageserver.http_client(auth_token=auth_token), tenant_shard_id, timeline, last_flush_lsn
         )
 
         assert waited >= last_flush_lsn
@@ -4556,6 +4613,7 @@ def last_flush_lsn_upload(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     pageserver_id: Optional[int] = None,
+    auth_token: Optional[str] = None,
 ) -> Lsn:
     """
     Wait for pageserver to catch to the latest flush LSN of given endpoint,
@@ -4563,11 +4621,11 @@ def last_flush_lsn_upload(
     reaching flush LSN).
     """
     last_flush_lsn = wait_for_last_flush_lsn(
-        env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver_id
+        env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver_id, auth_token=auth_token
     )
     shards = tenant_get_shards(env, tenant_id, pageserver_id)
     for tenant_shard_id, pageserver in shards:
-        ps_http = pageserver.http_client()
+        ps_http = pageserver.http_client(auth_token=auth_token)
         wait_for_last_record_lsn(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
         # force a checkpoint to trigger upload
         ps_http.timeline_checkpoint(tenant_shard_id, timeline_id)

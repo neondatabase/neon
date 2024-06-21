@@ -101,11 +101,12 @@ or
 ```toml
 [remote_storage]
 container_name = 'some-container-name'
+storage_account = 'somestorageaccnt'
 container_region = 'us-east'
 prefix_in_container = '/test-prefix/'
 ```
 
-`AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_ACCESS_KEY` env variables can be used to specify the azure credentials if needed.
+The `AZURE_STORAGE_ACCESS_KEY` env variable can be used to specify the azure credentials if needed.
 
 ## Repository background tasks
 

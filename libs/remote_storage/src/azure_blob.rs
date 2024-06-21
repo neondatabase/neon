@@ -54,7 +54,10 @@ impl AzureBlobStorage {
             azure_config.container_name
         );
 
-        let account = env::var("AZURE_STORAGE_ACCOUNT").expect("missing AZURE_STORAGE_ACCOUNT");
+        // Use the storage account from the config by default, fall back to env var if not present.
+        let account = azure_config.storage_account.clone().unwrap_or_else(|| {
+            env::var("AZURE_STORAGE_ACCOUNT").expect("missing AZURE_STORAGE_ACCOUNT")
+        });
 
         // If the `AZURE_STORAGE_ACCESS_KEY` env var has an access key, use that,
         // otherwise try the token based credentials.
