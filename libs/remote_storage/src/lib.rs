@@ -576,7 +576,9 @@ pub struct S3Config {
 }
 
 fn default_remote_storage_s3_concurrency_limit() -> NonZeroUsize {
-    DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT.try_into().unwrap()
+    DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
+        .try_into()
+        .unwrap()
 }
 
 impl Debug for S3Config {
@@ -653,12 +655,17 @@ fn deserialize_storage_class<'de, D: serde::Deserializer<'de>>(
             Ok(Some(storage_class))
         }
         fn visit_none<E>(self) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error, {
+        where
+            E: serde::de::Error,
+        {
             Ok(None)
         }
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(formatter, "one of the following string values: {:?}", StorageClass::values())
+            write!(
+                formatter,
+                "one of the following string values: {:?}",
+                StorageClass::values()
+            )
         }
     }
     deserializer.deserialize_str(Visitor)
@@ -796,6 +803,11 @@ impl ConcurrencyLimiter {
 mod tests {
     use super::*;
 
+    fn parse(input: &str) -> anyhow::Result<Option<RemoteStorageConfig>> {
+        let toml = input.parse::<toml_edit::Document>().unwrap();
+        RemoteStorageConfig::from_toml(toml.as_item())
+    }
+
     #[test]
     fn test_object_name() {
         let k = RemotePath::new(Utf8Path::new("a/b/c")).unwrap();
@@ -823,17 +835,68 @@ mod tests {
         let input = "local_path = '.'
 timeout = '5s'";
 
-        let toml = input.parse::<toml_edit::Document>().unwrap();
-
-        let config = RemoteStorageConfig::from_toml(toml.as_item())
-            .unwrap()
-            .expect("it exists");
+        let config = parse(input).unwrap().expect("it exists");
 
         assert_eq!(
             config,
             RemoteStorageConfig {
                 storage: RemoteStorageKind::LocalFs(Utf8PathBuf::from(".")),
                 timeout: Duration::from_secs(5)
+            }
+        );
+    }
+
+    #[test]
+    fn test_s3_parsing() {
+        let toml = "\
+        bucket_name = 'foo-bar'
+        bucket_region = 'eu-central-1'
+        upload_storage_class = 'INTELLIGENT_TIERING'
+        timeout = '7s'
+        ";
+
+        let config = parse(toml).unwrap().expect("it exists");
+
+        assert_eq!(
+            config,
+            RemoteStorageConfig {
+                storage: RemoteStorageKind::AwsS3(S3Config {
+                    bucket_name: "foo-bar".into(),
+                    bucket_region: "eu-central-1".into(),
+                    prefix_in_bucket: None,
+                    endpoint: None,
+                    concurrency_limit: default_remote_storage_s3_concurrency_limit(),
+                    max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+                    upload_storage_class: Some(StorageClass::IntelligentTiering),
+                }),
+                timeout: Duration::from_secs(7)
+            }
+        );
+    }
+
+    #[test]
+    fn test_azure_parsing() {
+        let toml = "\
+        container_name = 'foo-bar'
+        container_region = 'westeurope'
+        upload_storage_class = 'INTELLIGENT_TIERING'
+        timeout = '7s'
+        ";
+
+        let config = parse(toml).unwrap().expect("it exists");
+
+        assert_eq!(
+            config,
+            RemoteStorageConfig {
+                storage: RemoteStorageKind::AzureContainer(AzureConfig {
+                    container_name: "foo-bar".into(),
+                    storage_account: None,
+                    container_region: "westeurope".into(),
+                    prefix_in_container: None,
+                    concurrency_limit: default_remote_storage_azure_concurrency_limit(),
+                    max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+                }),
+                timeout: Duration::from_secs(7)
             }
         );
     }
