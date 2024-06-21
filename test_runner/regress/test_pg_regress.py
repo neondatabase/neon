@@ -23,11 +23,11 @@ if TYPE_CHECKING:
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
+@pytest.mark.timeout(600)
 @pytest.mark.parametrize("shard_count", [None, 4])
 def test_pg_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
-    build_type: str,
     pg_bin: PgBin,
     capsys: CaptureFixture[str],
     base_dir: Path,
@@ -42,10 +42,6 @@ def test_pg_regress(
     """
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
-
-    if build_type == "debug":
-        # Disable vectored read path cross validation since it makes the test time out.
-        neon_env_builder.pageserver_config_override = "validate_vectored_get=false"
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()

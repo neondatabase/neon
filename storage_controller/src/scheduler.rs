@@ -391,7 +391,7 @@ impl Scheduler {
             return Err(ScheduleError::NoPageservers);
         }
 
-        let mut scores: Vec<(NodeId, AffinityScore, usize)> = self
+        let mut scores: Vec<(NodeId, AffinityScore, usize, usize)> = self
             .nodes
             .iter()
             .filter_map(|(k, v)| {
@@ -402,6 +402,7 @@ impl Scheduler {
                         *k,
                         context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
                         v.shard_count,
+                        v.attached_shard_count,
                     ))
                 }
             })
@@ -409,9 +410,12 @@ impl Scheduler {
 
         // Sort by, in order of precedence:
         //  1st: Affinity score.  We should never pick a higher-score node if a lower-score node is available
-        //  2nd: Utilization.  Within nodes with the same affinity, use the least loaded nodes.
-        //  3rd: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
-        scores.sort_by_key(|i| (i.1, i.2, i.0));
+        //  2nd: Attached shard count.  Within nodes with the same affinity, we always pick the node with
+        //  the least number of attached shards.
+        //  3rd: Total shard count.  Within nodes with the same affinity and attached shard count, use nodes
+        //  with the lower total shard count.
+        //  4th: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
+        scores.sort_by_key(|i| (i.1, i.3, i.2, i.0));
 
         if scores.is_empty() {
             // After applying constraints, no pageservers were left.
