@@ -2249,10 +2249,26 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def cancel_node_drain(self, node_id):
+        log.info(f"cancel_node_drain({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def node_fill(self, node_id):
         log.info(f"node_fill({node_id})")
         self.request(
             "PUT",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def cancel_node_fill(self, node_id):
+        log.info(f"cancel_node_fill({node_id})")
+        self.request(
+            "DELETE",
             f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
             headers=self.headers(TokenScope.ADMIN),
         )
