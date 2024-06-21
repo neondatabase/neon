@@ -39,8 +39,8 @@ use crate::tenant::{
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
 use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{
-    IGNORED_TENANT_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
-    TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX,
+    TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME,
+    TIMELINE_DELETE_MARK_SUFFIX,
 };
 
 use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
@@ -809,11 +809,6 @@ impl PageServerConf {
 
     pub fn tenant_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
         self.tenants_path().join(tenant_shard_id.to_string())
-    }
-
-    pub fn tenant_ignore_mark_file_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
-        self.tenant_path(tenant_shard_id)
-            .join(IGNORED_TENANT_FILE_NAME)
     }
 
     /// Points to a place in pageserver's local directory,

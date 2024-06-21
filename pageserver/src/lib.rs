@@ -136,13 +136,6 @@ pub(crate) const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
 
 pub(crate) const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
 
-/// A marker file to prevent pageserver from loading a certain tenant on restart.
-/// Different from [`TIMELINE_UNINIT_MARK_SUFFIX`] due to semantics of the corresponding
-/// `ignore` management API command, that expects the ignored tenant to be properly loaded
-/// into pageserver's memory before being ignored.
-/// Full path: `tenants/<tenant_id>/___ignored_tenant`.
-pub const IGNORED_TENANT_FILE_NAME: &str = "___ignored_tenant";
-
 pub fn is_temporary(path: &Utf8Path) -> bool {
     match path.file_name() {
         Some(name) => name.ends_with(TEMP_FILE_SUFFIX),

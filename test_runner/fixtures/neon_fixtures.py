@@ -2700,12 +2700,6 @@ class NeonPageserver(PgProtocol, LogUtils):
         client = self.http_client(auth_token=auth_token)
         return client.tenant_create(tenant_id, conf, generation=generation)
 
-    def tenant_load(self, tenant_id: TenantId):
-        client = self.http_client()
-        return client.tenant_load(
-            tenant_id, generation=self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
-        )
-
     def list_layers(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
     ) -> list[Path]:
