@@ -293,14 +293,7 @@ pub async fn main_task(
 
     // shutdown background tasks
     if mgr.conf.is_wal_backup_enabled() {
-        wal_backup::update_task(
-            &mgr.conf,
-            &mgr.tli,
-            false,
-            &last_state,
-            &mut mgr.backup_task,
-        )
-        .await;
+        wal_backup::update_task(&mut mgr, false, &last_state).await;
     }
 
     if let Some(recovery_task) = &mut mgr.recovery_task {
@@ -352,7 +345,7 @@ impl Manager {
         self.tli.set_status(status);
     }
 
-    fn full_access_timeline(&mut self) -> FullAccessTimeline {
+    pub(crate) fn full_access_timeline(&mut self) -> FullAccessTimeline {
         assert!(!self.is_offloaded);
         let guard = self.access_service.create_guard();
         FullAccessTimeline::new(self.tli.clone(), guard)
@@ -371,14 +364,7 @@ impl Manager {
             wal_backup::is_wal_backup_required(self.wal_seg_size, num_computes, state);
 
         if self.conf.is_wal_backup_enabled() {
-            wal_backup::update_task(
-                &self.conf,
-                &self.tli,
-                is_wal_backup_required,
-                state,
-                &mut self.backup_task,
-            )
-            .await;
+            wal_backup::update_task(self, is_wal_backup_required, state).await;
         }
 
         // update the state in Arc<Timeline>
