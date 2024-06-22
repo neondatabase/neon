@@ -6,12 +6,13 @@
 //! Be aware that you need to be extra careful with manager code, because it is not respawned on panic.
 //! Also, if it will stuck in some branch, it will prevent any further progress in the timeline.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
+};
 
 use postgres_ffi::XLogSegNo;
-use tokio::
-    task::{JoinError, JoinHandle}
-;
+use tokio::task::{JoinError, JoinHandle};
 use tracing::{info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
 
@@ -196,6 +197,8 @@ pub async fn main_task(
     mut manager_rx: tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
     manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
 ) {
+    tli.set_status(Status::Started);
+
     let defer_tli = tli.tli.clone();
     scopeguard::defer! {
         if defer_tli.is_cancelled() {
@@ -216,18 +219,28 @@ pub async fn main_task(
     let last_state = 'outer: loop {
         MANAGER_ITERATIONS_TOTAL.inc();
 
+        mgr.set_status(Status::StateSnapshot);
         let state_snapshot = mgr.state_snapshot().await;
+
         let next_cfile_save = if !mgr.is_offloaded {
             let num_computes = *mgr.num_computes_rx.borrow();
+
+            mgr.set_status(Status::UpdateBackup);
             let is_wal_backup_required = mgr.update_backup(num_computes, &state_snapshot).await;
             mgr.update_is_active(is_wal_backup_required, num_computes, &state_snapshot);
 
+            mgr.set_status(Status::UpdateControlFile);
             let next_cfile_save = mgr.update_control_file_save(&state_snapshot).await;
+
+            mgr.set_status(Status::UpdateWalRemoval);
             mgr.update_wal_removal(&state_snapshot).await;
+
+            mgr.set_status(Status::UpdatePartialBackup);
             mgr.update_partial_backup(&state_snapshot).await;
 
             if mgr.conf.enable_offload && mgr.ready_for_eviction(&next_cfile_save, &state_snapshot)
             {
+                mgr.set_status(Status::EvictTimeline);
                 mgr.evict_timeline().await;
             }
 
@@ -236,6 +249,7 @@ pub async fn main_task(
             None
         };
 
+        mgr.set_status(Status::Wait);
         // wait until something changes. tx channels are stored under Arc, so they will not be
         // dropped until the manager task is finished.
         tokio::select! {
@@ -268,6 +282,7 @@ pub async fn main_task(
             }
 
             msg = manager_rx.recv() => {
+                mgr.set_status(Status::HandleMessage);
                 mgr.handle_message(msg).await;
             }
         }
@@ -331,6 +346,10 @@ impl Manager {
             access_service: AccessService::new(manager_tx),
             tli,
         }
+    }
+
+    fn set_status(&self, status: Status) {
+        self.tli.set_status(status);
     }
 
     fn full_access_timeline(&mut self) -> FullAccessTimeline {
@@ -567,5 +586,50 @@ async fn await_task_finish<T>(option: &mut Option<JoinHandle<T>>) -> Result<T, J
         task.await
     } else {
         futures::future::pending().await
+    }
+}
+
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    NotStarted,
+    Started,
+    StateSnapshot,
+    UpdateBackup,
+    UpdateControlFile,
+    UpdateWalRemoval,
+    UpdatePartialBackup,
+    EvictTimeline,
+    Wait,
+    HandleMessage,
+}
+
+pub struct AtomicStatus {
+    inner: AtomicUsize,
+}
+
+impl Default for AtomicStatus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AtomicStatus {
+    pub fn new() -> Self {
+        AtomicStatus {
+            inner: AtomicUsize::new(Status::NotStarted as usize),
+        }
+    }
+
+    pub fn load(&self, order: std::sync::atomic::Ordering) -> Status {
+        unsafe { std::mem::transmute(self.inner.load(order)) }
+    }
+
+    pub fn get(&self) -> Status {
+        self.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn store(&self, val: Status, order: std::sync::atomic::Ordering) {
+        self.inner.store(val as usize, order);
     }
 }

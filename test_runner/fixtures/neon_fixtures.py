@@ -3912,6 +3912,8 @@ class Safekeeper(LogUtils):
 
     def assert_no_errors(self):
         assert not self.log_contains("manager task finished prematurely")
+        assert not self.log_contains("error while acquiring FullAccessTimeline guard")
+        assert not self.log_contains("timeout while acquiring FullAccessTimeline guard")
 
     def append_logical_message(
         self, tenant_id: TenantId, timeline_id: TimelineId, request: Dict[str, Any]

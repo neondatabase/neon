@@ -33,7 +33,7 @@ use crate::safekeeper::{
 use crate::send_wal::WalSenders;
 use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, TimelineState};
 use crate::timeline_access::AccessGuard;
-use crate::timeline_manager::ManagerCtl;
+use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self};
 use crate::wal_backup_partial::PartialRemoteSegment;
@@ -469,6 +469,7 @@ pub struct Timeline {
     pub(crate) broker_active: AtomicBool,
     pub(crate) wal_backup_active: AtomicBool,
     pub(crate) last_removed_segno: AtomicU64,
+    pub(crate) mgr_status: AtomicStatus,
 }
 
 impl Timeline {
@@ -503,6 +504,7 @@ impl Timeline {
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
+            mgr_status: AtomicStatus::new(),
         })
     }
 
@@ -540,6 +542,7 @@ impl Timeline {
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
+            mgr_status: AtomicStatus::new(),
         })
     }
 
@@ -821,7 +824,30 @@ impl Timeline {
         }
 
         info!("requesting FullAccessTimeline guard");
-        let guard = self.manager_ctl.full_access_guard().await?;
+
+        let res =
+            tokio::time::timeout(Duration::from_secs(5), self.manager_ctl.full_access_guard())
+                .await;
+
+        let guard = match res {
+            Ok(Ok(guard)) => guard,
+            Ok(Err(e)) => {
+                warn!(
+                    "error while acquiring FullAccessTimeline guard (current state {:?}): {}",
+                    self.mgr_status.get(),
+                    e
+                );
+                return Err(e);
+            }
+            Err(_) => {
+                warn!(
+                    "timeout while acquiring FullAccessTimeline guard (current state {:?})",
+                    self.mgr_status.get()
+                );
+                anyhow::bail!("timeout while acquiring FullAccessTimeline guard");
+            }
+        };
+
         Ok(FullAccessTimeline::new(self.clone(), guard))
     }
 }
@@ -1047,6 +1073,10 @@ impl ManagerTimeline {
         shared.sk = StateSK::Loaded(SafeKeeper::new(cfile_state, wal_store, conf.my_id)?);
 
         Ok(())
+    }
+
+    pub(crate) fn set_status(&self, status: timeline_manager::Status) {
+        self.mgr_status.store(status, Ordering::Relaxed);
     }
 }
 
