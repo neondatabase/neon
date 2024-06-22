@@ -681,6 +681,11 @@ impl TenantShard {
 
         self.intent.promote_attached(scheduler, promote_to);
 
+        // Increment the sequence number for the edge case where a
+        // reconciler is already running to avoid waiting on the
+        // current reconcile instead of spawning a new one.
+        self.sequence = self.sequence.next();
+
         Ok(())
     }
 
