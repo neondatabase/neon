@@ -5328,7 +5328,7 @@ impl Service {
                         continue;
                     }
 
-                    match tenant_shard.reschedule_to_secondary(Some(node_id), None, scheduler) {
+                    match tenant_shard.reschedule_to_secondary(None, scheduler) {
                         Err(e) => {
                             tracing::warn!(
                                 tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
@@ -5526,11 +5526,7 @@ impl Service {
                             }
 
                             let previously_attached_to = *tenant_shard.intent.get_attached();
-                            match tenant_shard.reschedule_to_secondary(
-                                previously_attached_to,
-                                Some(node_id),
-                                scheduler,
-                            ) {
+                            match tenant_shard.reschedule_to_secondary(Some(node_id), scheduler) {
                                 Err(e) => {
                                     tracing::warn!(
                                         tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),

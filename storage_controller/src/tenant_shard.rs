@@ -656,7 +656,6 @@ impl TenantShard {
     /// the scheduler to recommend a node
     pub(crate) fn reschedule_to_secondary(
         &mut self,
-        attached_to: Option<NodeId>,
         promote_to: Option<NodeId>,
         scheduler: &mut Scheduler,
     ) -> Result<(), ScheduleError> {
@@ -672,8 +671,8 @@ impl TenantShard {
 
         assert!(self.intent.get_secondary().contains(&promote_to));
 
-        if let Some(node) = attached_to {
-            let demoted = self.intent.demote_attached(scheduler, node);
+        if let Some(node) = self.intent.get_attached() {
+            let demoted = self.intent.demote_attached(scheduler, *node);
             if !demoted {
                 return Err(ScheduleError::ImpossibleConstraint);
             }
