@@ -5364,7 +5364,6 @@ impl Service {
         let mut last_inspected_shard: Option<TenantShardId> = None;
         let mut inspected_all_shards = false;
         let mut waiters = Vec::new();
-        let mut schedule_context = ScheduleContext::default();
 
         while !inspected_all_shards {
             if cancel.is_cancelled() {
@@ -5419,28 +5418,32 @@ impl Service {
                         }
                     };
 
-                    if tenant_shard.intent.demote_attached(scheduler, node_id) {
-                        match tenant_shard.schedule(scheduler, &mut schedule_context) {
-                            Err(e) => {
-                                tracing::warn!(
-                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                    "Scheduling error when draining pageserver {} : {e}", node_id
-                                );
-                            }
-                            Ok(()) => {
-                                let scheduled_to = tenant_shard.intent.get_attached();
-                                tracing::info!(
-                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                    "Rescheduled shard while draining node {}: {} -> {:?}",
-                                    node_id,
-                                    node_id,
-                                    scheduled_to
-                                );
+                    // If the shard is not attached to the node being drained, skip it.
+                    if *tenant_shard.intent.get_attached() != Some(node_id) {
+                        last_inspected_shard = Some(*tid);
+                        continue;
+                    }
 
-                                let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
-                                if let Some(some) = waiter {
-                                    waiters.push(some);
-                                }
+                    match tenant_shard.reschedule_to_secondary(None, scheduler) {
+                        Err(e) => {
+                            tracing::warn!(
+                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                "Scheduling error when draining pageserver {} : {e}", node_id
+                            );
+                        }
+                        Ok(()) => {
+                            let scheduled_to = tenant_shard.intent.get_attached();
+                            tracing::info!(
+                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                "Rescheduled shard while draining node {}: {} -> {:?}",
+                                node_id,
+                                node_id,
+                                scheduled_to
+                            );
+
+                            let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
+                            if let Some(some) = waiter {
+                                waiters.push(some);
                             }
                         }
                     }
@@ -5603,9 +5606,7 @@ impl Service {
         // secondaries are warm. This is not always true (e.g. we just migrated the
         // tenant). Take that into consideration by checking the secondary status.
         let mut tids_to_promote = self.fill_node_plan(node_id);
-
         let mut waiters = Vec::new();
-        let mut schedule_context = ScheduleContext::default();
 
         // Execute the plan we've composed above. Before aplying each move from the plan,
         // we validate to ensure that it has not gone stale in the meantime.
@@ -5655,9 +5656,7 @@ impl Service {
                             }
 
                             let previously_attached_to = *tenant_shard.intent.get_attached();
-
-                            tenant_shard.intent.promote_attached(scheduler, node_id);
-                            match tenant_shard.schedule(scheduler, &mut schedule_context) {
+                            match tenant_shard.reschedule_to_secondary(Some(node_id), scheduler) {
                                 Err(e) => {
                                     tracing::warn!(
                                         tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),

@@ -646,6 +646,48 @@ impl TenantShard {
         Ok(())
     }
 
+    /// Reschedule this tenant shard to one of its secondary locations. Returns a scheduling error
+    /// if the swap is not possible and leaves the intent state in its original state.
+    ///
+    /// Arguments:
+    /// `attached_to`: the currently attached location matching the intent state (may be None if the
+    /// shard is not attached)
+    /// `promote_to`: an optional secondary location of this tenant shard. If set to None, we ask
+    /// the scheduler to recommend a node
+    pub(crate) fn reschedule_to_secondary(
+        &mut self,
+        promote_to: Option<NodeId>,
+        scheduler: &mut Scheduler,
+    ) -> Result<(), ScheduleError> {
+        let promote_to = match promote_to {
+            Some(node) => node,
+            None => match scheduler.node_preferred(self.intent.get_secondary()) {
+                Some(node) => node,
+                None => {
+                    return Err(ScheduleError::ImpossibleConstraint);
+                }
+            },
+        };
+
+        assert!(self.intent.get_secondary().contains(&promote_to));
+
+        if let Some(node) = self.intent.get_attached() {
+            let demoted = self.intent.demote_attached(scheduler, *node);
+            if !demoted {
+                return Err(ScheduleError::ImpossibleConstraint);
+            }
+        }
+
+        self.intent.promote_attached(scheduler, promote_to);
+
+        // Increment the sequence number for the edge case where a
+        // reconciler is already running to avoid waiting on the
+        // current reconcile instead of spawning a new one.
+        self.sequence = self.sequence.next();
+
+        Ok(())
+    }
+
     /// Optimize attachments: if a shard has a secondary location that is preferable to
     /// its primary location based on soft constraints, switch that secondary location
     /// to be attached.
