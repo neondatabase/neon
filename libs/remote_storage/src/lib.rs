@@ -679,6 +679,10 @@ impl RemoteStorageConfig {
             _ => bail!("toml not a table or inline table"),
         };
 
+        if document.is_empty() {
+            return Ok(None);
+        }
+
         Ok(Some(toml_edit::de::from_document(document)?))
     }
 }
