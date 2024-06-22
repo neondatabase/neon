@@ -533,8 +533,12 @@ pub struct RemoteStorageConfig {
     pub storage: RemoteStorageKind,
     /// A common timeout enforced for all requests after concurrency limiter permit has been
     /// acquired.
-    #[serde(with = "humantime_serde")]
+    #[serde(with = "humantime_serde", default = "default_timeout")]
     pub timeout: Duration,
+}
+
+fn default_timeout() -> Duration {
+    RemoteStorageConfig::DEFAULT_TIMEOUT
 }
 
 /// A kind of a remote storage to connect to, with its connection configuration.
