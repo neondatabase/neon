@@ -526,14 +526,18 @@ impl<const N: usize> From<[(&str, &str); N]> for StorageMetadata {
 }
 
 /// External backup storage configuration, enough for creating a client for that storage.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RemoteStorageConfig {
     /// The storage connection configuration.
     #[serde(flatten)]
     pub storage: RemoteStorageKind,
     /// A common timeout enforced for all requests after concurrency limiter permit has been
     /// acquired.
-    #[serde(with = "humantime_serde", default = "default_timeout")]
+    #[serde(
+        with = "humantime_serde",
+        default = "default_timeout",
+        skip_serializing_if = "is_default_timeout"
+    )]
     pub timeout: Duration,
 }
 
@@ -541,8 +545,12 @@ fn default_timeout() -> Duration {
     RemoteStorageConfig::DEFAULT_TIMEOUT
 }
 
+fn is_default_timeout(d: &Duration) -> bool {
+    *d == RemoteStorageConfig::DEFAULT_TIMEOUT
+}
+
 /// A kind of a remote storage to connect to, with its connection configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum RemoteStorageKind {
     /// Storage based on local file system.
@@ -557,7 +565,7 @@ pub enum RemoteStorageKind {
 }
 
 /// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct S3Config {
     /// Name of the bucket to connect to.
     pub bucket_name: String,
@@ -578,7 +586,11 @@ pub struct S3Config {
     pub concurrency_limit: NonZeroUsize,
     #[serde(default = "default_max_keys_per_list_response")]
     pub max_keys_per_list_response: Option<i32>,
-    #[serde(deserialize_with = "deserialize_storage_class", default)]
+    #[serde(
+        deserialize_with = "deserialize_storage_class",
+        serialize_with = "serialize_storage_class",
+        default
+    )]
     pub upload_storage_class: Option<StorageClass>,
 }
 
@@ -608,7 +620,7 @@ impl Debug for S3Config {
 }
 
 /// Azure  bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AzureConfig {
     /// Name of the container to connect to.
     pub container_name: String,
@@ -665,6 +677,14 @@ fn deserialize_storage_class<'de, D: serde::Deserializer<'de>>(
             Ok(None)
         }
     })
+}
+
+fn serialize_storage_class<S: serde::Serializer>(
+    val: &Option<StorageClass>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let val = val.as_ref().map(StorageClass::as_str);
+    Option::<&str>::serialize(&val, serializer)
 }
 
 impl RemoteStorageConfig {
