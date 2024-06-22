@@ -671,13 +671,15 @@ impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
 
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
-        let toml_edit::Item::Table(toml) = toml else {
-            bail!("toml not a table");
+        let document: toml_edit::Document = match toml {
+            toml_edit::Item::Table(toml) => toml.clone().into(),
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(toml)) => {
+                toml.clone().into_table().into()
+            }
+            _ => bail!("toml not a table or inline table"),
         };
 
-        let toml: toml_edit::Document = toml.clone().into();
-
-        Ok(Some(toml_edit::de::from_document(toml)?))
+        Ok(Some(toml_edit::de::from_document(document)?))
     }
 }
 
