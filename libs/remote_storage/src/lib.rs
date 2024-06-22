@@ -567,11 +567,6 @@ impl ConcurrencyLimiter {
 mod tests {
     use super::*;
 
-    fn parse(input: &str) -> anyhow::Result<Option<RemoteStorageConfig>> {
-        let toml = input.parse::<toml_edit::Document>().unwrap();
-        RemoteStorageConfig::from_toml(toml.as_item())
-    }
-
     #[test]
     fn test_object_name() {
         let k = RemotePath::new(Utf8Path::new("a/b/c")).unwrap();
@@ -592,78 +587,5 @@ mod tests {
     fn rempte_path_cannot_be_created_from_absolute_ones() {
         let err = RemotePath::new(Utf8Path::new("/")).expect_err("Should fail on absolute paths");
         assert_eq!(err.to_string(), "Path \"/\" is not relative");
-    }
-
-    #[test]
-    fn parse_localfs_config_with_timeout() {
-        let input = "local_path = '.'
-timeout = '5s'";
-
-        let config = parse(input).unwrap().expect("it exists");
-
-        assert_eq!(
-            config,
-            RemoteStorageConfig {
-                storage: RemoteStorageKind::LocalFs {
-                    local_path: Utf8PathBuf::from(".")
-                },
-                timeout: Duration::from_secs(5)
-            }
-        );
-    }
-
-    #[test]
-    fn test_s3_parsing() {
-        let toml = "\
-        bucket_name = 'foo-bar'
-        bucket_region = 'eu-central-1'
-        upload_storage_class = 'INTELLIGENT_TIERING'
-        timeout = '7s'
-        ";
-
-        let config = parse(toml).unwrap().expect("it exists");
-
-        assert_eq!(
-            config,
-            RemoteStorageConfig {
-                storage: RemoteStorageKind::AwsS3(S3Config {
-                    bucket_name: "foo-bar".into(),
-                    bucket_region: "eu-central-1".into(),
-                    prefix_in_bucket: None,
-                    endpoint: None,
-                    concurrency_limit: default_remote_storage_s3_concurrency_limit(),
-                    max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
-                    upload_storage_class: Some(StorageClass::IntelligentTiering),
-                }),
-                timeout: Duration::from_secs(7)
-            }
-        );
-    }
-
-    #[test]
-    fn test_azure_parsing() {
-        let toml = "\
-        container_name = 'foo-bar'
-        container_region = 'westeurope'
-        upload_storage_class = 'INTELLIGENT_TIERING'
-        timeout = '7s'
-        ";
-
-        let config = parse(toml).unwrap().expect("it exists");
-
-        assert_eq!(
-            config,
-            RemoteStorageConfig {
-                storage: RemoteStorageKind::AzureContainer(AzureConfig {
-                    container_name: "foo-bar".into(),
-                    storage_account: None,
-                    container_region: "westeurope".into(),
-                    prefix_in_container: None,
-                    concurrency_limit: default_remote_storage_azure_concurrency_limit(),
-                    max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
-                }),
-                timeout: Duration::from_secs(7)
-            }
-        );
     }
 }
