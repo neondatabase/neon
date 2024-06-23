@@ -24,7 +24,7 @@ use crate::{
     safekeeper::Term,
     send_wal::WalSenders,
     state::{EvictionState, TimelineState},
-    timeline::{FullAccessTimeline, ManagerTimeline, PeerInfo, ReadGuardSharedState, StateSK},
+    timeline::{ManagerTimeline, PeerInfo, ReadGuardSharedState, StateSK, WalResidentTimeline},
     timeline_access::{AccessGuard, AccessService, GuardId},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
@@ -92,7 +92,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 const CF_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub enum ManagerCtlMessage {
-    /// Request to get a guard for FullAccessTimeline, with WAL files available locally.
+    /// Request to get a guard for WalResidentTimeline, with WAL files available locally.
     GuardRequest(tokio::sync::oneshot::Sender<anyhow::Result<AccessGuard>>),
     /// Request to drop the guard.
     GuardDrop(GuardId),
@@ -131,7 +131,7 @@ impl ManagerCtl {
     }
 
     /// Issue a new guard and wait for manager to prepare the timeline.
-    pub async fn full_access_guard(&self) -> anyhow::Result<AccessGuard> {
+    pub async fn wal_residence_guard(&self) -> anyhow::Result<AccessGuard> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.manager_ch.send(ManagerCtlMessage::GuardRequest(tx))?;
 
@@ -212,7 +212,7 @@ pub async fn main_task(
 
     // Start recovery task which always runs on the timeline.
     if !mgr.is_offloaded && mgr.conf.peer_recovery_enabled {
-        let tli = mgr.full_access_timeline();
+        let tli = mgr.wal_resident_timeline();
         mgr.recovery_task = Some(tokio::spawn(recovery_main(tli, mgr.conf.clone())));
     }
 
@@ -345,10 +345,10 @@ impl Manager {
         self.tli.set_status(status);
     }
 
-    pub(crate) fn full_access_timeline(&mut self) -> FullAccessTimeline {
+    pub(crate) fn wal_resident_timeline(&mut self) -> WalResidentTimeline {
         assert!(!self.is_offloaded);
         let guard = self.access_service.create_guard();
-        FullAccessTimeline::new(self.tli.clone(), guard)
+        WalResidentTimeline::new(self.tli.clone(), guard)
     }
 
     async fn state_snapshot(&self) -> StateSnapshot {
@@ -509,9 +509,9 @@ impl Manager {
             return;
         }
 
-        // Get FullAccessTimeline and start partial backup task.
+        // Get WalResidentTimeline and start partial backup task.
         self.partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
-            self.full_access_timeline(),
+            self.wal_resident_timeline(),
             self.conf.clone(),
         )));
     }

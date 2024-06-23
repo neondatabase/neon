@@ -28,7 +28,7 @@ use crate::send_wal::WalSenderState;
 use crate::state::TimelineMemState;
 use crate::state::TimelinePersistentState;
 use crate::timeline::get_timeline_dir;
-use crate::timeline::FullAccessTimeline;
+use crate::timeline::WalResidentTimeline;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 
@@ -326,7 +326,7 @@ pub struct TimelineDigest {
 }
 
 pub async fn calculate_digest(
-    tli: &FullAccessTimeline,
+    tli: &WalResidentTimeline,
     request: TimelineDigestRequest,
 ) -> Result<TimelineDigest> {
     if request.from_lsn > request.until_lsn {

@@ -29,7 +29,7 @@ use utils::lsn::Lsn;
 use crate::{
     metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
     safekeeper::Term,
-    timeline::FullAccessTimeline,
+    timeline::WalResidentTimeline,
     timeline_manager::StateSnapshot,
     wal_backup::{self, remote_timeline_path},
     SafeKeeperConf,
@@ -82,7 +82,7 @@ impl State {
 
 struct PartialBackup {
     wal_seg_size: usize,
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     conf: SafeKeeperConf,
     local_prefix: Utf8PathBuf,
     remote_timeline_path: RemotePath,
@@ -291,7 +291,7 @@ pub fn needs_uploading(state: &StateSnapshot, uploaded: &Option<PartialRemoteSeg
 /// returns PartialRemoteSegment, to signal readiness for offloading the timeline.
 #[instrument(name = "Partial backup", skip_all, fields(ttid = %tli.ttid))]
 pub async fn main_task(
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     conf: SafeKeeperConf,
 ) -> Option<PartialRemoteSegment> {
     debug!("started");

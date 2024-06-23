@@ -814,26 +814,28 @@ impl Timeline {
     /// Get the timeline guard for reading/writing WAL files.
     /// TODO(TODO): if WAL files are not present on disk (evicted), they will be
     /// downloaded from S3. Also there will logic for preventing eviction
-    /// while someone is holding FullAccessTimeline guard.
+    /// while someone is holding WalResidentTimeline guard.
     ///
     /// NB: don't use this function from timeline_manager, it will deadlock.
     /// Don't use this function while holding shared_state lock.
-    pub async fn full_access_guard(self: &Arc<Self>) -> Result<FullAccessTimeline> {
+    pub async fn wal_residence_guard(self: &Arc<Self>) -> Result<WalResidentTimeline> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
 
-        info!("requesting FullAccessTimeline guard");
+        info!("requesting WalResidentTimeline guard");
 
-        let res =
-            tokio::time::timeout(Duration::from_secs(5), self.manager_ctl.full_access_guard())
-                .await;
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.manager_ctl.wal_residence_guard(),
+        )
+        .await;
 
         let guard = match res {
             Ok(Ok(guard)) => guard,
             Ok(Err(e)) => {
                 warn!(
-                    "error while acquiring FullAccessTimeline guard (current state {:?}): {}",
+                    "error while acquiring WalResidentTimeline guard (current state {:?}): {}",
                     self.mgr_status.get(),
                     e
                 );
@@ -841,31 +843,31 @@ impl Timeline {
             }
             Err(_) => {
                 warn!(
-                    "timeout while acquiring FullAccessTimeline guard (current state {:?})",
+                    "timeout while acquiring WalResidentTimeline guard (current state {:?})",
                     self.mgr_status.get()
                 );
-                anyhow::bail!("timeout while acquiring FullAccessTimeline guard");
+                anyhow::bail!("timeout while acquiring WalResidentTimeline guard");
             }
         };
 
-        Ok(FullAccessTimeline::new(self.clone(), guard))
+        Ok(WalResidentTimeline::new(self.clone(), guard))
     }
 }
 
 /// This is a guard that allows to read/write disk timeline state.
-/// All tasks that are using the disk should use this guard.
-pub struct FullAccessTimeline {
+/// All tasks that are trying to read/write WAL from disk should use this guard.
+pub struct WalResidentTimeline {
     pub tli: Arc<Timeline>,
     _guard: AccessGuard,
 }
 
-impl FullAccessTimeline {
+impl WalResidentTimeline {
     pub fn new(tli: Arc<Timeline>, _guard: AccessGuard) -> Self {
-        FullAccessTimeline { tli, _guard }
+        WalResidentTimeline { tli, _guard }
     }
 }
 
-impl Deref for FullAccessTimeline {
+impl Deref for WalResidentTimeline {
     type Target = Arc<Timeline>;
 
     fn deref(&self) -> &Self::Target {
@@ -873,7 +875,7 @@ impl Deref for FullAccessTimeline {
     }
 }
 
-impl FullAccessTimeline {
+impl WalResidentTimeline {
     /// Returns true if walsender should stop sending WAL to pageserver. We
     /// terminate it if remote_consistent_lsn reached commit_lsn and there is no
     /// computes. While there might be nothing to stream already, we learn about
@@ -1090,13 +1092,13 @@ async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
 }
 
 /// Get a path to the tenant directory. If you just need to get a timeline directory,
-/// use FullAccessTimeline::get_timeline_dir instead.
+/// use WalResidentTimeline::get_timeline_dir instead.
 pub(crate) fn get_tenant_dir(conf: &SafeKeeperConf, tenant_id: &TenantId) -> Utf8PathBuf {
     conf.workdir.join(tenant_id.to_string())
 }
 
 /// Get a path to the timeline directory. If you need to read WAL files from disk,
-/// use FullAccessTimeline::get_timeline_dir instead. This function does not check
+/// use WalResidentTimeline::get_timeline_dir instead. This function does not check
 /// timeline eviction status and WAL files might not be present on disk.
 pub(crate) fn get_timeline_dir(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Utf8PathBuf {
     get_tenant_dir(conf, &ttid.tenant_id).join(ttid.timeline_id.to_string())

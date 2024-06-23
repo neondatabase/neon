@@ -21,7 +21,7 @@ use utils::{id::NodeId, lsn::Lsn, postgres_client::wal_stream_connection_config}
 
 use crate::receive_wal::{WalAcceptor, REPLY_QUEUE_SIZE};
 use crate::safekeeper::{AppendRequest, AppendRequestHeader};
-use crate::timeline::FullAccessTimeline;
+use crate::timeline::WalResidentTimeline;
 use crate::{
     http::routes::TimelineStatus,
     receive_wal::MSG_QUEUE_SIZE,
@@ -36,7 +36,7 @@ use crate::{
 /// Entrypoint for per timeline task which always runs, checking whether
 /// recovery for this safekeeper is needed and starting it if so.
 #[instrument(name = "recovery task", skip_all, fields(ttid = %tli.ttid))]
-pub async fn recovery_main(tli: FullAccessTimeline, conf: SafeKeeperConf) {
+pub async fn recovery_main(tli: WalResidentTimeline, conf: SafeKeeperConf) {
     info!("started");
 
     let cancel = tli.cancel.clone();
@@ -66,7 +66,7 @@ pub async fn recovery_main(tli: FullAccessTimeline, conf: SafeKeeperConf) {
 /// depending on assembled quorum (e.g. classic picture 8 from Raft paper).
 /// Thus we don't try to predict it here.
 async fn recovery_needed(
-    tli: &FullAccessTimeline,
+    tli: &WalResidentTimeline,
     heartbeat_timeout: Duration,
 ) -> RecoveryNeededInfo {
     let ss = tli.read_shared_state().await;
@@ -195,7 +195,7 @@ impl From<&PeerInfo> for Donor {
 const CHECK_INTERVAL_MS: u64 = 2000;
 
 /// Check regularly whether we need to start recovery.
-async fn recovery_main_loop(tli: FullAccessTimeline, conf: SafeKeeperConf) {
+async fn recovery_main_loop(tli: WalResidentTimeline, conf: SafeKeeperConf) {
     let check_duration = Duration::from_millis(CHECK_INTERVAL_MS);
     loop {
         let recovery_needed_info = recovery_needed(&tli, conf.heartbeat_timeout).await;
@@ -205,7 +205,7 @@ async fn recovery_main_loop(tli: FullAccessTimeline, conf: SafeKeeperConf) {
                     "starting recovery from donor {}: {}",
                     donor.sk_id, recovery_needed_info
                 );
-                let res = tli.full_access_guard().await;
+                let res = tli.wal_residence_guard().await;
                 if let Err(e) = res {
                     warn!("failed to obtain guard: {}", e);
                     continue;
@@ -233,7 +233,7 @@ async fn recovery_main_loop(tli: FullAccessTimeline, conf: SafeKeeperConf) {
 /// Recover from the specified donor. Returns message explaining normal finish
 /// reason or error.
 async fn recover(
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     donor: &Donor,
     conf: &SafeKeeperConf,
 ) -> anyhow::Result<String> {
@@ -319,7 +319,7 @@ async fn recover(
 
 // Pull WAL from donor, assuming handshake is already done.
 async fn recovery_stream(
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     donor: &Donor,
     start_streaming_at: Lsn,
     conf: &SafeKeeperConf,
@@ -369,7 +369,7 @@ async fn recovery_stream(
     // As in normal walreceiver, do networking and writing to disk in parallel.
     let (msg_tx, msg_rx) = channel(MSG_QUEUE_SIZE);
     let (reply_tx, reply_rx) = channel(REPLY_QUEUE_SIZE);
-    let wa = WalAcceptor::spawn(tli.full_access_guard().await?, msg_rx, reply_tx, None);
+    let wa = WalAcceptor::spawn(tli.wal_residence_guard().await?, msg_rx, reply_tx, None);
 
     let res = tokio::select! {
         r = network_io(physical_stream, msg_tx, donor.clone(), tli, conf.clone()) => r,
@@ -403,7 +403,7 @@ async fn network_io(
     physical_stream: ReplicationStream,
     msg_tx: Sender<ProposerAcceptorMessage>,
     donor: Donor,
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     conf: SafeKeeperConf,
 ) -> anyhow::Result<Option<String>> {
     let mut physical_stream = pin!(physical_stream);

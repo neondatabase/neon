@@ -32,7 +32,7 @@ use crate::{
         routes::TimelineStatus,
     },
     safekeeper::Term,
-    timeline::{get_tenant_dir, get_timeline_dir, FullAccessTimeline, Timeline, TimelineError},
+    timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError, WalResidentTimeline},
     wal_storage::{self, open_wal_file, Storage},
     GlobalTimelines, SafeKeeperConf,
 };
@@ -46,7 +46,7 @@ use utils::{
 
 /// Stream tar archive of timeline to tx.
 #[instrument(name = "snapshot", skip_all, fields(ttid = %tli.ttid))]
-pub async fn stream_snapshot(tli: FullAccessTimeline, tx: mpsc::Sender<Result<Bytes>>) {
+pub async fn stream_snapshot(tli: WalResidentTimeline, tx: mpsc::Sender<Result<Bytes>>) {
     if let Err(e) = stream_snapshot_guts(tli, tx.clone()).await {
         // Error type/contents don't matter as they won't can't reach the client
         // (hyper likely doesn't do anything with it), but http stream will be
@@ -66,7 +66,7 @@ pub struct SnapshotContext {
     pub flush_lsn: Lsn,
     pub wal_seg_size: usize,
     // used to remove WAL hold off in Drop.
-    pub tli: FullAccessTimeline,
+    pub tli: WalResidentTimeline,
 }
 
 impl Drop for SnapshotContext {
@@ -80,7 +80,7 @@ impl Drop for SnapshotContext {
 }
 
 pub async fn stream_snapshot_guts(
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     tx: mpsc::Sender<Result<Bytes>>,
 ) -> Result<()> {
     // tokio-tar wants Write implementor, but we have mpsc tx <Result<Bytes>>;
@@ -135,7 +135,7 @@ pub async fn stream_snapshot_guts(
     Ok(())
 }
 
-impl FullAccessTimeline {
+impl WalResidentTimeline {
     /// Start streaming tar archive with timeline:
     /// 1) stream control file under lock;
     /// 2) hold off WAL removal;
@@ -207,10 +207,10 @@ impl FullAccessTimeline {
         }
         shared_state.wal_removal_on_hold = true;
 
-        // Drop shared_state to release the lock, before calling full_access_guard().
+        // Drop shared_state to release the lock, before calling wal_residence_guard().
         drop(shared_state);
 
-        let tli_copy = self.full_access_guard().await?;
+        let tli_copy = self.wal_residence_guard().await?;
         let bctx = SnapshotContext {
             from_segno,
             upto_segno,

@@ -29,7 +29,7 @@ use tracing::*;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
-use crate::timeline::{FullAccessTimeline, PeerInfo};
+use crate::timeline::{PeerInfo, WalResidentTimeline};
 use crate::timeline_manager::{Manager, StateSnapshot};
 use crate::{SafeKeeperConf, WAL_BACKUP_RUNTIME};
 
@@ -75,7 +75,7 @@ pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &St
             let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
             let async_task = backup_task_main(
-                mgr.full_access_timeline(),
+                mgr.wal_resident_timeline(),
                 mgr.conf.backup_parallel_jobs,
                 shutdown_rx,
             );
@@ -188,7 +188,7 @@ pub fn init_remote_storage(conf: &SafeKeeperConf) {
 }
 
 struct WalBackupTask {
-    timeline: FullAccessTimeline,
+    timeline: WalResidentTimeline,
     timeline_dir: Utf8PathBuf,
     wal_seg_size: usize,
     parallel_jobs: usize,
@@ -198,7 +198,7 @@ struct WalBackupTask {
 /// Offload single timeline.
 #[instrument(name = "WAL backup", skip_all, fields(ttid = %tli.ttid))]
 async fn backup_task_main(
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
@@ -297,7 +297,7 @@ impl WalBackupTask {
 }
 
 async fn backup_lsn_range(
-    timeline: &FullAccessTimeline,
+    timeline: &WalResidentTimeline,
     backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
