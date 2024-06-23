@@ -32,10 +32,10 @@ use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-        ShardSchedulingPolicy, TenantCreateResponse, TenantCreateResponseShard,
-        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
-        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
-        UtilizationScore,
+        ShardSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
+        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
+        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+        TenantShardMigrateResponse, UtilizationScore,
     },
     models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
@@ -46,10 +46,9 @@ use crate::pageserver_client::PageserverClient;
 use pageserver_api::{
     models::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
-        PageserverUtilization, ShardParameters, TenantConfig, TenantCreateRequest,
-        TenantLocationConfigRequest, TenantLocationConfigResponse, TenantShardLocation,
-        TenantShardSplitRequest, TenantShardSplitResponse, TenantTimeTravelRequest,
-        TimelineCreateRequest, TimelineInfo,
+        PageserverUtilization, ShardParameters, TenantConfig, TenantLocationConfigRequest,
+        TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
+        TenantShardSplitResponse, TenantTimeTravelRequest, TimelineCreateRequest, TimelineInfo,
     },
     shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
     upcall_api::{

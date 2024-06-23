@@ -11,6 +11,27 @@ use crate::{
     shard::{ShardStripeSize, TenantShardId},
 };
 
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantCreateRequest {
+    pub new_tenant_id: TenantShardId,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+
+    // If omitted, create a single shard with TenantShardId::unsharded()
+    #[serde(default)]
+    #[serde(skip_serializing_if = "ShardParameters::is_unsharded")]
+    pub shard_parameters: ShardParameters,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement_policy: Option<PlacementPolicy>,
+
+    #[serde(flatten)]
+    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TenantCreateResponseShard {
     pub shard_id: TenantShardId,
@@ -279,5 +300,20 @@ mod test {
         assert_eq!(encoded, "\"Detached\"");
         assert_eq!(serde_json::from_str::<PlacementPolicy>(&encoded)?, v);
         Ok(())
+    }
+
+    #[test]
+    fn test_reject_unknown_field() {
+        let id = TenantId::generate();
+        let create_request = serde_json::json!({
+            "new_tenant_id": id.to_string(),
+            "unknown_field": "unknown_value".to_string(),
+        });
+        let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
     }
 }
