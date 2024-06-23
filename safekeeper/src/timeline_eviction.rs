@@ -10,6 +10,7 @@ use tokio::{
     io::{AsyncRead, AsyncWriteExt},
 };
 use tracing::{info, instrument, warn};
+use utils::crashsafe::durable_rename;
 
 use crate::{
     timeline_manager::{Manager, StateSnapshot},
@@ -108,6 +109,7 @@ async fn do_eviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyho
 async fn do_uneviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyhow::Result<()> {
     // if the local segment is present, validate it
     validate_local_segment(mgr, partial).await?;
+
     // TODO: file can be invalid because previous download failed, we shouldn't
     // prevent uneviction in that case
 
@@ -132,16 +134,16 @@ async fn redownload_partial_segment(
     mgr: &Manager,
     partial: &PartialRemoteSegment,
 ) -> anyhow::Result<()> {
-    let local_segfile = local_segment_path(mgr, partial);
+    let tmp_file = mgr.tli.timeline_dir().join("remote_partial.tmp");
     let remote_segfile = remote_segment_path(mgr, partial)?;
 
     info!(
         "redownloading partial segment: {} -> {}",
-        remote_segfile, local_segfile
+        remote_segfile, tmp_file
     );
 
     let mut reader = wal_backup::read_object(&remote_segfile, 0).await?;
-    let mut file = File::create(local_segfile).await?;
+    let mut file = File::create(&tmp_file).await?;
 
     let actual_len = tokio::io::copy(&mut reader, &mut file).await?;
     let expected_len = partial.flush_lsn.segment_offset(mgr.wal_seg_size);
@@ -161,7 +163,16 @@ async fn redownload_partial_segment(
     assert!(actual_len <= mgr.wal_seg_size as u64);
     file.set_len(mgr.wal_seg_size as u64).await?;
     file.flush().await?;
-    file.sync_all().await?;
+
+    let final_path = local_segment_path(mgr, partial);
+    if let Err(e) = durable_rename(&tmp_file, &final_path, !mgr.conf.no_sync).await {
+        // Probably rename succeeded, but fsync of it failed. Remove
+        // the file then to avoid using it.
+        tokio::fs::remove_file(tmp_file)
+            .await
+            .or_else(utils::fs_ext::ignore_not_found)?;
+        return Err(e.into());
+    }
 
     Ok(())
 }
