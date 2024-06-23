@@ -315,7 +315,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     # Create a tenant directly via pageserver HTTP API, skipping the storage controller
     tenant_id = TenantId.generate()
     generation = 123
-    origin_ps.http_client().tenant_create(tenant_id, generation=generation)
+    origin_ps.tenant_create(tenant_id, generation=generation)
 
     # As if doing a live migration, first configure origin into stale mode
     r = origin_ps.http_client().tenant_location_conf(
