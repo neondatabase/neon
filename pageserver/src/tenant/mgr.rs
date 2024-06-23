@@ -1735,6 +1735,7 @@ impl TenantManager {
             let timelines = parent_shard.timelines.lock().unwrap().clone();
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
+                tracing::info!(timeline_id=%timeline.timeline_id, "Loading list of layers to hardlink");
                 let timeline_layers = timeline
                     .layers
                     .read()
@@ -1774,7 +1775,12 @@ impl TenantManager {
 
         // Since we will do a large number of small filesystem metadata operations, batch them into
         // spawn_blocking calls rather than doing each one as a tokio::fs round-trip.
+        let span = tracing::Span::current();
         let jh = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            // Run this synchronous code in the same log context as the outer function that spawned it.
+            let _span = span.enter();
+
+            tracing::info!("Creating {} directories", create_dirs.len());
             for dir in &create_dirs {
                 if let Err(e) = std::fs::create_dir_all(dir) {
                     // Ignore AlreadyExists errors, drop out on all other errors
@@ -1788,6 +1794,11 @@ impl TenantManager {
             }
 
             for child_prefix in child_prefixes {
+                tracing::info!(
+                    "Hard-linking {} parent layers into child path {}",
+                    parent_layers.len(),
+                    child_prefix
+                );
                 for relative_layer in &parent_layers {
                     let parent_path = parent_path.join(relative_layer);
                     let child_path = child_prefix.join(relative_layer);
@@ -1813,6 +1824,7 @@ impl TenantManager {
             // Durability is not required for correctness, but if we crashed during split and
             // then came restarted with empty timeline dirs, it would be very inefficient to
             // re-populate from remote storage.
+            tracing::info!("fsyncing {} directories", create_dirs.len());
             for dir in create_dirs {
                 if let Err(e) = crashsafe::fsync(&dir) {
                     // Something removed a newly created timeline dir out from underneath us?  Extremely

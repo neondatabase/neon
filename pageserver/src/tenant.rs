@@ -2215,6 +2215,7 @@ impl Tenant {
             // Upload an index from the parent: this is partly to provide freshness for the
             // child tenants that will copy it, and partly for general ease-of-debugging: there will
             // always be a parent shard index in the same generation as we wrote the child shard index.
+            tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index");
             timeline
                 .remote_client
                 .schedule_index_upload_for_file_changes()?;
@@ -2222,12 +2223,14 @@ impl Tenant {
 
             // Shut down the timeline's remote client: this means that the indices we write
             // for child shards will not be invalidated by the parent shard deleting layers.
+            tracing::info!(timeline_id=%timeline.timeline_id, "Shutting down remote storage client");
             timeline.remote_client.shutdown().await;
 
             // Download methods can still be used after shutdown, as they don't flow through the remote client's
             // queue.  In principal the RemoteTimelineClient could provide this without downloading it, but this
             // operation is rare, so it's simpler to just download it (and robustly guarantees that the index
             // we use here really is the remotely persistent one).
+            tracing::info!(timeline_id=%timeline.timeline_id, "Downloading index_part from parent");
             let result = timeline.remote_client
                 .download_index_file(&self.cancel)
                 .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))
@@ -2240,6 +2243,7 @@ impl Tenant {
             };
 
             for child_shard in child_shards {
+                tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index_part for child {}", child_shard.to_index());
                 upload_index_part(
                     &self.remote_storage,
                     child_shard,
