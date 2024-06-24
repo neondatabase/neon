@@ -325,6 +325,17 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
+
+    pub(crate) async fn shutdown(&self) {
+        match self {
+            Self::Prod(mgr) => mgr.shutdown().await,
+            #[cfg(test)]
+            Self::Test(mgr) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         match self {
             Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
@@ -1879,6 +1890,10 @@ impl Tenant {
         // this will additionally shutdown and await all timeline tasks.
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), None).await;
+
+        if let Some(walredo_mgr) = self.walredo_mgr.as_ref() {
+            walredo_mgr.shutdown().await;
+        }
 
         // Wait for any in-flight operations to complete
         self.gate.close().await;
