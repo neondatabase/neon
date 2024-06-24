@@ -35,11 +35,9 @@ use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
 use pageserver_api::shard::TenantShardId;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::lsn::Lsn;
 use utils::sync::gate::Gate;
@@ -47,49 +45,18 @@ use utils::sync::heavier_once_cell;
 
 pub struct GlobalState {
     conf: &'static PageServerConf,
-    /// Watched by the [`Self::actor`].
-    shutdown: CancellationToken,
-    /// Set by [`Self::actor`] when [`Self::shutdown`] is cancelled.
-    /// We do this to avoid the Mutex lock inside the `CancellationToken`.
-    shutdown_bool: AtomicBool,
     pub(self) spawn_gate: Gate,
 }
 
 impl GlobalState {
-    pub async fn spawn(
-        conf: &'static PageServerConf,
-        shutdown: CancellationToken,
-    ) -> Arc<GlobalState> {
+    pub async fn spawn(conf: &'static PageServerConf) -> Arc<GlobalState> {
         let state = Arc::new(GlobalState {
             conf,
-            shutdown,
-            shutdown_bool: AtomicBool::new(false), // if `shutdown` is cancelled already, the task spawned below will set it promptly
             spawn_gate: Gate::default(),
-        });
-        tokio::spawn({
-            let state = Arc::clone(&state);
-            async move {
-                info!("starting");
-                state.actor().await;
-                info!("done");
-            }
-            .instrument(info_span!(parent: None, "walredo_global_state"))
         });
         state
     }
-    async fn actor(self: Arc<Self>) {
-        self.shutdown.cancelled().await;
-        info!("propagating cancellation");
-        self.shutdown_bool.store(true, Ordering::Relaxed);
-        self.spawn_gate.close().await;
-        info!("all walredo processes have been killed and no new ones will be spawned");
-    }
-
-    pub(crate) async fn wait_shutdown_complete(self: &Arc<Self>) {
-        assert!(
-            self.shutdown.is_cancelled(),
-            "must cancel the `shutdown` token before waiting, otherwise we will wait forever"
-        );
+    pub(crate) async fn shutdown(self: &Arc<Self>) {
         self.spawn_gate.close().await
         // The destructor of WalRedoProcess SIGKILLs and `wait()`s for the process
         // The gate guard is stored in WalRedoProcess.

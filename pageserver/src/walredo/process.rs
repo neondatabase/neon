@@ -32,7 +32,6 @@ use utils::{
 use super::GlobalState;
 
 pub struct WalRedoProcess {
-    global_state: Arc<GlobalState>,
     _spawn_gate_guard: GateGuard,
     #[allow(dead_code)]
     conf: &'static PageServerConf,
@@ -168,7 +167,6 @@ impl WalRedoProcess {
         );
 
         Ok(Self {
-            global_state: global_state.clone(),
             _spawn_gate_guard: spawn_gate_guard,
             conf,
             #[cfg(feature = "testing")]

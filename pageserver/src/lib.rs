@@ -82,13 +82,14 @@ pub async fn shutdown_pageserver(
     )
     .await;
 
-    // In theory, walredo processes are tenant-scoped and should have been shut down after
-    // tenant manager shutdown above.
-    // In practive, we have lingering walredo processes even after pageserver shutdowns that
-    // don't hit the systemd TimeoutSec timeout of 10 seconds (i.e., that log `Shut down successfully completed` below).
+    // walredo processes are tenant-scoped and should have been shut down after tenant manager shutdown above.
+    //
+    // In practive, we have lingering walredo processes even when pageserver shuts down cleanly, i.e., even when it
+    // does not hit systemd's TimeoutSec timeout (10 seconds in prod).
+    // TODO: understand why the processes aren't gone by the time tenant_manager.shutdown() above returns.
     timed(
-        walredo_global_state.wait_shutdown_complete(),
-        "wait for walredo processes to exit",
+        walredo_global_state.shutdown(),
+        "wait for all walredo processes to exit",
         Duration::from_secs(1),
     )
     .await;
@@ -118,11 +119,10 @@ pub async fn shutdown_pageserver(
     // There should be nothing left, but let's be sure
     timed(
         task_mgr::shutdown_tasks(None, None, None),
-        "shutdown taskmgr leftovers",
+        "shutdown leftovers",
         Duration::from_secs(1),
     )
     .await;
-
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
 }

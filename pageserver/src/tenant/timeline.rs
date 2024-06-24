@@ -5240,7 +5240,9 @@ impl Timeline {
                     Err(e) => {
                         return Err(match e {
                             crate::walredo::Error::Cancelled => PageReconstructError::Cancelled,
-                            crate::walredo::Error::Other(e) => PageReconstructError::WalRedo(e),
+                            crate::walredo::Error::Other(e) => {
+                                PageReconstructError::WalRedo(e.context("reconstruct a page image"))
+                            }
                         })
                     }
                 };

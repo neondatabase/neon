@@ -394,10 +394,9 @@ fn start_pageserver(
         deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
     }
 
-    // Set up global tracking of walredo processes
-    let walredo_global_state = BACKGROUND_RUNTIME.block_on(
-        pageserver::walredo::GlobalState::spawn(conf, shutdown_pageserver.clone()),
-    );
+    // Set up global state shared by all walredo processes.
+    let walredo_global_state =
+        BACKGROUND_RUNTIME.block_on(pageserver::walredo::GlobalState::spawn(conf));
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
@@ -695,7 +694,13 @@ fn start_pageserver(
             // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
             // The plan is to change that over time.
             shutdown_pageserver.take();
-            pageserver::shutdown_pageserver(&tenant_manager, deletion_queue.clone(), 0).await;
+            pageserver::shutdown_pageserver(
+                &tenant_manager,
+                deletion_queue.clone(),
+                walredo_global_state,
+                0,
+            )
+            .await;
             unreachable!()
         })
     }
