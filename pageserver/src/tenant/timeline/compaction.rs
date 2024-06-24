@@ -965,6 +965,8 @@ impl Timeline {
         _cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
+        use std::collections::BTreeSet;
+
         use crate::tenant::storage_layer::ValueReconstructState;
         // Step 0: pick all delta layers + image layers below/intersect with the GC horizon.
         // The layer selection has the following properties:
@@ -986,20 +988,30 @@ impl Timeline {
             (selected_layers, gc_cutoff)
         };
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
+        // Also, collect the layer information to decide when to split the new delta layers.
         let mut all_key_values = Vec::new();
+        let mut delta_split_points = BTreeSet::new();
         for layer in &layer_selection {
             all_key_values.extend(layer.load_key_values(ctx).await?);
+            let desc = layer.layer_desc();
+            if desc.is_delta() {
+                // TODO: is it correct to only record split points for deltas intersecting with the GC horizon? (exclude those below/above the horizon)
+                // so that we can avoid having too many small delta layers.
+                let key_range = desc.get_key_range();
+                delta_split_points.insert(key_range.start);
+                delta_split_points.insert(key_range.end);
+            }
         }
         // Key small to large, LSN low to high, if the same LSN has both image and delta due to the merge of delta layers and
-        // image layers, make image appear later than delta.
+        // image layers, make image appear before than delta.
         struct ValueWrapper<'a>(&'a crate::repository::Value);
         impl Ord for ValueWrapper<'_> {
             fn cmp(&self, other: &Self) -> std::cmp::Ordering {
                 use crate::repository::Value;
                 use std::cmp::Ordering;
                 match (self.0, other.0) {
-                    (Value::Image(_), Value::WalRecord(_)) => Ordering::Greater,
-                    (Value::WalRecord(_), Value::Image(_)) => Ordering::Less,
+                    (Value::Image(_), Value::WalRecord(_)) => Ordering::Less,
+                    (Value::WalRecord(_), Value::Image(_)) => Ordering::Greater,
                     _ => Ordering::Equal,
                 }
             }
@@ -1018,13 +1030,6 @@ impl Timeline {
         all_key_values.sort_by(|(k1, l1, v1), (k2, l2, v2)| {
             (k1, l1, ValueWrapper(v1)).cmp(&(k2, l2, ValueWrapper(v2)))
         });
-        let max_lsn = all_key_values
-            .iter()
-            .map(|(_, lsn, _)| lsn)
-            .max()
-            .copied()
-            .unwrap()
-            + 1;
         // Step 2: Produce images+deltas. TODO: ensure newly-produced delta does not overlap with other deltas.
         // Data of the same key.
         let mut accumulated_values = Vec::new();
@@ -1043,7 +1048,19 @@ impl Timeline {
             // We have a list of deltas/images. We want to create image layers while collect garbages.
             for (key, lsn, val) in accumulated_values.iter().rev() {
                 if *lsn > horizon {
-                    keys_above_horizon.push((*key, *lsn, val.clone())); // TODO: ensure one LSN corresponds to either delta or image instead of both
+                    if let Some((_, prev_lsn, _)) = keys_above_horizon.last_mut() {
+                        if *prev_lsn == *lsn {
+                            // The case that we have an LSN with both data from the delta layer and the image layer. As
+                            // `ValueWrapper` ensures that an image is ordered before a delta at the same LSN, we simply
+                            // drop this delta and keep the image.
+                            //
+                            // For example, we have delta layer key1@0x10, key1@0x20, and image layer key1@0x10, we will
+                            // keep the image for key1@0x10 and the delta for key1@0x20. key1@0x10 delta will be simply
+                            // dropped.
+                            continue;
+                        }
+                    }
+                    keys_above_horizon.push((*key, *lsn, val.clone()));
                 } else if *lsn <= horizon {
                     match val {
                         crate::repository::Value::Image(image) => {
@@ -1068,15 +1085,59 @@ impl Timeline {
             Ok((keys_above_horizon, img))
         }
 
-        let mut delta_layer_writer = DeltaLayerWriter::new(
-            self.conf,
-            self.timeline_id,
-            self.tenant_shard_id,
-            all_key_values.first().unwrap().0,
-            gc_cutoff..max_lsn, // TODO: off by one?
-            ctx,
-        )
-        .await?;
+        async fn flush_deltas(
+            deltas: &mut Vec<(Key, Lsn, crate::repository::Value)>,
+            last_key: Key,
+            delta_split_points: &[Key],
+            current_delta_split_point: &mut usize,
+            tline: &Arc<Timeline>,
+            gc_cutoff: Lsn,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<Option<ResidentLayer>> {
+            // Check if we need to split the delta layer. We split at the original delta layer boundary to avoid
+            // overlapping layers.
+            //
+            // If we have a structure like this:
+            //
+            // | Delta 1 |         | Delta 4 |
+            // |---------| Delta 2 |---------|
+            // | Delta 3 |         | Delta 5 |
+            //
+            // And we choose to compact delta 2+3+5. We will get an overlapping delta layer with delta 1+4.
+            // A simple solution here is to split the delta layers using the original boundary, while this
+            // might produce a lot of small layers. This should be improved and fixed in the future.
+            let mut need_split = false;
+            while *current_delta_split_point < delta_split_points.len()
+                && last_key >= delta_split_points[*current_delta_split_point]
+            {
+                *current_delta_split_point += 1;
+                need_split = true;
+            }
+            if !need_split {
+                return Ok(None);
+            }
+            let deltas = std::mem::take(deltas);
+            if deltas.is_empty() {
+                return Ok(None);
+            }
+            let end_lsn = deltas.iter().map(|(_, lsn, _)| lsn).max().copied().unwrap() + 1;
+            let mut delta_layer_writer = DeltaLayerWriter::new(
+                tline.conf,
+                tline.timeline_id,
+                tline.tenant_shard_id,
+                deltas.first().unwrap().0,
+                gc_cutoff..end_lsn,
+                ctx,
+            )
+            .await?;
+            let key_end = deltas.last().unwrap().0.next();
+            for (key, lsn, val) in deltas {
+                delta_layer_writer.put_value(key, lsn, val, ctx).await?;
+            }
+            let delta_layer = delta_layer_writer.finish(key_end, tline, ctx).await?;
+            Ok(Some(delta_layer))
+        }
+
         let mut image_layer_writer = ImageLayerWriter::new(
             self.conf,
             self.timeline_id,
@@ -1087,6 +1148,10 @@ impl Timeline {
         )
         .await?;
 
+        let mut delta_values = Vec::new();
+        let delta_split_points = delta_split_points.into_iter().collect_vec();
+        let mut current_delta_split_point = 0;
+        let mut delta_layers = Vec::new();
         for item @ (key, _, _) in &all_key_values {
             if &last_key == key {
                 accumulated_values.push(item);
@@ -1094,33 +1159,54 @@ impl Timeline {
                 let (deltas, image) =
                     flush_accumulated_states(self, last_key, &accumulated_values, gc_cutoff)
                         .await?;
+                // Put the image into the image layer. Currently we have a single big layer for the compaction.
                 image_layer_writer.put_image(last_key, image, ctx).await?;
-                for (key, lsn, val) in deltas {
-                    delta_layer_writer.put_value(key, lsn, val, ctx).await?;
-                }
+                delta_values.extend(deltas);
+                delta_layers.extend(
+                    flush_deltas(
+                        &mut delta_values,
+                        last_key,
+                        &delta_split_points,
+                        &mut current_delta_split_point,
+                        self,
+                        gc_cutoff,
+                        ctx,
+                    )
+                    .await?,
+                );
                 accumulated_values.clear();
                 accumulated_values.push(item);
                 last_key = *key;
             }
         }
+
+        // TODO: move this part to the loop body
         let (deltas, image) =
             flush_accumulated_states(self, last_key, &accumulated_values, gc_cutoff).await?;
+        // Put the image into the image layer. Currently we have a single big layer for the compaction.
         image_layer_writer.put_image(last_key, image, ctx).await?;
-        for (key, lsn, val) in deltas {
-            delta_layer_writer.put_value(key, lsn, val, ctx).await?;
-        }
-        accumulated_values.clear();
-        // TODO: split layers
-        let delta_layer = delta_layer_writer.finish(last_key, self, ctx).await?;
+        delta_values.extend(deltas);
+        delta_layers.extend(
+            flush_deltas(
+                &mut delta_values,
+                last_key,
+                &delta_split_points,
+                &mut current_delta_split_point,
+                self,
+                gc_cutoff,
+                ctx,
+            )
+            .await?,
+        );
+
         let image_layer = image_layer_writer.finish(self, ctx).await?;
+        let mut compact_to = Vec::new();
+        compact_to.extend(delta_layers);
+        compact_to.push(image_layer);
         // Step 3: Place back to the layer map.
         {
             let mut guard = self.layers.write().await;
-            guard.finish_gc_compaction(
-                &layer_selection,
-                &[delta_layer.clone(), image_layer.clone()],
-                &self.metrics,
-            )
+            guard.finish_gc_compaction(&layer_selection, &compact_to, &self.metrics)
         };
         Ok(())
     }
