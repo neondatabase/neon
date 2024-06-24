@@ -1053,6 +1053,10 @@ impl Timeline {
                             // The case that we have an LSN with both data from the delta layer and the image layer. As
                             // `ValueWrapper` ensures that an image is ordered before a delta at the same LSN, we simply
                             // drop this delta and keep the image.
+                            //
+                            // For example, we have delta layer key1@0x10, key1@0x20, and image layer key1@0x10, we will
+                            // keep the image for key1@0x10 and the delta for key1@0x20. key1@0x10 delta will be simply
+                            // dropped.
                             continue;
                         }
                     }
