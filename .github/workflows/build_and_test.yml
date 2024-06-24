@@ -751,7 +751,7 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
@@ -842,7 +842,7 @@ jobs:
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
       - name: Build compute-node image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
@@ -861,7 +861,7 @@ jobs:
 
       - name: Build neon extensions test image
         if: matrix.version == 'v16'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
@@ -882,7 +882,7 @@ jobs:
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
         if: matrix.version == 'v16'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           target: compute-tools-image
           context: .
