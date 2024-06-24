@@ -2240,6 +2240,7 @@ impl TimelineMetrics {
         }
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = VALID_LSN_LEASE_COUNT.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()
