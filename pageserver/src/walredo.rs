@@ -53,10 +53,18 @@ pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
-    /// The current [`process::WalRedoProcess`] that is used by new redo requests.
-    /// We use [`heavier_once_cell`] for coalescing the spawning, but the redo
-    /// requests don't use the [`heavier_once_cell::Guard`] to keep ahold of the
+    /// We use [`heavier_once_cell`] for
+    ///
+    /// 1. coalescing the lazy spawning of walredo processes ([`ProcessOnceCell::Spawned`])
+    /// 2. for [`utils::sync::gate::Gate`]-like behavior required by [`Self::shutdown`] (=> [`ProcessOnceCell::ManagerShutDown`]).
+    ///
+    /// # Spawning
+    ///
+    /// Redo requests use the once cell to coalesce onto one call to [`process::WalRedoProcess::launch`].
+    ///
+    /// Notably, requests don't use the [`heavier_once_cell::Guard`] to keep ahold of the
     /// their process object; we use [`Arc::clone`] for that.
+    ///
     /// This is primarily because earlier implementations that didn't  use [`heavier_once_cell`]
     /// had that behavior; it's probably unnecessary.
     /// The only merit of it is that if one walredo process encounters an error,
@@ -65,11 +73,17 @@ pub struct PostgresRedoManager {
     /// still be using the old redo process. But, those other tasks will most likely
     /// encounter an error as well, and errors are an unexpected condition anyway.
     /// So, probably we could get rid of the `Arc` in the future.
-    redo_process: heavier_once_cell::OnceCell<RedoProcessState>,
+    ///
+    /// # Shutdown
+    ///
+    /// The invariant is that once the once cell is set to [`ProcessOnceCell::ManagerShutDown`], no new processes
+    /// will be launched and we will not change the value again.
+    redo_process: heavier_once_cell::OnceCell<ProcessOnceCell>,
 }
 
-enum RedoProcessState {
-    Launched(Arc<process::WalRedoProcess>),
+/// See [`PostgresRedoManager::redo_process`].
+enum ProcessOnceCell {
+    Spawned(Arc<process::WalRedoProcess>),
     ManagerShutDown,
 }
 
@@ -168,8 +182,8 @@ impl PostgresRedoManager {
                 })
             },
             process: self.redo_process.get().and_then(|p| match &*p {
-                RedoProcessState::Launched(p) => Some(WalRedoManagerProcessStatus { pid: p.id() }),
-                RedoProcessState::ManagerShutDown => None,
+                ProcessOnceCell::Spawned(p) => Some(WalRedoManagerProcessStatus { pid: p.id() }),
+                ProcessOnceCell::ManagerShutDown => None,
             }),
         }
     }
@@ -192,8 +206,18 @@ impl PostgresRedoManager {
         }
     }
 
+    /// Shut down the WAL redo manager.
+    ///
+    /// After this future completes, new redo requests will fail with [`Error::Cancelled`].
+    /// Concurrent redo requests may or may not complete.
+    ///
+    /// The manager will not launch new redo processes.
+    /// TODO: guarantee that pre-existing processes have been killed using a gate.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn shutdown(&self) {
-        // prevent new launches
         let permit = match self.redo_process.get_or_init_detached().await {
             Ok(guard) => {
                 let (proc, permit) = guard.take_and_deinit();
@@ -203,7 +227,7 @@ impl PostgresRedoManager {
             Err(permit) => permit,
         };
         self.redo_process
-            .set(RedoProcessState::ManagerShutDown, permit);
+            .set(ProcessOnceCell::ManagerShutDown, permit);
     }
 
     /// This type doesn't have its own background task to check for idleness: we
@@ -246,8 +270,8 @@ impl PostgresRedoManager {
             let proc: Arc<process::WalRedoProcess> =
                 match self.redo_process.get_or_init_detached().await {
                     Ok(guard) => match &*guard {
-                        RedoProcessState::Launched(proc) => Arc::clone(proc),
-                        RedoProcessState::ManagerShutDown => {
+                        ProcessOnceCell::Spawned(proc) => Arc::clone(proc),
+                        ProcessOnceCell::ManagerShutDown => {
                             return Err(Error::Cancelled);
                         }
                     },
@@ -270,7 +294,7 @@ impl PostgresRedoManager {
                             "launched walredo process"
                         );
                         self.redo_process
-                            .set(RedoProcessState::Launched(Arc::clone(&proc)), permit);
+                            .set(ProcessOnceCell::Spawned(Arc::clone(&proc)), permit);
                         proc
                     }
                 };
@@ -339,8 +363,8 @@ impl PostgresRedoManager {
                     None => (),
                     Some(guard) => {
                         match &*guard {
-                            RedoProcessState::ManagerShutDown => {}
-                            RedoProcessState::Launched(guard_proc) => {
+                            ProcessOnceCell::ManagerShutDown => {}
+                            ProcessOnceCell::Spawned(guard_proc) => {
                                 if Arc::ptr_eq(&proc, guard_proc) {
                                     // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
                                     guard.take_and_deinit();
