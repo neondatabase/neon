@@ -608,6 +608,11 @@ impl AtomicStatus {
     }
 
     pub fn load(&self, order: std::sync::atomic::Ordering) -> Status {
+        // Safety: This line of code uses `std::mem::transmute` to reinterpret the loaded value as `Status`.
+        // It is safe to use `transmute` in this context because `Status` is a repr(usize) enum,
+        // which means it has the same memory layout as usize.
+        // However, it is important to ensure that the loaded value is a valid variant of `Status`,
+        // otherwise, the behavior will be undefined.
         unsafe { std::mem::transmute(self.inner.load(order)) }
     }
 

@@ -167,7 +167,7 @@ impl<'a> Drop for WriteGuardSharedState<'a> {
 
 pub enum StateSK {
     Loaded(SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>),
-    Offloaded(TimelineState<control_file::FileStorage>),
+    Offloaded(Box<TimelineState<control_file::FileStorage>>),
     Empty,
 }
 
@@ -271,7 +271,7 @@ impl StateSK {
     fn take_state(self) -> TimelineState<control_file::FileStorage> {
         match self {
             StateSK::Loaded(sk) => sk.state,
-            StateSK::Offloaded(state) => state,
+            StateSK::Offloaded(state) => *state,
             StateSK::Empty => unreachable!(),
         }
     }
@@ -345,7 +345,9 @@ impl SharedState {
                     conf.my_id,
                 )?)
             }
-            EvictionState::Offloaded(_) => StateSK::Offloaded(TimelineState::new(control_store)),
+            EvictionState::Offloaded(_) => {
+                StateSK::Offloaded(Box::new(TimelineState::new(control_store)))
+            }
         };
 
         Ok(Self {
@@ -1031,7 +1033,7 @@ impl ManagerTimeline {
         // now we can switch shared.sk to Offloaded, shouldn't fail
         let prev_sk = std::mem::replace(&mut shared.sk, StateSK::Empty);
         let cfile_state = prev_sk.take_state();
-        shared.sk = StateSK::Offloaded(cfile_state);
+        shared.sk = StateSK::Offloaded(Box::new(cfile_state));
 
         Ok(())
     }
