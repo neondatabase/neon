@@ -236,6 +236,13 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
+        - name: with_lease
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Whether to grant a lease to the corresponding LSN. Default to false.
+
       responses:
         "200":
           description: OK
@@ -1029,6 +1036,10 @@ components:
         kind:
           type: string
           enum: [past, present, future, nodata]
+        valid_until:
+          type: string
+          format: date-time
+          description: The expiration time of the granted lease.
 
     LsnLease:
       type: object
