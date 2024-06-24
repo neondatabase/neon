@@ -394,7 +394,7 @@ fn start_pageserver(
         deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
     }
 
-    // Set up global walredo manager state
+    // Set up global tracking of walredo processes
     let walredo_global_state = BACKGROUND_RUNTIME.block_on(
         pageserver::walredo::GlobalState::spawn(conf, shutdown_pageserver.clone()),
     );

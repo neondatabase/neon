@@ -82,21 +82,22 @@ pub async fn shutdown_pageserver(
     )
     .await;
 
+    // In theory, walredo processes are tenant-scoped and should have been shut down after
+    // tenant manager shutdown above.
+    // In practive, we have lingering walredo processes even after pageserver shutdowns that
+    // don't hit the systemd TimeoutSec timeout of 10 seconds (i.e., that log `Shut down successfully completed` below).
+    timed(
+        walredo_global_state.wait_shutdown_complete(),
+        "wait for walredo processes to exit",
+        Duration::from_secs(1),
+    )
+    .await;
+
     // Shut down any page service tasks: any in-progress work for particular timelines or tenants
     // should already have been canclled via mgr::shutdown_all_tenants
     timed(
         task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None),
         "shutdown PageRequestHandlers",
-        Duration::from_secs(1),
-    )
-    .await;
-
-    // The caller of this function already cancelled the `shutdown_pageserver` cancellation token,
-    // to which all the per-tenant walredo _manager_ methods are sensitive.
-    // This here is just to make sure the underlying walredo _processes_ are gone.
-    timed(
-        walredo_global_state.wait_shutdown_complete().await,
-        "wait for walredo processes to exit",
         Duration::from_secs(1),
     )
     .await;

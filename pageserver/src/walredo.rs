@@ -84,10 +84,8 @@ impl GlobalState {
         self.spawn_gate.close().await;
         info!("all walredo processes have been killed and no new ones will be spawned");
     }
-    pub(self) fn is_shutdown_requested(self: &Arc<Self>) -> bool {
-        self.shutdown_bool.load(Ordering::Relaxed)
-    }
-    pub(crate) fn wait_shutdown_complete(self: &Arc<Self>) {
+
+    pub(crate) async fn wait_shutdown_complete(self: &Arc<Self>) {
         assert!(
             self.shutdown.is_cancelled(),
             "must cancel the `shutdown` token before waiting, otherwise we will wait forever"
@@ -319,7 +317,10 @@ impl PostgresRedoManager {
             let result = proc
                 .apply_wal_records(rel, blknum, &base_img, records, wal_redo_timeout)
                 .await
-                .context("apply_wal_records");
+                .map_err(|e| match e {
+                    Error::Cancelled => Error::Cancelled,
+                    Error::Other(e) => Error::Other(e.context("apply_wal_records")),
+                });
             if matches!(result, Err(Error::Cancelled)) {
                 // bail asap and also avoid log noise due to the error reporting below
                 return Err(Error::Cancelled);
@@ -396,7 +397,7 @@ impl PostgresRedoManager {
             }
             n_attempts += 1;
             if n_attempts > MAX_RETRY_ATTEMPTS || result.is_ok() {
-                return result.map_err(Error::Other);
+                return result;
             }
         }
     }

@@ -218,10 +218,6 @@ impl WalRedoProcess {
     ) -> Result<Bytes, super::Error> {
         debug_assert_current_span_has_tenant_id();
 
-        if self.global_state.is_shutdown_requested() {
-            return Err(super::Error::Cancelled);
-        }
-
         let tag = protocol::BufferTag { rel, blknum };
 
         // Serialize all the messages to send the WAL redo process first.
