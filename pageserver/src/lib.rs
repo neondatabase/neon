@@ -11,6 +11,8 @@ pub mod deletion_queue;
 pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
+use std::sync::Arc;
+
 pub use pageserver_api::keyspace;
 pub mod aux_file;
 pub mod metrics;
@@ -58,6 +60,7 @@ pub use crate::metrics::preinitialize_metrics;
 pub async fn shutdown_pageserver(
     tenant_manager: &TenantManager,
     mut deletion_queue: DeletionQueue,
+    walredo_global_state: Arc<walredo::GlobalState>,
     exit_code: i32,
 ) {
     use std::time::Duration;
@@ -88,6 +91,16 @@ pub async fn shutdown_pageserver(
     )
     .await;
 
+    // The caller of this function already cancelled the `shutdown_pageserver` cancellation token,
+    // to which all the per-tenant walredo _manager_ methods are sensitive.
+    // This here is just to make sure the underlying walredo _processes_ are gone.
+    timed(
+        walredo_global_state.wait_shutdown_complete().await,
+        "wait for walredo processes to exit",
+        Duration::from_secs(1),
+    )
+    .await;
+
     // Best effort to persist any outstanding deletions, to avoid leaking objects
     deletion_queue.shutdown(Duration::from_secs(5)).await;
 
@@ -104,10 +117,11 @@ pub async fn shutdown_pageserver(
     // There should be nothing left, but let's be sure
     timed(
         task_mgr::shutdown_tasks(None, None, None),
-        "shutdown leftovers",
+        "shutdown taskmgr leftovers",
         Duration::from_secs(1),
     )
     .await;
+
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
 }

@@ -87,6 +87,16 @@ impl GlobalState {
     pub(self) fn is_shutdown_requested(self: &Arc<Self>) -> bool {
         self.shutdown_bool.load(Ordering::Relaxed)
     }
+    pub(crate) fn wait_shutdown_complete(self: &Arc<Self>) {
+        assert!(
+            self.shutdown.is_cancelled(),
+            "must cancel the `shutdown` token before waiting, otherwise we will wait forever"
+        );
+        self.spawn_gate.close().await
+        // The destructor of WalRedoProcess SIGKILLs and `wait()`s for the process
+        // The gate guard is stored in WalRedoProcess.
+        // So, we arrive here once all WalRedoProcess structs are gone.
+    }
 }
 
 ///
@@ -310,11 +320,9 @@ impl PostgresRedoManager {
                 .apply_wal_records(rel, blknum, &base_img, records, wal_redo_timeout)
                 .await
                 .context("apply_wal_records");
-            if result.is_err() {
-                // avoid
-                if self.global_state.shutdown.is_cancelled() {
-                    return Err(Error::Cancelled);
-                }
+            if matches!(result, Err(Error::Cancelled)) {
+                // bail asap and also avoid log noise due to the error reporting below
+                return Err(Error::Cancelled);
             }
 
             let duration = started_at.elapsed();
