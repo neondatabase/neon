@@ -13,6 +13,10 @@ pub trait ShouldRetry {
     fn should_retry_database_address(&self) -> bool {
         true
     }
+
+    fn retry_after(&self, num_retries: u32, config: RetryConfig) -> time::Duration {
+        retry_after(num_retries, config)
+    }
 }
 
 impl ShouldRetry for io::Error {
@@ -79,6 +83,7 @@ impl ShouldRetry for compute::ConnectionError {
         match self {
             compute::ConnectionError::Postgres(err) => err.could_retry(),
             compute::ConnectionError::CouldNotConnect(err) => err.could_retry(),
+            compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
             _ => false,
         }
     }
@@ -86,9 +91,18 @@ impl ShouldRetry for compute::ConnectionError {
         match self {
             compute::ConnectionError::Postgres(err) => err.should_retry_database_address(),
             compute::ConnectionError::CouldNotConnect(err) => err.should_retry_database_address(),
+            compute::ConnectionError::WakeComputeError(err) => err.should_retry_database_address(),
             // the cache entry was not checked for validity
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
             _ => true,
+        }
+    }
+    fn retry_after(&self, num_retries: u32, config: RetryConfig) -> time::Duration {
+        match self {
+            compute::ConnectionError::Postgres(e) => e.retry_after(num_retries, config),
+            compute::ConnectionError::CouldNotConnect(e) => e.retry_after(num_retries, config),
+            compute::ConnectionError::WakeComputeError(e) => e.retry_after(num_retries, config),
+            _ => retry_after(num_retries, config),
         }
     }
 }

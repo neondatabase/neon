@@ -6,10 +6,7 @@ use crate::{
     context::RequestMonitoring,
     error::ReportableError,
     metrics::{ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType},
-    proxy::{
-        retry::{retry_after, ShouldRetry},
-        wake_compute::wake_compute,
-    },
+    proxy::{retry::ShouldRetry, wake_compute::wake_compute},
     Host,
 };
 use async_trait::async_trait;
@@ -171,7 +168,7 @@ where
     info!("wake_compute success. attempting to connect");
     num_retries = 1;
     loop {
-        match mechanism
+        let wait_duration = match mechanism
             .connect_once(ctx, &node_info, CONNECT_TIMEOUT)
             .await
         {
@@ -201,10 +198,10 @@ where
                     return Err(e.into());
                 }
                 warn!(error = ?e, num_retries, retriable, "couldn't connect to compute node");
+                e.retry_after(num_retries, connect_to_compute_retry_config)
             }
-        }
+        };
 
-        let wait_duration = retry_after(num_retries, connect_to_compute_retry_config);
         num_retries += 1;
 
         let pause = ctx

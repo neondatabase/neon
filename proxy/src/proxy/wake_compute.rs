@@ -6,7 +6,6 @@ use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
     WakeupFailureKind,
 };
-use crate::proxy::retry::retry_after;
 use hyper1::StatusCode;
 use std::ops::ControlFlow;
 use tracing::{error, info, warn};
@@ -23,7 +22,7 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
     let retry_type = RetryType::WakeCompute;
     loop {
         let wake_res = api.wake_compute(ctx).await;
-        match handle_try_wake(wake_res, *num_retries, config) {
+        let wait_duration = match handle_try_wake(wake_res, *num_retries, config) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
                 report_error(&e, false);
@@ -39,6 +38,7 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
             Ok(ControlFlow::Continue(e)) => {
                 warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
                 report_error(&e, true);
+                e.retry_after(*num_retries, config)
             }
             Ok(ControlFlow::Break(n)) => {
                 Metrics::get().proxy.retries_metric.observe(
@@ -51,9 +51,7 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
                 info!(?num_retries, "compute node woken up after");
                 return Ok(n);
             }
-        }
-
-        let wait_duration = retry_after(*num_retries, config);
+        };
         *num_retries += 1;
         let pause = ctx
             .latency_timer
@@ -73,12 +71,8 @@ pub fn handle_try_wake(
     config: RetryConfig,
 ) -> Result<ControlFlow<CachedNodeInfo, WakeComputeError>, WakeComputeError> {
     match result {
-        Err(err) => match &err {
-            WakeComputeError::ApiError(api) if api.should_retry(num_retries, config) => {
-                Ok(ControlFlow::Continue(err))
-            }
-            _ => Err(err),
-        },
+        Err(err) if err.should_retry(num_retries, config) => Ok(ControlFlow::Continue(err)),
+        Err(err) => Err(err),
         // Ready to try again.
         Ok(new) => Ok(ControlFlow::Break(new)),
     }

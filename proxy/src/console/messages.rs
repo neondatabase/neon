@@ -1,11 +1,12 @@
 use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
+use std::time::Duration;
 
 use crate::auth::IpPattern;
 
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
-use crate::proxy::retry::ShouldRetry;
+use crate::proxy::retry::{retry_after, ShouldRetry};
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
@@ -66,44 +67,24 @@ impl Display for ConsoleError {
 
 impl ShouldRetry for ConsoleError {
     fn could_retry(&self) -> bool {
-        if self.status.is_none() || self.status.as_ref().unwrap().details.retry_info.is_none() {
-            // retry some temporary failures because the compute was in a bad state
-            // (bad request can be returned when the endpoint was in transition)
-            return match &self {
-                ConsoleError {
-                    http_status_code: http::StatusCode::BAD_REQUEST,
-                    ..
-                } => true,
-                // don't retry when quotas are exceeded
-                ConsoleError {
-                    http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
-                    ref error,
-                    ..
-                } => !error.contains("compute time quota of non-primary branches is exceeded"),
-                // locked can be returned when the endpoint was in transition
-                // or when quotas are exceeded. don't retry when quotas are exceeded
-                ConsoleError {
-                    http_status_code: http::StatusCode::LOCKED,
-                    ref error,
-                    ..
-                } => {
-                    !error.contains("quota exceeded")
-                        && !error.contains("the limit for current plan reached")
-                }
-                _ => false,
-            };
-        }
-
-        // retry if the response has a retry delay
-        if let Some(retry_info) = self
-            .status
+        // retry if the retry info is set.
+        // if no status or retry info, do not retry.
+        self.status
             .as_ref()
-            .and_then(|s| s.details.retry_info.as_ref())
-        {
-            retry_info.retry_delay_ms > 0
-        } else {
-            false
-        }
+            .and_then(|status| status.details.retry_info.as_ref())
+            .is_some()
+    }
+
+    fn retry_after(
+        &self,
+        num_retries: u32,
+        config: crate::config::RetryConfig,
+    ) -> tokio::time::Duration {
+        self.status
+            .as_ref()
+            .and_then(|status| status.details.retry_info.as_ref())
+            .map(|info| Duration::from_millis(info.retry_delay_ms))
+            .unwrap_or_else(|| retry_after(num_retries, config))
     }
 }
 
