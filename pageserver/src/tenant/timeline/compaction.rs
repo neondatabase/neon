@@ -981,8 +981,7 @@ impl Timeline {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
             let gc_info = self.gc_info.read().unwrap();
-            if !gc_info.retain_lsns.is_empty() {
-                // TODO: add lease LSNs
+            if !gc_info.retain_lsns.is_empty() || !gc_info.leases.is_empty() {
                 return Err(CompactionError::Other(anyhow!(
                     "enhanced legacy compaction currently does not support retain_lsns (branches)"
                 )));

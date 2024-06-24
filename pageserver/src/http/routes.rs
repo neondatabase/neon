@@ -1706,7 +1706,6 @@ async fn timeline_compact_handler(
         if !cfg!(feature = "testing") {
             return Err(ApiError::InternalServerError(
                 anyhow!("enhanced_gc_bottom_most_compaction is only available in testing mode")
-                    .into(),
             ));
         }
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
