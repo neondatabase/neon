@@ -231,8 +231,7 @@ impl PhysicalStorage {
             // half initialized segment, first bake it under tmp filename and
             // then rename.
             let tmp_path = self.timeline_dir.join("waltmp");
-            let mut file = 
-                File::create(&tmp_path)
+            let mut file = File::create(&tmp_path)
                 .await
                 .with_context(|| format!("Failed to open tmp wal file {:?}", &tmp_path))?;
 
