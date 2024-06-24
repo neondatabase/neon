@@ -6,25 +6,23 @@
 Neon is a serverless open-source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes the PostgreSQL storage layer by redistributing data across a cluster of nodes.
 
 <div align="center">
-  
-  [![Number of GitHub issues that are open](https://img.shields.io/github/issues/neondatabase/neon)](https://github.com/neondatabase/neon/issues)
-  [![Number of GitHub pull requests that are open](https://img.shields.io/github/issues-pr-raw/neondatabase/neon)](https://github.com/neondatabase/neon/pulls)
-  [![Contributors](https://img.shields.io/github/contributors/neondatabase/neon)](https://github.com/neondatabase/neon/graphs/contributors)
-  [![Latest Release](https://img.shields.io/github/v/release/neondatabase/neon)](https://github.com/neondatabase/neon/releases)
-  [![Number of GitHub stars](https://img.shields.io/github/stars/neondatabase/neon)](https://github.com/neondatabase/neon)
-  [![Forks](https://img.shields.io/github/forks/neondatabase/neon)](https://github.com/neondatabase/neon/network/members)
-  [![Issues Closed](https://img.shields.io/github/issues-closed/neondatabase/neon)](https://github.com/neondatabase/neon/issues?q=is%3Aissue+is%3Aclosed)
-  [![Pull Requests Closed](https://img.shields.io/github/issues-pr-closed/neondatabase/neon)](https://github.com/neondatabase/neon/pulls?q=is%3Apr+is%3Aclosed)
-  [![Follow us on X, formerly Twitter](https://img.shields.io/twitter/follow/neondatabase)](https://x.com/neondatabase)
-  [![Let's Chat on Discord](https://img.shields.io/discord/1176467419317940276)](https://neon.tech/discord)
-  [![License](https://img.shields.io/github/license/neondatabase/neon)](https://github.com/neondatabase/neon/blob/main/LICENSE)
-  [![Website](https://img.shields.io/website?url=https%3A%2F%2Fneon.tech)](https://neon.tech)
-  [![Docker Pulls](https://img.shields.io/docker/pulls/neondatabase/neon)](https://hub.docker.com/r/neondatabase/neon)
-  [![Last Commit](https://img.shields.io/github/last-commit/neondatabase/neon)](https://github.com/neondatabase/neon/commits/main)
-  [![Start Contributing](https://img.shields.io/badge/Start-Contributing-green)](/CONTRIBUTING.md)
-  [![Get Started](https://img.shields.io/badge/Get%20Started-Free%20Tier-ff69b4)](https://console.neon.tech/signup)
-</div>
 
+## How to get involved with Neon
+
+[![Discord](https://img.shields.io/discord/1176467419317940276)](https://discord.gg/GsWmAzVuAn)
+[![Follow us on X](https://img.shields.io/twitter/follow/neondatabase)](https://x.com/neondatabase)
+[![Contribute](https://img.shields.io/badge/Contribute-Guide-brightgreen)](CONTRIBUTING.md)
+[![Website](https://img.shields.io/website?url=https%3A%2F%2Fneon.tech)](https://neon.tech)
+[![OAuth Integration](https://img.shields.io/badge/Integrate-OAuth-blue)](https://neon.tech/docs/guides/oauth-integration)
+
+## How to start building on Neon
+
+[![Sign Up](https://img.shields.io/badge/Sign%20Up-Free%20Tier-brightgreen)](https://console.neon.tech/signup)
+[![Sample Data](https://img.shields.io/badge/Sample-Data-orange)](https://neon.tech/docs/import/import-sample-data)
+[![Example Apps](https://img.shields.io/badge/Example-Apps-blue)](https://github.com/neondatabase/examples)
+[![Partners](https://img.shields.io/badge/Postgres%20as%20a-Platform-purple)](https://neon.tech/partners)
+
+</div>
 
 ## Quick start
 Try the [Neon Free Tier](https://neon.tech/github) to create a serverless Postgres instance. Then connect to it with your preferred Postgres client (psql, dbeaver, etc) or use the online [SQL Editor](https://neon.tech/docs/get-started-with-neon/query-with-neon-sql-editor/). See [Connect from any application](https://neon.tech/docs/connect/connect-from-any-app/) for connection instructions.
