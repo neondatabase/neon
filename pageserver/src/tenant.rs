@@ -658,11 +658,6 @@ impl Tenant {
             walredo_global_state,
         } = resources;
 
-        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
-            walredo_global_state,
-            tenant_shard_id,
-        )));
-
         let attach_mode = attached_conf.location.attach_mode;
         let generation = attached_conf.location.generation;
 
@@ -2492,11 +2487,22 @@ impl Tenant {
         conf: &'static PageServerConf,
         attached_conf: AttachedTenantConf,
         shard_identity: ShardIdentity,
-        walredo_mgr: Option<Arc<WalRedoManager>>,
         tenant_shard_id: TenantShardId,
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
     ) -> Tenant {
+        let cancel = CancellationToken::default();
+
+        let walredo_mgr = if let TenantState::Broken { .. } = &state {
+            None
+        } else {
+            Some(Arc::new(WalRedoManager::from(PostgresRedoManager::new(
+                walredo_global_state,
+                tenant_shard_id,
+                cancel.child_token(),
+            ))))
+        };
+
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
@@ -2571,7 +2577,7 @@ impl Tenant {
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
             activate_now_sem: tokio::sync::Semaphore::new(0),
-            cancel: CancellationToken::default(),
+            cancel,
             gate: Gate::default(),
             timeline_get_throttle: Arc::new(throttle::Throttle::new(
                 Tenant::get_timeline_get_throttle_config(conf, &attached_conf.tenant_conf),
