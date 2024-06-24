@@ -49,6 +49,11 @@ impl TimelinesSet {
         self.timelines.lock().unwrap().values().cloned().collect()
     }
 
+    /// Returns size.
+    pub fn get_len(&self) -> usize {
+        self.timelines.lock().unwrap().len()
+    }
+
     /// Returns a timeline guard for easy presence control.
     pub fn guard(self: &Arc<Self>, tli: Arc<Timeline>) -> TimelineSetGuard {
         let is_present = self.is_present(&tli.ttid);

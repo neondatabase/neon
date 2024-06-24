@@ -12,8 +12,8 @@ use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
     register_int_counter, register_int_counter_pair, register_int_counter_pair_vec,
-    register_int_counter_vec, Gauge, IntCounter, IntCounterPair, IntCounterPairVec, IntCounterVec,
-    IntGaugeVec,
+    register_int_counter_vec, register_int_gauge, Gauge, IntCounter, IntCounterPair,
+    IntCounterPairVec, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 
@@ -162,6 +162,13 @@ pub static PARTIAL_BACKUP_UPLOADED_BYTES: Lazy<IntCounter> = Lazy::new(|| {
         "Number of bytes uploaded to the S3 during partial backup"
     )
     .expect("Failed to register safekeeper_partial_backup_uploaded_bytes_total counter")
+});
+pub static MANAGERS_RUNNING: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "safekeeper_managers_running",
+        "Number of timeline managers running. Should match safekeeper_timelines minus safekeeper_timelines_cancelled."
+    )
+    .expect("failed to define a metric")
 });
 pub static MANAGER_ITERATIONS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -385,7 +392,9 @@ pub struct TimelineCollector {
     flushed_wal_seconds: GaugeVec,
     collect_timeline_metrics: Gauge,
     timelines_count: IntGauge,
+    timelines_cancelled_count: IntGauge,
     active_timelines_count: IntGauge,
+    active_timelines_set_size: IntGauge,
 }
 
 impl Default for TimelineCollector {
@@ -573,10 +582,17 @@ impl TimelineCollector {
 
         let timelines_count = IntGauge::new(
             "safekeeper_timelines",
-            "Total number of timelines loaded in-memory",
+            "Total number of timelines loaded in-memory, including cancelled (deleted) ones.",
         )
         .unwrap();
         descs.extend(timelines_count.desc().into_iter().cloned());
+
+        let timelines_cancelled_count = IntGauge::new(
+            "safekeeper_timelines_cancelled",
+            "Number of cancelled timelines loaded in-memory",
+        )
+        .unwrap();
+        descs.extend(timelines_cancelled_count.desc().into_iter().cloned());
 
         let active_timelines_count = IntGauge::new(
             "safekeeper_active_timelines",
@@ -584,6 +600,13 @@ impl TimelineCollector {
         )
         .unwrap();
         descs.extend(active_timelines_count.desc().into_iter().cloned());
+
+        let active_timelines_set_size = IntGauge::new(
+            "safekeeper_active_timelines_set_size",
+            "Size of the active timelines hashset. Should match safekeeper_active_timelines metric.",
+        )
+        .unwrap();
+        descs.extend(active_timelines_set_size.desc().into_iter().cloned());
 
         TimelineCollector {
             descs,
@@ -606,7 +629,9 @@ impl TimelineCollector {
             flushed_wal_seconds,
             collect_timeline_metrics,
             timelines_count,
+            timelines_cancelled_count,
             active_timelines_count,
+            active_timelines_set_size,
         }
     }
 }
@@ -759,9 +784,18 @@ impl Collector for TimelineCollector {
         self.timelines_count.set(timelines_count as i64);
         mfs.extend(self.timelines_count.collect());
 
+        // report number of cancelled timelines
+        self.timelines_cancelled_count
+            .set(GlobalTimelines::get_num_cancelled() as i64);
+        mfs.extend(self.timelines_cancelled_count.collect());
+
         self.active_timelines_count
             .set(active_timelines_count as i64);
         mfs.extend(self.active_timelines_count.collect());
+
+        self.active_timelines_set_size
+            .set(GlobalTimelines::get_global_broker_active_set().get_len() as i64);
+        mfs.extend(self.active_timelines_set_size.collect());
 
         mfs
     }
