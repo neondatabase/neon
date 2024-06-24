@@ -12,6 +12,7 @@ use std::{
 };
 
 use postgres_ffi::XLogSegNo;
+use serde::{Deserialize, Serialize};
 use tokio::task::{JoinError, JoinHandle};
 use tracing::{info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
@@ -142,8 +143,8 @@ impl ManagerCtl {
     pub fn bootstrap_manager(
         &self,
     ) -> (
-        tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
         tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
+        tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
     ) {
         let rx = self
             .init_manager_rx
@@ -152,7 +153,7 @@ impl ManagerCtl {
             .take()
             .expect("manager already bootstrapped");
 
-        (rx, self.manager_ch.clone())
+        (self.manager_ch.clone(), rx)
     }
 }
 
@@ -191,8 +192,8 @@ pub async fn main_task(
     tli: ManagerTimeline,
     conf: SafeKeeperConf,
     broker_active_set: Arc<TimelinesSet>,
-    mut manager_rx: tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
     manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
+    mut manager_rx: tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
 ) {
     tli.set_status(Status::Started);
 
@@ -573,7 +574,7 @@ async fn await_task_finish<T>(option: &mut Option<JoinHandle<T>>) -> Result<T, J
 }
 
 #[repr(usize)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
     NotStarted,
     Started,

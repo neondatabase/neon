@@ -165,9 +165,14 @@ impl<'a> Drop for WriteGuardSharedState<'a> {
     }
 }
 
+/// This structure is stored in shared state and represents the state of the timeline.
+/// Usually it holds SafeKeeper, but it also supports offloaded timeline state. In this
+/// case, SafeKeeper is not available (because WAL is not present on disk) and all
+/// operations can be done only with control file.
 pub enum StateSK {
     Loaded(SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>),
     Offloaded(Box<TimelineState<control_file::FileStorage>>),
+    // Not used, required for moving between states.
     Empty,
 }
 
@@ -177,12 +182,13 @@ impl StateSK {
             StateSK::Loaded(sk) => sk.wal_store.flush_lsn(),
             StateSK::Offloaded(state) => match state.eviction_state {
                 EvictionState::Offloaded(flush_lsn) => flush_lsn,
-                _ => unreachable!(),
+                _ => panic!("StateSK::Offloaded mismatches with eviction_state from control_file"),
             },
             StateSK::Empty => unreachable!(),
         }
     }
 
+    /// Get a reference to the control file's timeline state.
     pub fn state(&self) -> &TimelineState<control_file::FileStorage> {
         match self {
             StateSK::Loaded(sk) => &sk.state,
@@ -209,12 +215,14 @@ impl StateSK {
             .get_last_log_term(self.flush_lsn())
     }
 
+    /// Close open WAL files to release FDs.
     fn close_wal_store(&mut self) {
         if let StateSK::Loaded(sk) = self {
             sk.wal_store.close();
         }
     }
 
+    /// Update timeline state with peer safekeeper data.
     pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
         // update commit_lsn if safekeeper is loaded
         match self {
@@ -248,6 +256,7 @@ impl StateSK {
         Ok(())
     }
 
+    /// Previously known as epoch_start_lsn. Needed only for reference in some APIs.
     pub fn term_start_lsn(&self) -> Lsn {
         match self {
             StateSK::Loaded(sk) => sk.term_start_lsn,
@@ -256,6 +265,7 @@ impl StateSK {
         }
     }
 
+    /// Used for metrics only.
     pub fn wal_storage_metrics(&self) -> WalStorageMetrics {
         match self {
             StateSK::Loaded(sk) => sk.wal_store.get_metrics(),
@@ -264,6 +274,7 @@ impl StateSK {
         }
     }
 
+    /// Returns WAL storage internal LSNs for debug dump.
     pub fn wal_storage_internal_state(&self) -> (Lsn, Lsn, Lsn, bool) {
         match self {
             StateSK::Loaded(sk) => sk.wal_store.internal_state(),
@@ -275,6 +286,7 @@ impl StateSK {
         }
     }
 
+    /// Access to SafeKeeper object. Panics if offloaded, should be good to use from WalResidentTimeline.
     pub fn safekeeper(
         &mut self,
     ) -> &mut SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage> {
@@ -287,6 +299,7 @@ impl StateSK {
         }
     }
 
+    /// Moves control file's state structure out of the enum. Used to switch states.
     fn take_state(self) -> TimelineState<control_file::FileStorage> {
         match self {
             StateSK::Loaded(sk) => sk.state,
@@ -617,7 +630,7 @@ impl Timeline {
         conf: &SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
     ) {
-        let (rx, tx) = self.manager_ctl.bootstrap_manager();
+        let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
         // Start manager task which will monitor timeline state and update
         // background tasks.
@@ -625,8 +638,8 @@ impl Timeline {
             ManagerTimeline { tli: self.clone() },
             conf.clone(),
             broker_active_set,
-            rx,
             tx,
+            rx,
         ));
     }
 
@@ -807,6 +820,7 @@ impl Timeline {
             last_removed_segno: self.last_removed_segno.load(Ordering::Relaxed),
             epoch_start_lsn: state.sk.term_start_lsn(),
             mem_state: state.sk.state().inmem.clone(),
+            mgr_status: self.mgr_status.get(),
             write_lsn,
             write_record_lsn,
             flush_lsn,
@@ -833,19 +847,21 @@ impl Timeline {
     }
 
     /// Get the timeline guard for reading/writing WAL files.
-    /// TODO(TODO): if WAL files are not present on disk (evicted), they will be
-    /// downloaded from S3. Also there will logic for preventing eviction
-    /// while someone is holding WalResidentTimeline guard.
+    /// If WAL files are not present on disk (evicted), they will be automatically
+    /// downloaded from remote storage. This is done in the manager task, which is
+    /// responsible for issuing all guards.
     ///
     /// NB: don't use this function from timeline_manager, it will deadlock.
-    /// Don't use this function while holding shared_state lock.
+    /// NB: don't use this function while holding shared_state lock.
     pub async fn wal_residence_guard(self: &Arc<Self>) -> Result<WalResidentTimeline> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
 
-        info!("requesting WalResidentTimeline guard");
+        debug!("requesting WalResidentTimeline guard");
 
+        // Wait 5 seconds for the guard to be acquired, should be enough for uneviction.
+        // If it times out, most likely there is a deadlock in the manager task.
         let res = tokio::time::timeout(
             Duration::from_secs(5),
             self.manager_ctl.wal_residence_guard(),
@@ -976,7 +992,7 @@ impl WalResidentTimeline {
     }
 }
 
-/// This struct is used to give special access to the timeline manager.
+/// This struct contains methods that are used by timeline manager task.
 pub(crate) struct ManagerTimeline {
     pub(crate) tli: Arc<Timeline>,
 }
@@ -994,6 +1010,7 @@ impl ManagerTimeline {
         &self.tli.timeline_dir
     }
 
+    /// Manager requests this state on startup.
     pub(crate) async fn bootstrap_mgr(&self) -> (bool, Option<PartialRemoteSegment>) {
         let shared_state = self.read_shared_state().await;
         let is_offloaded = matches!(
@@ -1005,6 +1022,7 @@ impl ManagerTimeline {
         (is_offloaded, partial_backup_uploaded)
     }
 
+    /// Try to switch state Present->Offloaded.
     pub(crate) async fn switch_to_offloaded(
         &self,
         partial: &PartialRemoteSegment,
@@ -1057,6 +1075,7 @@ impl ManagerTimeline {
         Ok(())
     }
 
+    /// Try to switch state Offloaded->Present.
     pub(crate) async fn switch_to_present(&self) -> anyhow::Result<()> {
         let conf = GlobalTimelines::get_global_config();
         let mut shared = self.write_shared_state().await;
@@ -1098,6 +1117,7 @@ impl ManagerTimeline {
         Ok(())
     }
 
+    /// Update current manager state, useful for debugging manager deadlocks.
     pub(crate) fn set_status(&self, status: timeline_manager::Status) {
         self.mgr_status.store(status, Ordering::Relaxed);
     }

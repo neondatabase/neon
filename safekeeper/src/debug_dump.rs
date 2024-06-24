@@ -29,6 +29,7 @@ use crate::state::TimelineMemState;
 use crate::state::TimelinePersistentState;
 use crate::timeline::get_timeline_dir;
 use crate::timeline::WalResidentTimeline;
+use crate::timeline_manager;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 
@@ -168,6 +169,7 @@ pub struct Memory {
     pub last_removed_segno: XLogSegNo,
     pub epoch_start_lsn: Lsn,
     pub mem_state: TimelineMemState,
+    pub mgr_status: timeline_manager::Status,
 
     // PhysicalStorage state.
     pub write_lsn: Lsn,
