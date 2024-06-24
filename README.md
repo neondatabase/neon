@@ -15,7 +15,7 @@
   [![Issues Closed](https://img.shields.io/github/issues-closed/neondatabase/neon)](https://github.com/neondatabase/neon/issues?q=is%3Aissue+is%3Aclosed)
   [![Pull Requests Closed](https://img.shields.io/github/issues-pr-closed/neondatabase/neon)](https://github.com/neondatabase/neon/pulls?q=is%3Apr+is%3Aclosed)
   [![Follow us on X, formerly Twitter](https://img.shields.io/twitter/follow/neondatabase)](https://x.com/neondatabase)
-  [![Let's Chat on Discord](https://img.shields.io/discord/1176467419317940276)](https://discord.gg/GsWmAzVuAn)
+  [![Let's Chat on Discord](https://img.shields.io/discord/1176467419317940276)](https://neon.tech/discord)
   [![License](https://img.shields.io/github/license/neondatabase/neon)](https://github.com/neondatabase/neon/blob/main/LICENSE)
   [![Website](https://img.shields.io/website?url=https%3A%2F%2Fneon.tech)](https://neon.tech)
   [![Docker Pulls](https://img.shields.io/docker/pulls/neondatabase/neon)](https://hub.docker.com/r/neondatabase/neon)
