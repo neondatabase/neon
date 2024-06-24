@@ -981,6 +981,12 @@ impl Timeline {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
             let gc_info = self.gc_info.read().unwrap();
+            if !gc_info.retain_lsns.is_empty() {
+                // TODO: add lease LSNs
+                return Err(CompactionError::Other(anyhow!(
+                    "enhanced legacy compaction currently does not support retain_lsns (branches)"
+                )));
+            }
             let gc_cutoff = Lsn::min(gc_info.cutoffs.horizon, gc_info.cutoffs.pitr);
             let mut selected_layers = Vec::new();
             // TODO: consider retain_lsns
@@ -1085,23 +1091,11 @@ impl Timeline {
             }
             // do not reverse delta_above_base_image, reconstruct state expects reversely-ordered records
             keys_above_horizon.reverse();
-            let img_lsn = base_image.as_ref().map(|img| img.0);
-            let delta_lsns = delta_above_base_image
-                .iter()
-                .map(|delta| delta.0)
-                .collect_vec();
-            let full_history = accumulated_values
-                .iter()
-                .map(|(_, lsn, _)| lsn)
-                .collect_vec();
             let state = ValueReconstructState {
                 img: base_image,
                 records: delta_above_base_image,
             };
-            let img = tline
-                .reconstruct_value(key, horizon, state)
-                .await
-                .with_context(|| format!("when reconstructing {img_lsn:?} {delta_lsns:?} {full_history:?} at {horizon}"))?;
+            let img = tline.reconstruct_value(key, horizon, state).await?;
             Ok((keys_above_horizon, img))
         }
 
