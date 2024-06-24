@@ -111,13 +111,29 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
         max_num_of_deltas_above_image = max(
             max_num_of_deltas_above_image, key_range["num_of_deltas_above_image"]
         )
-    zenbenchmark.record("logical_size_after_bottom_most_compaction", logical_size // MB, "Mb", MetricReport.LOWER_IS_BETTER)
-    zenbenchmark.record("physical_size_after_bottom_most_compaction", physical_size // MB, "Mb", MetricReport.LOWER_IS_BETTER)
     zenbenchmark.record(
-        "physical/logical ratio after bottom_most_compaction", physical_size / logical_size, "", MetricReport.LOWER_IS_BETTER
+        "logical_size_after_bottom_most_compaction",
+        logical_size // MB,
+        "Mb",
+        MetricReport.LOWER_IS_BETTER,
     )
     zenbenchmark.record(
-        "max_total_num_of_deltas_after_bottom_most_compaction", max_total_num_of_deltas, "", MetricReport.LOWER_IS_BETTER
+        "physical_size_after_bottom_most_compaction",
+        physical_size // MB,
+        "Mb",
+        MetricReport.LOWER_IS_BETTER,
+    )
+    zenbenchmark.record(
+        "physical/logical ratio after bottom_most_compaction",
+        physical_size / logical_size,
+        "",
+        MetricReport.LOWER_IS_BETTER,
+    )
+    zenbenchmark.record(
+        "max_total_num_of_deltas_after_bottom_most_compaction",
+        max_total_num_of_deltas,
+        "",
+        MetricReport.LOWER_IS_BETTER,
     )
     zenbenchmark.record(
         "max_num_of_deltas_above_image_after_bottom_most_compaction",
@@ -127,7 +143,7 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     )
 
     with endpoint.cursor() as cur:
-        cur.execute(f"SELECT * FROM t") # ensure data is not corrupted
+        cur.execute("SELECT * FROM t")  # ensure data is not corrupted
 
     layer_map_path = env.repo_dir / "layer-map.json"
     log.info(f"Writing layer map to {layer_map_path}")
