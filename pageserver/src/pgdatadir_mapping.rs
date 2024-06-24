@@ -45,7 +45,7 @@ use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::pausable_failpoint;
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -2263,6 +2263,13 @@ impl DatadirModification<'_> {
             (None, false) => {
                 self.tline.aux_file_size_estimator.on_add(content.len());
                 new_files.push((path, content));
+            }
+            // Compute may request delete of old version of pgstat AUX file if new one exceeds size limit.
+            // Compute doesn't know if previous version of this file exists or not, so
+            // attempt to delete non-existing file can cause this message.
+            // To avoid false alarms, log it as info rather than warning.
+            (None, true) if path.starts_with("pg_stat/") => {
+                info!("removing non-existing pg_stat file: {}", path)
             }
             (None, true) => warn!("removing non-existing aux file: {}", path),
         }
