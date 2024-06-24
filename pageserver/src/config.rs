@@ -33,9 +33,7 @@ use utils::{
 use crate::tenant::timeline::GetVectoredImpl;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
-use crate::tenant::{
-    TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
-};
+use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
 use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{
@@ -853,14 +851,6 @@ impl PageServerConf {
             self.timeline_path(&tenant_shard_id, &timeline_id),
             TIMELINE_DELETE_MARK_SUFFIX,
         )
-    }
-
-    pub(crate) fn tenant_deleted_mark_file_path(
-        &self,
-        tenant_shard_id: &TenantShardId,
-    ) -> Utf8PathBuf {
-        self.tenant_path(tenant_shard_id)
-            .join(TENANT_DELETED_MARKER_FILE_NAME)
     }
 
     pub fn traces_path(&self) -> Utf8PathBuf {

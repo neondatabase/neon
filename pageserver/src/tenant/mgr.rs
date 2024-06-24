@@ -51,7 +51,6 @@ use utils::fs_ext::PathExt;
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 
-use super::delete::DeleteTenantError;
 use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
 use super::timeline::detach_ancestor::PreparedTimelineDetach;
@@ -107,12 +106,6 @@ pub(crate) enum TenantsMap {
     /// The pageserver has entered shutdown mode via [`TenantManager::shutdown`].
     /// Existing tenants are still accessible, but no new tenants can be created.
     ShuttingDown(BTreeMap<TenantShardId, TenantSlot>),
-}
-
-pub(crate) enum TenantsMapRemoveResult {
-    Occupied(TenantSlot),
-    Vacant,
-    InProgress(utils::completion::Barrier),
 }
 
 /// When resolving a TenantId to a shard, we may be looking for the 0th
@@ -188,26 +181,6 @@ impl TenantsMap {
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 m.get(tenant_shard_id).and_then(|slot| slot.get_attached())
             }
-        }
-    }
-
-    /// Only for use from DeleteTenantFlow.  This method directly removes a TenantSlot from the map.
-    ///
-    /// The normal way to remove a tenant is using a SlotGuard, which will gracefully remove the guarded
-    /// slot if the enclosed tenant is shutdown.
-    pub(crate) fn remove(&mut self, tenant_shard_id: TenantShardId) -> TenantsMapRemoveResult {
-        use std::collections::btree_map::Entry;
-        match self {
-            TenantsMap::Initializing => TenantsMapRemoveResult::Vacant,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => match m.entry(tenant_shard_id) {
-                Entry::Occupied(entry) => match entry.get() {
-                    TenantSlot::InProgress(barrier) => {
-                        TenantsMapRemoveResult::InProgress(barrier.clone())
-                    }
-                    _ => TenantsMapRemoveResult::Occupied(entry.remove()),
-                },
-                Entry::Vacant(_entry) => TenantsMapRemoveResult::Vacant,
-            },
         }
     }
 
@@ -460,6 +433,18 @@ async fn init_load_tenant_configs(
     Ok(configs)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DeleteTenantError {
+    #[error("Tenant map slot error {0}")]
+    SlotError(#[from] TenantSlotError),
+
+    #[error("Cancelled")]
+    Cancelled,
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 /// Initialize repositories with locally available timelines.
 /// Timelines that are only partially available locally (remote storage has more data than this pageserver)
 /// are scheduled for download and added to the tenant once download is completed.
@@ -629,7 +614,6 @@ pub async fn init_tenant_mgr(
                     AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
                     shard_identity,
                     Some(init_order.clone()),
-                    &TENANTS,
                     SpawnMode::Lazy,
                     &ctx,
                 ) {
@@ -685,7 +669,6 @@ fn tenant_spawn(
     location_conf: AttachedTenantConf,
     shard_identity: ShardIdentity,
     init_order: Option<InitializationOrder>,
-    tenants: &'static std::sync::RwLock<TenantsMap>,
     mode: SpawnMode,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
@@ -712,7 +695,6 @@ fn tenant_spawn(
         location_conf,
         shard_identity,
         init_order,
-        tenants,
         mode,
         ctx,
     ) {
@@ -1161,7 +1143,6 @@ impl TenantManager {
                     attached_conf,
                     shard_identity,
                     None,
-                    self.tenants,
                     spawn_mode,
                     ctx,
                 )?;
@@ -1283,7 +1264,6 @@ impl TenantManager {
             AttachedTenantConf::try_from(config)?,
             shard_identity,
             None,
-            self.tenants,
             SpawnMode::Eager,
             ctx,
         )?;
@@ -1634,7 +1614,7 @@ impl TenantManager {
         for child_shard_id in &child_shards {
             let child_shard_id = *child_shard_id;
             let child_shard = {
-                let locked = TENANTS.read().unwrap();
+                let locked = self.tenants.read().unwrap();
                 let peek_slot =
                     tenant_map_peek_slot(&locked, &child_shard_id, TenantSlotPeekMode::Read)?;
                 peek_slot.and_then(|s| s.get_attached()).cloned()
@@ -1866,7 +1846,7 @@ impl TenantManager {
         deletion_queue_client: &DeletionQueueClient,
     ) -> Result<(), TenantStateError> {
         let tmp_path = self
-            .detach_tenant0(conf, &TENANTS, tenant_shard_id, deletion_queue_client)
+            .detach_tenant0(conf, tenant_shard_id, deletion_queue_client)
             .await?;
         spawn_background_purge(tmp_path);
 
@@ -1876,7 +1856,6 @@ impl TenantManager {
     async fn detach_tenant0(
         &self,
         conf: &'static PageServerConf,
-        tenants: &std::sync::RwLock<TenantsMap>,
         tenant_shard_id: TenantShardId,
         deletion_queue_client: &DeletionQueueClient,
     ) -> Result<Utf8PathBuf, TenantStateError> {
@@ -1890,7 +1869,7 @@ impl TenantManager {
         };
 
         let removal_result = remove_tenant_from_memory(
-            tenants,
+            self.tenants,
             tenant_shard_id,
             tenant_dir_rename_operation(tenant_shard_id),
         )
@@ -1906,7 +1885,7 @@ impl TenantManager {
     pub(crate) fn list_tenants(
         &self,
     ) -> Result<Vec<(TenantShardId, TenantState, Generation)>, TenantMapListError> {
-        let tenants = TENANTS.read().unwrap();
+        let tenants = self.tenants.read().unwrap();
         let m = match &*tenants {
             TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
@@ -2007,7 +1986,6 @@ impl TenantManager {
             AttachedTenantConf::try_from(config)?,
             shard_identity,
             None,
-            self.tenants,
             SpawnMode::Eager,
             ctx,
         )?;
