@@ -72,7 +72,7 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/build-push-action@v4
+      - uses: docker/build-push-action@v6
         with:
           context: .
           provenance: false
