@@ -495,7 +495,7 @@ impl ImageLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
         let mut result = Vec::new();
-        let mut stream = Box::pin(tree_reader.get_stream_from(&[0; KEY_SIZE], ctx));
+        let mut stream = Box::pin(tree_reader.into_stream(&[0; KEY_SIZE], ctx));
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let cursor = block_reader.block_cursor();
         while let Some(item) = stream.next().await {
@@ -544,7 +544,7 @@ impl ImageLayerInner {
             let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
             range.start.write_to_byte_slice(&mut search_key);
 
-            let index_stream = tree_reader.get_stream_from(&search_key, &ctx);
+            let index_stream = tree_reader.clone().into_stream(&search_key, &ctx);
             let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {
@@ -691,14 +691,15 @@ impl ImageLayerInner {
     }
 
     #[cfg(test)]
-    pub(crate) fn iter<'a, 'ctx>(
-        &'a self,
-        ctx: &'ctx RequestContext,
-    ) -> ImageLayerIterator<'a, 'ctx> {
+    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
         ImageLayerIterator {
             image_layer: self,
             ctx,
-            next_batch_start_key: Key::MIN,
+            index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
+            last_batch_last_item: None,
             key_values_batch: Vec::new(),
             next_idx_in_batch: 0,
             is_end: false,
@@ -961,11 +962,12 @@ impl Drop for ImageLayerWriter {
 }
 
 #[cfg(test)]
-pub struct ImageLayerIterator<'a, 'ctx> {
+pub struct ImageLayerIterator<'a> {
     image_layer: &'a ImageLayerInner,
-    ctx: &'ctx RequestContext,
-    next_batch_start_key: Key,
+    ctx: &'a RequestContext,
+    index_iter: crate::tenant::disk_btree::DiskBtreeIterator<'a>,
     key_values_batch: Vec<(Key, Lsn, Value)>,
+    last_batch_last_item: Option<(Vec<u8>, u64)>,
     next_idx_in_batch: usize,
     is_end: bool,
     /// Limit of number of keys per batch
@@ -975,66 +977,61 @@ pub struct ImageLayerIterator<'a, 'ctx> {
 }
 
 #[cfg(test)]
-impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
+impl<'a> ImageLayerIterator<'a> {
     /// Retrieve a batch of key-value pairs into the iterator buffer.
     async fn next_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.next_idx_in_batch >= self.key_values_batch.len());
         assert!(!self.is_end);
         self.key_values_batch.clear();
         self.next_idx_in_batch = 0;
-
-        let block_reader = FileBlockReader::new(&self.image_layer.file, self.image_layer.file_id);
-        let tree_reader = DiskBtreeReader::new(
-            self.image_layer.index_start_blk,
-            self.image_layer.index_root_blk,
-            &block_reader,
-        );
-        let mut search_key = [0; KEY_SIZE];
-        self.next_batch_start_key
-            .write_to_byte_slice(&mut search_key);
         // We want to have exactly one read syscall (plus several others for index lookup) for each `next_batch` call.
         // Therefore, we enforce `self.max_read_size` by ourselves instead of using the VectoredReadPlanner's capability,
         // to avoid splitting into two I/Os.
         let mut read_planner = VectoredReadPlanner::new_caller_controlled_max_limit();
         let mut cnt = 0;
-        let mut start_pos = None;
+        let mut begin_offset =
+            if let Some((last_key, last_offset)) = self.last_batch_last_item.take() {
+                read_planner.handle(
+                    Key::from_slice(&last_key[..KEY_SIZE]),
+                    self.image_layer.lsn,
+                    last_offset,
+                    BlobFlag::None,
+                );
+                cnt += 1;
+                Some(last_offset)
+            } else {
+                None
+            };
         let mut range_end_handled = false;
-        // TODO: dedup with vectored read?
-        tree_reader
-            .visit(
-                &search_key,
-                VisitDirection::Forwards,
-                |raw_key, offset| {
-                    if start_pos
-                        .map(|start_pos| offset - start_pos >= self.max_read_size)
-                        .unwrap_or(false)
-                        || cnt >= self.batch_size
-                    {
-                        // At this point, the I/O size might have already exceeded `self.max_read_size`. This is fine. We do not expect
-                        // `self.max_read_size` to be a hard limit.
-                        read_planner.handle_range_end(offset);
-                        range_end_handled = true;
-                        return false;
-                    }
-                    start_pos = Some(offset);
-                    read_planner.handle(
-                        Key::from_slice(&raw_key[..KEY_SIZE]),
-                        self.image_layer.lsn,
-                        offset,
-                        BlobFlag::None,
-                    );
-                    cnt += 1;
-                    true
-                },
-                self.ctx,
-            )
-            .await?;
+        while let Some(res) = self.index_iter.next().await {
+            let (raw_key, offset) = res?;
+            if begin_offset.is_none() {
+                begin_offset = Some(offset);
+            }
+            if (offset - begin_offset.unwrap() >= self.max_read_size && cnt >= 1/* ensure at least one key is in the batch */)
+                || cnt >= self.batch_size
+            {
+                // We either reach the limit of max_read_size, or the batch will have more than batch_size items if we read this key.
+                self.last_batch_last_item = Some((raw_key, offset)); // Handle the current key in the next batch, exclude it from this batch.
+                read_planner.handle_range_end(offset); // Use the current offset to finish the read plan.
+                range_end_handled = true;
+                break;
+            }
+            read_planner.handle(
+                Key::from_slice(&raw_key[..KEY_SIZE]),
+                self.image_layer.lsn,
+                offset,
+                BlobFlag::None,
+            );
+            cnt += 1;
+        }
         if cnt == 0 {
             self.is_end = true;
             return Ok(());
         }
         if !range_end_handled {
             let payload_end = self.image_layer.index_start_blk as u64 * PAGE_SZ as u64;
+            self.last_batch_last_item = None;
             read_planner.handle_range_end(payload_end);
         }
         let plan = read_planner.finish();
@@ -1052,8 +1049,6 @@ impl<'a, 'ctx> ImageLayerIterator<'a, 'ctx> {
                 next_batch.push((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
             }
         }
-        let (last_key, _, _) = next_batch.last().unwrap();
-        self.next_batch_start_key = last_key.next();
         self.key_values_batch = next_batch;
         Ok(())
     }
@@ -1306,7 +1301,7 @@ mod test {
     }
 
     async fn assert_img_iter_equal(
-        img_iter: &mut ImageLayerIterator<'_, '_>,
+        img_iter: &mut ImageLayerIterator<'_>,
         expect: &[(Key, Bytes)],
         expect_lsn: Lsn,
     ) {
@@ -1352,11 +1347,26 @@ mod test {
                 .await
                 .unwrap();
         let img_layer = resident_layer.get_as_image(&ctx).await.unwrap();
-        for batch_size in [1, 2, 4, 8, 3, 7, 13] {
-            println!("running with batch_size={batch_size}");
-            let mut iter = img_layer.iter(&ctx);
-            iter.batch_size = batch_size;
-            assert_img_iter_equal(&mut iter, &test_imgs, Lsn(0x10)).await;
+        for max_read_size in [1, 1024] {
+            for batch_size in [1, 2, 4, 8, 3, 7, 13] {
+                println!("running with batch_size={batch_size} max_read_size={max_read_size}");
+                // Test if the batch size is correctly determined
+                let mut iter = img_layer.iter(&ctx);
+                iter.batch_size = batch_size;
+                iter.max_read_size = max_read_size;
+                iter.next_batch().await.unwrap();
+                if max_read_size == 1 {
+                    // every key should be a batch b/c the value is larger than max_read_size
+                    assert_eq!(iter.key_values_batch.len(), 1);
+                } else {
+                    assert_eq!(iter.key_values_batch.len(), batch_size);
+                }
+                // Test if the result is correct
+                let mut iter = img_layer.iter(&ctx);
+                iter.batch_size = batch_size;
+                iter.max_read_size = max_read_size;
+                assert_img_iter_equal(&mut iter, &test_imgs, Lsn(0x10)).await;
+            }
         }
     }
 }
