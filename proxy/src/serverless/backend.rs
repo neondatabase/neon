@@ -104,7 +104,7 @@ impl PoolingBackend {
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         let maybe_client = if !force_new {
             info!("pool: looking for an existing connection");
-            self.pool.get(ctx, &conn_info).await?
+            self.pool.get(ctx, &conn_info)?
         } else {
             info!("pool: pool is disabled");
             None
@@ -230,6 +230,10 @@ impl ConnectMechanism for TokioMechanism {
             .password(&*self.conn_info.password)
             .dbname(&self.conn_info.dbname)
             .connect_timeout(timeout);
+
+        config
+            .param("client_encoding", "UTF8")
+            .expect("client encoding UTF8 is always valid");
 
         let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
         let res = config.connect(tokio_postgres::NoTls).await;

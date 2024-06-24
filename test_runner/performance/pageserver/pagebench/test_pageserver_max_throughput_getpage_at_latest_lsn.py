@@ -85,6 +85,8 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
         f"max_throughput_latest_lsn-{n_tenants}-{pgbench_scale}",
         n_tenants,
         setup_wrapper,
+        # https://github.com/neondatabase/neon/issues/8070
+        timeout_in_seconds=60,
     )
 
     env.pageserver.allowed_errors.append(
@@ -209,3 +211,11 @@ def run_benchmark_max_throughput_latest_lsn(
             unit="ms",
             report=MetricReport.LOWER_IS_BETTER,
         )
+
+    env.storage_controller.allowed_errors.append(
+        # The test setup swaps NeonEnv instances, hence different
+        # pg instances are used for the storage controller db. This means
+        # the storage controller doesn't know about the nodes mentioned
+        # in attachments.json at start-up.
+        ".* Scheduler missing node 1",
+    )

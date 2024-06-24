@@ -6,7 +6,6 @@ from fixtures.neon_fixtures import NeonEnv
 
 def test_physical_replication(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    n_records = 100000
     with env.endpoints.create_start(
         branch_name="main",
         endpoint_id="primary",
@@ -22,8 +21,20 @@ def test_physical_replication(neon_simple_env: NeonEnv):
                 with p_con.cursor() as p_cur:
                     with secondary.connect() as s_con:
                         with s_con.cursor() as s_cur:
-                            for pk in range(n_records):
+                            runtime_secs = 30
+                            started_at = time.time()
+                            pk = 0
+                            while True:
+                                pk += 1
+                                now = time.time()
+                                if now - started_at > runtime_secs:
+                                    break
                                 p_cur.execute("insert into t (pk) values (%s)", (pk,))
+                                # an earlier version of this test was based on a fixed number of loop iterations
+                                # and selected for pk=(random.randrange(1, fixed number of loop iterations)).
+                                # => the probability of selection for a value that was never inserted changed from 99.9999% to 0% over the course of the test.
+                                #
+                                # We changed the test to where=(random.randrange(1, 2*pk)), which means the probability is now fixed to 50%.
                                 s_cur.execute(
-                                    "select * from t where pk=%s", (random.randrange(1, n_records),)
+                                    "select * from t where pk=%s", (random.randrange(1, 2 * pk),)
                                 )

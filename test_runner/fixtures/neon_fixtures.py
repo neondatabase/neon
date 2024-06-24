@@ -1177,10 +1177,10 @@ class NeonEnv:
             force=config.config_init_force,
         )
 
-    def start(self):
+    def start(self, timeout_in_seconds: Optional[int] = None):
         # Storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
-        self.storage_controller.start()
+        self.storage_controller.start(timeout_in_seconds=timeout_in_seconds)
 
         # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
@@ -1196,10 +1196,18 @@ class NeonEnv:
             )  # The `or None` is for the linter
 
             for pageserver in self.pageservers:
-                futs.append(executor.submit(lambda ps=pageserver: ps.start()))
+                futs.append(
+                    executor.submit(
+                        lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)
+                    )
+                )
 
             for safekeeper in self.safekeepers:
-                futs.append(executor.submit(lambda sk=safekeeper: sk.start()))
+                futs.append(
+                    executor.submit(
+                        lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)
+                    )
+                )
 
         for f in futs:
             f.result()
@@ -1783,8 +1791,13 @@ class NeonCli(AbstractNeonCli):
             res.check_returncode()
         return res
 
-    def storage_controller_start(self):
+    def storage_controller_start(
+        self,
+        timeout_in_seconds: Optional[int] = None,
+    ):
         cmd = ["storage_controller", "start"]
+        if timeout_in_seconds is not None:
+            cmd.append(f"--start-timeout={timeout_in_seconds}s")
         return self.raw_cli(cmd)
 
     def storage_controller_stop(self, immediate: bool):
@@ -1797,8 +1810,11 @@ class NeonCli(AbstractNeonCli):
         self,
         id: int,
         extra_env_vars: Optional[Dict[str, str]] = None,
+        timeout_in_seconds: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         start_args = ["pageserver", "start", f"--id={id}"]
+        if timeout_in_seconds is not None:
+            start_args.append(f"--start-timeout={timeout_in_seconds}s")
         storage = self.env.pageserver_remote_storage
 
         if isinstance(storage, S3Storage):
@@ -1816,7 +1832,10 @@ class NeonCli(AbstractNeonCli):
         return self.raw_cli(cmd)
 
     def safekeeper_start(
-        self, id: int, extra_opts: Optional[List[str]] = None
+        self,
+        id: int,
+        extra_opts: Optional[List[str]] = None,
+        timeout_in_seconds: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         s3_env_vars = None
         if isinstance(self.env.safekeepers_remote_storage, S3Storage):
@@ -1826,6 +1845,8 @@ class NeonCli(AbstractNeonCli):
             extra_opts = [f"-e={opt}" for opt in extra_opts]
         else:
             extra_opts = []
+        if timeout_in_seconds is not None:
+            extra_opts.append(f"--start-timeout={timeout_in_seconds}s")
         return self.raw_cli(
             ["safekeeper", "start", str(id), *extra_opts], extra_env_vars=s3_env_vars
         )
@@ -2077,9 +2098,9 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
         self.logfile = self.workdir / "storage_controller.log"
 
-    def start(self):
+    def start(self, timeout_in_seconds: Optional[int] = None):
         assert not self.running
-        self.env.neon_cli.storage_controller_start()
+        self.env.neon_cli.storage_controller_start(timeout_in_seconds)
         self.running = True
         return self
 
@@ -2159,12 +2180,19 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return time.time() - t1
 
     def attach_hook_issue(
-        self, tenant_shard_id: Union[TenantId, TenantShardId], pageserver_id: int
+        self,
+        tenant_shard_id: Union[TenantId, TenantShardId],
+        pageserver_id: int,
+        generation_override: Optional[int] = None,
     ) -> int:
+        body = {"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id}
+        if generation_override is not None:
+            body["generation_override"] = generation_override
+
         response = self.request(
             "POST",
             f"{self.env.storage_controller_api}/debug/v1/attach-hook",
-            json={"tenant_shard_id": str(tenant_shard_id), "node_id": pageserver_id},
+            json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
         gen = response.json()["gen"]
@@ -2212,6 +2240,46 @@ class NeonStorageController(MetricsGetter, LogUtils):
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
+
+    def node_drain(self, node_id):
+        log.info(f"node_drain({node_id})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def cancel_node_drain(self, node_id):
+        log.info(f"cancel_node_drain({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_fill(self, node_id):
+        log.info(f"node_fill({node_id})")
+        self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def cancel_node_fill(self, node_id):
+        log.info(f"cancel_node_fill({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_status(self, node_id):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
 
     def node_list(self):
         response = self.request(
@@ -2500,6 +2568,7 @@ class NeonPageserver(PgProtocol, LogUtils):
     def start(
         self,
         extra_env_vars: Optional[Dict[str, str]] = None,
+        timeout_in_seconds: Optional[int] = None,
     ) -> "NeonPageserver":
         """
         Start the page server.
@@ -2508,7 +2577,9 @@ class NeonPageserver(PgProtocol, LogUtils):
         """
         assert self.running is False
 
-        self.env.neon_cli.pageserver_start(self.id, extra_env_vars=extra_env_vars)
+        self.env.neon_cli.pageserver_start(
+            self.id, extra_env_vars=extra_env_vars, timeout_in_seconds=timeout_in_seconds
+        )
         self.running = True
         return self
 
@@ -2522,13 +2593,17 @@ class NeonPageserver(PgProtocol, LogUtils):
             self.running = False
         return self
 
-    def restart(self, immediate: bool = False):
+    def restart(
+        self,
+        immediate: bool = False,
+        timeout_in_seconds: Optional[int] = None,
+    ):
         """
         High level wrapper for restart: restarts the process, and waits for
         tenant state to stabilize.
         """
         self.stop(immediate=immediate)
-        self.start()
+        self.start(timeout_in_seconds=timeout_in_seconds)
         self.quiesce_tenants()
 
     def quiesce_tenants(self):
@@ -2611,6 +2686,7 @@ class NeonPageserver(PgProtocol, LogUtils):
         config: None | Dict[str, Any] = None,
         config_null: bool = False,
         generation: Optional[int] = None,
+        override_storage_controller_generation: bool = False,
     ):
         """
         Tenant attachment passes through here to acquire a generation number before proceeding
@@ -2619,6 +2695,10 @@ class NeonPageserver(PgProtocol, LogUtils):
         client = self.http_client()
         if generation is None:
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
+        elif override_storage_controller_generation:
+            generation = self.env.storage_controller.attach_hook_issue(
+                tenant_id, self.id, generation
+            )
         return client.tenant_attach(
             tenant_id,
             config,
@@ -2663,12 +2743,6 @@ class NeonPageserver(PgProtocol, LogUtils):
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         client = self.http_client(auth_token=auth_token)
         return client.tenant_create(tenant_id, conf, generation=generation)
-
-    def tenant_load(self, tenant_id: TenantId):
-        client = self.http_client()
-        return client.tenant_load(
-            tenant_id, generation=self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
-        )
 
     def list_layers(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
@@ -3410,6 +3484,13 @@ class Endpoint(PgProtocol, LogUtils):
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
+        # Semaphore is set to 1 when we start, and acquire'd back to zero when we stop
+        #
+        # We use a semaphore rather than a bool so that racing calls to stop() don't
+        # try and stop the same process twice, as stop() is called by test teardown and
+        # potentially by some __del__ chains in other threads.
+        self._running = threading.Semaphore(0)
+
     def http_client(
         self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
     ) -> EndpointHttpClient:
@@ -3487,7 +3568,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
         )
-        self.running = True
+        self._running.release(1)
 
         return self
 
@@ -3535,8 +3616,11 @@ class Endpoint(PgProtocol, LogUtils):
             conf_file.write("\n".join(hba) + "\n")
             conf_file.write(data)
 
-        if self.running:
+        if self.is_running():
             self.safe_psql("SELECT pg_reload_conf()")
+
+    def is_running(self):
+        return self._running._value > 0
 
     def reconfigure(self, pageserver_id: Optional[int] = None):
         assert self.endpoint_id is not None
@@ -3579,15 +3663,19 @@ class Endpoint(PgProtocol, LogUtils):
     def stop(self, mode: str = "fast") -> "Endpoint":
         """
         Stop the Postgres instance if it's running.
+
+        Because test teardown might try and stop an endpoint concurrently with test code
+        stopping the endpoint, this method is thread safe
+
         Returns self.
         """
 
-        if self.running:
+        running = self._running.acquire(blocking=False)
+        if running:
             assert self.endpoint_id is not None
             self.env.neon_cli.endpoint_stop(
                 self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
             )
-            self.running = False
 
         return self
 
@@ -3597,12 +3685,13 @@ class Endpoint(PgProtocol, LogUtils):
         Returns self.
         """
 
-        assert self.endpoint_id is not None
-        self.env.neon_cli.endpoint_stop(
-            self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
-        )
-        self.endpoint_id = None
-        self.running = False
+        running = self._running.acquire(blocking=False)
+        if running:
+            assert self.endpoint_id is not None
+            self.env.neon_cli.endpoint_stop(
+                self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
+            )
+            self.endpoint_id = None
 
         return self
 
@@ -3790,9 +3879,13 @@ class Safekeeper(LogUtils):
         self.running = running
         self.logfile = Path(self.data_dir) / f"safekeeper-{id}.log"
 
-    def start(self, extra_opts: Optional[List[str]] = None) -> "Safekeeper":
+    def start(
+        self, extra_opts: Optional[List[str]] = None, timeout_in_seconds: Optional[int] = None
+    ) -> "Safekeeper":
         assert self.running is False
-        self.env.neon_cli.safekeeper_start(self.id, extra_opts=extra_opts)
+        self.env.neon_cli.safekeeper_start(
+            self.id, extra_opts=extra_opts, timeout_in_seconds=timeout_in_seconds
+        )
         self.running = True
         # wait for wal acceptor start by checking its status
         started_at = time.time()

@@ -11,8 +11,6 @@ from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     enable_remote_storage_versioning,
-    poll_for_remote_storage_iterations,
-    tenant_delete_wait_completed,
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
@@ -83,8 +81,7 @@ def test_tenant_s3_restore(
     assert (
         ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
     ), "tenant removed before we deletion was issued"
-    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
-    tenant_delete_wait_completed(ps_http, tenant_id, iterations)
+    ps_http.tenant_delete(tenant_id)
     ps_http.deletion_queue_flush(execute=True)
     assert (
         ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0

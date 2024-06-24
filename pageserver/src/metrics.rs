@@ -145,14 +145,6 @@ impl ReconstructTimeMetrics {
     }
 }
 
-pub(crate) static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_materialized_cache_hits_direct_total",
-        "Number of cache hits from materialized page cache without redo",
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) struct ReconstructDataTimeMetrics {
     singular: Histogram,
     vectored: Histogram,
@@ -180,14 +172,6 @@ pub(crate) static GET_RECONSTRUCT_DATA_TIME: Lazy<ReconstructDataTimeMetrics> = 
         singular: inner.with_label_values(&[GetKind::Singular.into()]),
         vectored: inner.with_label_values(&[GetKind::Vectored.into()]),
     }
-});
-
-pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_materialized_cache_hits_total",
-        "Number of cache hits from materialized page cache",
-    )
-    .expect("failed to define a metric")
 });
 
 pub(crate) struct GetVectoredLatency {
@@ -298,12 +282,8 @@ pub(crate) static SCAN_LATENCY: Lazy<ScanLatency> = Lazy::new(|| {
 });
 
 pub(crate) struct PageCacheMetricsForTaskKind {
-    pub read_accesses_materialized_page: IntCounter,
     pub read_accesses_immutable: IntCounter,
-
     pub read_hits_immutable: IntCounter,
-    pub read_hits_materialized_page_exact: IntCounter,
-    pub read_hits_materialized_page_older_lsn: IntCounter,
 }
 
 pub(crate) struct PageCacheMetrics {
@@ -336,16 +316,6 @@ pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMet
             let content_kind = <PageContentKind as enum_map::Enum>::from_usize(content_kind);
             let content_kind: &'static str = content_kind.into();
             PageCacheMetricsForTaskKind {
-                read_accesses_materialized_page: {
-                    PAGE_CACHE_READ_ACCESSES
-                        .get_metric_with_label_values(&[
-                            task_kind,
-                            "materialized_page",
-                            content_kind,
-                        ])
-                        .unwrap()
-                },
-
                 read_accesses_immutable: {
                     PAGE_CACHE_READ_ACCESSES
                         .get_metric_with_label_values(&[task_kind, "immutable", content_kind])
@@ -355,28 +325,6 @@ pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMet
                 read_hits_immutable: {
                     PAGE_CACHE_READ_HITS
                         .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
-                        .unwrap()
-                },
-
-                read_hits_materialized_page_exact: {
-                    PAGE_CACHE_READ_HITS
-                        .get_metric_with_label_values(&[
-                            task_kind,
-                            "materialized_page",
-                            content_kind,
-                            "exact",
-                        ])
-                        .unwrap()
-                },
-
-                read_hits_materialized_page_older_lsn: {
-                    PAGE_CACHE_READ_HITS
-                        .get_metric_with_label_values(&[
-                            task_kind,
-                            "materialized_page",
-                            content_kind,
-                            "older_lsn",
-                        ])
                         .unwrap()
                 },
             }
@@ -394,7 +342,6 @@ pub(crate) struct PageCacheSizeMetrics {
     pub max_bytes: UIntGauge,
 
     pub current_bytes_immutable: UIntGauge,
-    pub current_bytes_materialized_page: UIntGauge,
 }
 
 static PAGE_CACHE_SIZE_CURRENT_BYTES: Lazy<UIntGaugeVec> = Lazy::new(|| {
@@ -418,11 +365,6 @@ pub(crate) static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> =
         current_bytes_immutable: {
             PAGE_CACHE_SIZE_CURRENT_BYTES
                 .get_metric_with_label_values(&["immutable"])
-                .unwrap()
-        },
-        current_bytes_materialized_page: {
-            PAGE_CACHE_SIZE_CURRENT_BYTES
-                .get_metric_with_label_values(&["materialized_page"])
                 .unwrap()
         },
     });
@@ -1405,17 +1347,23 @@ static COMPUTE_STARTUP_BUCKETS: Lazy<[f64; 28]> = Lazy::new(|| {
     .map(|ms| (ms as f64) / 1000.0)
 });
 
-pub(crate) struct BasebackupQueryTime(HistogramVec);
+pub(crate) struct BasebackupQueryTime {
+    ok: Histogram,
+    error: Histogram,
+}
+
 pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
-    BasebackupQueryTime({
-        register_histogram_vec!(
-            "pageserver_basebackup_query_seconds",
-            "Histogram of basebackup queries durations, by result type",
-            &["result"],
-            COMPUTE_STARTUP_BUCKETS.to_vec(),
-        )
-        .expect("failed to define a metric")
-    })
+    let vec = register_histogram_vec!(
+        "pageserver_basebackup_query_seconds",
+        "Histogram of basebackup queries durations, by result type",
+        &["result"],
+        COMPUTE_STARTUP_BUCKETS.to_vec(),
+    )
+    .expect("failed to define a metric");
+    BasebackupQueryTime {
+        ok: vec.get_metric_with_label_values(&["ok"]).unwrap(),
+        error: vec.get_metric_with_label_values(&["error"]).unwrap(),
+    }
 });
 
 pub(crate) struct BasebackupQueryTimeOngoingRecording<'a, 'c> {
@@ -1470,12 +1418,11 @@ impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
                 elapsed
             }
         };
-        let label_value = if res.is_ok() { "ok" } else { "error" };
-        let metric = self
-            .parent
-            .0
-            .get_metric_with_label_values(&[label_value])
-            .unwrap();
+        let metric = if res.is_ok() {
+            &self.parent.ok
+        } else {
+            &self.parent.error
+        };
         metric.observe(ex_throttled.as_secs_f64());
     }
 }
@@ -2918,13 +2865,11 @@ pub fn preinitialize_metrics() {
     // FIXME(4813): make it so that we have no top level metrics as this fn will easily fall out of
     // order:
     // - global metrics reside in a Lazy<PageserverMetrics>
-    //   - access via crate::metrics::PS_METRICS.materialized_page_cache_hit.inc()
+    //   - access via crate::metrics::PS_METRICS.some_metric.inc()
     // - could move the statics into TimelineMetrics::new()?
 
     // counters
     [
-        &MATERIALIZED_PAGE_CACHE_HIT,
-        &MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
         &UNEXPECTED_ONDEMAND_DOWNLOADS,
         &WALRECEIVER_STARTED_CONNECTIONS,
         &WALRECEIVER_BROKER_UPDATES,
@@ -2986,4 +2931,5 @@ pub fn preinitialize_metrics() {
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&tenant_throttling::TIMELINE_GET);
+    Lazy::force(&BASEBACKUP_QUERY_TIME);
 }
