@@ -230,7 +230,7 @@ fn local_segment_path(mgr: &Manager, partial: &PartialRemoteSegment) -> Utf8Path
     let flush_lsn = partial.flush_lsn;
     let segno = flush_lsn.segment_number(mgr.wal_seg_size);
     let (_, local_partial_segfile) =
-        wal_file_paths(mgr.tli.timeline_dir(), segno, mgr.wal_seg_size).unwrap();
+        wal_file_paths(mgr.tli.timeline_dir(), segno, mgr.wal_seg_size);
     local_partial_segfile
 }
 

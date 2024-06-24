@@ -25,7 +25,7 @@ use crate::{
     send_wal::WalSenders,
     state::{EvictionState, TimelineState},
     timeline::{ManagerTimeline, PeerInfo, ReadGuardSharedState, StateSK, WalResidentTimeline},
-    timeline_access::{AccessGuard, AccessService, GuardId},
+    timeline_guard::{AccessService, GuardId, ResidenceGuard},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
     wal_backup_partial::{self, PartialRemoteSegment},
@@ -93,7 +93,7 @@ const CF_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub enum ManagerCtlMessage {
     /// Request to get a guard for WalResidentTimeline, with WAL files available locally.
-    GuardRequest(tokio::sync::oneshot::Sender<anyhow::Result<AccessGuard>>),
+    GuardRequest(tokio::sync::oneshot::Sender<anyhow::Result<ResidenceGuard>>),
     /// Request to drop the guard.
     GuardDrop(GuardId),
 }
@@ -131,7 +131,7 @@ impl ManagerCtl {
     }
 
     /// Issue a new guard and wait for manager to prepare the timeline.
-    pub async fn wal_residence_guard(&self) -> anyhow::Result<AccessGuard> {
+    pub async fn wal_residence_guard(&self) -> anyhow::Result<ResidenceGuard> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.manager_ch.send(ManagerCtlMessage::GuardRequest(tx))?;
 

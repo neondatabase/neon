@@ -32,7 +32,7 @@ use crate::safekeeper::{
 };
 use crate::send_wal::WalSenders;
 use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, TimelineState};
-use crate::timeline_access::AccessGuard;
+use crate::timeline_guard::ResidenceGuard;
 use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self};
@@ -879,11 +879,11 @@ impl Timeline {
 /// All tasks that are trying to read/write WAL from disk should use this guard.
 pub struct WalResidentTimeline {
     pub tli: Arc<Timeline>,
-    _guard: AccessGuard,
+    _guard: ResidenceGuard,
 }
 
 impl WalResidentTimeline {
-    pub fn new(tli: Arc<Timeline>, _guard: AccessGuard) -> Self {
+    pub fn new(tli: Arc<Timeline>, _guard: ResidenceGuard) -> Self {
         WalResidentTimeline { tli, _guard }
     }
 }
