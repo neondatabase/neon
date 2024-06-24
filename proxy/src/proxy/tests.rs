@@ -16,10 +16,10 @@ use crate::console::messages::{ConsoleError, MetricsAuxInfo};
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
-use crate::proxy::retry::retry_after;
 use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
+use retry::Retry;
 use rstest::rstest;
 use rustls::pki_types;
 use tokio_postgres::config::SslMode;
@@ -358,20 +358,6 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test]
-fn connect_compute_total_wait() {
-    let mut total_wait = tokio::time::Duration::ZERO;
-    let config = RetryConfig {
-        base_delay: Duration::from_secs(1),
-        max_retries: 5,
-        backoff_factor: 2.0,
-    };
-    for num_retries in 1..config.max_retries {
-        total_wait += retry_after(num_retries, config);
-    }
-    assert!(f64::abs(total_wait.as_secs_f64() - 15.0) < 0.1);
-}
-
 #[derive(Clone, Copy, Debug)]
 enum ConnectAction {
     Wake,
@@ -439,8 +425,12 @@ impl std::fmt::Display for TestConnectError {
 impl std::error::Error for TestConnectError {}
 
 impl ShouldRetry for TestConnectError {
-    fn could_retry(&self) -> bool {
-        self.retryable
+    fn could_retry(&self) -> Retry {
+        if self.retryable {
+            Retry::Backoff
+        } else {
+            Retry::Never
+        }
     }
 }
 
@@ -489,7 +479,7 @@ impl TestBackend for TestConnectMechanism {
                     error: "TEST".into(),
                     status: None,
                 });
-                assert!(!err.could_retry());
+                assert!(!err.could_retry().is_retriable());
                 Err(console::errors::WakeComputeError::ApiError(err))
             }
             ConnectAction::WakeRetry => {
@@ -498,7 +488,7 @@ impl TestBackend for TestConnectMechanism {
                     error: "TEST".into(),
                     status: None,
                 });
-                assert!(err.could_retry());
+                assert!(err.could_retry().is_retriable());
                 Err(console::errors::WakeComputeError::ApiError(err))
             }
             x => panic!("expecting action {:?}, wake_compute is called instead", x),

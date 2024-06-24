@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::auth::IpPattern;
 
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
-use crate::proxy::retry::{retry_after, ShouldRetry};
+use crate::proxy::retry::{Retry, ShouldRetry};
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
@@ -66,25 +66,19 @@ impl Display for ConsoleError {
 }
 
 impl ShouldRetry for ConsoleError {
-    fn could_retry(&self) -> bool {
+    fn could_retry(&self) -> Retry {
         // retry if the retry info is set.
         // if no status or retry info, do not retry.
-        self.status
+        let retry = self
+            .status
             .as_ref()
             .and_then(|status| status.details.retry_info.as_ref())
-            .is_some()
-    }
+            .map(|info| Duration::from_millis(info.retry_delay_ms));
 
-    fn retry_after(
-        &self,
-        num_retries: u32,
-        config: crate::config::RetryConfig,
-    ) -> tokio::time::Duration {
-        self.status
-            .as_ref()
-            .and_then(|status| status.details.retry_info.as_ref())
-            .map(|info| Duration::from_millis(info.retry_delay_ms))
-            .unwrap_or_else(|| retry_after(num_retries, config))
+        match retry {
+            Some(x) => Retry::Fixed(x),
+            None => Retry::Never,
+        }
     }
 }
 

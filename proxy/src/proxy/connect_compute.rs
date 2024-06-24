@@ -139,7 +139,10 @@ where
     let node_info = if !node_info.cached() || !err.should_retry_database_address() {
         // If we just recieved this from cplane and dodn't get it from cache, we shouldn't retry.
         // Do not need to retrieve a new node_info, just return the old one.
-        if !err.should_retry(num_retries, connect_to_compute_retry_config) {
+        if err
+            .should_retry(num_retries, connect_to_compute_retry_config)
+            .is_none()
+        {
             Metrics::get().proxy.retries_metric.observe(
                 RetriesMetricGroup {
                     outcome: ConnectOutcome::Failed,
@@ -168,7 +171,7 @@ where
     info!("wake_compute success. attempting to connect");
     num_retries = 1;
     loop {
-        let wait_duration = match mechanism
+        match mechanism
             .connect_once(ctx, &node_info, CONNECT_TIMEOUT)
             .await
         {
@@ -185,9 +188,10 @@ where
                 return Ok(res);
             }
             Err(e) => {
-                let retriable = e.should_retry(num_retries, connect_to_compute_retry_config);
-                if !retriable {
-                    error!(error = ?e, num_retries, retriable, "couldn't connect to compute node");
+                let Some(wait_duration) =
+                    e.should_retry(num_retries, connect_to_compute_retry_config)
+                else {
+                    error!(error = ?e, num_retries, retriable = false, "couldn't connect to compute node");
                     Metrics::get().proxy.retries_metric.observe(
                         RetriesMetricGroup {
                             outcome: ConnectOutcome::Failed,
@@ -196,18 +200,16 @@ where
                         num_retries.into(),
                     );
                     return Err(e.into());
-                }
-                warn!(error = ?e, num_retries, retriable, "couldn't connect to compute node");
-                e.retry_after(num_retries, connect_to_compute_retry_config)
+                };
+                warn!(error = ?e, num_retries, retriable = true, "couldn't connect to compute node");
+                num_retries += 1;
+
+                let pause = ctx
+                    .latency_timer
+                    .pause(crate::metrics::Waiting::RetryTimeout);
+                time::sleep(wait_duration).await;
+                drop(pause);
             }
-        };
-
-        num_retries += 1;
-
-        let pause = ctx
-            .latency_timer
-            .pause(crate::metrics::Waiting::RetryTimeout);
-        time::sleep(wait_duration).await;
-        drop(pause);
+        }
     }
 }

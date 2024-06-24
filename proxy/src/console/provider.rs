@@ -24,12 +24,10 @@ use tokio::time::Instant;
 use tracing::info;
 
 pub mod errors {
-    use std::time::Duration;
-
     use crate::{
         console::messages::{self, ConsoleError},
         error::{io_error, ReportableError, UserFacingError},
-        proxy::retry::{retry_after, ShouldRetry},
+        proxy::retry::{Retry, ShouldRetry},
     };
     use thiserror::Error;
 
@@ -131,17 +129,11 @@ pub mod errors {
     }
 
     impl ShouldRetry for ApiError {
-        fn could_retry(&self) -> bool {
+        fn could_retry(&self) -> Retry {
             match self {
                 // retry some transport errors
                 Self::Transport(io) => io.could_retry(),
                 Self::Console(e) => e.could_retry(),
-            }
-        }
-        fn retry_after(&self, num_retries: u32, config: crate::config::RetryConfig) -> Duration {
-            match self {
-                ApiError::Console(e) => e.retry_after(num_retries, config),
-                ApiError::Transport(e) => e.retry_after(num_retries, config),
             }
         }
     }
@@ -249,24 +241,12 @@ pub mod errors {
     }
 
     impl ShouldRetry for WakeComputeError {
-        fn could_retry(&self) -> bool {
+        fn could_retry(&self) -> Retry {
             match self {
-                WakeComputeError::BadComputeAddress(_) => false,
+                WakeComputeError::BadComputeAddress(_) => Retry::Never,
                 WakeComputeError::ApiError(e) => e.could_retry(),
-                WakeComputeError::TooManyConnections => false,
-                WakeComputeError::TooManyConnectionAttempts(_) => false,
-            }
-        }
-        fn retry_after(
-            &self,
-            num_retries: u32,
-            config: crate::config::RetryConfig,
-        ) -> tokio::time::Duration {
-            match self {
-                WakeComputeError::BadComputeAddress(_) => retry_after(num_retries, config),
-                WakeComputeError::ApiError(e) => e.retry_after(num_retries, config),
-                WakeComputeError::TooManyConnections => retry_after(num_retries, config),
-                WakeComputeError::TooManyConnectionAttempts(_) => retry_after(num_retries, config),
+                WakeComputeError::TooManyConnections => Retry::Never,
+                WakeComputeError::TooManyConnectionAttempts(_) => Retry::Never,
             }
         }
     }
