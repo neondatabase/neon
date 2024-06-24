@@ -5235,10 +5235,14 @@ impl Timeline {
                     .map_err(PageReconstructError::WalRedo)?
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
                     .await
-                    .context("reconstruct a page image")
                 {
                     Ok(img) => img,
-                    Err(e) => return Err(PageReconstructError::WalRedo(e)),
+                    Err(e) => {
+                        return Err(match e {
+                            crate::walredo::Error::Cancelled => PageReconstructError::Cancelled,
+                            crate::walredo::Error::Other(e) => PageReconstructError::WalRedo(e),
+                        })
+                    }
                 };
 
                 Ok(img)
