@@ -132,7 +132,7 @@ async fn do_uneviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> any
 async fn delete_local_segment(mgr: &Manager, partial: &PartialRemoteSegment) -> anyhow::Result<()> {
     let local_path = local_segment_path(mgr, partial);
 
-    info!("deleting WAL file to evict: {}", local_path,);
+    info!("deleting WAL file to evict: {}", local_path);
     tokio::fs::remove_file(&local_path).await?;
     Ok(())
 }
@@ -165,14 +165,20 @@ async fn redownload_partial_segment(
         );
     }
 
-    assert!(actual_len <= mgr.wal_seg_size as u64);
+    if actual_len > mgr.wal_seg_size as u64 {
+        anyhow::bail!(
+            "remote segment is too long: {} bytes, expected {}",
+            actual_len,
+            mgr.wal_seg_size
+        );
+    }
     file.set_len(mgr.wal_seg_size as u64).await?;
     file.flush().await?;
 
     let final_path = local_segment_path(mgr, partial);
     info!(
         "downloaded {} bytes, renaming to {}",
-        final_path, mgr.wal_seg_size
+        final_path, final_path,
     );
     if let Err(e) = durable_rename(&tmp_file, &final_path, !mgr.conf.no_sync).await {
         // Probably rename succeeded, but fsync of it failed. Remove
