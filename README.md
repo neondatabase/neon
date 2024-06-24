@@ -21,7 +21,7 @@
   [![Docker Pulls](https://img.shields.io/docker/pulls/neondatabase/neon)](https://hub.docker.com/r/neondatabase/neon)
   [![Last Commit](https://img.shields.io/github/last-commit/neondatabase/neon)](https://github.com/neondatabase/neon/commits/main)
   [![Start Contributing](https://img.shields.io/badge/Start-Contributing-green)](/CONTRIBUTING.md)
-  [![Try it out](https://img.shields.io/badge/Try%20Neon-Launch%20Demo-ff69b4)](https://youtu.be/llSTZMVrbx8?si=Wcoz7XTJ3PY8y8zV)
+  [![Get Started](https://img.shields.io/badge/Get%20Started-Free%20Tier-ff69b4)](https://console.neon.tech/signup)
 </div>
 
 
