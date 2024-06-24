@@ -272,7 +272,10 @@ impl PartialBackup {
 }
 
 /// Check if everything is uploaded and partial backup task doesn't need to run.
-pub fn needs_uploading(state: &StateSnapshot, uploaded: &Option<PartialRemoteSegment>) -> bool {
+pub(crate) fn needs_uploading(
+    state: &StateSnapshot,
+    uploaded: &Option<PartialRemoteSegment>,
+) -> bool {
     match uploaded {
         Some(uploaded) => {
             uploaded.status != UploadStatus::Uploaded

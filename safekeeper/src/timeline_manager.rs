@@ -14,7 +14,7 @@ use std::{
 use postgres_ffi::XLogSegNo;
 use serde::{Deserialize, Serialize};
 use tokio::task::{JoinError, JoinHandle};
-use tracing::{info, info_span, instrument, warn, Instrument};
+use tracing::{debug, info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
 
 use crate::{
@@ -24,7 +24,7 @@ use crate::{
     remove_wal::calc_horizon_lsn,
     safekeeper::Term,
     send_wal::WalSenders,
-    state::{EvictionState, TimelineState},
+    state::TimelineState,
     timeline::{ManagerTimeline, PeerInfo, ReadGuardSharedState, StateSK, WalResidentTimeline},
     timeline_guard::{AccessService, GuardId, ResidenceGuard},
     timelines_set::{TimelineSetGuard, TimelinesSet},
@@ -33,27 +33,26 @@ use crate::{
     SafeKeeperConf,
 };
 
-pub struct StateSnapshot {
+pub(crate) struct StateSnapshot {
     // inmem values
-    pub commit_lsn: Lsn,
-    pub backup_lsn: Lsn,
-    pub remote_consistent_lsn: Lsn,
+    pub(crate) commit_lsn: Lsn,
+    pub(crate) backup_lsn: Lsn,
+    pub(crate) remote_consistent_lsn: Lsn,
 
     // persistent control file values
-    pub cfile_peer_horizon_lsn: Lsn,
-    pub cfile_remote_consistent_lsn: Lsn,
-    pub cfile_backup_lsn: Lsn,
+    pub(crate) cfile_peer_horizon_lsn: Lsn,
+    pub(crate) cfile_remote_consistent_lsn: Lsn,
+    pub(crate) cfile_backup_lsn: Lsn,
 
     // latest state
-    pub flush_lsn: Lsn,
-    pub term: Term,
+    pub(crate) flush_lsn: Lsn,
+    pub(crate) term: Term,
 
     // misc
-    pub cfile_last_persist_at: std::time::Instant,
-    pub inmem_flush_pending: bool,
-    pub wal_removal_on_hold: bool,
-    pub peers: Vec<PeerInfo>,
-    pub eviction: EvictionState,
+    pub(crate) cfile_last_persist_at: std::time::Instant,
+    pub(crate) inmem_flush_pending: bool,
+    pub(crate) wal_removal_on_hold: bool,
+    pub(crate) peers: Vec<PeerInfo>,
 }
 
 impl StateSnapshot {
@@ -73,7 +72,6 @@ impl StateSnapshot {
             inmem_flush_pending: Self::has_unflushed_inmem_state(state),
             wal_removal_on_hold: read_guard.wal_removal_on_hold,
             peers: read_guard.get_peers(heartbeat_timeout),
-            eviction: state.eviction_state,
         }
     }
 
@@ -100,7 +98,7 @@ impl std::fmt::Debug for ManagerCtlMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ManagerCtlMessage::GuardRequest(_) => write!(f, "GuardRequest"),
-            ManagerCtlMessage::GuardDrop(id) => write!(f, "{:?}", id),
+            ManagerCtlMessage::GuardDrop(id) => write!(f, "GuardDrop({:?})", id),
         }
     }
 }
@@ -129,13 +127,15 @@ impl ManagerCtl {
     }
 
     /// Issue a new guard and wait for manager to prepare the timeline.
+    /// Sends a message to the manager and waits for the response.
+    /// Can be blocked indefinitely if the manager is stuck.
     pub async fn wal_residence_guard(&self) -> anyhow::Result<ResidenceGuard> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.manager_ch.send(ManagerCtlMessage::GuardRequest(tx))?;
 
         // wait for the manager to respond with the guard
         rx.await
-            .map_err(|e| anyhow::anyhow!("failed to wait for manager guard: {:?}", e))
+            .map_err(|e| anyhow::anyhow!("response read fail: {:?}", e))
             .and_then(std::convert::identity)
     }
 
@@ -285,6 +285,7 @@ pub async fn main_task(
             }
         }
     };
+    mgr.set_status(Status::Exiting);
 
     // remove timeline from the broker active set sooner, before waiting for background tasks
     mgr.tli_broker_active.set(false);
@@ -310,6 +311,8 @@ pub async fn main_task(
         let res = wal_removal_task.await;
         mgr.update_wal_removal_end(res);
     }
+
+    mgr.set_status(Status::Finished);
 }
 
 impl Manager {
@@ -343,12 +346,16 @@ impl Manager {
         self.tli.set_status(status);
     }
 
+    /// Get a WalResidentTimeline.
+    /// Manager code must use this function instead of one from `Timeline`
+    /// directly, because it will deadlock.
     pub(crate) fn wal_resident_timeline(&mut self) -> WalResidentTimeline {
         assert!(!self.is_offloaded);
         let guard = self.access_service.create_guard();
         WalResidentTimeline::new(self.tli.clone(), guard)
     }
 
+    /// Get a snapshot of the timeline state.
     async fn state_snapshot(&self) -> StateSnapshot {
         StateSnapshot::new(
             self.tli.read_shared_state().await,
@@ -412,7 +419,7 @@ impl Manager {
 
         if state.cfile_last_persist_at.elapsed() > self.conf.control_file_save_interval {
             let mut write_guard = self.tli.write_shared_state().await;
-            // this can be done in the background because it blocks manager task, but flush() should
+            // it should be done in the background because it blocks manager task, but flush() should
             // be fast enough not to be a problem now
             if let Err(e) = write_guard.sk.state_mut().flush().await {
                 warn!("failed to save control file: {:?}", e);
@@ -420,7 +427,7 @@ impl Manager {
 
             None
         } else {
-            // we should wait until next CF_SAVE_INTERVAL
+            // we should wait until some time passed until the next save
             Some((state.cfile_last_persist_at + self.conf.control_file_save_interval).into())
         }
     }
@@ -454,7 +461,7 @@ impl Manager {
                 }
                 StateSK::Offloaded(_) => {
                     // we can't remove WAL if it's not loaded
-                    // TODO: log warning?
+                    warn!("unexpectedly trying to run WAL removal on offloaded timeline");
                     return;
                 }
                 StateSK::Empty => unreachable!(),
@@ -491,6 +498,7 @@ impl Manager {
             .store(new_last_removed_segno, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Spawns partial WAL backup task if needed.
     async fn update_partial_backup(&mut self, state: &StateSnapshot) {
         // check if partial backup is enabled and should be started
         if !self.conf.is_wal_backup_enabled() || !self.conf.partial_backup_enabled {
@@ -514,6 +522,7 @@ impl Manager {
         )));
     }
 
+    /// Update the state after partial WAL backup task finished.
     fn update_partial_backup_end(&mut self, res: Result<Option<PartialRemoteSegment>, JoinError>) {
         match res {
             Ok(new_upload_state) => {
@@ -525,24 +534,24 @@ impl Manager {
         }
     }
 
+    /// Handle message arrived from ManagerCtl.
     async fn handle_message(&mut self, msg: Option<ManagerCtlMessage>) {
-        info!("received manager message: {:?}", msg);
+        debug!("received manager message: {:?}", msg);
         match msg {
             Some(ManagerCtlMessage::GuardRequest(tx)) => {
                 if self.is_offloaded {
-                    // trying to unevict timeline
+                    // trying to unevict timeline, but without gurarantee that it will be successful
                     self.unevict_timeline().await;
                 }
 
                 let guard = if self.is_offloaded {
-                    warn!("timeline is offloaded, can't get a guard");
                     Err(anyhow::anyhow!("timeline is offloaded, can't get a guard"))
                 } else {
                     Ok(self.access_service.create_guard())
                 };
 
                 if tx.send(guard).is_err() {
-                    warn!("failed to reply with a guard");
+                    warn!("failed to reply with a guard, receiver dropped");
                 }
             }
             Some(ManagerCtlMessage::GuardDrop(guard_id)) => {
@@ -586,8 +595,11 @@ pub enum Status {
     EvictTimeline,
     Wait,
     HandleMessage,
+    Exiting,
+    Finished,
 }
 
+/// AtomicStatus is a wrapper around AtomicUsize adapted for the Status enum.
 pub struct AtomicStatus {
     inner: AtomicUsize,
 }

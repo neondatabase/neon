@@ -47,7 +47,7 @@ pub struct WalBackupTaskHandle {
 }
 
 /// Do we have anything to upload to S3, i.e. should safekeepers run backup activity?
-pub fn is_wal_backup_required(
+pub(crate) fn is_wal_backup_required(
     wal_seg_size: usize,
     num_computes: usize,
     state: &StateSnapshot,

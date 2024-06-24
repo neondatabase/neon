@@ -9,7 +9,7 @@ use tokio::{
     fs::File,
     io::{AsyncRead, AsyncWriteExt},
 };
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use utils::crashsafe::durable_rename;
 
 use crate::{
@@ -20,6 +20,13 @@ use crate::{
 };
 
 impl Manager {
+    /// Returns true if the timeline is ready for eviction.
+    /// Current criteria:
+    /// - no active tasks
+    /// - control file is flushed
+    /// - no WAL residence guards
+    /// - no pushes to the broker
+    /// - partial WAL backup is uploaded
     pub(crate) fn ready_for_eviction(
         &self,
         next_cfile_save: &Option<tokio::time::Instant>,
@@ -43,6 +50,7 @@ impl Manager {
                 == self.last_removed_segno + 1
     }
 
+    /// Evict the timeline to remote storage.
     #[instrument(name = "evict_timeline", skip_all)]
     pub(crate) async fn evict_timeline(&mut self) {
         assert!(!self.is_offloaded);
@@ -54,10 +62,7 @@ impl Manager {
             }
         };
 
-        info!(
-            "starting eviction with backup {:?}",
-            partial_backup_uploaded
-        );
+        info!("starting eviction, using {:?}", partial_backup_uploaded);
 
         if let Err(e) = do_eviction(self, &partial_backup_uploaded).await {
             warn!("failed to evict timeline: {:?}", e);
@@ -67,21 +72,19 @@ impl Manager {
         info!("successfully evicted timeline");
     }
 
+    /// Restore evicted timeline from remote storage.
     #[instrument(name = "unevict_timeline", skip_all)]
     pub(crate) async fn unevict_timeline(&mut self) {
         assert!(self.is_offloaded);
         let partial_backup_uploaded = match &self.partial_backup_uploaded {
             Some(p) => p.clone(),
             None => {
-                warn!("no partial backup uploaded, skipping eviction");
+                warn!("no partial backup uploaded, cannot unevict");
                 return;
             }
         };
 
-        info!(
-            "starting uneviction with backup {:?}",
-            partial_backup_uploaded
-        );
+        info!("starting uneviction, using {:?}", partial_backup_uploaded);
 
         if let Err(e) = do_uneviction(self, &partial_backup_uploaded).await {
             warn!("failed to unevict timeline: {:?}", e);
@@ -92,8 +95,11 @@ impl Manager {
     }
 }
 
+/// Ensure that content matches the remote partial backup, if local segment exists.
+/// Then change state in control file and in-memory. If `delete_offloaded_wal` is set,
+/// delete the local segment.
 async fn do_eviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyhow::Result<()> {
-    validate_local_segment(mgr, partial).await?;
+    compare_local_segment_with_remote(mgr, partial).await?;
 
     mgr.tli.switch_to_offloaded(partial).await?;
     // switch manager state as soon as possible
@@ -106,13 +112,13 @@ async fn do_eviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyho
     Ok(())
 }
 
+/// Ensure that content matches the remote partial backup, if local segment exists.
+/// Then download segment to local disk and change state in control file and in-memory.
 async fn do_uneviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> anyhow::Result<()> {
     // if the local segment is present, validate it
-    validate_local_segment(mgr, partial).await?;
+    compare_local_segment_with_remote(mgr, partial).await?;
 
-    // TODO: file can be invalid because previous download failed, we shouldn't
-    // prevent uneviction in that case
-
+    // atomically download the partial segment
     redownload_partial_segment(mgr, partial).await?;
 
     mgr.tli.switch_to_present().await?;
@@ -122,6 +128,7 @@ async fn do_uneviction(mgr: &mut Manager, partial: &PartialRemoteSegment) -> any
     Ok(())
 }
 
+/// Delete local WAL segment.
 async fn delete_local_segment(mgr: &Manager, partial: &PartialRemoteSegment) -> anyhow::Result<()> {
     let local_path = local_segment_path(mgr, partial);
 
@@ -130,6 +137,8 @@ async fn delete_local_segment(mgr: &Manager, partial: &PartialRemoteSegment) -> 
     Ok(())
 }
 
+/// Redownload partial segment from remote storage.
+/// The segment is downloaded to a temporary file and then renamed to the final path.
 async fn redownload_partial_segment(
     mgr: &Manager,
     partial: &PartialRemoteSegment,
@@ -137,7 +146,7 @@ async fn redownload_partial_segment(
     let tmp_file = mgr.tli.timeline_dir().join("remote_partial.tmp");
     let remote_segfile = remote_segment_path(mgr, partial)?;
 
-    info!(
+    debug!(
         "redownloading partial segment: {} -> {}",
         remote_segfile, tmp_file
     );
@@ -156,15 +165,15 @@ async fn redownload_partial_segment(
         );
     }
 
-    info!(
-        "downloaded {} bytes, resizing the file to wal_seg_size = {}",
-        actual_len, mgr.wal_seg_size
-    );
     assert!(actual_len <= mgr.wal_seg_size as u64);
     file.set_len(mgr.wal_seg_size as u64).await?;
     file.flush().await?;
 
     let final_path = local_segment_path(mgr, partial);
+    info!(
+        "downloaded {} bytes, renaming to {}",
+        final_path, mgr.wal_seg_size
+    );
     if let Err(e) = durable_rename(&tmp_file, &final_path, !mgr.conf.no_sync).await {
         // Probably rename succeeded, but fsync of it failed. Remove
         // the file then to avoid using it.
@@ -177,7 +186,10 @@ async fn redownload_partial_segment(
     Ok(())
 }
 
-async fn validate_local_segment(
+/// Compare local WAL segment with partial WAL backup in remote storage.
+/// If the local segment is not present, the function does nothing.
+/// If the local segment is present, it compares the local segment with the remote one.
+async fn compare_local_segment_with_remote(
     mgr: &Manager,
     partial: &PartialRemoteSegment,
 ) -> anyhow::Result<()> {
@@ -197,6 +209,8 @@ async fn validate_local_segment(
     }
 }
 
+/// Compare opened local WAL segment with partial WAL backup in remote storage.
+/// Validate full content of both files.
 async fn do_validation(
     mgr: &Manager,
     file: &mut File,
@@ -216,11 +230,16 @@ async fn do_validation(
     let mut remote_reader: std::pin::Pin<Box<dyn AsyncRead + Send + Sync>> =
         wal_backup::read_object(&remote_segfile, 0).await?;
 
+    // remote segment should have bytes excatly up to `flush_lsn`
     let expected_remote_size = partial.flush_lsn.segment_offset(mgr.wal_seg_size);
+    // let's compare the first `expected_remote_size` bytes
     compare_n_bytes(&mut remote_reader, file, expected_remote_size).await?;
+    // and check that the remote segment ends here
     check_end(&mut remote_reader).await?;
 
+    // if local segment is longer, the rest should be zeroes
     read_n_zeroes(file, mgr.wal_seg_size - expected_remote_size).await?;
+    // and check that the local segment ends here
     check_end(file).await?;
 
     Ok(())
@@ -242,6 +261,8 @@ fn remote_segment_path(
     Ok(remote_timeline_path.join(&partial.name))
 }
 
+/// Compare first `n` bytes of two readers. If the bytes differ, return an error.
+/// If the readers are shorter than `n`, return an error.
 async fn compare_n_bytes<R1, R2>(reader1: &mut R1, reader2: &mut R2, n: usize) -> anyhow::Result<()>
 where
     R1: AsyncRead + Unpin,
@@ -251,8 +272,8 @@ where
 
     const BUF_SIZE: usize = 32 * 1024;
 
-    let mut buffer1 = [0u8; BUF_SIZE];
-    let mut buffer2 = [0u8; BUF_SIZE];
+    let mut buffer1 = vec![0u8; BUF_SIZE];
+    let mut buffer2 = vec![0u8; BUF_SIZE];
 
     let mut offset = 0;
 
@@ -314,7 +335,7 @@ where
     use tokio::io::AsyncReadExt;
 
     const BUF_SIZE: usize = 32 * 1024;
-    let mut buffer = [0u8; BUF_SIZE];
+    let mut buffer = vec![0u8; BUF_SIZE];
     let mut offset = 0;
 
     while offset < n {
