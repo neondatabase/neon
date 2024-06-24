@@ -1,4 +1,5 @@
 import filecmp
+import logging
 import os
 import random
 import shutil
@@ -2180,6 +2181,14 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
     do_something()
 
 
+# Test creates 5 endpoints and tries to wake them up randomly. All timeouts are
+# configured to be very short, so that we expect that:
+# - pageserver will update remote_consistent_lsn very often
+# - safekeepers will upload partial WAL segments very often
+# - safekeeper will try to evict and unevict timelines
+#
+# Test checks that there are no critical errors while doing this. Also it checks
+# that every safekeeper has at least one successful eviction.
 @pytest.mark.parametrize("delete_offloaded_wal", [False, True])
 @pytest.mark.parametrize("restart_chance", [0.0, 0.2])
 def test_s3_eviction(
@@ -2203,27 +2212,52 @@ def test_s3_eviction(
     n_timelines = 5
 
     branch_names = [f"branch{tlin}" for tlin in range(n_timelines)]
+    timelines = []
+    ps_client = env.pageservers[0].http_client()
 
     # start postgres on each timeline
     endpoints: list[Endpoint] = []
     for branch_name in branch_names:
-        env.neon_cli.create_branch(branch_name)
+        timeline_id = env.neon_cli.create_branch(branch_name)
+        timelines.append(timeline_id)
+
         endpoints.append(env.endpoints.create_start(branch_name))
         endpoints[-1].safe_psql("CREATE TABLE t(i int)")
         endpoints[-1].safe_psql("INSERT INTO t VALUES (0)")
+
+        lsn = endpoints[-1].safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
+        log.info(f"{branch_name}: LSN={lsn}")
+
         endpoints[-1].stop()
+
+        # update remote_consistent_lsn on pageserver
+        ps_client.timeline_checkpoint(env.initial_tenant, timelines[-1], wait_until_uploaded=True)
 
     check_values = [0] * n_timelines
 
     n_iters = 20
     for _ in range(n_iters):
+        if log.isEnabledFor(logging.DEBUG):
+            for j in range(n_timelines):
+                detail = ps_client.timeline_detail(env.initial_tenant, timelines[j])
+                log.debug(
+                    f'{branch_names[j]}: RCL={detail["remote_consistent_lsn"]}, LRL={detail["last_record_lsn"]}'
+                )
+
         i = random.randint(0, n_timelines - 1)
         log.info(f"Starting endpoint {i}")
         endpoints[i].start()
         check_values[i] += 1
         res = endpoints[i].safe_psql("UPDATE t SET i = i + 1 RETURNING i")
         assert res[0][0] == check_values[i]
+
+        lsn = endpoints[i].safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
+        log.info(f"{branch_names[i]}: LSN={lsn}")
+
         endpoints[i].stop()
+
+        # update remote_consistent_lsn on pageserver
+        ps_client.timeline_checkpoint(env.initial_tenant, timelines[i], wait_until_uploaded=True)
 
         # restarting random safekeepers
         for sk in env.safekeepers:
@@ -2231,4 +2265,6 @@ def test_s3_eviction(
                 sk.stop().start(extra_opts=extra_opts)
         time.sleep(0.5)
 
-    # TODO: check logs for successful eviction
+    # require at least one successful eviction on each safekeeper
+    for sk in env.safekeepers:
+        assert sk.log_contains("successfully evicted timeline")
