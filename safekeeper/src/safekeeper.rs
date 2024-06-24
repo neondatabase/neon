@@ -916,10 +916,8 @@ where
         )))
     }
 
-    /// Update timeline state with peer safekeeper data.
+    /// Update commit_lsn from peer safekeeper data.
     pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
-        let mut sync_control_file = false;
-
         if (Lsn(sk_info.commit_lsn) != Lsn::INVALID) && (sk_info.last_log_term != INVALID_TERM) {
             // Note: the check is too restrictive, generally we can update local
             // commit_lsn if our history matches (is part of) history of advanced
@@ -927,29 +925,6 @@ where
             if sk_info.last_log_term == self.get_last_log_term() {
                 self.update_commit_lsn(Lsn(sk_info.commit_lsn)).await?;
             }
-        }
-
-        self.state.inmem.backup_lsn = max(Lsn(sk_info.backup_lsn), self.state.inmem.backup_lsn);
-        sync_control_file |= self.state.backup_lsn + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.backup_lsn;
-
-        self.state.inmem.remote_consistent_lsn = max(
-            Lsn(sk_info.remote_consistent_lsn),
-            self.state.inmem.remote_consistent_lsn,
-        );
-        sync_control_file |= self.state.remote_consistent_lsn
-            + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.remote_consistent_lsn;
-
-        self.state.inmem.peer_horizon_lsn = max(
-            Lsn(sk_info.peer_horizon_lsn),
-            self.state.inmem.peer_horizon_lsn,
-        );
-        sync_control_file |= self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.peer_horizon_lsn;
-
-        if sync_control_file {
-            self.state.flush().await?;
         }
         Ok(())
     }

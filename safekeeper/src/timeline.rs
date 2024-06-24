@@ -216,17 +216,36 @@ impl StateSK {
     }
 
     pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
+        // update commit_lsn if safekeeper is loaded
         match self {
-            StateSK::Loaded(sk) => sk.record_safekeeper_info(sk_info).await,
-            StateSK::Offloaded(_) => {
-                warn!(
-                    "received broker message for offloaded timeline, ignoring: {:?}",
-                    sk_info
-                );
-                Ok(())
-            }
+            StateSK::Loaded(sk) => sk.record_safekeeper_info(sk_info).await?,
+            StateSK::Offloaded(_) => {}
             StateSK::Empty => unreachable!(),
         }
+
+        // update everything else, including remote_consistent_lsn and backup_lsn
+        let mut sync_control_file = false;
+        let state = self.state_mut();
+        let wal_seg_size = state.server.wal_seg_size as u64;
+
+        state.inmem.backup_lsn = max(Lsn(sk_info.backup_lsn), state.inmem.backup_lsn);
+        sync_control_file |= state.backup_lsn + wal_seg_size < state.inmem.backup_lsn;
+
+        state.inmem.remote_consistent_lsn = max(
+            Lsn(sk_info.remote_consistent_lsn),
+            state.inmem.remote_consistent_lsn,
+        );
+        sync_control_file |=
+            state.remote_consistent_lsn + wal_seg_size < state.inmem.remote_consistent_lsn;
+
+        state.inmem.peer_horizon_lsn =
+            max(Lsn(sk_info.peer_horizon_lsn), state.inmem.peer_horizon_lsn);
+        sync_control_file |= state.peer_horizon_lsn + wal_seg_size < state.inmem.peer_horizon_lsn;
+
+        if sync_control_file {
+            state.flush().await?;
+        }
+        Ok(())
     }
 
     pub fn term_start_lsn(&self) -> Lsn {
