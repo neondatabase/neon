@@ -2202,7 +2202,13 @@ def test_s3_eviction(
         }
     )
 
-    extra_opts = ["--enable-offload"]
+    extra_opts = [
+        "--enable-offload",
+        "--partial-backup-timeout",
+        "50ms",
+        "--control-file-save-interval",
+        "1s",
+    ]
     if delete_offloaded_wal:
         extra_opts.append("--delete-offloaded-wal")
 

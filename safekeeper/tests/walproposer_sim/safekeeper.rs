@@ -186,6 +186,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         disable_periodic_broker_push: false,
         enable_offload: false,
         delete_offloaded_wal: false,
+        control_file_save_interval: Duration::from_secs(1),
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;

@@ -50,7 +50,8 @@ pub mod defaults {
 
     pub const DEFAULT_HEARTBEAT_TIMEOUT: &str = "5000ms";
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
-    pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "50ms";
+    pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "50ms"; // TODO: change to 15m before merging
+    pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "1s"; // TODO: change to 300s before merging
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +90,7 @@ pub struct SafeKeeperConf {
     pub disable_periodic_broker_push: bool,
     pub enable_offload: bool,
     pub delete_offloaded_wal: bool,
+    pub control_file_save_interval: Duration,
 }
 
 impl SafeKeeperConf {
@@ -130,6 +132,7 @@ impl SafeKeeperConf {
             disable_periodic_broker_push: false,
             enable_offload: false,
             delete_offloaded_wal: false,
+            control_file_save_interval: Duration::from_secs(1),
         }
     }
 }

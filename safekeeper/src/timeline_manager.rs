@@ -88,9 +88,6 @@ impl StateSnapshot {
 /// There is no need to check for updates more often than this.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 
-/// How often to save the control file if the is no other activity.
-const CF_SAVE_INTERVAL: Duration = Duration::from_secs(1);
-
 pub enum ManagerCtlMessage {
     /// Request to get a guard for WalResidentTimeline, with WAL files available locally.
     GuardRequest(tokio::sync::oneshot::Sender<anyhow::Result<ResidenceGuard>>),
@@ -412,7 +409,7 @@ impl Manager {
             return None;
         }
 
-        if state.cfile_last_persist_at.elapsed() > CF_SAVE_INTERVAL {
+        if state.cfile_last_persist_at.elapsed() > self.conf.control_file_save_interval {
             let mut write_guard = self.tli.write_shared_state().await;
             // this can be done in the background because it blocks manager task, but flush() should
             // be fast enough not to be a problem now
@@ -423,7 +420,7 @@ impl Manager {
             None
         } else {
             // we should wait until next CF_SAVE_INTERVAL
-            Some((state.cfile_last_persist_at + CF_SAVE_INTERVAL).into())
+            Some((state.cfile_last_persist_at + self.conf.control_file_save_interval).into())
         }
     }
 
