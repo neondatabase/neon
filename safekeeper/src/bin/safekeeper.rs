@@ -341,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
         partial_backup_enabled: true,
         partial_backup_timeout: args.partial_backup_timeout,
         disable_periodic_broker_push: args.disable_periodic_broker_push,
-        enable_offload: true, // TODO: temporary enabled in all tests to find more issues
+        enable_offload: args.enable_offload,
         delete_offloaded_wal: args.delete_offloaded_wal,
         control_file_save_interval: args.control_file_save_interval,
     };

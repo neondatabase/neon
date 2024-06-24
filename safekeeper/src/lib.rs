@@ -50,8 +50,8 @@ pub mod defaults {
 
     pub const DEFAULT_HEARTBEAT_TIMEOUT: &str = "5000ms";
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
-    pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "50ms"; // TODO: change to 15m before merging
-    pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "1s"; // TODO: change to 300s before merging
+    pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
+    pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";
 }
 
 #[derive(Debug, Clone)]
