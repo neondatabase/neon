@@ -66,13 +66,27 @@ pub struct PostgresRedoManager {
     /// encounter an error as well, and errors are an unexpected condition anyway.
     /// So, probably we could get rid of the `Arc` in the future.
     redo_process: heavier_once_cell::OnceCell<RedoProcessState>,
-    launch_process_gate: Gate,
 }
 
 enum RedoProcessState {
     Launched(Arc<process::WalRedoProcess>),
     ManagerShutDown,
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+macro_rules! bail {
+    ($($arg:tt)*) => {
+        return Err($crate::walredo::Error::Other(::anyhow::anyhow!($($arg)*)));
+    }
+}
+pub(self) use bail;
 
 ///
 /// Public interface of WAL redo manager
@@ -94,9 +108,9 @@ impl PostgresRedoManager {
         base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
-    ) -> anyhow::Result<Bytes> {
+    ) -> Result<Bytes, Error> {
         if records.is_empty() {
-            anyhow::bail!("invalid WAL redo request with no records");
+            bail!("invalid WAL redo request with no records");
         }
 
         let base_img_lsn = base_img.as_ref().map(|p| p.0).unwrap_or(Lsn::INVALID);
@@ -176,7 +190,6 @@ impl PostgresRedoManager {
             conf,
             last_redo_at: std::sync::Mutex::default(),
             redo_process: heavier_once_cell::OnceCell::default(),
-            launch_process_gate: Gate::default(),
         }
     }
 
@@ -192,9 +205,6 @@ impl PostgresRedoManager {
         };
         self.redo_process
             .set(RedoProcessState::ManagerShutDown, permit);
-
-        // wait for all WalRedoProcess objects to get dropped
-        self.launch_process_gate.close().await;
     }
 
     /// This type doesn't have its own background task to check for idleness: we
@@ -227,7 +237,7 @@ impl PostgresRedoManager {
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
         pg_version: u32,
-    ) -> anyhow::Result<Bytes> {
+    ) -> Result<Bytes, Error> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
 
         let (rel, blknum) = key.to_rel_block().context("invalid record")?;
@@ -350,7 +360,7 @@ impl PostgresRedoManager {
             }
             n_attempts += 1;
             if n_attempts > MAX_RETRY_ATTEMPTS || result.is_ok() {
-                return result;
+                return result.map_err(Error::Other);
             }
         }
     }
@@ -364,7 +374,7 @@ impl PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
-    ) -> anyhow::Result<Bytes> {
+    ) -> Result<Bytes, Error> {
         let start_time = Instant::now();
 
         let mut page = BytesMut::new();
@@ -373,7 +383,7 @@ impl PostgresRedoManager {
             page.extend_from_slice(&fpi[..]);
         } else {
             // All the current WAL record types that we can handle require a base image.
-            anyhow::bail!("invalid neon WAL redo request with no base image");
+            bail!("invalid neon WAL redo request with no base image");
         }
 
         // Apply all the WAL records in the batch
