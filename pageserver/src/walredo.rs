@@ -35,7 +35,6 @@ use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
 use pageserver_api::shard::TenantShardId;
-use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -75,7 +74,6 @@ impl GlobalState {
 pub struct PostgresRedoManager {
     global_state: Arc<GlobalState>,
     tenant_shard_id: TenantShardId,
-    cancel: CancellationToken,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
     /// The current [`process::WalRedoProcess`] that is used by new redo requests.
     /// We use [`heavier_once_cell`] for coalescing the spawning, but the redo
@@ -202,12 +200,10 @@ impl PostgresRedoManager {
     pub fn new(
         global_state: Arc<GlobalState>,
         tenant_shard_id: TenantShardId,
-        cancel: CancellationToken,
     ) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
             global_state,
-            cancel,
             tenant_shard_id,
             last_redo_at: std::sync::Mutex::default(),
             redo_process: heavier_once_cell::OnceCell::default(),
