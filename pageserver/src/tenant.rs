@@ -4007,6 +4007,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
+    use timeline::GcInfo;
     use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
@@ -7114,6 +7115,7 @@ mod tests {
                     pitr: Lsn(0x30),
                     horizon: Lsn(0x30),
                 },
+                leases: Default::default(),
             };
         }
 
