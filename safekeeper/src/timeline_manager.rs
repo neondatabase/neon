@@ -13,7 +13,10 @@ use std::{
 
 use postgres_ffi::XLogSegNo;
 use serde::{Deserialize, Serialize};
-use tokio::task::{JoinError, JoinHandle};
+use tokio::{
+    task::{JoinError, JoinHandle},
+    time::Instant,
+};
 use tracing::{debug, info, info_span, instrument, warn, Instrument};
 use utils::lsn::Lsn;
 
@@ -220,7 +223,8 @@ pub async fn main_task(
         mgr.set_status(Status::StateSnapshot);
         let state_snapshot = mgr.state_snapshot().await;
 
-        let next_cfile_save = if !mgr.is_offloaded {
+        let mut next_event: Option<Instant> = None;
+        if !mgr.is_offloaded {
             let num_computes = *mgr.num_computes_rx.borrow();
 
             mgr.set_status(Status::UpdateBackup);
@@ -228,7 +232,8 @@ pub async fn main_task(
             mgr.update_is_active(is_wal_backup_required, num_computes, &state_snapshot);
 
             mgr.set_status(Status::UpdateControlFile);
-            let next_cfile_save = mgr.update_control_file_save(&state_snapshot).await;
+            mgr.update_control_file_save(&state_snapshot, &mut next_event)
+                .await;
 
             mgr.set_status(Status::UpdateWalRemoval);
             mgr.update_wal_removal(&state_snapshot).await;
@@ -236,16 +241,11 @@ pub async fn main_task(
             mgr.set_status(Status::UpdatePartialBackup);
             mgr.update_partial_backup(&state_snapshot).await;
 
-            if mgr.conf.enable_offload && mgr.ready_for_eviction(&next_cfile_save, &state_snapshot)
-            {
+            if mgr.conf.enable_offload && mgr.ready_for_eviction(&next_event, &state_snapshot) {
                 mgr.set_status(Status::EvictTimeline);
                 mgr.evict_timeline().await;
             }
-
-            next_cfile_save
-        } else {
-            None
-        };
+        }
 
         mgr.set_status(Status::Wait);
         // wait until something changes. tx channels are stored under Arc, so they will not be
@@ -265,8 +265,8 @@ pub async fn main_task(
             _ = mgr.num_computes_rx.changed() => {
                 // number of connected computes was updated
             }
-            _ = sleep_until(&next_cfile_save) => {
-                // it's time to save the control file
+            _ = sleep_until(&next_event) => {
+                // we were waiting for some event (e.g. cfile save)
             }
             res = await_task_finish(&mut mgr.wal_removal_task) => {
                 // WAL removal task finished
@@ -412,9 +412,10 @@ impl Manager {
     async fn update_control_file_save(
         &self,
         state: &StateSnapshot,
-    ) -> Option<tokio::time::Instant> {
+        next_event: &mut Option<Instant>,
+    ) {
         if !state.inmem_flush_pending {
-            return None;
+            return;
         }
 
         if state.cfile_last_persist_at.elapsed() > self.conf.control_file_save_interval {
@@ -424,11 +425,12 @@ impl Manager {
             if let Err(e) = write_guard.sk.state_mut().flush().await {
                 warn!("failed to save control file: {:?}", e);
             }
-
-            None
         } else {
             // we should wait until some time passed until the next save
-            Some((state.cfile_last_persist_at + self.conf.control_file_save_interval).into())
+            update_next_event(
+                next_event,
+                (state.cfile_last_persist_at + self.conf.control_file_save_interval).into(),
+            );
         }
     }
 
@@ -579,6 +581,16 @@ async fn await_task_finish<T>(option: &mut Option<JoinHandle<T>>) -> Result<T, J
         task.await
     } else {
         futures::future::pending().await
+    }
+}
+
+fn update_next_event(next_event: &mut Option<Instant>, candidate: Instant) {
+    if let Some(next) = next_event {
+        if candidate < *next {
+            *next = candidate;
+        }
+    } else {
+        *next_event = Some(candidate);
     }
 }
 

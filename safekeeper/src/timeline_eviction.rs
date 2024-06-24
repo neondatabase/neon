@@ -23,13 +23,13 @@ impl Manager {
     /// Returns true if the timeline is ready for eviction.
     /// Current criteria:
     /// - no active tasks
-    /// - control file is flushed
+    /// - control file is flushed (no next event scheduled)
     /// - no WAL residence guards
     /// - no pushes to the broker
     /// - partial WAL backup is uploaded
     pub(crate) fn ready_for_eviction(
         &self,
-        next_cfile_save: &Option<tokio::time::Instant>,
+        next_event: &Option<tokio::time::Instant>,
         state: &StateSnapshot,
     ) -> bool {
         self.backup_task.is_none()
@@ -37,7 +37,7 @@ impl Manager {
             && self.wal_removal_task.is_none()
             && self.partial_backup_task.is_none()
             && self.partial_backup_uploaded.is_some()
-            && next_cfile_save.is_none()
+            && next_event.is_none()
             && self.access_service.is_empty()
             && !self.tli_broker_active.get()
             && !wal_backup_partial::needs_uploading(state, &self.partial_backup_uploaded)
