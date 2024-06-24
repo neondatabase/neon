@@ -35,12 +35,59 @@ use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
 use pageserver_api::shard::TenantShardId;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::lsn::Lsn;
+use utils::sync::gate::Gate;
 use utils::sync::heavier_once_cell;
+
+pub struct GlobalState {
+    conf: &'static PageServerConf,
+    /// Watched by the [`Self::actor`].
+    shutdown: CancellationToken,
+    /// Set by [`Self::actor`] when [`Self::shutdown`] is cancelled.
+    /// We do this to avoid the Mutex lock inside the `CancellationToken`.
+    shutdown_bool: AtomicBool,
+    pub(self) spawn_gate: Gate,
+}
+
+impl GlobalState {
+    pub async fn spawn(
+        conf: &'static PageServerConf,
+        shutdown: CancellationToken,
+    ) -> Arc<GlobalState> {
+        let state = Arc::new(GlobalState {
+            conf,
+            shutdown,
+            shutdown_bool: AtomicBool::new(false), // if `shutdown` is cancelled already, the task spawned below will set it promptly
+            spawn_gate: Gate::default(),
+        });
+        tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                info!("starting");
+                state.actor().await;
+                info!("done");
+            }
+            .instrument(info_span!(parent: None, "walredo_global_state"))
+        });
+        state
+    }
+    async fn actor(self: Arc<Self>) {
+        self.shutdown.cancelled().await;
+        info!("propagating cancellation");
+        self.shutdown_bool.store(true, Ordering::Relaxed);
+        self.spawn_gate.close().await;
+        info!("all walredo processes have been killed and no new ones will be spawned");
+    }
+    pub(self) fn is_shutdown_requested(self: &Arc<Self>) -> bool {
+        self.shutdown_bool.load(Ordering::Relaxed)
+    }
+}
 
 ///
 /// This is the real implementation that uses a Postgres process to
@@ -50,8 +97,8 @@ use utils::sync::heavier_once_cell;
 /// records.
 ///
 pub struct PostgresRedoManager {
+    global_state: Arc<GlobalState>,
     tenant_shard_id: TenantShardId,
-    conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
     /// The current [`process::WalRedoProcess`] that is used by new redo requests.
     /// We use [`heavier_once_cell`] for coalescing the spawning, but the redo
@@ -78,9 +125,10 @@ pub enum Error {
 
 macro_rules! bail {
     ($($arg:tt)*) => {
-        return Err(Error::Other(anyhow::anyhow!($($arg)*)));
+        return Err($crate::walredo::Error::Other(::anyhow::anyhow!($($arg)*)));
     }
 }
+pub(self) use bail;
 
 ///
 /// Public interface of WAL redo manager
@@ -124,7 +172,7 @@ impl PostgresRedoManager {
                         img,
                         base_img_lsn,
                         &records[batch_start..i],
-                        self.conf.wal_redo_timeout,
+                        self.global_state.conf.wal_redo_timeout,
                         pg_version,
                     )
                     .await
@@ -145,7 +193,7 @@ impl PostgresRedoManager {
                 img,
                 base_img_lsn,
                 &records[batch_start..],
-                self.conf.wal_redo_timeout,
+                self.global_state.conf.wal_redo_timeout,
                 pg_version,
             )
             .await
@@ -175,13 +223,13 @@ impl PostgresRedoManager {
     /// Create a new PostgresRedoManager.
     ///
     pub fn new(
-        conf: &'static PageServerConf,
+        global_state: Arc<GlobalState>,
         tenant_shard_id: TenantShardId,
     ) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
+            global_state,
             tenant_shard_id,
-            conf,
             last_redo_at: std::sync::Mutex::default(),
             redo_process: heavier_once_cell::OnceCell::default(),
         }
@@ -232,11 +280,16 @@ impl PostgresRedoManager {
                         let start = Instant::now();
                         let proc = Arc::new(
                             process::WalRedoProcess::launch(
-                                self.conf,
+                                &self.global_state,
                                 self.tenant_shard_id,
                                 pg_version,
                             )
-                            .context("launch walredo process")?,
+                            .map_err(|e| match e {
+                                process::LaunchError::Cancelled => Error::Cancelled,
+                                process::LaunchError::Other(e) => {
+                                    Error::Other(e.context("launch walredo process"))
+                                }
+                            })?,
                         );
                         let duration = start.elapsed();
                         WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
@@ -257,6 +310,12 @@ impl PostgresRedoManager {
                 .apply_wal_records(rel, blknum, &base_img, records, wal_redo_timeout)
                 .await
                 .context("apply_wal_records");
+            if result.is_err() {
+                // avoid
+                if self.global_state.shutdown.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+            }
 
             let duration = started_at.elapsed();
 

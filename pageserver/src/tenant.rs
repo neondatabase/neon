@@ -166,6 +166,7 @@ pub struct TenantSharedResources {
     pub broker_client: storage_broker::BrokerClientChannel,
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
+    pub walredo_global_state: Arc<crate::walredo::GlobalState>,
 }
 
 /// A [`Tenant`] is really an _attached_ tenant.  The configuration
@@ -650,16 +651,17 @@ impl Tenant {
         mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
-        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
-            conf,
-            tenant_shard_id,
-        )));
-
         let TenantSharedResources {
             broker_client,
             remote_storage,
             deletion_queue_client,
+            walredo_global_state,
         } = resources;
+
+        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
+            walredo_global_state,
+            tenant_shard_id,
+        )));
 
         let attach_mode = attached_conf.location.attach_mode;
         let generation = attached_conf.location.generation;

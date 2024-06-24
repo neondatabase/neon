@@ -18,13 +18,22 @@ use std::sync::atomic::AtomicUsize;
 use std::{
     collections::VecDeque,
     process::{Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, instrument, Instrument};
-use utils::{lsn::Lsn, poison::Poison};
+use utils::{
+    lsn::Lsn,
+    poison::Poison,
+    sync::gate::{GateError, GateGuard},
+};
+
+use super::GlobalState;
 
 pub struct WalRedoProcess {
+    global_state: Arc<GlobalState>,
+    _spawn_gate_guard: GateGuard,
     #[allow(dead_code)]
     conf: &'static PageServerConf,
     #[cfg(feature = "testing")]
@@ -49,17 +58,32 @@ struct ProcessOutput {
     n_processed_responses: usize,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum LaunchError {
+    #[error("cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 impl WalRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
     #[instrument(skip_all,fields(pg_version=pg_version))]
     pub(crate) fn launch(
-        conf: &'static PageServerConf,
+        global_state: &Arc<GlobalState>,
         tenant_shard_id: TenantShardId,
         pg_version: u32,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, LaunchError> {
         crate::span::debug_assert_current_span_has_tenant_id();
+
+        let conf = global_state.conf;
+
+        let spawn_gate_guard = match global_state.spawn_gate.enter() {
+            Ok(guard) => guard,
+            Err(GateError::GateClosed) => return Err(LaunchError::Cancelled),
+        };
 
         let pg_bin_dir_path = conf.pg_bin_dir(pg_version).context("pg_bin_dir")?; // TODO these should be infallible.
         let pg_lib_dir_path = conf.pg_lib_dir(pg_version).context("pg_lib_dir")?;
@@ -144,6 +168,8 @@ impl WalRedoProcess {
         );
 
         Ok(Self {
+            global_state: global_state.clone(),
+            _spawn_gate_guard: spawn_gate_guard,
             conf,
             #[cfg(feature = "testing")]
             tenant_shard_id,
@@ -189,8 +215,12 @@ impl WalRedoProcess {
         base_img: &Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
-    ) -> anyhow::Result<Bytes> {
+    ) -> Result<Bytes, super::Error> {
         debug_assert_current_span_has_tenant_id();
+
+        if self.global_state.is_shutdown_requested() {
+            return Err(super::Error::Cancelled);
+        }
 
         let tag = protocol::BufferTag { rel, blknum };
 
@@ -216,17 +246,19 @@ impl WalRedoProcess {
             {
                 protocol::build_apply_record_msg(*lsn, postgres_rec, &mut writebuf);
             } else {
-                anyhow::bail!("tried to pass neon wal record to postgres WAL redo");
+                super::bail!("tried to pass neon wal record to postgres WAL redo");
             }
         }
         protocol::build_get_page_msg(tag, &mut writebuf);
         WAL_REDO_RECORD_COUNTER.inc_by(records.len() as u64);
 
-        let Ok(res) =
-            tokio::time::timeout(wal_redo_timeout, self.apply_wal_records0(&writebuf)).await
-        else {
-            anyhow::bail!("WAL redo timed out");
-        };
+        let res =
+            // TODO: we should tokio::select! on the self.global_state.shutdown here,
+            // but, that requires thinking through the perf implications
+            tokio::time::timeout(wal_redo_timeout, self.apply_wal_records0(&writebuf))
+                .await
+                .map_err(|_elapsed| anyhow::anyhow!("WAL redo timed out"))?
+                .map_err(super::Error::Other);
 
         if res.is_err() {
             // not all of these can be caused by this particular input, however these are so rare
@@ -377,6 +409,11 @@ impl Drop for WalRedoProcess {
             .take()
             .expect("we only do this once")
             .kill_and_wait(WalRedoKillCause::WalRedoProcessDrop);
+
+        // The spawn gate is supposed to track running walredo processes.
+        // => must keep guard alive until the process is dead.
+        let _ = &self._spawn_gate_guard;
+
         // no way to wait for stderr_logger_task from Drop because that is async only
     }
 }

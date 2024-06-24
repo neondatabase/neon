@@ -394,6 +394,11 @@ fn start_pageserver(
         deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
     }
 
+    // Set up global walredo manager state
+    let walredo_global_state = BACKGROUND_RUNTIME.block_on(
+        pageserver::walredo::GlobalState::spawn(conf, shutdown_pageserver.clone()),
+    );
+
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
     startup_checkpoint(started_startup_at, "initial", "Starting loading tenants");
@@ -429,6 +434,7 @@ fn start_pageserver(
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
+            walredo_global_state: Arc::clone(&walredo_global_state),
         },
         order,
         shutdown_pageserver.clone(),
