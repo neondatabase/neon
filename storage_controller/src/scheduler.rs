@@ -1,4 +1,5 @@
 use crate::{node::Node, tenant_shard::TenantShard};
+use itertools::Itertools;
 use pageserver_api::controller_api::UtilizationScore;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -283,6 +284,44 @@ impl Scheduler {
         }
     }
 
+    // Check if the number of shards attached to a given node is lagging below
+    // the cluster average. If that's the case, the node should be filled.
+    pub(crate) fn compute_fill_requirement(&self, node_id: NodeId) -> usize {
+        let Some(node) = self.nodes.get(&node_id) else {
+            debug_assert!(false);
+            tracing::error!("Scheduler missing node {node_id}");
+            return 0;
+        };
+        assert!(!self.nodes.is_empty());
+        let expected_attached_shards_per_node = self.expected_attached_shard_count();
+
+        for (node_id, node) in self.nodes.iter() {
+            tracing::trace!(%node_id, "attached_shard_count={} shard_count={} expected={}", node.attached_shard_count, node.shard_count, expected_attached_shards_per_node);
+        }
+
+        if node.attached_shard_count < expected_attached_shards_per_node {
+            expected_attached_shards_per_node - node.attached_shard_count
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn expected_attached_shard_count(&self) -> usize {
+        let total_attached_shards: usize =
+            self.nodes.values().map(|n| n.attached_shard_count).sum();
+
+        assert!(!self.nodes.is_empty());
+        total_attached_shards / self.nodes.len()
+    }
+
+    pub(crate) fn nodes_by_attached_shard_count(&self) -> Vec<(NodeId, usize)> {
+        self.nodes
+            .iter()
+            .map(|(node_id, stats)| (*node_id, stats.attached_shard_count))
+            .sorted_by(|lhs, rhs| Ord::cmp(&lhs.1, &rhs.1).reverse())
+            .collect()
+    }
+
     pub(crate) fn node_upsert(&mut self, node: &Node) {
         use std::collections::hash_map::Entry::*;
         match self.nodes.entry(node.get_id()) {
@@ -352,7 +391,7 @@ impl Scheduler {
             return Err(ScheduleError::NoPageservers);
         }
 
-        let mut scores: Vec<(NodeId, AffinityScore, usize)> = self
+        let mut scores: Vec<(NodeId, AffinityScore, usize, usize)> = self
             .nodes
             .iter()
             .filter_map(|(k, v)| {
@@ -363,6 +402,7 @@ impl Scheduler {
                         *k,
                         context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
                         v.shard_count,
+                        v.attached_shard_count,
                     ))
                 }
             })
@@ -370,9 +410,12 @@ impl Scheduler {
 
         // Sort by, in order of precedence:
         //  1st: Affinity score.  We should never pick a higher-score node if a lower-score node is available
-        //  2nd: Utilization.  Within nodes with the same affinity, use the least loaded nodes.
-        //  3rd: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
-        scores.sort_by_key(|i| (i.1, i.2, i.0));
+        //  2nd: Attached shard count.  Within nodes with the same affinity, we always pick the node with
+        //  the least number of attached shards.
+        //  3rd: Total shard count.  Within nodes with the same affinity and attached shard count, use nodes
+        //  with the lower total shard count.
+        //  4th: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
+        scores.sort_by_key(|i| (i.1, i.3, i.2, i.0));
 
         if scores.is_empty() {
             // After applying constraints, no pageservers were left.

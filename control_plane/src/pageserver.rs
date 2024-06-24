@@ -158,8 +158,8 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
-        self.start_node().await
+    pub async fn start(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
+        self.start_node(retry_timeout).await
     }
 
     fn pageserver_init(&self, conf: NeonLocalInitPageserverConf) -> anyhow::Result<()> {
@@ -214,14 +214,15 @@ impl PageServerNode {
         Ok(())
     }
 
-    async fn start_node(&self) -> anyhow::Result<()> {
+    async fn start_node(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
-            "Starting pageserver node {} at '{}' in {:?}",
+            "Starting pageserver node {} at '{}' in {:?}, retrying for {:?}",
             self.conf.id,
             self.pg_connection_config.raw_address(),
-            datadir
+            datadir,
+            retry_timeout
         );
         io::stdout().flush().context("flush stdout")?;
 
@@ -239,6 +240,7 @@ impl PageServerNode {
             args,
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
+            retry_timeout,
             || async {
                 let st = self.check_status().await;
                 match st {
@@ -383,6 +385,10 @@ impl PageServerNode {
                 .map(|x| x.parse::<AuxFilePolicy>())
                 .transpose()
                 .context("Failed to parse 'switch_aux_file_policy'")?,
+            lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
+            lsn_lease_length_for_ts: settings
+                .remove("lsn_lease_length_for_ts")
+                .map(|x| x.to_string()),
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -506,6 +512,10 @@ impl PageServerNode {
                     .map(|x| x.parse::<AuxFilePolicy>())
                     .transpose()
                     .context("Failed to parse 'switch_aux_file_policy'")?,
+                lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
+                lsn_lease_length_for_ts: settings
+                    .remove("lsn_lease_length_for_ts")
+                    .map(|x| x.to_string()),
             }
         };
 

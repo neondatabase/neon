@@ -1014,6 +1014,9 @@ name = "camino"
 version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c59e92b5a388f549b863a7bea62612c09f24c8393560709a54558a9abdfb3b9c"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "camino-tempfile"
@@ -4647,6 +4650,7 @@ dependencies = [
  "futures-util",
  "http-types",
  "humantime",
+ "humantime-serde",
  "hyper 0.14.26",
  "itertools",
  "metrics",
@@ -5158,6 +5162,7 @@ dependencies = [
  "tokio-io-timeout",
  "tokio-postgres",
  "tokio-stream",
+ "tokio-tar",
  "tokio-util",
  "toml_edit",
  "tracing",
@@ -5753,6 +5758,7 @@ dependencies = [
  "r2d2",
  "reqwest 0.12.4",
  "routerify",
+ "scopeguard",
  "serde",
  "serde_json",
  "strum",
@@ -7365,6 +7371,7 @@ dependencies = [
  "base64 0.21.1",
  "base64ct",
  "bytes",
+ "camino",
  "cc",
  "chrono",
  "clap",

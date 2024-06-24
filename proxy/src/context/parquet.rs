@@ -543,7 +543,9 @@ mod tests {
         rx: impl Stream<Item = RequestData>,
     ) -> Vec<(u64, usize, i64)> {
         let remote_storage_config = RemoteStorageConfig {
-            storage: RemoteStorageKind::LocalFs(tmpdir.to_path_buf()),
+            storage: RemoteStorageKind::LocalFs {
+                local_path: tmpdir.to_path_buf(),
+            },
             timeout: std::time::Duration::from_secs(120),
         };
         let storage = GenericRemoteStorage::from_config(&remote_storage_config).unwrap();

@@ -177,6 +177,20 @@ serde_with::serde_conv!(
     |value: String| -> Result<_, humantime::TimestampError> { humantime::parse_rfc3339(&value) }
 );
 
+impl LsnLease {
+    /// The default length for an explicit LSN lease request (10 minutes).
+    pub const DEFAULT_LENGTH: Duration = Duration::from_secs(10 * 60);
+
+    /// The default length for an implicit LSN lease granted during
+    /// `get_lsn_by_timestamp` request (1 minutes).
+    pub const DEFAULT_LENGTH_FOR_TS: Duration = Duration::from_secs(60);
+
+    /// Checks whether the lease is expired.
+    pub fn is_expired(&self, now: &SystemTime) -> bool {
+        now > &self.valid_until
+    }
+}
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
@@ -279,22 +293,6 @@ pub struct TenantCreateRequest {
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct TenantLoadRequest {
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
-}
-
-impl std::ops::Deref for TenantCreateRequest {
-    type Target = TenantConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.config
-    }
-}
-
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
@@ -322,6 +320,8 @@ pub struct TenantConfig {
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
+    pub lsn_lease_length: Option<String>,
+    pub lsn_lease_length_for_ts: Option<String>,
 }
 
 /// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`

@@ -4,6 +4,7 @@ use clap::Parser;
 use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
+use std::path::PathBuf;
 use std::sync::Arc;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
@@ -77,6 +78,12 @@ struct Cli {
     /// How long to wait for the initial database connection to be available.
     #[arg(long, default_value = "5s")]
     db_connect_timeout: humantime::Duration,
+
+    /// `neon_local` sets this to the path of the neon_local repo dir.
+    /// Only relevant for testing.
+    // TODO: make `cfg(feature = "testing")`
+    #[arg(long)]
+    neon_local_repo_dir: Option<PathBuf>,
 }
 
 enum StrictMode {
@@ -260,6 +267,7 @@ async fn async_main() -> anyhow::Result<()> {
             .reconciler_concurrency
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
         split_threshold: args.split_threshold,
+        neon_local_repo_dir: args.neon_local_repo_dir,
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations
