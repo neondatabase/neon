@@ -86,7 +86,6 @@ macro_rules! bail {
         return Err($crate::walredo::Error::Other(::anyhow::anyhow!($($arg)*)));
     }
 }
-pub(self) use bail;
 
 ///
 /// Public interface of WAL redo manager
@@ -342,7 +341,7 @@ impl PostgresRedoManager {
                         match &*guard {
                             RedoProcessState::ManagerShutDown => {}
                             RedoProcessState::Launched(guard_proc) => {
-                                if Arc::ptr_eq(&proc, &*guard_proc) {
+                                if Arc::ptr_eq(&proc, guard_proc) {
                                     // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
                                     guard.take_and_deinit();
                                 } else {
