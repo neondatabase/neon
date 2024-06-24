@@ -18,7 +18,7 @@ use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use reqwest::Method;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{fs, str::FromStr};
+use std::{fs, str::FromStr, time::Duration};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
@@ -224,7 +224,7 @@ impl StorageController {
         Ok(database_url)
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
+    pub async fn start(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
         // Start a vanilla Postgres process used by the storage controller for persistence.
         let pg_data_path = Utf8PathBuf::from_path_buf(self.env.base_data_dir.clone())
             .unwrap()
@@ -272,6 +272,7 @@ impl StorageController {
             db_start_args,
             [],
             background_process::InitialPidFile::Create(self.postgres_pid_file()),
+            retry_timeout,
             || self.pg_isready(&pg_bin_dir),
         )
         .await?;
@@ -326,6 +327,7 @@ impl StorageController {
             args,
             [],
             background_process::InitialPidFile::Create(self.pid_file()),
+            retry_timeout,
             || async {
                 match self.ready().await {
                     Ok(_) => Ok(true),
