@@ -1704,9 +1704,9 @@ async fn timeline_compact_handler(
     }
     if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
         if !cfg!(feature = "testing") {
-            return Err(ApiError::InternalServerError(
-                anyhow!("enhanced_gc_bottom_most_compaction is only available in testing mode")
-            ));
+            return Err(ApiError::InternalServerError(anyhow!(
+                "enhanced_gc_bottom_most_compaction is only available in testing mode"
+            )));
         }
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }

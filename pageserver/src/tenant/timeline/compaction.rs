@@ -973,6 +973,10 @@ impl Timeline {
 
         info!("running enhanced gc bottom-most compaction");
 
+        scopeguard::defer! {
+            info!("done enhanced gc bottom-most compaction");
+        };
+
         // Step 0: pick all delta layers + image layers below/intersect with the GC horizon.
         // The layer selection has the following properties:
         // 1. If a layer is in the selection, all layers below it are in the selection.
