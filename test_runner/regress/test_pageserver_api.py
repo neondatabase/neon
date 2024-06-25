@@ -86,7 +86,9 @@ def check_client(env: NeonEnv, client: PageserverHttpClient):
     # create new tenant and check it is also there
     tenant_id = TenantId.generate()
     env.pageserver.tenant_create(
-        tenant_id, generation=env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id)
+        tenant_id,
+        generation=env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id),
+        auth_token=client.auth_token,
     )
     assert tenant_id in {TenantId(t["id"]) for t in client.tenant_list()}
 
