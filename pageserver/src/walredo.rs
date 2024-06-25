@@ -40,6 +40,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
 use utils::lsn::Lsn;
+use utils::sync::gate::GateError;
 use utils::sync::heavier_once_cell;
 
 ///
@@ -56,7 +57,7 @@ pub struct PostgresRedoManager {
     /// We use [`heavier_once_cell`] for
     ///
     /// 1. coalescing the lazy spawning of walredo processes ([`ProcessOnceCell::Spawned`])
-    /// 2. for [`utils::sync::gate::Gate`]-like behavior required by [`Self::shutdown`] (=> [`ProcessOnceCell::ManagerShutDown`]).
+    /// 2. prevent new processes from being spawned on [`Self::shutdown`] (=> [`ProcessOnceCell::ManagerShutDown`]).
     ///
     /// # Spawning
     ///
@@ -76,15 +77,46 @@ pub struct PostgresRedoManager {
     ///
     /// # Shutdown
     ///
-    /// The invariant is that once the once cell is set to [`ProcessOnceCell::ManagerShutDown`], no new processes
-    /// will be launched and we will not change the value again.
+    /// See [`Self::launched_processes`].
     redo_process: heavier_once_cell::OnceCell<ProcessOnceCell>,
+
+    /// Gate that is entered when launching a walredo process and held open
+    /// until the process has been `kill()`ed and `wait()`ed upon.
+    ///
+    /// Manager shutdown waits for this gate to close after setting the
+    /// [`ProcessOnceCell::ManagerShutDown`] state in [`Self::redo_process`].
+    ///
+    /// This type of usage is a bit unusual because gates usually keep track of
+    /// concurrent operations, e.g., every [`Self::request_redo`] that is inflight.
+    /// But we use it here to keep track of the _processes_ that we have launched,
+    /// which may outlive any individual redo request because
+    /// - we keep walredo process around until its quiesced to amortize spawn cost and
+    /// - the Arc may be held by multiple concurrent redo requests, so, just because
+    ///   you replace the [`Self::redo_process`] cell's content doesn't mean the
+    ///   process gets killed immediately.
+    ///
+    /// We could simplify this by getting rid of the [`Arc`].
+    /// See the comment on [`Self::redo_process`] for more details.
+    launched_processes: utils::sync::gate::Gate,
 }
 
 /// See [`PostgresRedoManager::redo_process`].
 enum ProcessOnceCell {
-    Spawned(Arc<process::WalRedoProcess>),
+    Spawned(Arc<Process>),
     ManagerShutDown,
+}
+
+struct Process {
+    _launched_processes_guard: utils::sync::gate::GateGuard,
+    process: process::WalRedoProcess,
+}
+
+impl std::ops::Deref for Process {
+    type Target = process::WalRedoProcess;
+
+    fn deref(&self) -> &Self::Target {
+        &self.process
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -203,21 +235,22 @@ impl PostgresRedoManager {
             conf,
             last_redo_at: std::sync::Mutex::default(),
             redo_process: heavier_once_cell::OnceCell::default(),
+            launched_processes: utils::sync::gate::Gate::default(),
         }
     }
 
     /// Shut down the WAL redo manager.
     ///
-    /// After this future completes, new redo requests will fail with [`Error::Cancelled`].
-    /// Concurrent redo requests may or may not complete.
-    ///
-    /// The manager will not launch new redo processes.
-    /// TODO: guarantee that pre-existing processes have been killed using a gate.
+    /// After this future completes
+    /// - concurrent redo requests have either completed or failed with [`Error::Cancelled`]
+    /// - new redo requests will fail with [`Error::Cancelled`]
+    /// - no redo process is running.
     ///
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
     pub async fn shutdown(&self) {
+        // prevent new processes from being spawned
         let permit = match self.redo_process.get_or_init_detached().await {
             Ok(guard) => {
                 let (proc, permit) = guard.take_and_deinit();
@@ -228,6 +261,10 @@ impl PostgresRedoManager {
         };
         self.redo_process
             .set(ProcessOnceCell::ManagerShutDown, permit);
+        // wait for ongoing requests to drain and the refcounts of all Arc<WalRedoProcess> that
+        // we ever launched to drop to zero, which when it happens synchronously kill()s & wait()s
+        // for the underlying process.
+        self.launched_processes.close().await;
     }
 
     /// This type doesn't have its own background task to check for idleness: we
@@ -267,37 +304,41 @@ impl PostgresRedoManager {
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
         loop {
-            let proc: Arc<process::WalRedoProcess> =
-                match self.redo_process.get_or_init_detached().await {
-                    Ok(guard) => match &*guard {
-                        ProcessOnceCell::Spawned(proc) => Arc::clone(proc),
-                        ProcessOnceCell::ManagerShutDown => {
-                            return Err(Error::Cancelled);
-                        }
-                    },
-                    Err(permit) => {
-                        // don't hold poison_guard, the launch code can bail
-                        let start = Instant::now();
-                        let proc = Arc::new(
-                            process::WalRedoProcess::launch(
+            let proc: Arc<Process> = match self.redo_process.get_or_init_detached().await {
+                Ok(guard) => match &*guard {
+                    ProcessOnceCell::Spawned(proc) => Arc::clone(proc),
+                    ProcessOnceCell::ManagerShutDown => {
+                        return Err(Error::Cancelled);
+                    }
+                },
+                Err(permit) => {
+                    let start = Instant::now();
+                    let proc = Arc::new(Process {
+                            _launched_processes_guard: match self.launched_processes.enter() {
+                                Ok(guard) => guard,
+                                Err(GateError::GateClosed) => unreachable!(
+                                    "shutdown sets the once cell to `ManagerShutDown` state before closing the gate"
+                                ),
+                            },
+                            process: process::WalRedoProcess::launch(
                                 self.conf,
                                 self.tenant_shard_id,
                                 pg_version,
                             )
                             .context("launch walredo process")?,
-                        );
-                        let duration = start.elapsed();
-                        WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
-                        info!(
-                            duration_ms = duration.as_millis(),
-                            pid = proc.id(),
-                            "launched walredo process"
-                        );
-                        self.redo_process
-                            .set(ProcessOnceCell::Spawned(Arc::clone(&proc)), permit);
-                        proc
-                    }
-                };
+                        });
+                    let duration = start.elapsed();
+                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                    info!(
+                        duration_ms = duration.as_millis(),
+                        pid = proc.id(),
+                        "launched walredo process"
+                    );
+                    self.redo_process
+                        .set(ProcessOnceCell::Spawned(Arc::clone(&proc)), permit);
+                    proc
+                }
+            };
 
             let started_at = std::time::Instant::now();
 
