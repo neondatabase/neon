@@ -264,7 +264,7 @@ fn remote_segment_path(
     partial: &PartialRemoteSegment,
 ) -> anyhow::Result<RemotePath> {
     let remote_timeline_path = wal_backup::remote_timeline_path(&mgr.tli.ttid)?;
-    Ok(remote_timeline_path.join(&partial.name))
+    Ok(partial.remote_path(&remote_timeline_path))
 }
 
 /// Compare first `n` bytes of two readers. If the bytes differ, return an error.

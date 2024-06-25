@@ -61,6 +61,10 @@ impl PartialRemoteSegment {
             && self.flush_lsn == other.flush_lsn
             && self.term == other.term
     }
+
+    pub(crate) fn remote_path(&self, remote_timeline_path: &RemotePath) -> RemotePath {
+        remote_timeline_path.join(&self.name)
+    }
 }
 
 // NB: these structures are a part of a control_file, you can't change them without
@@ -152,7 +156,7 @@ impl PartialBackup {
         let backup_bytes = flush_lsn.segment_offset(self.wal_seg_size);
 
         let local_path = self.local_prefix.join(self.local_segment_name(segno));
-        let remote_path = self.remote_timeline_path.join(&prepared.name);
+        let remote_path = prepared.remote_path(&self.remote_timeline_path);
 
         // Upload first `backup_bytes` bytes of the segment to the remote storage.
         wal_backup::backup_partial_segment(&local_path, &remote_path, backup_bytes).await?;

@@ -107,7 +107,7 @@ impl std::fmt::Debug for ManagerCtlMessage {
 }
 
 pub struct ManagerCtl {
-    manager_ch: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
+    manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
 
     // this is used to initialize manager, it will be moved out in bootstrap().
     init_manager_rx:
@@ -124,7 +124,7 @@ impl ManagerCtl {
     pub fn new() -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
-            manager_ch: tx,
+            manager_tx: tx,
             init_manager_rx: std::sync::Mutex::new(Some(rx)),
         }
     }
@@ -134,7 +134,7 @@ impl ManagerCtl {
     /// Can be blocked indefinitely if the manager is stuck.
     pub async fn wal_residence_guard(&self) -> anyhow::Result<ResidenceGuard> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.manager_ch.send(ManagerCtlMessage::GuardRequest(tx))?;
+        self.manager_tx.send(ManagerCtlMessage::GuardRequest(tx))?;
 
         // wait for the manager to respond with the guard
         rx.await
@@ -156,7 +156,7 @@ impl ManagerCtl {
             .take()
             .expect("manager already bootstrapped");
 
-        (self.manager_ch.clone(), rx)
+        (self.manager_tx.clone(), rx)
     }
 }
 
@@ -584,6 +584,7 @@ async fn await_task_finish<T>(option: &mut Option<JoinHandle<T>>) -> Result<T, J
     }
 }
 
+/// Update next_event if candidate is earlier.
 fn update_next_event(next_event: &mut Option<Instant>, candidate: Instant) {
     if let Some(next) = next_event {
         if candidate < *next {

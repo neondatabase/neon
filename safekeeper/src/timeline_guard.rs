@@ -12,7 +12,7 @@ use crate::timeline_manager::ManagerCtlMessage;
 pub struct GuardId(u64);
 
 pub struct ResidenceGuard {
-    manager_ch: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
+    manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
     guard_id: GuardId,
 }
 
@@ -20,7 +20,7 @@ impl Drop for ResidenceGuard {
     fn drop(&mut self) {
         // notify the manager that the guard is dropped
         let res = self
-            .manager_ch
+            .manager_tx
             .send(ManagerCtlMessage::GuardDrop(self.guard_id));
         if let Err(e) = res {
             warn!("failed to send GuardDrop message: {:?}", e);
@@ -59,7 +59,7 @@ impl AccessService {
         debug!("issued a new guard {:?}", guard_id);
 
         ResidenceGuard {
-            manager_ch: self.manager_tx.clone(),
+            manager_tx: self.manager_tx.clone(),
             guard_id,
         }
     }
