@@ -3355,6 +3355,7 @@ impl Timeline {
         }
     }
 
+    #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
     /// The algorithm is as follows:
@@ -4613,7 +4614,7 @@ impl Timeline {
     /// Requires a timeline that:
     /// - has an ancestor to detach from
     /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
-    /// a technical requirement
+    ///   a technical requirement
     ///
     /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
     /// polled again until completion.

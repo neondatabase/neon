@@ -2,13 +2,13 @@
 //! To do so, a current implementation needs to do the following:
 //!
 //! * acknowledge the timelines that it needs to stream WAL into.
-//! Pageserver is able to dynamically (un)load tenants on attach and detach,
-//! hence WAL receiver needs to react on such events.
+//!   Pageserver is able to dynamically (un)load tenants on attach and detach,
+//!   hence WAL receiver needs to react on such events.
 //!
 //! * get a broker subscription, stream data from it to determine that a timeline needs WAL streaming.
-//! For that, it watches specific keys in storage_broker and pulls the relevant data periodically.
-//! The data is produced by safekeepers, that push it periodically and pull it to synchronize between each other.
-//! Without this data, no WAL streaming is possible currently.
+//!   For that, it watches specific keys in storage_broker and pulls the relevant data periodically.
+//!   The data is produced by safekeepers, that push it periodically and pull it to synchronize between each other.
+//!   Without this data, no WAL streaming is possible currently.
 //!
 //! Only one active WAL streaming connection is allowed at a time.
 //! The connection is supposed to be updated periodically, based on safekeeper timeline data.

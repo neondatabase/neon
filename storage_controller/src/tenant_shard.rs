@@ -124,6 +124,7 @@ pub(crate) struct TenantShard {
     ///  - ReconcileWaiters need to Arc-clone the overall object to read it later
     ///  - ReconcileWaitError needs to use an `Arc<ReconcileError>` because we can construct
     ///    many waiters for one shard, and the underlying error types are not Clone.
+    ///
     /// TODO: generalize to an array of recent events
     /// TOOD: use a ArcSwap instead of mutex for faster reads?
     #[serde(serialize_with = "read_last_error")]
