@@ -906,7 +906,7 @@ mod test_read_exact_at_impl {
         })
         .await;
         assert!(res.is_ok());
-        assert_eq!(buf, vec![b'a', b'b', b'c', b'd', b'e']);
+        assert_eq!(buf.into_inner(), vec![b'a', b'b', b'c', b'd', b'e']);
     }
 
     #[tokio::test]
@@ -926,7 +926,7 @@ mod test_read_exact_at_impl {
         })
         .await;
         assert!(res.is_ok());
-        assert_eq!(buf, vec![b'a', b'b', b'c']);
+        assert_eq!(buf.into_inner(), vec![b'a', b'b', b'c']);
     }
 
     #[tokio::test]
@@ -966,7 +966,7 @@ mod test_read_exact_at_impl {
         })
         .await;
         assert!(res.is_ok());
-        assert_eq!(buf, vec![b'a', b'b', b'c', b'd']);
+        assert_eq!(buf.into_inner(), vec![b'a', b'b', b'c', b'd']);
     }
 
     #[tokio::test]
