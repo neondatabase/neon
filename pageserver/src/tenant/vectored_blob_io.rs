@@ -175,7 +175,7 @@ impl VectoredReadPlanner {
         }
     }
 
-    /// This function should *only* be used if the caller has a way to control the limit. e.g., in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`],
+    /// This function should *only* be used if the caller has a way to control the limit. e.g., in [`StreamingVectoredReadPlanner`],
     /// it uses the vectored read planner to avoid duplicated logic on handling blob start/end, while expecting the vectored
     /// read planner to give a single read to a continuous range of bytes in the image layer. Therefore, it does not need the
     /// code path to split reads into chunks of `max_read_size`, and controls the read size itself.
@@ -370,6 +370,84 @@ impl<'a> VectoredBlobReader<'a> {
         }
 
         Ok(VectoredBlobsBuf { buf, blobs: metas })
+    }
+}
+
+#[cfg(test)]
+pub struct StreamingVectoredReadPlanner {
+    planner: VectoredReadPlanner,
+    /// Max read size per batch
+    max_read_size: u64,
+    /// Max item count per batch
+    max_cnt: usize,
+    /// The first offset of this batch
+    this_batch_first_offset: Option<u64>,
+    /// Size of the current batch
+    cnt: usize,
+}
+
+#[cfg(test)]
+impl StreamingVectoredReadPlanner {
+    pub fn new(max_read_size: u64, max_cnt: usize) -> Self {
+        assert!(max_cnt > 0);
+        assert!(max_read_size > 0);
+        Self {
+            // We want to have exactly one read syscall (plus several others for index lookup) for each `next_batch` call.
+            // Therefore, we enforce `self.max_read_size` by ourselves instead of using the VectoredReadPlanner's capability,
+            // to avoid splitting into two I/Os.
+            planner: VectoredReadPlanner::new_caller_controlled_max_limit(),
+            max_cnt,
+            max_read_size,
+            this_batch_first_offset: None,
+            cnt: 0,
+        }
+    }
+
+    fn emit(&mut self, this_batch_first_offset: u64) -> VectoredRead {
+        let planner = std::mem::replace(
+            &mut self.planner,
+            VectoredReadPlanner::new_caller_controlled_max_limit(),
+        );
+        self.this_batch_first_offset = Some(this_batch_first_offset);
+        self.cnt = 1;
+        let mut batch = planner.finish();
+        assert_eq!(batch.len(), 1, "should have exactly one read batch");
+        batch.pop().unwrap()
+    }
+
+    pub fn handle(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        offset: u64,
+        flag: BlobFlag,
+    ) -> Option<VectoredRead> {
+        if let Some(begin_offset) = self.this_batch_first_offset {
+            // Each batch will have at least one item b/c `self.this_batch_first_offset` is set
+            // after one item gets processed
+            if offset - begin_offset > self.max_read_size {
+                self.planner.handle_range_end(offset); // End the current batch with the offset
+                let batch = self.emit(offset); // Produce a batch
+                self.planner.handle(key, lsn, offset, flag); // Add this key to the next batch
+                return Some(batch);
+            }
+        } else {
+            self.this_batch_first_offset = Some(offset)
+        }
+        if self.cnt >= self.max_cnt {
+            self.planner.handle_range_end(offset); // End the current batch with the offset
+            let batch = self.emit(offset); // Produce a batch
+            self.planner.handle(key, lsn, offset, flag); // Add this key to the next batch
+            return Some(batch);
+        }
+        self.planner.handle(key, lsn, offset, flag); // Add this key to the current batch
+        self.cnt += 1;
+        None
+    }
+
+    pub fn handle_range_end(&mut self, offset: u64) -> VectoredRead {
+        self.planner.handle_range_end(offset);
+        self.emit(offset)
     }
 }
 

@@ -699,12 +699,12 @@ impl ImageLayerInner {
             image_layer: self,
             ctx,
             index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
-            last_batch_last_item: None,
-            key_values_batch: Vec::new(),
-            next_idx_in_batch: 0,
+            key_values_batch: std::collections::VecDeque::new(),
             is_end: false,
-            batch_size: 1024, // The default value. Unit tests might use a different value.
-            max_read_size: 1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+            planner: crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner::new(
+                1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+                1024,        // The default value. Unit tests might use a different value
+            ),
         }
     }
 }
@@ -965,108 +965,65 @@ impl Drop for ImageLayerWriter {
 pub struct ImageLayerIterator<'a> {
     image_layer: &'a ImageLayerInner,
     ctx: &'a RequestContext,
+    planner: crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner,
     index_iter: crate::tenant::disk_btree::DiskBtreeIterator<'a>,
-    key_values_batch: Vec<(Key, Lsn, Value)>,
-    last_batch_last_item: Option<(Vec<u8>, u64)>,
-    next_idx_in_batch: usize,
+    key_values_batch: std::collections::VecDeque<(Key, Lsn, Value)>,
     is_end: bool,
-    /// Limit of number of keys per batch
-    batch_size: usize,
-    /// Limit of read size per batch
-    max_read_size: u64,
 }
 
 #[cfg(test)]
 impl<'a> ImageLayerIterator<'a> {
     /// Retrieve a batch of key-value pairs into the iterator buffer.
     async fn next_batch(&mut self) -> anyhow::Result<()> {
-        assert!(self.next_idx_in_batch >= self.key_values_batch.len());
+        assert!(self.key_values_batch.is_empty());
         assert!(!self.is_end);
         self.key_values_batch.clear();
-        self.next_idx_in_batch = 0;
-        // We want to have exactly one read syscall (plus several others for index lookup) for each `next_batch` call.
-        // Therefore, we enforce `self.max_read_size` by ourselves instead of using the VectoredReadPlanner's capability,
-        // to avoid splitting into two I/Os.
-        let mut read_planner = VectoredReadPlanner::new_caller_controlled_max_limit();
-        let mut cnt = 0;
-        let mut begin_offset =
-            if let Some((last_key, last_offset)) = self.last_batch_last_item.take() {
-                read_planner.handle(
-                    Key::from_slice(&last_key[..KEY_SIZE]),
+
+        let plan = loop {
+            if let Some(res) = self.index_iter.next().await {
+                let (raw_key, offset) = res?;
+                if let Some(batch_plan) = self.planner.handle(
+                    Key::from_slice(&raw_key[..KEY_SIZE]),
                     self.image_layer.lsn,
-                    last_offset,
+                    offset,
                     BlobFlag::None,
-                );
-                cnt += 1;
-                Some(last_offset)
+                ) {
+                    break batch_plan;
+                }
             } else {
-                None
-            };
-        let mut range_end_handled = false;
-        while let Some(res) = self.index_iter.next().await {
-            let (raw_key, offset) = res?;
-            if begin_offset.is_none() {
-                begin_offset = Some(offset);
+                self.is_end = true;
+                let payload_end = self.image_layer.index_start_blk as u64 * PAGE_SZ as u64;
+                break self.planner.handle_range_end(payload_end);
             }
-            if (offset - begin_offset.unwrap() >= self.max_read_size && cnt >= 1/* ensure at least one key is in the batch */)
-                || cnt >= self.batch_size
-            {
-                // We either reach the limit of max_read_size, or the batch will have more than batch_size items if we read this key.
-                self.last_batch_last_item = Some((raw_key, offset)); // Handle the current key in the next batch, exclude it from this batch.
-                read_planner.handle_range_end(offset); // Use the current offset to finish the read plan.
-                range_end_handled = true;
-                break;
-            }
-            read_planner.handle(
-                Key::from_slice(&raw_key[..KEY_SIZE]),
-                self.image_layer.lsn,
-                offset,
-                BlobFlag::None,
-            );
-            cnt += 1;
-        }
-        if cnt == 0 {
-            self.is_end = true;
-            return Ok(());
-        }
-        if !range_end_handled {
-            let payload_end = self.image_layer.index_start_blk as u64 * PAGE_SZ as u64;
-            self.last_batch_last_item = None;
-            read_planner.handle_range_end(payload_end);
-        }
-        let plan = read_planner.finish();
+        };
         let vectored_blob_reader = VectoredBlobReader::new(&self.image_layer.file);
-        let mut next_batch = Vec::new();
-        for read in plan {
-            let buf_size = read.size();
-            let buf = BytesMut::with_capacity(buf_size);
-            let blobs_buf = vectored_blob_reader
-                .read_blobs(&read, buf, self.ctx)
-                .await?;
-            let frozen_buf: Bytes = blobs_buf.buf.freeze();
-            for meta in blobs_buf.blobs.iter() {
-                let img_buf = frozen_buf.slice(meta.start..meta.end);
-                next_batch.push((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
-            }
+        let mut next_batch = std::collections::VecDeque::new();
+        let buf_size = plan.size();
+        let buf = BytesMut::with_capacity(buf_size);
+        let blobs_buf = vectored_blob_reader
+            .read_blobs(&plan, buf, self.ctx)
+            .await?;
+        let frozen_buf: Bytes = blobs_buf.buf.freeze();
+        for meta in blobs_buf.blobs.iter() {
+            let img_buf = frozen_buf.slice(meta.start..meta.end);
+            next_batch.push_back((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
         }
         self.key_values_batch = next_batch;
         Ok(())
     }
 
     pub async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
-        if self.is_end {
-            return Ok(None);
-        }
-        if self.next_idx_in_batch >= self.key_values_batch.len() {
-            self.next_batch().await?;
+        if self.key_values_batch.is_empty() {
             if self.is_end {
                 return Ok(None);
             }
+            self.next_batch().await?;
         }
-        assert!(!self.key_values_batch.is_empty());
-        let ret = self.key_values_batch[self.next_idx_in_batch].clone();
-        self.next_idx_in_batch += 1;
-        Ok(Some(ret))
+        Ok(Some(
+            self.key_values_batch
+                .pop_front()
+                .expect("should not be empty"),
+        ))
     }
 }
 
@@ -1093,6 +1050,7 @@ mod test {
             config::TenantConf,
             harness::{TenantHarness, TIMELINE_ID},
             storage_layer::ResidentLayer,
+            vectored_blob_io::StreamingVectoredReadPlanner,
             Tenant, Timeline,
         },
         DEFAULT_PG_VERSION,
@@ -1319,7 +1277,7 @@ mod test {
                     assert_eq!(l1, expect_lsn);
                     assert_eq!(&i1, i2);
                 }
-                _ => panic!("iterators length mismatch"),
+                (o1, o2) => panic!("iterators length mismatch: {:?}, {:?}", o1, o2),
             }
         }
     }
@@ -1339,8 +1297,9 @@ mod test {
             key.field6 = id;
             key
         }
-        let test_imgs = (0..1000)
-            .map(|idx| (get_key(idx), Bytes::from(format!("img{idx:05}"))))
+        const N: usize = 1000;
+        let test_imgs = (0..N)
+            .map(|idx| (get_key(idx as u32), Bytes::from(format!("img{idx:05}"))))
             .collect_vec();
         let resident_layer =
             produce_image_layer(&tenant, &tline, test_imgs.clone(), Lsn(0x10), &ctx)
@@ -1352,19 +1311,25 @@ mod test {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined
                 let mut iter = img_layer.iter(&ctx);
-                iter.batch_size = batch_size;
-                iter.max_read_size = max_read_size;
-                iter.next_batch().await.unwrap();
-                if max_read_size == 1 {
-                    // every key should be a batch b/c the value is larger than max_read_size
-                    assert_eq!(iter.key_values_batch.len(), 1);
-                } else {
-                    assert_eq!(iter.key_values_batch.len(), batch_size);
+                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut num_items = 0;
+                for _ in 0..3 {
+                    iter.next_batch().await.unwrap();
+                    num_items += iter.key_values_batch.len();
+                    if max_read_size == 1 {
+                        // every key should be a batch b/c the value is larger than max_read_size
+                        assert_eq!(iter.key_values_batch.len(), 1);
+                    } else {
+                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                    }
+                    if num_items >= N {
+                        break;
+                    }
+                    iter.key_values_batch.clear();
                 }
                 // Test if the result is correct
                 let mut iter = img_layer.iter(&ctx);
-                iter.batch_size = batch_size;
-                iter.max_read_size = max_read_size;
+                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
                 assert_img_iter_equal(&mut iter, &test_imgs, Lsn(0x10)).await;
             }
         }
