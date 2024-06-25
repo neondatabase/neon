@@ -2960,6 +2960,11 @@ impl Tenant {
                 let now = SystemTime::now();
                 target.leases.retain(|_, lease| !lease.is_expired(&now));
 
+                timeline
+                    .metrics
+                    .valid_lsn_lease_count_gauge
+                    .set(target.leases.len() as u64);
+
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
                         target.retain_lsns = branchpoints;
