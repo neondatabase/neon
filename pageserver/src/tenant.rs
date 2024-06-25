@@ -648,7 +648,7 @@ impl Tenant {
         init_order: Option<InitializationOrder>,
         mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Tenant>> {
+    ) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf,
             tenant_shard_id,
@@ -856,7 +856,7 @@ impl Tenant {
             }
             .instrument(tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), gen=?generation)),
         );
-        Ok(tenant)
+        tenant
     }
 
     #[instrument(skip_all)]
@@ -1145,30 +1145,6 @@ impl Tenant {
             ctx,
         )
         .await
-    }
-
-    /// Create a placeholder Tenant object for a broken tenant
-    pub fn create_broken_tenant(
-        conf: &'static PageServerConf,
-        tenant_shard_id: TenantShardId,
-        remote_storage: GenericRemoteStorage,
-        reason: String,
-    ) -> Arc<Tenant> {
-        Arc::new(Tenant::new(
-            TenantState::Broken {
-                reason,
-                backtrace: String::new(),
-            },
-            conf,
-            AttachedTenantConf::try_from(LocationConf::default()).unwrap(),
-            // Shard identity isn't meaningful for a broken tenant: it's just a placeholder
-            // to occupy the slot for this TenantShardId.
-            ShardIdentity::broken(tenant_shard_id.shard_number, tenant_shard_id.shard_count),
-            None,
-            tenant_shard_id,
-            remote_storage,
-            DeletionQueueClient::broken(),
-        ))
     }
 
     async fn load_timeline_metadata(
@@ -2591,12 +2567,15 @@ impl Tenant {
             let deserialized = Self::read_config(&config_path)?;
             Ok(toml_edit::de::from_document::<LocationConf>(deserialized)?)
         } else {
-            // FIXME If the config file is not found, assume that we're attaching
-            // a detached tenant and config is passed via attach command.
-            // https://github.com/neondatabase/neon/issues/1555
-            // OR: we're loading after incomplete deletion that managed to remove config.
-            info!("tenant config not found in {}", config_path);
-            Ok(LocationConf::default())
+            // The config should almost always exist for a tenant directory:
+            //  - When attaching a tenant, the config is the first thing we write
+            //  - When detaching a tenant, we atomically move the directory to a tmp location
+            //    before deleting contents.
+            //
+            // The very rare edge case that can result in a missing config is if we crash during attach
+            // between creating directory and writing config.  Callers should handle that as if the
+            // directory didn't exist.
+            anyhow::bail!("tenant config not found in {}", config_path);
         }
     }
 
