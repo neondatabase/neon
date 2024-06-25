@@ -45,7 +45,7 @@ runs:
       env:
         SOURCE: ${{ inputs.path }}
         ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
-        PREFIX: artifacts/${{ inputs.prefix || format('{0}/{1}/{2}', github.sha, github.event.pull_request.head.sha || github.sha, github.run_attempt) }}
+        PREFIX: artifacts/${{ inputs.prefix || format('{0}/{1}/{2}', github.event.pull_request.head.sha || github.sha, github.run_id , github.run_attempt) }}
       run: |
         BUCKET=neon-github-public-dev
         FILENAME=$(basename $ARCHIVE)
