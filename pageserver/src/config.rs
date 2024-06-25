@@ -36,10 +36,7 @@ use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
 use crate::{tenant::config::TenantConf, virtual_file};
-use crate::{
-    TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME,
-    TIMELINE_DELETE_MARK_SUFFIX,
-};
+use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
 use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
 
