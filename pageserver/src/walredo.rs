@@ -242,9 +242,10 @@ impl PostgresRedoManager {
     /// Shut down the WAL redo manager.
     ///
     /// After this future completes
-    /// - concurrent redo requests have either completed or failed with [`Error::Cancelled`]
-    /// - new redo requests will fail with [`Error::Cancelled`]
-    /// - no redo process is running.
+    /// - no redo process is running
+    /// - no new redo process will be spawned
+    /// - redo requests that need walredo process will fail with [`Error::Cancelled`]
+    /// - [`apply_neon`]-only redo requests may still work, but this may change in the future
     ///
     /// # Cancel-Safety
     ///
