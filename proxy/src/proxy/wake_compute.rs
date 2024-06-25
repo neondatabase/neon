@@ -6,7 +6,7 @@ use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
     WakeupFailureKind,
 };
-use crate::proxy::retry::should_retry;
+use crate::proxy::retry::{retry_after, should_retry};
 use hyper1::StatusCode;
 use tracing::{error, info, warn};
 
@@ -20,12 +20,12 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
 ) -> Result<CachedNodeInfo, WakeComputeError> {
     let retry_type = RetryType::WakeCompute;
     loop {
-        let (e, wait_duration) = match api.wake_compute(ctx).await {
-            Err(e) => match should_retry(&e, *num_retries, config) {
-                Some(wait_duration) => (e, wait_duration),
-                None => {
-                    error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
-                    report_error(&e, false);
+        match api.wake_compute(ctx).await {
+            Err(e) => {
+                let retriable = should_retry(&e, *num_retries, config);
+                report_error(&e, retriable);
+                if !retriable {
+                    error!(error = ?e, num_retries, retriable, "couldn't wake compute node");
                     Metrics::get().proxy.retries_metric.observe(
                         RetriesMetricGroup {
                             outcome: ConnectOutcome::Failed,
@@ -35,7 +35,8 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
                     );
                     return Err(e);
                 }
-            },
+                warn!(error = ?e, num_retries, retriable, "couldn't wake compute node");
+            }
             Ok(n) => {
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
@@ -49,8 +50,7 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
             }
         };
 
-        warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
-        report_error(&e, true);
+        let wait_duration = retry_after(*num_retries, config);
         *num_retries += 1;
 
         let pause = ctx

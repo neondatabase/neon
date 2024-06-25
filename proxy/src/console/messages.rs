@@ -1,12 +1,11 @@
 use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
-use std::time::Duration;
 
 use crate::auth::IpPattern;
 
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
-use crate::proxy::retry::{CouldRetry, Retry};
+use crate::proxy::retry::CouldRetry;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
@@ -66,13 +65,13 @@ impl Display for ConsoleError {
 }
 
 impl CouldRetry for ConsoleError {
-    fn could_retry(&self) -> Option<Retry> {
+    fn could_retry(&self) -> bool {
         // retry if the retry info is set.
         // if no status or retry info, do not retry.
         self.status
             .as_ref()
             .and_then(|status| status.details.retry_info.as_ref())
-            .map(|info| Retry::Fixed(Duration::from_millis(info.retry_delay_ms)))
+            .is_some()
     }
 }
 

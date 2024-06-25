@@ -18,7 +18,7 @@ use crate::{
     intern::EndpointIdInt,
     proxy::{
         connect_compute::ConnectMechanism,
-        retry::{CouldRetry, CouldRetry2, Retry},
+        retry::{CouldRetry, CouldRetry2},
     },
     rate_limiter::EndpointRateLimiter,
     Host,
@@ -183,14 +183,14 @@ impl UserFacingError for HttpConnError {
 }
 
 impl CouldRetry for HttpConnError {
-    fn could_retry(&self) -> Option<Retry> {
+    fn could_retry(&self) -> bool {
         match self {
             HttpConnError::ConnectionError(e) => e.could_retry(),
             HttpConnError::ConnectionClosedAbruptly(_)
             | HttpConnError::GetAuthInfo(_)
             | HttpConnError::AuthError(_)
             | HttpConnError::WakeCompute(_)
-            | HttpConnError::TooManyConnectionAttempts(_) => None,
+            | HttpConnError::TooManyConnectionAttempts(_) => false,
         }
     }
 }

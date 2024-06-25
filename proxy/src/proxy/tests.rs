@@ -19,7 +19,7 @@ use crate::error::ErrorKind;
 use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use retry::{CouldRetry2, Retry};
+use retry::CouldRetry2;
 use rstest::rstest;
 use rustls::pki_types;
 use tokio_postgres::config::SslMode;
@@ -425,8 +425,8 @@ impl std::fmt::Display for TestConnectError {
 impl std::error::Error for TestConnectError {}
 
 impl CouldRetry for TestConnectError {
-    fn could_retry(&self) -> Option<Retry> {
-        self.retryable.then_some(Retry::Backoff)
+    fn could_retry(&self) -> bool {
+        self.retryable
     }
 }
 impl CouldRetry2 for TestConnectError {
@@ -480,7 +480,7 @@ impl TestBackend for TestConnectMechanism {
                     error: "TEST".into(),
                     status: None,
                 });
-                assert!(err.could_retry().is_none());
+                assert!(!err.could_retry());
                 Err(console::errors::WakeComputeError::ApiError(err))
             }
             ConnectAction::WakeRetry => {
@@ -497,7 +497,7 @@ impl TestBackend for TestConnectMechanism {
                         },
                     }),
                 });
-                assert!(err.could_retry().is_some());
+                assert!(err.could_retry());
                 Err(console::errors::WakeComputeError::ApiError(err))
             }
             x => panic!("expecting action {:?}, wake_compute is called instead", x),
