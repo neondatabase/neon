@@ -6,7 +6,7 @@
 //! - Every start is a fresh start, so the data directory is removed and
 //!   initialized again on each run.
 //! - If remote_extension_config is provided, it will be used to fetch extensions list
-//!  and download `shared_preload_libraries` from the remote storage.
+//!   and download `shared_preload_libraries` from the remote storage.
 //! - Next it will put configuration files into the `PGDATA` directory.
 //! - Sync safekeepers and get commit LSN.
 //! - Get `basebackup` from pageserver using the returned on the previous step LSN.
@@ -33,7 +33,6 @@
 //!             -b /usr/local/bin/postgres \
 //!             -r http://pg-ext-s3-gateway \
 //! ```
-//!
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;

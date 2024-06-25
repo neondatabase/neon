@@ -56,6 +56,7 @@ pub struct ComputeNode {
     /// - we push new spec and it does reconfiguration
     /// - but then something happens and compute pod / VM is destroyed,
     ///   so k8s controller starts it again with the **old** spec
+    ///
     /// and the same for empty computes:
     /// - we started compute without any spec
     /// - we push spec and it does configuration
