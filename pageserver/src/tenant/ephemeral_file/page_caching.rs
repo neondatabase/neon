@@ -166,13 +166,15 @@ impl PreWarmingWriter {
         }
     }
 
-    async fn read_all_written_blocks_into_memory_directly_from_disk<
-        B: tokio_epoll_uring::BoundedBufMut + Send,
-    >(
+    async fn read_all_written_blocks_into_memory_directly_from_disk<B, Buf>(
         &self,
         buf: B,
         ctx: &RequestContext,
-    ) -> std::io::Result<B> {
+    ) -> std::io::Result<tokio_epoll_uring::Slice<Buf>>
+    where
+        B: tokio_epoll_uring::BoundedBufMut<BufMut = Buf>,
+        Buf: tokio_epoll_uring::IoBufMut + Send,
+    {
         assert_eq!(buf.bytes_total() % PAGE_SZ, 0);
         assert_eq!(
             buf.bytes_total() / PAGE_SZ,

@@ -622,9 +622,9 @@ impl InMemoryLayer {
 
         let l0_flush_global_state = timeline.l0_flush_global_state.inner();
         use l0_flush::Inner;
-        let _memory_permit = match l0_flush_global_state {
+        let _concurrency_permit = match l0_flush_global_state {
             Inner::PageCached => None,
-            Inner::Direct { semaphore, .. } => Some(semaphore.acquire(inner.file.len()).await),
+            Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
         };
 
         let end_lsn = *self.end_lsn.get().unwrap();
@@ -676,7 +676,7 @@ impl InMemoryLayer {
                 }
             }
             l0_flush::Inner::Direct { .. } => {
-                let file_contents = inner.file.load_into_contiguous_memory(ctx).await?;
+                let file_contents: Vec<u8> = inner.file.load_into_contiguous_memory(ctx).await?;
                 assert_eq!(file_contents.len(), inner.file.len() as usize);
 
                 let cursor = BlockCursor::new(BlockReaderRef::Slice(&file_contents));
@@ -695,6 +695,11 @@ impl InMemoryLayer {
                         res?;
                     }
                 }
+
+                // Hold the permit until the IO is done; if we didn't, one could drop this future,
+                // thereby releasing the permit, but the Vec<u8> remains allocated until the IO completes.
+                // => we'd have more concurrenct Vec<u8> than allowed as per the semaphore.
+                drop(_concurrency_permit);
             }
         }
 

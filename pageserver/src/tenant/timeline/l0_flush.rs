@@ -1,19 +1,14 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub enum L0FlushConfig {
     #[default]
     PageCached,
     Direct {
-        /// Concurrent L0 flushes are limited to consume at most `max_memory` bytes of memory.
-        /// If there are a lot of small L0s that need to be flushed, a lot of flushes can happen in parallel.
-        /// If there is a large L0 to be flushed, it might have to wait until preceding flushes are done.
-        max_memory: MaxMemory,
+        max_memory: NonZeroUsize,
+        max_concurrency: NonZeroUsize,
     },
 }
-
-/// Deserializer guarantees that that initializing the `tokio::sync::Semaphore` will succeed.
-pub struct MaxMemory(NonZeroUsize);
 
 pub struct L0FlushGlobalState(Arc<Inner>);
 
@@ -29,8 +24,11 @@ impl L0FlushGlobalState {
     pub fn new(config: L0FlushConfig) -> Self {
         match config {
             L0FlushConfig::PageCached => Self(Inner::PageCached),
-            L0FlushConfig::Direct { max_memory } => {
-                let semaphore = tokio::sync::Semaphore::new(max_memory.0.get());
+            L0FlushConfig::Direct {
+                max_memory,
+                max_concurrency,
+            } => {
+                let semaphore = tokio::sync::Semaphore::new(max_concurrency.get());
                 Self(Inner::Direct { config, semaphore })
             }
         }
