@@ -18,11 +18,6 @@ pub enum Generation {
     // so that code handling generations doesn't have to be aware of the legacy
     // case everywhere it touches a generation.
     None,
-    // Generations with this magic value may never be used to construct S3 keys:
-    // we will panic if someone tries to.  This is for Tenants in the "Broken" state,
-    // so that we can satisfy their constructor with a Generation without risking
-    // a code bug using it in an S3 write (broken tenants should never write)
-    Broken,
     Valid(u32),
 }
 
@@ -42,11 +37,6 @@ impl Generation {
         Self::None
     }
 
-    // Create a new generation that will panic if you try to use get_suffix
-    pub fn broken() -> Self {
-        Self::Broken
-    }
-
     pub const fn new(v: u32) -> Self {
         Self::Valid(v)
     }
@@ -60,9 +50,6 @@ impl Generation {
         match self {
             Self::Valid(v) => GenerationFileSuffix(Some(*v)),
             Self::None => GenerationFileSuffix(None),
-            Self::Broken => {
-                panic!("Tried to use a broken generation");
-            }
         }
     }
 
@@ -86,7 +73,6 @@ impl Generation {
                 }
             }
             Self::None => Self::None,
-            Self::Broken => panic!("Attempted to use a broken generation"),
         }
     }
 
@@ -95,7 +81,6 @@ impl Generation {
         match self {
             Self::Valid(n) => Self::Valid(*n + 1),
             Self::None => Self::Valid(1),
-            Self::Broken => panic!("Attempted to use a broken generation"),
         }
     }
 
@@ -158,9 +143,6 @@ impl Debug for Generation {
             }
             Self::None => {
                 write!(f, "<none>")
-            }
-            Self::Broken => {
-                write!(f, "<broken>")
             }
         }
     }
