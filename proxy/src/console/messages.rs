@@ -66,12 +66,51 @@ impl Display for ConsoleError {
 
 impl CouldRetry for ConsoleError {
     fn could_retry(&self) -> bool {
-        // retry if the retry info is set.
-        // if no status or retry info, do not retry.
-        self.status
+        if self
+            .status
             .as_ref()
             .and_then(|status| status.details.retry_info.as_ref())
             .is_some()
+        {
+            return true;
+        }
+
+        if let Some(status) = &self.status {
+            // retry if the retry info is set.
+            if let Some(_) = status.details.retry_info {
+                return true;
+            }
+
+            // if no retry info set, attempt to use the error code to guess the retry state.
+            let reason = status
+                .details
+                .error_info
+                .map_or(Reason::Unknown, |e| e.reason);
+            match reason {
+                // not a transitive error
+                Reason::RoleProtected => false,
+                // on retry, it will still not be found
+                Reason::ResourceNotFound
+                | Reason::ProjectNotFound
+                | Reason::EndpointNotFound
+                | Reason::BranchNotFound => false,
+                // we were asked to go away
+                Reason::RateLimitExceeded |
+                Reason::NonDefaultBranchComputeTimeExceeded |
+                Reason::ActiveTimeQuotaExceeded |
+                Reason::ComputeTimeQuotaExceeded |
+                Reason::WrittenDataQuotaExceeded |
+                Reason::DataTransferQuotaExceeded |
+                Reason::LogicalSizeQuotaExceeded => false,
+                // transitive error. control plane is currently busy
+                // but might be ready soon
+                Reason::RunningOperations => true,
+                Reason::ConcurrencyLimitReached => true,
+                Reason::LockAlreadyTaken => true,
+                // unknown error. better not retry it.
+                Reason::Unknown => false,
+            }
+        }
     }
 }
 
@@ -97,30 +136,59 @@ pub struct ErrorInfo {
 
 #[derive(Clone, Copy, Debug, Deserialize, Default)]
 pub enum Reason {
+    /// RoleProtected indicates that the role is protected and the attempted operation is not permitted on protected roles.
     #[serde(rename = "ROLE_PROTECTED")]
     RoleProtected,
+    /// ResourceNotFound indicates that a resource (project, endpoint, branch, etc.) wasn't found,
+    /// usually due to the provided ID not being correct or because the subject doesn't have enough permissions to
+    /// access the requested resource.
+    /// Prefer a more specific reason if possible, e.g., ProjectNotFound, EndpointNotFound, etc.
     #[serde(rename = "RESOURCE_NOT_FOUND")]
     ResourceNotFound,
+    /// ProjectNotFound indicates that the project wasn't found, usually due to the provided ID not being correct,
+    /// or that the subject doesn't have enough permissions to access the requested project.
     #[serde(rename = "PROJECT_NOT_FOUND")]
     ProjectNotFound,
+    /// EndpointNotFound indicates that the endpoint wasn't found, usually due to the provided ID not being correct,
+    /// or that the subject doesn't have enough permissions to access the requested endpoint.
     #[serde(rename = "ENDPOINT_NOT_FOUND")]
     EndpointNotFound,
+    /// BranchNotFound indicates that the branch wasn't found, usually due to the provided ID not being correct,
+    /// or that the subject doesn't have enough permissions to access the requested branch.
     #[serde(rename = "BRANCH_NOT_FOUND")]
     BranchNotFound,
+    /// RateLimitExceeded indicates that the rate limit for the operation has been exceeded.
     #[serde(rename = "RATE_LIMIT_EXCEEDED")]
     RateLimitExceeded,
+    /// NonDefaultBranchComputeTimeExceeded indicates that the compute time quota of non-default branches has been
+    /// exceeded.
     #[serde(rename = "NON_PRIMARY_BRANCH_COMPUTE_TIME_EXCEEDED")]
-    NonPrimaryBranchComputeTimeExceeded,
+    NonDefaultBranchComputeTimeExceeded,
+    /// ActiveTimeQuotaExceeded indicates that the active time quota was exceeded.
     #[serde(rename = "ACTIVE_TIME_QUOTA_EXCEEDED")]
     ActiveTimeQuotaExceeded,
+    /// ComputeTimeQuotaExceeded indicates that the compute time quota was exceeded.
     #[serde(rename = "COMPUTE_TIME_QUOTA_EXCEEDED")]
     ComputeTimeQuotaExceeded,
+    /// WrittenDataQuotaExceeded indicates that the written data quota was exceeded.
     #[serde(rename = "WRITTEN_DATA_QUOTA_EXCEEDED")]
     WrittenDataQuotaExceeded,
+    /// DataTransferQuotaExceeded indicates that the data transfer quota was exceeded.
     #[serde(rename = "DATA_TRANSFER_QUOTA_EXCEEDED")]
     DataTransferQuotaExceeded,
+    /// LogicalSizeQuotaExceeded indicates that the logical size quota was exceeded.
     #[serde(rename = "LOGICAL_SIZE_QUOTA_EXCEEDED")]
     LogicalSizeQuotaExceeded,
+    /// RunningOperations indicates that the project already has some running operations
+    /// and scheduling of new ones is prohibited.
+    #[serde(rename = "RUNNING_OPERATIONS")]
+    RunningOperations,
+    /// ConcurrencyLimitReached indicates that the concurrency limit for an action was reached.
+    #[serde(rename = "CONCURRENCY_LIMIT_REACHED")]
+    ConcurrencyLimitReached,
+    /// LockAlreadyTaken indicates that the we attempted to take a lock that was already taken.
+    #[serde(rename = "LOCK_ALREADY_TAKEN")]
+    LockAlreadyTaken,
     #[default]
     #[serde(other)]
     Unknown,
