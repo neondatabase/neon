@@ -2470,6 +2470,8 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
     ) -> Tenant {
+        debug_assert!(!attached_conf.location.generation.is_none());
+
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {

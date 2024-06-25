@@ -9,15 +9,11 @@ use serde::{Deserialize, Serialize};
 /// numbers are used.
 #[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum Generation {
-    // Generations with this magic value will not add a suffix to S3 keys, and will not
-    // be included in persisted index_part.json.  This value is only to be used
-    // during migration from pre-generation metadata to generation-aware metadata,
-    // and should eventually go away.
-    //
-    // A special Generation is used rather than always wrapping Generation in an Option,
-    // so that code handling generations doesn't have to be aware of the legacy
-    // case everywhere it touches a generation.
+    // The None Generation is used in the metadata of layers written before generations were
+    // introduced.  A running Tenant always has a valid generation, but the layer metadata may
+    // include None generations.
     None,
+
     Valid(u32),
 }
 
@@ -113,7 +109,7 @@ impl Serialize for Generation {
         if let Self::Valid(v) = self {
             v.serialize(serializer)
         } else {
-            // We should never be asked to serialize a None or Broken.  Structures
+            // We should never be asked to serialize a None. Structures
             // that include an optional generation should convert None to an
             // Option<Generation>::None
             Err(serde::ser::Error::custom(
