@@ -403,7 +403,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                 tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
                 tracing::Span::current().record(
                     "pid",
-                    &tracing::field::display(client.inner.get_process_id()),
+                    tracing::field::display(client.inner.get_process_id()),
                 );
                 info!(
                     cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
