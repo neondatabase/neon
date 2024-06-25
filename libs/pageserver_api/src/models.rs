@@ -293,22 +293,6 @@ pub struct TenantCreateRequest {
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct TenantLoadRequest {
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
-}
-
-impl std::ops::Deref for TenantCreateRequest {
-    type Target = TenantConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.config
-    }
-}
-
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
@@ -620,31 +604,6 @@ impl TenantConfigRequest {
     pub fn new(tenant_id: TenantId) -> TenantConfigRequest {
         let config = TenantConfig::default();
         TenantConfigRequest { tenant_id, config }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TenantAttachRequest {
-    #[serde(default)]
-    pub config: TenantAttachConfig,
-    #[serde(default)]
-    pub generation: Option<u32>,
-}
-
-/// Newtype to enforce deny_unknown_fields on TenantConfig for
-/// its usage inside `TenantAttachRequest`.
-#[derive(Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct TenantAttachConfig {
-    #[serde(flatten)]
-    allowing_unknown_fields: TenantConfig,
-}
-
-impl std::ops::Deref for TenantAttachConfig {
-    type Target = TenantConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.allowing_unknown_fields
     }
 }
 
@@ -1565,18 +1524,6 @@ mod tests {
             "unknown_field": "unknown_value".to_string(),
         });
         let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
-        );
-
-        let attach_request = json!({
-            "config": {
-                "unknown_field": "unknown_value".to_string(),
-            },
-        });
-        let err = serde_json::from_value::<TenantAttachRequest>(attach_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
             "expect unknown field `unknown_field` error, got: {}",

@@ -46,12 +46,12 @@ use utils::backoff;
 
 use super::StorageMetadata;
 use crate::{
+    config::S3Config,
     error::Cancelled,
     metrics::{start_counting_cancelled_wait, start_measuring_requests},
     support::PermitCarrying,
     ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    S3Config, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
-    REMOTE_STORAGE_PREFIX_SEPARATOR,
+    TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 use crate::metrics::AttemptOutcome;

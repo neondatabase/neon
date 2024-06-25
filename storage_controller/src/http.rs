@@ -502,6 +502,17 @@ async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiErro
     json_response(StatusCode::ACCEPTED, ())
 }
 
+async fn handle_cancel_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+
+    state.service.cancel_node_drain(node_id).await?;
+
+    json_response(StatusCode::ACCEPTED, ())
+}
+
 async fn handle_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -509,6 +520,17 @@ async fn handle_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
 
     state.service.start_node_fill(node_id).await?;
+
+    json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+
+    state.service.cancel_node_fill(node_id).await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -871,8 +893,22 @@ pub fn make_router(
         .put("/control/v1/node/:node_id/drain", |r| {
             named_request_span(r, handle_node_drain, RequestName("control_v1_node_drain"))
         })
+        .delete("/control/v1/node/:node_id/drain", |r| {
+            named_request_span(
+                r,
+                handle_cancel_node_drain,
+                RequestName("control_v1_cancel_node_drain"),
+            )
+        })
         .put("/control/v1/node/:node_id/fill", |r| {
             named_request_span(r, handle_node_fill, RequestName("control_v1_node_fill"))
+        })
+        .delete("/control/v1/node/:node_id/fill", |r| {
+            named_request_span(
+                r,
+                handle_cancel_node_fill,
+                RequestName("control_v1_cancel_node_fill"),
+            )
         })
         // TODO(vlad): endpoint for cancelling drain and fill
         // Tenant Shard operations

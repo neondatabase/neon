@@ -55,11 +55,9 @@ use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
 use self::config::LocationConf;
 use self::config::TenantConf;
-use self::delete::DeleteTenantFlow;
 use self::metadata::TimelineMetadata;
 use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
-use self::mgr::TenantsMap;
 use self::remote_timeline_client::upload::upload_index_part;
 use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineCreateGuard;
@@ -137,7 +135,6 @@ pub mod remote_timeline_client;
 pub mod storage_layer;
 
 pub mod config;
-pub mod delete;
 pub mod mgr;
 pub mod secondary;
 pub mod tasks;
@@ -160,8 +157,6 @@ pub const TENANTS_SEGMENT_NAME: &str = "tenants";
 
 /// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
-
-pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 
 /// References to shared objects that are passed into each tenant, such
 /// as the shared remote storage client and process initialization state.
@@ -207,7 +202,6 @@ struct TimelinePreload {
 }
 
 pub(crate) struct TenantPreload {
-    deleting: bool,
     timelines: HashMap<TimelineId, TimelinePreload>,
 }
 
@@ -285,8 +279,6 @@ pub struct Tenant {
     /// to proceed to Active as soon as possible, rather than waiting for lazy
     /// background warmup.
     pub(crate) activate_now_sem: tokio::sync::Semaphore,
-
-    pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 
     // Cancellation token fires when we have entered shutdown().  This is a parent of
     // Timelines' cancellation token.
@@ -654,7 +646,6 @@ impl Tenant {
         attached_conf: AttachedTenantConf,
         shard_identity: ShardIdentity,
         init_order: Option<InitializationOrder>,
-        tenants: &'static std::sync::RwLock<TenantsMap>,
         mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -828,52 +819,6 @@ impl Tenant {
                 // Remote preload is complete.
                 drop(remote_load_completion);
 
-                let pending_deletion = {
-                    match DeleteTenantFlow::should_resume_deletion(
-                        conf,
-                        preload.as_ref().map(|p| p.deleting).unwrap_or(false),
-                        &tenant_clone,
-                    )
-                    .await
-                    {
-                        Ok(should_resume_deletion) => should_resume_deletion,
-                        Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err), BrokenVerbosity::Error);
-                            return Ok(());
-                        }
-                    }
-                };
-
-                info!("pending_deletion {}", pending_deletion.is_some());
-
-                if let Some(deletion) = pending_deletion {
-                    // as we are no longer loading, signal completion by dropping
-                    // the completion while we resume deletion
-                    drop(_completion);
-                    let background_jobs_can_start =
-                        init_order.as_ref().map(|x| &x.background_jobs_can_start);
-                    if let Some(background) = background_jobs_can_start {
-                        info!("waiting for backgound jobs barrier");
-                        background.clone().wait().await;
-                        info!("ready for backgound jobs barrier");
-                    }
-
-                    let deleted = DeleteTenantFlow::resume_from_attach(
-                        deletion,
-                        &tenant_clone,
-                        preload,
-                        tenants,
-                        &ctx,
-                    )
-                    .await;
-
-                    if let Err(e) = deleted {
-                        make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
-                    }
-
-                    return Ok(());
-                }
-
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
                 let attached = {
                     let _attach_timer = match mode {
@@ -931,21 +876,13 @@ impl Tenant {
         )
         .await?;
 
-        let deleting = other_keys.contains(TENANT_DELETED_MARKER_FILE_NAME);
-        info!(
-            "found {} timelines, deleting={}",
-            remote_timeline_ids.len(),
-            deleting
-        );
+        info!("found {} timelines", remote_timeline_ids.len(),);
 
         for k in other_keys {
-            if k != TENANT_DELETED_MARKER_FILE_NAME {
-                warn!("Unexpected non timeline key {k}");
-            }
+            warn!("Unexpected non timeline key {k}");
         }
 
         Ok(TenantPreload {
-            deleting,
             timelines: Self::load_timeline_metadata(
                 self,
                 remote_timeline_ids,
@@ -974,7 +911,6 @@ impl Tenant {
         let preload = match (preload, mode) {
             (Some(p), _) => p,
             (None, SpawnMode::Create) => TenantPreload {
-                deleting: false,
                 timelines: HashMap::new(),
             },
             (None, _) => {
@@ -2215,6 +2151,7 @@ impl Tenant {
             // Upload an index from the parent: this is partly to provide freshness for the
             // child tenants that will copy it, and partly for general ease-of-debugging: there will
             // always be a parent shard index in the same generation as we wrote the child shard index.
+            tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index");
             timeline
                 .remote_client
                 .schedule_index_upload_for_file_changes()?;
@@ -2222,12 +2159,14 @@ impl Tenant {
 
             // Shut down the timeline's remote client: this means that the indices we write
             // for child shards will not be invalidated by the parent shard deleting layers.
+            tracing::info!(timeline_id=%timeline.timeline_id, "Shutting down remote storage client");
             timeline.remote_client.shutdown().await;
 
             // Download methods can still be used after shutdown, as they don't flow through the remote client's
             // queue.  In principal the RemoteTimelineClient could provide this without downloading it, but this
             // operation is rare, so it's simpler to just download it (and robustly guarantees that the index
             // we use here really is the remotely persistent one).
+            tracing::info!(timeline_id=%timeline.timeline_id, "Downloading index_part from parent");
             let result = timeline.remote_client
                 .download_index_file(&self.cancel)
                 .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))
@@ -2240,6 +2179,7 @@ impl Tenant {
             };
 
             for child_shard in child_shards {
+                tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index_part for child {}", child_shard.to_index());
                 upload_index_part(
                     &self.remote_storage,
                     child_shard,
@@ -2628,7 +2568,6 @@ impl Tenant {
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
             activate_now_sem: tokio::sync::Semaphore::new(0),
-            delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
             timeline_get_throttle: Arc::new(throttle::Throttle::new(
@@ -3020,6 +2959,11 @@ impl Tenant {
 
                 let now = SystemTime::now();
                 target.leases.retain(|_, lease| !lease.is_expired(&now));
+
+                timeline
+                    .metrics
+                    .valid_lsn_lease_count_gauge
+                    .set(target.leases.len() as u64);
 
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
@@ -3906,7 +3850,9 @@ pub(crate) mod harness {
             let remote_fs_dir = conf.workdir.join("localfs");
             std::fs::create_dir_all(&remote_fs_dir).unwrap();
             let config = RemoteStorageConfig {
-                storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+                storage: RemoteStorageKind::LocalFs {
+                    local_path: remote_fs_dir.clone(),
+                },
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
@@ -4066,6 +4012,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
+    use timeline::GcInfo;
     use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
@@ -6743,49 +6690,48 @@ mod tests {
 
         // img layer at 0x10
         let img_layer = (0..10)
-            .map(|id| (get_key(id), test_img(&format!("value {id}@0x10"))))
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
             .collect_vec();
 
         let delta1 = vec![
-            // TODO: we should test a real delta record here, which requires us to add a variant of NeonWalRecord for testing purpose.
             (
                 get_key(1),
                 Lsn(0x20),
-                Value::Image(test_img("value 1@0x20")),
+                Value::Image(Bytes::from("value 1@0x20")),
             ),
             (
                 get_key(2),
                 Lsn(0x30),
-                Value::Image(test_img("value 2@0x30")),
+                Value::Image(Bytes::from("value 2@0x30")),
             ),
             (
                 get_key(3),
                 Lsn(0x40),
-                Value::Image(test_img("value 3@0x40")),
+                Value::Image(Bytes::from("value 3@0x40")),
             ),
         ];
         let delta2 = vec![
             (
                 get_key(5),
                 Lsn(0x20),
-                Value::Image(test_img("value 5@0x20")),
+                Value::Image(Bytes::from("value 5@0x20")),
             ),
             (
                 get_key(6),
                 Lsn(0x20),
-                Value::Image(test_img("value 6@0x20")),
+                Value::Image(Bytes::from("value 6@0x20")),
             ),
         ];
         let delta3 = vec![
             (
                 get_key(8),
                 Lsn(0x40),
-                Value::Image(test_img("value 8@0x40")),
+                Value::Image(Bytes::from("value 8@0x40")),
             ),
             (
                 get_key(9),
                 Lsn(0x40),
-                Value::Image(test_img("value 9@0x40")),
+                Value::Image(Bytes::from("value 9@0x40")),
             ),
         ];
 
@@ -6807,8 +6753,41 @@ mod tests {
             guard.cutoffs.horizon = Lsn(0x30);
         }
 
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x20"),
+            Bytes::from_static(b"value 2@0x30"),
+            Bytes::from_static(b"value 3@0x40"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x20"),
+            Bytes::from_static(b"value 6@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x40"),
+            Bytes::from_static(b"value 9@0x40"),
+        ];
+
+        for (idx, expected) in expected_result.iter().enumerate() {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+
         let cancel = CancellationToken::new();
         tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+
+        for (idx, expected) in expected_result.iter().enumerate() {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
 
         // Check if the image layer at the GC horizon contains exactly what we want
         let image_at_gc_horizon = tline
@@ -6820,14 +6799,22 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(image_at_gc_horizon.len(), 10);
-        let expected_lsn = [0x10, 0x20, 0x30, 0x10, 0x10, 0x20, 0x20, 0x10, 0x10, 0x10];
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x20"),
+            Bytes::from_static(b"value 2@0x30"),
+            Bytes::from_static(b"value 3@0x10"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x20"),
+            Bytes::from_static(b"value 6@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10"),
+            Bytes::from_static(b"value 9@0x10"),
+        ];
         for idx in 0..10 {
             assert_eq!(
                 image_at_gc_horizon[idx],
-                (
-                    get_key(idx as u32),
-                    test_img(&format!("value {idx}@{:#x}", expected_lsn[idx]))
-                )
+                (get_key(idx as u32), expected_result[idx].clone())
             );
         }
 
@@ -6860,7 +6847,7 @@ mod tests {
                 },
                 // The delta layer that is cut in the middle
                 PersistentLayerKey {
-                    key_range: Key::MIN..get_key(9),
+                    key_range: get_key(3)..get_key(4),
                     lsn_range: Lsn(0x30)..Lsn(0x41),
                     is_delta: true
                 },
@@ -6945,6 +6932,9 @@ mod tests {
             tline.get(get_key(2), Lsn(0x50), &ctx).await?,
             Bytes::from_static(b"0x10,0x20,0x30")
         );
+
+        // Need to remove the limit of "Neon WAL redo requires base image".
+
         // assert_eq!(tline.get(get_key(3), Lsn(0x50), &ctx).await?, Bytes::new());
         // assert_eq!(tline.get(get_key(4), Lsn(0x50), &ctx).await?, Bytes::new());
 
@@ -7036,6 +7026,166 @@ mod tests {
         // Assumption: original lease to is still valid for 0/50.
         let _ =
             timeline.make_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_simple_bottom_most_compaction_deltas() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction_deltas")?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
+        //
+        //  | D1 |                       | D3 |
+        // -|    |-- gc horizon -----------------
+        //  |    |                | D2 |
+        // --------- img layer ------------------
+        //
+        // What we should expact from this compaction is:
+        //  | Part of D1 |               | D3 |
+        // --------- img layer with D1+D2 at GC horizon------------------
+
+        // img layer at 0x10
+        let img_layer = (0..10)
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
+            .collect_vec();
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(2),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x30")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+        ];
+        let delta2 = vec![
+            (
+                get_key(5),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(6),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+        ];
+        let delta3 = vec![
+            (
+                get_key(8),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+            (
+                get_key(9),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+        ];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![delta1, delta2, delta3], // delta layers
+                vec![(Lsn(0x10), img_layer)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            *guard = GcInfo {
+                retain_lsns: vec![],
+                cutoffs: GcCutoffs {
+                    pitr: Lsn(0x30),
+                    horizon: Lsn(0x30),
+                },
+                leases: Default::default(),
+            };
+        }
+
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10@0x20"),
+            Bytes::from_static(b"value 2@0x10@0x30"),
+            Bytes::from_static(b"value 3@0x10@0x40"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10@0x20"),
+            Bytes::from_static(b"value 6@0x10@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10@0x40"),
+            Bytes::from_static(b"value 9@0x10@0x40"),
+        ];
+
+        let expected_result_at_gc_horizon = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10@0x20"),
+            Bytes::from_static(b"value 2@0x10@0x30"),
+            Bytes::from_static(b"value 3@0x10"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10@0x20"),
+            Bytes::from_static(b"value 6@0x10@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10"),
+            Bytes::from_static(b"value 9@0x10"),
+        ];
+
+        for idx in 0..10 {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result[idx]
+            );
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x30), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result_at_gc_horizon[idx]
+            );
+        }
+
+        let cancel = CancellationToken::new();
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+
+        for idx in 0..10 {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result[idx]
+            );
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x30), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result_at_gc_horizon[idx]
+            );
+        }
 
         Ok(())
     }
