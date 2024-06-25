@@ -1,3 +1,5 @@
+#![allow(clippy::todo)]
+
 use std::ffi::CString;
 
 use crate::{
