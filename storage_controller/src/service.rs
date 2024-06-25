@@ -4963,7 +4963,7 @@ impl Service {
     ///      we did the split, but are probably better placed elsewhere.
     /// - Creating new secondary locations if it improves the spreading of a sharded tenant
     ///    * e.g. after a shard split, some locations will be on the same node (where the split
-    ///     happened), and will probably be better placed elsewhere.
+    ///      happened), and will probably be better placed elsewhere.
     ///
     /// To put it more briefly: whereas the scheduler respects soft constraints in a ScheduleContext at
     /// the time of scheduling, this function looks for cases where a better-scoring location is available
@@ -5526,14 +5526,14 @@ impl Service {
 
     /// Create a node fill plan (pick secondaries to promote) that meets the following requirements:
     /// 1. The node should be filled until it reaches the expected cluster average of
-    /// attached shards. If there are not enough secondaries on the node, the plan stops early.
+    ///    attached shards. If there are not enough secondaries on the node, the plan stops early.
     /// 2. Select tenant shards to promote such that the number of attached shards is balanced
-    /// throughout the cluster. We achieve this by picking tenant shards from each node,
-    /// starting from the ones with the largest number of attached shards, until the node
-    /// reaches the expected cluster average.
+    ///    throughout the cluster. We achieve this by picking tenant shards from each node,
+    ///    starting from the ones with the largest number of attached shards, until the node
+    ///    reaches the expected cluster average.
     /// 3. Avoid promoting more shards of the same tenant than required. The upper bound
-    /// for the number of tenants from the same shard promoted to the node being filled is:
-    /// shard count for the tenant divided by the number of nodes in the cluster.
+    ///    for the number of tenants from the same shard promoted to the node being filled is:
+    ///    shard count for the tenant divided by the number of nodes in the cluster.
     fn fill_node_plan(&self, node_id: NodeId) -> Vec<TenantShardId> {
         let mut locked = self.inner.write().unwrap();
         let fill_requirement = locked.scheduler.compute_fill_requirement(node_id);
