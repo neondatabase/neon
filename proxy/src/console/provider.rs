@@ -27,7 +27,7 @@ pub mod errors {
     use crate::{
         console::messages::{self, ConsoleError},
         error::{io_error, ReportableError, UserFacingError},
-        proxy::retry::{Retry, ShouldRetry},
+        proxy::retry::{CouldRetry, Retry},
     };
     use thiserror::Error;
 
@@ -128,8 +128,8 @@ pub mod errors {
         }
     }
 
-    impl ShouldRetry for ApiError {
-        fn could_retry(&self) -> Retry {
+    impl CouldRetry for ApiError {
+        fn could_retry(&self) -> Option<Retry> {
             match self {
                 // retry some transport errors
                 Self::Transport(io) => io.could_retry(),
@@ -240,13 +240,13 @@ pub mod errors {
         }
     }
 
-    impl ShouldRetry for WakeComputeError {
-        fn could_retry(&self) -> Retry {
+    impl CouldRetry for WakeComputeError {
+        fn could_retry(&self) -> Option<Retry> {
             match self {
-                WakeComputeError::BadComputeAddress(_) => Retry::Never,
+                WakeComputeError::BadComputeAddress(_) => None,
                 WakeComputeError::ApiError(e) => e.could_retry(),
-                WakeComputeError::TooManyConnections => Retry::Never,
-                WakeComputeError::TooManyConnectionAttempts(_) => Retry::Never,
+                WakeComputeError::TooManyConnections => None,
+                WakeComputeError::TooManyConnectionAttempts(_) => None,
             }
         }
     }

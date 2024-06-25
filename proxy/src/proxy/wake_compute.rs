@@ -6,11 +6,11 @@ use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
     WakeupFailureKind,
 };
+use crate::proxy::retry::should_retry;
 use hyper1::StatusCode;
 use tracing::{error, info, warn};
 
 use super::connect_compute::ComputeConnectBackend;
-use super::retry::ShouldRetry;
 
 pub async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
@@ -20,9 +20,10 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
 ) -> Result<CachedNodeInfo, WakeComputeError> {
     let retry_type = RetryType::WakeCompute;
     loop {
-        match api.wake_compute(ctx).await {
-            Err(e) => {
-                let Some(wait_duration) = e.should_retry(*num_retries, config) else {
+        let (e, wait_duration) = match api.wake_compute(ctx).await {
+            Err(e) => match should_retry(&e, *num_retries, config) {
+                Some(wait_duration) => (e, wait_duration),
+                None => {
                     error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
                     report_error(&e, false);
                     Metrics::get().proxy.retries_metric.observe(
@@ -33,18 +34,8 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
                         (*num_retries).into(),
                     );
                     return Err(e);
-                };
-
-                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
-                report_error(&e, true);
-                *num_retries += 1;
-
-                let pause = ctx
-                    .latency_timer
-                    .pause(crate::metrics::Waiting::RetryTimeout);
-                tokio::time::sleep(wait_duration).await;
-                drop(pause);
-            }
+                }
+            },
             Ok(n) => {
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
@@ -56,7 +47,17 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
                 info!(?num_retries, "compute node woken up after");
                 return Ok(n);
             }
-        }
+        };
+
+        warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
+        report_error(&e, true);
+        *num_retries += 1;
+
+        let pause = ctx
+            .latency_timer
+            .pause(crate::metrics::Waiting::RetryTimeout);
+        tokio::time::sleep(wait_duration).await;
+        drop(pause);
     }
 }
 

@@ -18,7 +18,7 @@ use crate::{
     intern::EndpointIdInt,
     proxy::{
         connect_compute::ConnectMechanism,
-        retry::{Retry, ShouldRetry},
+        retry::{CouldRetry, CouldRetry2, Retry},
     },
     rate_limiter::EndpointRateLimiter,
     Host,
@@ -182,17 +182,19 @@ impl UserFacingError for HttpConnError {
     }
 }
 
-impl ShouldRetry for HttpConnError {
-    fn could_retry(&self) -> Retry {
+impl CouldRetry for HttpConnError {
+    fn could_retry(&self) -> Option<Retry> {
         match self {
             HttpConnError::ConnectionError(e) => e.could_retry(),
-            HttpConnError::ConnectionClosedAbruptly(_) => Retry::Never,
-            HttpConnError::GetAuthInfo(_) => Retry::Never,
-            HttpConnError::AuthError(_) => Retry::Never,
-            HttpConnError::WakeCompute(_) => Retry::Never,
-            HttpConnError::TooManyConnectionAttempts(_) => Retry::Never,
+            HttpConnError::ConnectionClosedAbruptly(_)
+            | HttpConnError::GetAuthInfo(_)
+            | HttpConnError::AuthError(_)
+            | HttpConnError::WakeCompute(_)
+            | HttpConnError::TooManyConnectionAttempts(_) => None,
         }
     }
+}
+impl CouldRetry2 for HttpConnError {
     fn should_retry_database_address(&self) -> bool {
         match self {
             HttpConnError::ConnectionError(e) => e.should_retry_database_address(),

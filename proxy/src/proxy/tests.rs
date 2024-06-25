@@ -5,7 +5,7 @@ mod mitm;
 use std::time::Duration;
 
 use super::connect_compute::ConnectMechanism;
-use super::retry::ShouldRetry;
+use super::retry::CouldRetry;
 use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
@@ -19,7 +19,7 @@ use crate::error::ErrorKind;
 use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use retry::Retry;
+use retry::{CouldRetry2, Retry};
 use rstest::rstest;
 use rustls::pki_types;
 use tokio_postgres::config::SslMode;
@@ -424,13 +424,14 @@ impl std::fmt::Display for TestConnectError {
 
 impl std::error::Error for TestConnectError {}
 
-impl ShouldRetry for TestConnectError {
-    fn could_retry(&self) -> Retry {
-        if self.retryable {
-            Retry::Backoff
-        } else {
-            Retry::Never
-        }
+impl CouldRetry for TestConnectError {
+    fn could_retry(&self) -> Option<Retry> {
+        self.retryable.then_some(Retry::Backoff)
+    }
+}
+impl CouldRetry2 for TestConnectError {
+    fn should_retry_database_address(&self) -> bool {
+        true
     }
 }
 
@@ -479,7 +480,7 @@ impl TestBackend for TestConnectMechanism {
                     error: "TEST".into(),
                     status: None,
                 });
-                assert!(!err.could_retry().is_retriable());
+                assert!(err.could_retry().is_none());
                 Err(console::errors::WakeComputeError::ApiError(err))
             }
             ConnectAction::WakeRetry => {
@@ -496,7 +497,7 @@ impl TestBackend for TestConnectMechanism {
                         },
                     }),
                 });
-                assert!(err.could_retry().is_retriable());
+                assert!(err.could_retry().is_some());
                 Err(console::errors::WakeComputeError::ApiError(err))
             }
             x => panic!("expecting action {:?}, wake_compute is called instead", x),
