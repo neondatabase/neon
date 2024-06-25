@@ -622,18 +622,16 @@ impl InMemoryLayer {
 
         let end_lsn = *self.end_lsn.get().unwrap();
 
-        let keys: Vec<_> = if let Some(key_range) = key_range {
+        let key_count = if let Some(key_range) = key_range {
             inner
                 .index
                 .iter()
                 .filter(|(k, _)| key_range.contains(k))
-                .map(|(k, m)| (k.to_i128(), m))
-                .collect()
+                .count()
         } else {
-            inner.index.iter().map(|(k, m)| (k.to_i128(), m)).collect()
+            inner.index.len()
         };
-
-        if keys.is_empty() {
+        if key_count == 0 {
             return Ok(None);
         }
 

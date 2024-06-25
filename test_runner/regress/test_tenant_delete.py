@@ -31,8 +31,12 @@ def error_tolerant_delete(ps_http, tenant_id):
             if e.status_code == 500:
                 # This test uses failure injection, which can produce 500s as the pageserver expects
                 # the object store to always be available, and the ListObjects during deletion is generally
-                # an infallible operation
-                assert "simulated failure of remote operation" in e.message
+                # an infallible operation.  This can show up as a clear simulated error, or as a general
+                # error during delete_objects()
+                assert (
+                    "simulated failure of remote operation" in e.message
+                    or "failed to delete" in e.message
+                )
             else:
                 raise
         else:

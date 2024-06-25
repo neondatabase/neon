@@ -21,6 +21,7 @@ use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
+use pageserver_api::models::LsnLease;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
@@ -30,13 +31,11 @@ use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
-use pageserver_api::models::TenantState;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
 use pageserver_api::models::{
-    DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
-    TenantLocationConfigRequest,
+    DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantLocationConfigRequest,
 };
 use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
@@ -50,7 +49,6 @@ use utils::auth::JwtAuth;
 use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::prometheus_metrics_handler;
 use utils::http::endpoint::request_span;
-use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use crate::context::{DownloadBehavior, RequestContext};
@@ -728,6 +726,8 @@ async fn get_lsn_by_timestamp_handler(
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
+    let with_lease = parse_query_param(&request, "with_lease")?.unwrap_or(false);
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let timeline =
@@ -736,10 +736,15 @@ async fn get_lsn_by_timestamp_handler(
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
+
     #[derive(serde::Serialize, Debug)]
     struct Result {
         lsn: Lsn,
         kind: &'static str,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(flatten)]
+        lease: Option<LsnLease>,
     }
     let (lsn, kind) = match result {
         LsnForTimestamp::Present(lsn) => (lsn, "present"),
@@ -747,11 +752,28 @@ async fn get_lsn_by_timestamp_handler(
         LsnForTimestamp::Past(lsn) => (lsn, "past"),
         LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
     };
-    let result = Result { lsn, kind };
+
+    let lease = if with_lease {
+        timeline
+            .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .inspect_err(|_| {
+                warn!("fail to grant a lease to {}", lsn);
+            })
+            .ok()
+    } else {
+        None
+    };
+
+    let result = Result { lsn, kind, lease };
+    let valid_until = result
+        .lease
+        .as_ref()
+        .map(|l| humantime::format_rfc3339_millis(l.valid_until).to_string());
     tracing::info!(
         lsn=?result.lsn,
         kind=%result.kind,
         timestamp=%timestamp_raw,
+        valid_until=?valid_until,
         "lsn_by_timestamp finished"
     );
     json_response(StatusCode::OK, result)
@@ -796,58 +818,6 @@ async fn get_timestamp_of_lsn_handler(
     }
 }
 
-async fn tenant_attach_handler(
-    mut request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
-    let maybe_body: Option<TenantAttachRequest> = json_request_or_empty_body(&mut request).await?;
-    let tenant_conf = match &maybe_body {
-        Some(request) => TenantConfOpt::try_from(&*request.config).map_err(ApiError::BadRequest)?,
-        None => TenantConfOpt::default(),
-    };
-
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
-    info!("Handling tenant attach {tenant_id}");
-
-    let state = get_state(&request);
-
-    let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
-
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-    let shard_params = ShardParameters::default();
-    let location_conf = LocationConf::attached_single(tenant_conf, generation, &shard_params);
-
-    let tenant = state
-        .tenant_manager
-        .upsert_location(tenant_shard_id, location_conf, None, SpawnMode::Eager, &ctx)
-        .await?;
-
-    let Some(tenant) = tenant else {
-        // This should never happen: indicates a bug in upsert_location
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "Upsert succeeded but didn't return tenant!"
-        )));
-    };
-
-    // We might have successfully constructed a Tenant, but it could still
-    // end up in a broken state:
-    if let TenantState::Broken {
-        reason,
-        backtrace: _,
-    } = tenant.current_state()
-    {
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "Tenant state is Broken: {reason}"
-        )));
-    }
-
-    json_response(StatusCode::ACCEPTED, ())
-}
-
 async fn timeline_delete_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -876,26 +846,6 @@ async fn timeline_delete_handler(
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
-}
-
-async fn tenant_detach_handler(
-    request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-    // This is a legacy API (`/location_conf` is the replacement).  It only supports unsharded tenants
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-
-    let state = get_state(&request);
-    let conf = state.conf;
-    state
-        .tenant_manager
-        .detach_tenant(conf, tenant_shard_id, &state.deletion_queue_client)
-        .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
-        .await?;
-
-    json_response(StatusCode::OK, ())
 }
 
 async fn tenant_reset_handler(
@@ -2685,12 +2635,6 @@ pub fn make_router(
         })
         .post("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_create_handler)
-        })
-        .post("/v1/tenant/:tenant_id/attach", |r| {
-            api_handler(r, tenant_attach_handler)
-        })
-        .post("/v1/tenant/:tenant_id/detach", |r| {
-            api_handler(r, tenant_detach_handler)
         })
         .post("/v1/tenant/:tenant_shard_id/reset", |r| {
             api_handler(r, tenant_reset_handler)
