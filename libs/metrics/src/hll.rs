@@ -13,11 +13,7 @@ use std::{
 
 use measured::{
     label::{LabelGroupVisitor, LabelName, LabelValue, LabelVisitor},
-    metric::{
-        group::{Encoding, MetricValue},
-        name::MetricNameEncoder,
-        Metric, MetricType, MetricVec,
-    },
+    metric::{gauge::write_gauge, name::MetricNameEncoder, Metric, MetricType, MetricVec},
     text::TextEncoder,
     LabelGroup,
 };
@@ -182,12 +178,13 @@ impl<W: std::io::Write, const N: usize> measured::metric::MetricEncoding<TextEnc
             .into_iter()
             .enumerate()
             .try_for_each(|(hll_shard, val)| {
-                enc.write_metric_value(
+                write_gauge(
+                    enc,
                     name.by_ref(),
                     labels.by_ref().compose_with(HllShardLabel {
                         hll_shard: hll_shard as i64,
                     }),
-                    MetricValue::Int(val as i64),
+                    val as i64,
                 )
             })
     }

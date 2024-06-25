@@ -8,8 +8,8 @@ use measured::{
     label::{LabelGroupSet, LabelGroupVisitor, LabelName, NoLabels},
     metric::{
         counter::CounterState,
-        gauge::GaugeState,
-        group::{Encoding, MetricValue},
+        gauge::{write_gauge, GaugeState},
+        group::Encoding,
         name::{MetricName, MetricNameEncoder},
         MetricEncoding, MetricFamilyEncoding,
     },
@@ -165,15 +165,6 @@ pub struct LibMetrics {
     serve_count: CollectionCounter,
 }
 
-fn write_gauge<Enc: Encoding>(
-    x: i64,
-    labels: impl LabelGroup,
-    name: impl MetricNameEncoder,
-    enc: &mut Enc,
-) -> Result<(), Enc::Err> {
-    enc.write_metric_value(name, labels, MetricValue::Int(x))
-}
-
 #[derive(Default)]
 struct Rusage;
 
@@ -199,12 +190,12 @@ where
             "Bytes written and read from disk, grouped by the operation (read|write)",
         )?;
         GaugeState::write_type(DISK_IO, enc)?;
-        write_gauge(ru.ru_inblock * BYTES_IN_BLOCK, IoOp::Read, DISK_IO, enc)?;
-        write_gauge(ru.ru_oublock * BYTES_IN_BLOCK, IoOp::Write, DISK_IO, enc)?;
+        write_gauge(enc, DISK_IO, IoOp::Read, ru.ru_inblock * BYTES_IN_BLOCK)?;
+        write_gauge(enc, DISK_IO, IoOp::Write, ru.ru_oublock * BYTES_IN_BLOCK)?;
 
         enc.write_help(MAXRSS, "Memory usage (Maximum Resident Set Size)")?;
         GaugeState::write_type(MAXRSS, enc)?;
-        write_gauge(ru.ru_maxrss, IoOp::Read, MAXRSS, enc)?;
+        write_gauge(enc, MAXRSS, IoOp::Read, ru.ru_maxrss)?;
 
         Ok(())
     }
@@ -543,15 +534,6 @@ impl<T: Encoding> Encoding for Inc<T> {
     fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
         self.0.write_help(name, help)
     }
-
-    fn write_metric_value(
-        &mut self,
-        name: impl MetricNameEncoder,
-        labels: impl LabelGroup,
-        value: MetricValue,
-    ) -> Result<(), Self::Err> {
-        self.0.write_metric_value(name, labels, value)
-    }
 }
 
 impl<T: Encoding> MetricEncoding<Inc<T>> for MeasuredCounterPairState
@@ -577,15 +559,6 @@ impl<T: Encoding> Encoding for Dec<T> {
 
     fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
         self.0.write_help(name, help)
-    }
-
-    fn write_metric_value(
-        &mut self,
-        name: impl MetricNameEncoder,
-        labels: impl LabelGroup,
-        value: MetricValue,
-    ) -> Result<(), Self::Err> {
-        self.0.write_metric_value(name, labels, value)
     }
 }
 
