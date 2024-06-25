@@ -9,6 +9,7 @@ pub(crate) mod logical_size;
 pub mod span;
 pub mod uninit;
 mod walreceiver;
+pub(crate) mod l0_flush;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use arc_swap::ArcSwap;
@@ -208,6 +209,7 @@ pub struct TimelineResources {
     pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
+    pub l0_flush_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 pub(crate) struct AuxFilesState {
@@ -433,6 +435,8 @@ pub struct Timeline {
     /// in the future, add `extra_test_sparse_keyspace` if necessary.
     #[cfg(test)]
     pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
+
+    pub(crate) l0_flush_global_state: L0FlushGlobalState,
 }
 
 pub struct WalReceiverInfo {

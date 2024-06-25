@@ -65,6 +65,10 @@ impl EphemeralFile {
         self.rw.page_cache_file_id()
     }
 
+    pub(crate) async fn load_into_contiguous_memory(&self, ctx: &RequestContext) -> Result<Vec<u8>, io::Error> {
+        self.rw.load_into_contiguous_memory(ctx).await
+    }
+
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,

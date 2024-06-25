@@ -49,6 +49,35 @@ impl RW {
         self.rw.bytes_written()
     }
 
+    pub(crate) async fn load_into_contiguous_memory(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<Vec<u8>, io::Error> {
+        let size = {
+            let s = self.bytes_written();
+            s += s % PAGE_SZ; // round up to the next PAGE_SZ multiple, required by blob_io
+        };
+        let buf = Vec::with_capacity(size);
+
+        // read from disk what we've already flushed
+        let writer = self.rw.as_writer();
+        let buf = writer
+            .read_all_written_blocks_into_memory_directly_from_disk(
+                buf.slice(0..writer.nwritten_blocks * PAGE_SZ),
+                ctx,
+            )
+            .await?;
+        let vec = buf.into_inner();
+        assert_eq!(vec.len() % PAGE_SZ, 0);
+        assert_eq!(vec.len() / PAGE_SZ, writer.nwritten_blocks as usize);
+
+        // copy from in-memory buffer what we haven't flushed yet but would return when accessed via read_blk
+        let buffered = self.rw.inspect_buffer_zero_padded();
+        vec.extend_from_slice(buffered);
+        assert_eq!(vec.len(), size);
+        Ok(vec)
+    }
+
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,
@@ -128,6 +157,19 @@ impl PreWarmingWriter {
             page_cache_file_id,
             file,
         }
+    }
+
+    async fn read_all_written_blocks_into_memory_directly_from_disk<
+        B: tokio_epoll_uring::Slice<Buf = Buf>,
+        Buf: tokio_epoll_uring::IoBufMut + Send,
+    >(
+        &self,
+        buf: B,
+        ctx: &RequestContext,
+    ) -> std::io::Result<B> {
+        assert_eq!(buf.bytes_total() % PAGE_SZ, 0);
+        assert_eq!(buf.bytes_total() / PAGE_SZ, self.nwritten_blocks);
+        self.file.read_exact_at(buf, 0, ctx).await
     }
 }
 

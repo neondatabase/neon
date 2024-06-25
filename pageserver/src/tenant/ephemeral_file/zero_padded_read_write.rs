@@ -75,6 +75,14 @@ where
         flushed_offset + u64::try_from(buffer.pending()).unwrap()
     }
 
+    pub fn inspect_buffer_zero_padded(&self) -> &[u8] {
+        let buffer: &zero_padded::Buffer<TAIL_SZ> = self.buffered_writer.inspect_buffer();
+        let buffer_written_up_to = u64::try_from(buffer.pending()).unwrap();
+        // pad to next page boundary
+        let read_up_to = buffer_written_up_to + (buffer_written_up_to % PAGE_SZ);
+        buffer.as_zero_padded_slice()[0..buffer_written_up_to]
+    }
+
     pub(crate) async fn read_blk(&self, blknum: u32) -> Result<ReadResult<'_, W>, std::io::Error> {
         let flushed_offset = self.buffered_writer.as_inner().bytes_written();
         let buffer: &zero_padded::Buffer<TAIL_SZ> = self.buffered_writer.inspect_buffer();

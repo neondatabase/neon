@@ -81,6 +81,7 @@ pub(crate) enum BlockReaderRef<'a> {
     FileBlockReader(&'a FileBlockReader<'a>),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
+    Slice(&[u8]),
     #[cfg(test)]
     TestDisk(&'a super::disk_btree::tests::TestDisk),
     #[cfg(test)]

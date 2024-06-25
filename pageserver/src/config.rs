@@ -294,7 +294,10 @@ pub struct PageServerConf {
     ///
     /// Setting this to zero disables limits on total ephemeral layer size.
     pub ephemeral_bytes_per_memory_kb: usize,
+
+    pub l0_flush: L0FlushConfig,
 }
+
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
 /// and/or serialized at a whim, while the token is secret. Currently this token is the
