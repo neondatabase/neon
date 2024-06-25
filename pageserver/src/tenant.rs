@@ -2957,8 +2957,30 @@ impl Tenant {
             {
                 let mut target = timeline.gc_info.write().unwrap();
 
+                // Cull any expired leases
                 let now = SystemTime::now();
                 target.leases.retain(|_, lease| !lease.is_expired(&now));
+
+                // Look up parent's PITR cutoff to update the child's knowledge of whether it is within parent's PITR
+                if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
+                    if let Some(ancestor_gc_cutoffs) = gc_cutoffs.get(&ancestor_id) {
+                        target.within_ancestor_pitr =
+                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.pitr;
+                    }
+                }
+
+                // Update metrics that depend on GC state
+                timeline
+                    .metrics
+                    .within_ancestor_pitr
+                    .set(target.within_ancestor_pitr as i64);
+                timeline.metrics.pitr_history_size.set(
+                    timeline
+                        .get_last_record_lsn()
+                        .checked_sub(target.cutoffs.pitr)
+                        .unwrap_or(Lsn(0))
+                        .0 as i64,
+                );
 
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
