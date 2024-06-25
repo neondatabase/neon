@@ -175,7 +175,7 @@ impl VectoredReadPlanner {
         }
     }
 
-    /// This function should *only* be used if the caller has a way to control the limit. e.g., in `ImageLayerIterator`,
+    /// This function should *only* be used if the caller has a way to control the limit. e.g., in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`],
     /// it uses the vectored read planner to avoid duplicated logic on handling blob start/end, while expecting the vectored
     /// read planner to give a single read to a continuous range of bytes in the image layer. Therefore, it does not need the
     /// code path to split reads into chunks of `max_read_size`, and controls the read size itself.

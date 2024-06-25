@@ -1309,18 +1309,18 @@ mod test {
         loop {
             let o1 = img_iter.next().await.unwrap();
             let o2 = expect_iter.next();
-            assert_eq!(o1.is_some(), o2.is_some());
-            if o1.is_none() && o2.is_none() {
-                break;
+            match (o1, o2) {
+                (None, None) => break,
+                (Some((k1, l1, v1)), Some((k2, i2))) => {
+                    let Value::Image(i1) = v1 else {
+                        panic!("expect Value::Image")
+                    };
+                    assert_eq!(&k1, k2);
+                    assert_eq!(l1, expect_lsn);
+                    assert_eq!(&i1, i2);
+                }
+                _ => panic!("iterators length mismatch"),
             }
-            let (k1, l1, v1) = o1.unwrap();
-            let Value::Image(i1) = v1 else {
-                panic!("expect Value::Image")
-            };
-            let (k2, i2) = o2.unwrap();
-            assert_eq!(&k1, k2);
-            assert_eq!(l1, expect_lsn);
-            assert_eq!(&i1, i2);
         }
     }
 

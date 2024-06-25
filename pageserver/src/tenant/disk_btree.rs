@@ -276,8 +276,14 @@ where
     /// TODO: Once the sequential read path is removed this will become
     /// the only index traversal method.
     ///
-    /// Note 2: this function used to take `&self` but due to the iterator-based API refactor,
-    /// it now consumes `self`. Feel free to add the `&self` variant back if it's necessary.
+    /// Note 2: this function used to take `&self` but it now consumes `self`. This is due to
+    /// the lifetime constraints of the reader and the stream / iterator it creates. Using `&self`
+    /// requires the reader to be present when the stream is used, and this creates a lifetime
+    /// dependency between the reader and the stream. Now if we want to create an iterator that
+    /// holds the stream, someone will need to keep a reference to the reader, which is inconvenient
+    /// to use from the image/delta layer APIs.
+    ///
+    /// Feel free to add the `&self` variant back if it's necessary.
     pub fn into_stream<'a>(
         self,
         start_key: &'a [u8; L],
