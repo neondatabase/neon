@@ -25,7 +25,7 @@ use tracing::info;
 
 pub mod errors {
     use crate::{
-        console::messages::{self, ConsoleError},
+        console::messages::{self, ConsoleError, Reason},
         error::{io_error, ReportableError, UserFacingError},
         proxy::retry::CouldRetry,
     };
@@ -76,21 +76,22 @@ pub mod errors {
                 ApiError::Console(e) => {
                     use crate::error::ErrorKind::*;
                     match e.get_reason() {
-                        crate::console::messages::Reason::RoleProtected => User,
-                        crate::console::messages::Reason::ResourceNotFound => User,
-                        crate::console::messages::Reason::ProjectNotFound => User,
-                        crate::console::messages::Reason::EndpointNotFound => User,
-                        crate::console::messages::Reason::BranchNotFound => User,
-                        crate::console::messages::Reason::RateLimitExceeded => ServiceRateLimit,
-                        crate::console::messages::Reason::NonPrimaryBranchComputeTimeExceeded => {
-                            User
-                        }
-                        crate::console::messages::Reason::ActiveTimeQuotaExceeded => User,
-                        crate::console::messages::Reason::ComputeTimeQuotaExceeded => User,
-                        crate::console::messages::Reason::WrittenDataQuotaExceeded => User,
-                        crate::console::messages::Reason::DataTransferQuotaExceeded => User,
-                        crate::console::messages::Reason::LogicalSizeQuotaExceeded => User,
-                        crate::console::messages::Reason::Unknown => match &e {
+                        Reason::RoleProtected => User,
+                        Reason::ResourceNotFound => User,
+                        Reason::ProjectNotFound => User,
+                        Reason::EndpointNotFound => User,
+                        Reason::BranchNotFound => User,
+                        Reason::RateLimitExceeded => ServiceRateLimit,
+                        Reason::NonDefaultBranchComputeTimeExceeded => User,
+                        Reason::ActiveTimeQuotaExceeded => User,
+                        Reason::ComputeTimeQuotaExceeded => User,
+                        Reason::WrittenDataQuotaExceeded => User,
+                        Reason::DataTransferQuotaExceeded => User,
+                        Reason::LogicalSizeQuotaExceeded => User,
+                        Reason::ConcurrencyLimitReached => ControlPlane,
+                        Reason::LockAlreadyTaken => ControlPlane,
+                        Reason::RunningOperations => ControlPlane,
+                        Reason::Unknown => match &e {
                             ConsoleError {
                                 http_status_code:
                                     http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,

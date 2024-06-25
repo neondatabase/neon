@@ -1,5 +1,5 @@
 use crate::config::RetryConfig;
-use crate::console::messages::ConsoleError;
+use crate::console::messages::{ConsoleError, Reason};
 use crate::console::{errors::WakeComputeError, provider::CachedNodeInfo};
 use crate::context::RequestMonitoring;
 use crate::metrics::{
@@ -66,43 +66,22 @@ fn report_error(e: &WakeComputeError, retry: bool) {
         WakeComputeError::BadComputeAddress(_) => WakeupFailureKind::BadComputeAddress,
         WakeComputeError::ApiError(ApiError::Transport(_)) => WakeupFailureKind::ApiTransportError,
         WakeComputeError::ApiError(ApiError::Console(e)) => match e.get_reason() {
-            crate::console::messages::Reason::RoleProtected => {
-                WakeupFailureKind::ApiConsoleBadRequest
-            }
-            crate::console::messages::Reason::ResourceNotFound => {
-                WakeupFailureKind::ApiConsoleBadRequest
-            }
-            crate::console::messages::Reason::ProjectNotFound => {
-                WakeupFailureKind::ApiConsoleBadRequest
-            }
-            crate::console::messages::Reason::EndpointNotFound => {
-                WakeupFailureKind::ApiConsoleBadRequest
-            }
-            crate::console::messages::Reason::BranchNotFound => {
-                WakeupFailureKind::ApiConsoleBadRequest
-            }
-            crate::console::messages::Reason::RateLimitExceeded => {
-                WakeupFailureKind::ApiConsoleLocked
-            }
-            crate::console::messages::Reason::NonPrimaryBranchComputeTimeExceeded => {
-                WakeupFailureKind::QuotaExceeded
-            }
-            crate::console::messages::Reason::ActiveTimeQuotaExceeded => {
-                WakeupFailureKind::QuotaExceeded
-            }
-            crate::console::messages::Reason::ComputeTimeQuotaExceeded => {
-                WakeupFailureKind::QuotaExceeded
-            }
-            crate::console::messages::Reason::WrittenDataQuotaExceeded => {
-                WakeupFailureKind::QuotaExceeded
-            }
-            crate::console::messages::Reason::DataTransferQuotaExceeded => {
-                WakeupFailureKind::QuotaExceeded
-            }
-            crate::console::messages::Reason::LogicalSizeQuotaExceeded => {
-                WakeupFailureKind::QuotaExceeded
-            }
-            crate::console::messages::Reason::Unknown => match e {
+            Reason::RoleProtected => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::ResourceNotFound => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::ProjectNotFound => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::EndpointNotFound => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::BranchNotFound => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::RateLimitExceeded => WakeupFailureKind::ApiConsoleLocked,
+            Reason::NonDefaultBranchComputeTimeExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::ActiveTimeQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::ComputeTimeQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::WrittenDataQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::DataTransferQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::LogicalSizeQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::ConcurrencyLimitReached => WakeupFailureKind::ApiConsoleLocked,
+            Reason::LockAlreadyTaken => WakeupFailureKind::ApiConsoleLocked,
+            Reason::RunningOperations => WakeupFailureKind::ApiConsoleLocked,
+            Reason::Unknown => match e {
                 ConsoleError {
                     http_status_code: StatusCode::LOCKED,
                     ref error,

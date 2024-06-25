@@ -66,50 +66,45 @@ impl Display for ConsoleError {
 
 impl CouldRetry for ConsoleError {
     fn could_retry(&self) -> bool {
-        if self
-            .status
-            .as_ref()
-            .and_then(|status| status.details.retry_info.as_ref())
-            .is_some()
-        {
+        // If the error message does not have a status,
+        // the error is unknown and probably should not retry automatically
+        let Some(status) = &self.status else {
+            return false;
+        };
+
+        // retry if the retry info is set.
+        if status.details.retry_info.is_some() {
             return true;
         }
 
-        if let Some(status) = &self.status {
-            // retry if the retry info is set.
-            if let Some(_) = status.details.retry_info {
-                return true;
-            }
-
-            // if no retry info set, attempt to use the error code to guess the retry state.
-            let reason = status
-                .details
-                .error_info
-                .map_or(Reason::Unknown, |e| e.reason);
-            match reason {
-                // not a transitive error
-                Reason::RoleProtected => false,
-                // on retry, it will still not be found
-                Reason::ResourceNotFound
-                | Reason::ProjectNotFound
-                | Reason::EndpointNotFound
-                | Reason::BranchNotFound => false,
-                // we were asked to go away
-                Reason::RateLimitExceeded |
-                Reason::NonDefaultBranchComputeTimeExceeded |
-                Reason::ActiveTimeQuotaExceeded |
-                Reason::ComputeTimeQuotaExceeded |
-                Reason::WrittenDataQuotaExceeded |
-                Reason::DataTransferQuotaExceeded |
-                Reason::LogicalSizeQuotaExceeded => false,
-                // transitive error. control plane is currently busy
-                // but might be ready soon
-                Reason::RunningOperations => true,
-                Reason::ConcurrencyLimitReached => true,
-                Reason::LockAlreadyTaken => true,
-                // unknown error. better not retry it.
-                Reason::Unknown => false,
-            }
+        // if no retry info set, attempt to use the error code to guess the retry state.
+        let reason = status
+            .details
+            .error_info
+            .map_or(Reason::Unknown, |e| e.reason);
+        match reason {
+            // not a transitive error
+            Reason::RoleProtected => false,
+            // on retry, it will still not be found
+            Reason::ResourceNotFound
+            | Reason::ProjectNotFound
+            | Reason::EndpointNotFound
+            | Reason::BranchNotFound => false,
+            // we were asked to go away
+            Reason::RateLimitExceeded
+            | Reason::NonDefaultBranchComputeTimeExceeded
+            | Reason::ActiveTimeQuotaExceeded
+            | Reason::ComputeTimeQuotaExceeded
+            | Reason::WrittenDataQuotaExceeded
+            | Reason::DataTransferQuotaExceeded
+            | Reason::LogicalSizeQuotaExceeded => false,
+            // transitive error. control plane is currently busy
+            // but might be ready soon
+            Reason::RunningOperations => true,
+            Reason::ConcurrencyLimitReached => true,
+            Reason::LockAlreadyTaken => true,
+            // unknown error. better not retry it.
+            Reason::Unknown => false,
         }
     }
 }
@@ -128,7 +123,7 @@ pub struct Details {
     pub user_facing_message: Option<UserFacingMessage>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Copy, Clone, Debug, Deserialize)]
 pub struct ErrorInfo {
     pub reason: Reason,
     // Schema could also have `metadata` field, but it's not structured. Skip it for now.
@@ -206,7 +201,7 @@ impl Reason {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Copy, Clone, Debug, Deserialize)]
 pub struct RetryInfo {
     pub retry_delay_ms: u64,
 }
