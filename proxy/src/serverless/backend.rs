@@ -18,7 +18,7 @@ use crate::{
     intern::EndpointIdInt,
     proxy::{
         connect_compute::ConnectMechanism,
-        retry::{CouldRetry, CouldRetry2},
+        retry::{CouldRetry, ShouldRetryWakeCompute},
     },
     rate_limiter::EndpointRateLimiter,
     Host,
@@ -194,10 +194,10 @@ impl CouldRetry for HttpConnError {
         }
     }
 }
-impl CouldRetry2 for HttpConnError {
-    fn should_retry_database_address(&self) -> bool {
+impl ShouldRetryWakeCompute for HttpConnError {
+    fn should_retry_wake_compute(&self) -> bool {
         match self {
-            HttpConnError::ConnectionError(e) => e.should_retry_database_address(),
+            HttpConnError::ConnectionError(e) => e.should_retry_wake_compute(),
             // we never checked cache validity
             HttpConnError::TooManyConnectionAttempts(_) => false,
             _ => true,

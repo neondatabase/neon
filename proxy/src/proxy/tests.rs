@@ -19,7 +19,7 @@ use crate::error::ErrorKind;
 use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use retry::{retry_after, CouldRetry2};
+use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
 use rustls::pki_types;
 use tokio_postgres::config::SslMode;
@@ -443,8 +443,8 @@ impl CouldRetry for TestConnectError {
         self.retryable
     }
 }
-impl CouldRetry2 for TestConnectError {
-    fn should_retry_database_address(&self) -> bool {
+impl ShouldRetryWakeCompute for TestConnectError {
+    fn should_retry_wake_compute(&self) -> bool {
         true
     }
 }

@@ -17,7 +17,7 @@ use pq_proto::StartupMessageParams;
 use tokio::time;
 use tracing::{error, info, warn};
 
-use super::retry::CouldRetry2;
+use super::retry::ShouldRetryWakeCompute;
 
 const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 
@@ -106,7 +106,7 @@ pub async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
     connect_to_compute_retry_config: RetryConfig,
 ) -> Result<M::Connection, M::Error>
 where
-    M::ConnectError: CouldRetry + CouldRetry2 + std::fmt::Debug,
+    M::ConnectError: CouldRetry + ShouldRetryWakeCompute + std::fmt::Debug,
     M::Error: From<WakeComputeError>,
 {
     let mut num_retries = 0;
@@ -141,7 +141,7 @@ where
 
     error!(error = ?err, "could not connect to compute node");
 
-    let node_info = if !node_info.cached() || !err.should_retry_database_address() {
+    let node_info = if !node_info.cached() || !err.should_retry_wake_compute() {
         // If we just recieved this from cplane and dodn't get it from cache, we shouldn't retry.
         // Do not need to retrieve a new node_info, just return the old one.
         if should_retry(&err, num_retries, connect_to_compute_retry_config) {

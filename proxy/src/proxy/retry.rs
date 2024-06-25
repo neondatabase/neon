@@ -3,11 +3,14 @@ use std::{error::Error, io};
 use tokio::time;
 
 pub trait CouldRetry {
+    /// Returns true if the error could be retried
     fn could_retry(&self) -> bool;
 }
 
-pub trait CouldRetry2 {
-    fn should_retry_database_address(&self) -> bool;
+pub trait ShouldRetryWakeCompute {
+    /// Returns true if we need to invalidate the cache for this node.
+    /// If false, we can continue retrying with the current node cache.
+    fn should_retry_wake_compute(&self) -> bool;
 }
 
 pub fn should_retry(err: &impl CouldRetry, num_retries: u32, config: RetryConfig) -> bool {
@@ -36,8 +39,8 @@ impl CouldRetry for tokio_postgres::error::DbError {
         )
     }
 }
-impl CouldRetry2 for tokio_postgres::error::DbError {
-    fn should_retry_database_address(&self) -> bool {
+impl ShouldRetryWakeCompute for tokio_postgres::error::DbError {
+    fn should_retry_wake_compute(&self) -> bool {
         use tokio_postgres::error::SqlState;
         // Here are errors that happens after the user successfully authenticated to the database.
         // TODO: there are pgbouncer errors that should be retried, but they are not listed here.
@@ -65,11 +68,13 @@ impl CouldRetry for tokio_postgres::Error {
         }
     }
 }
-impl CouldRetry2 for tokio_postgres::Error {
-    fn should_retry_database_address(&self) -> bool {
+impl ShouldRetryWakeCompute for tokio_postgres::Error {
+    fn should_retry_wake_compute(&self) -> bool {
         if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
-            tokio_postgres::error::DbError::should_retry_database_address(db_err)
+            tokio_postgres::error::DbError::should_retry_wake_compute(db_err)
         } else {
+            // likely an IO error. Possible the compute has shutdown and the
+            // cache is stale.
             true
         }
     }
@@ -85,10 +90,10 @@ impl CouldRetry for compute::ConnectionError {
         }
     }
 }
-impl CouldRetry2 for compute::ConnectionError {
-    fn should_retry_database_address(&self) -> bool {
+impl ShouldRetryWakeCompute for compute::ConnectionError {
+    fn should_retry_wake_compute(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.should_retry_database_address(),
+            compute::ConnectionError::Postgres(err) => err.should_retry_wake_compute(),
             // the cache entry was not checked for validity
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
             _ => true,
