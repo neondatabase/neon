@@ -389,7 +389,6 @@ impl Layer {
     }
 
     /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
-    #[cfg(test)]
     pub(crate) async fn load_key_values(
         &self,
         ctx: &RequestContext,
@@ -1774,7 +1773,6 @@ impl DownloadedLayer {
         }
     }
 
-    #[cfg(test)]
     async fn load_key_values(
         &self,
         owner: &Arc<LayerInner>,

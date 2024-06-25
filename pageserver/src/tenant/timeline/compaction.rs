@@ -47,10 +47,14 @@ impl Timeline {
     /// TODO: cancellation
     pub(crate) async fn compact_legacy(
         self: &Arc<Self>,
-        _cancel: &CancellationToken,
+        cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
+        if flags.contains(CompactFlags::EnhancedGcBottomMostCompaction) {
+            return self.compact_with_gc(cancel, ctx).await;
+        }
+
         // High level strategy for compaction / image creation:
         //
         // 1. First, calculate the desired "partitioning" of the
@@ -959,15 +963,20 @@ impl Timeline {
     /// the GC horizon without considering retain_lsns. Then, it does a full compaction over all these delta
     /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
     /// and create delta layers with all deltas >= gc horizon.
-    #[cfg(test)]
     pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
         _cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
+        use crate::tenant::storage_layer::ValueReconstructState;
         use std::collections::BTreeSet;
 
-        use crate::tenant::storage_layer::ValueReconstructState;
+        info!("running enhanced gc bottom-most compaction");
+
+        scopeguard::defer! {
+            info!("done enhanced gc bottom-most compaction");
+        };
+
         // Step 0: pick all delta layers + image layers below/intersect with the GC horizon.
         // The layer selection has the following properties:
         // 1. If a layer is in the selection, all layers below it are in the selection.
@@ -976,6 +985,11 @@ impl Timeline {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
             let gc_info = self.gc_info.read().unwrap();
+            if !gc_info.retain_lsns.is_empty() || !gc_info.leases.is_empty() {
+                return Err(CompactionError::Other(anyhow!(
+                    "enhanced legacy compaction currently does not support retain_lsns (branches)"
+                )));
+            }
             let gc_cutoff = Lsn::min(gc_info.cutoffs.horizon, gc_info.cutoffs.pitr);
             let mut selected_layers = Vec::new();
             // TODO: consider retain_lsns
@@ -987,6 +1001,11 @@ impl Timeline {
             }
             (selected_layers, gc_cutoff)
         };
+        info!(
+            "picked {} layers for compaction with gc_cutoff={}",
+            layer_selection.len(),
+            gc_cutoff
+        );
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
         // Also, collect the layer information to decide when to split the new delta layers.
         let mut all_key_values = Vec::new();
@@ -1064,10 +1083,8 @@ impl Timeline {
                 } else if *lsn <= horizon {
                     match val {
                         crate::repository::Value::Image(image) => {
-                            if lsn <= &horizon {
-                                base_image = Some((*lsn, image.clone()));
-                                break;
-                            }
+                            base_image = Some((*lsn, image.clone()));
+                            break;
                         }
                         crate::repository::Value::WalRecord(wal) => {
                             delta_above_base_image.push((*lsn, wal.clone()));
@@ -1075,7 +1092,7 @@ impl Timeline {
                     }
                 }
             }
-            delta_above_base_image.reverse();
+            // do not reverse delta_above_base_image, reconstruct state expects reversely-ordered records
             keys_above_horizon.reverse();
             let state = ValueReconstructState {
                 img: base_image,
@@ -1200,6 +1217,11 @@ impl Timeline {
         );
 
         let image_layer = image_layer_writer.finish(self, ctx).await?;
+        info!(
+            "produced {} delta layers and {} image layers",
+            delta_layers.len(),
+            1
+        );
         let mut compact_to = Vec::new();
         compact_to.extend(delta_layers);
         compact_to.push(image_layer);
@@ -1208,6 +1230,9 @@ impl Timeline {
             let mut guard = self.layers.write().await;
             guard.finish_gc_compaction(&layer_selection, &compact_to, &self.metrics)
         };
+
+        self.remote_client
+            .schedule_compaction_update(&layer_selection, &compact_to)?;
         Ok(())
     }
 }
