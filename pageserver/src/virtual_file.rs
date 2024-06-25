@@ -786,13 +786,13 @@ pub async fn read_exact_at_impl<B, F, Fut>(
     mut offset: u64,
     count: Option<usize>,
     mut read_at: F,
-) -> (B, std::io::Result<()>)
+) -> (B::Buf, std::io::Result<()>)
 where
-    B: IoBufMut + Send,
-    F: FnMut(tokio_epoll_uring::Slice<B>, u64) -> Fut,
-    Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B>, std::io::Result<usize>)>,
+    B: BoundedBuf + Send,
+    F: FnMut(tokio_epoll_uring::Slice<B::Buf>, u64) -> Fut,
+    Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B::Buf>, std::io::Result<usize>)>,
 {
-    let mut buf: tokio_epoll_uring::Slice<B> = match count {
+    let mut buf: tokio_epoll_uring::Slice<_> = match count {
         Some(count) => {
             assert!(count <= buf.bytes_total());
             assert!(count > 0);
