@@ -21,6 +21,7 @@ use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
+use pageserver_api::models::LsnLease;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
@@ -728,6 +729,8 @@ async fn get_lsn_by_timestamp_handler(
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
+    let with_lease = parse_query_param(&request, "with_lease")?.unwrap_or(false);
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let timeline =
@@ -736,10 +739,15 @@ async fn get_lsn_by_timestamp_handler(
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
+
     #[derive(serde::Serialize, Debug)]
     struct Result {
         lsn: Lsn,
         kind: &'static str,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(flatten)]
+        lease: Option<LsnLease>,
     }
     let (lsn, kind) = match result {
         LsnForTimestamp::Present(lsn) => (lsn, "present"),
@@ -747,11 +755,28 @@ async fn get_lsn_by_timestamp_handler(
         LsnForTimestamp::Past(lsn) => (lsn, "past"),
         LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
     };
-    let result = Result { lsn, kind };
+
+    let lease = if with_lease {
+        timeline
+            .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .inspect_err(|_| {
+                warn!("fail to grant a lease to {}", lsn);
+            })
+            .ok()
+    } else {
+        None
+    };
+
+    let result = Result { lsn, kind, lease };
+    let valid_until = result
+        .lease
+        .as_ref()
+        .map(|l| humantime::format_rfc3339_millis(l.valid_until).to_string());
     tracing::info!(
         lsn=?result.lsn,
         kind=%result.kind,
         timestamp=%timestamp_raw,
+        valid_until=?valid_until,
         "lsn_by_timestamp finished"
     );
     json_response(StatusCode::OK, result)
