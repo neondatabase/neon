@@ -373,6 +373,9 @@ impl<'a> VectoredBlobReader<'a> {
     }
 }
 
+/// Read planner used in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`]. It provides a streaming API for
+/// getting read blobs. It returns a batch when `handle` gets called and when the current key would exceed the read_size and
+/// max_cnt constraints. Underlying it uses [`VectoredReadPlanner`].
 #[cfg(test)]
 pub struct StreamingVectoredReadPlanner {
     planner: VectoredReadPlanner,

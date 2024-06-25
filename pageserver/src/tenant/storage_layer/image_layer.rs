@@ -977,7 +977,6 @@ impl<'a> ImageLayerIterator<'a> {
     async fn next_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.key_values_batch.is_empty());
         assert!(!self.is_end);
-        self.key_values_batch.clear();
 
         let plan = loop {
             if let Some(res) = self.index_iter.next().await {
