@@ -19,7 +19,7 @@ use crate::error::ErrorKind;
 use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use retry::CouldRetry2;
+use retry::{retry_after, CouldRetry2};
 use rstest::rstest;
 use rustls::pki_types;
 use tokio_postgres::config::SslMode;
@@ -356,6 +356,20 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         .context("server shouldn't accept client")?;
 
     Ok(())
+}
+
+#[test]
+fn connect_compute_total_wait() {
+    let mut total_wait = tokio::time::Duration::ZERO;
+    let config = RetryConfig {
+        base_delay: Duration::from_secs(1),
+        max_retries: 5,
+        backoff_factor: 2.0,
+    };
+    for num_retries in 1..config.max_retries {
+        total_wait += retry_after(num_retries, config);
+    }
+    assert!(f64::abs(total_wait.as_secs_f64() - 15.0) < 0.1);
 }
 
 #[derive(Clone, Copy, Debug)]

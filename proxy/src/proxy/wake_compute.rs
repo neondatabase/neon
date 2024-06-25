@@ -21,21 +21,21 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
     let retry_type = RetryType::WakeCompute;
     loop {
         match api.wake_compute(ctx).await {
+            Err(e) if !should_retry(&e, *num_retries, config) => {
+                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
+                report_error(&e, false);
+                Metrics::get().proxy.retries_metric.observe(
+                    RetriesMetricGroup {
+                        outcome: ConnectOutcome::Failed,
+                        retry_type,
+                    },
+                    (*num_retries).into(),
+                );
+                return Err(e);
+            }
             Err(e) => {
-                let retriable = should_retry(&e, *num_retries, config);
-                report_error(&e, retriable);
-                if !retriable {
-                    error!(error = ?e, num_retries, retriable, "couldn't wake compute node");
-                    Metrics::get().proxy.retries_metric.observe(
-                        RetriesMetricGroup {
-                            outcome: ConnectOutcome::Failed,
-                            retry_type,
-                        },
-                        (*num_retries).into(),
-                    );
-                    return Err(e);
-                }
-                warn!(error = ?e, num_retries, retriable, "couldn't wake compute node");
+                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
+                report_error(&e, true);
             }
             Ok(n) => {
                 Metrics::get().proxy.retries_metric.observe(
@@ -48,11 +48,10 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
                 info!(?num_retries, "compute node woken up after");
                 return Ok(n);
             }
-        };
+        }
 
         let wait_duration = retry_after(*num_retries, config);
         *num_retries += 1;
-
         let pause = ctx
             .latency_timer
             .pause(crate::metrics::Waiting::RetryTimeout);

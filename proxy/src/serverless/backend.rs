@@ -186,11 +186,11 @@ impl CouldRetry for HttpConnError {
     fn could_retry(&self) -> bool {
         match self {
             HttpConnError::ConnectionError(e) => e.could_retry(),
-            HttpConnError::ConnectionClosedAbruptly(_)
-            | HttpConnError::GetAuthInfo(_)
-            | HttpConnError::AuthError(_)
-            | HttpConnError::WakeCompute(_)
-            | HttpConnError::TooManyConnectionAttempts(_) => false,
+            HttpConnError::ConnectionClosedAbruptly(_) => false,
+            HttpConnError::GetAuthInfo(_) => false,
+            HttpConnError::AuthError(_) => false,
+            HttpConnError::WakeCompute(_) => false,
+            HttpConnError::TooManyConnectionAttempts(_) => false,
         }
     }
 }

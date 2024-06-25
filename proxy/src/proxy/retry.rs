@@ -17,25 +17,23 @@ pub fn should_retry(err: &impl CouldRetry, num_retries: u32, config: RetryConfig
 impl CouldRetry for io::Error {
     fn could_retry(&self) -> bool {
         use std::io::ErrorKind;
-        match self.kind() {
-            ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable | ErrorKind::TimedOut => {
-                true
-            }
-            _ => false,
-        }
+        matches!(
+            self.kind(),
+            ErrorKind::ConnectionRefused | ErrorKind::AddrNotAvailable | ErrorKind::TimedOut
+        )
     }
 }
 
 impl CouldRetry for tokio_postgres::error::DbError {
     fn could_retry(&self) -> bool {
         use tokio_postgres::error::SqlState;
-        match *self.code() {
-            SqlState::CONNECTION_FAILURE
-            | SqlState::CONNECTION_EXCEPTION
-            | SqlState::CONNECTION_DOES_NOT_EXIST
-            | SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION => true,
-            _ => false,
-        }
+        matches!(
+            self.code(),
+            &SqlState::CONNECTION_FAILURE
+                | &SqlState::CONNECTION_EXCEPTION
+                | &SqlState::CONNECTION_DOES_NOT_EXIST
+                | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
+        )
     }
 }
 impl CouldRetry2 for tokio_postgres::error::DbError {
@@ -102,25 +100,4 @@ pub fn retry_after(num_retries: u32, config: RetryConfig) -> time::Duration {
     config
         .base_delay
         .mul_f64(config.backoff_factor.powi((num_retries as i32) - 1))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use crate::{config::RetryConfig, proxy::retry::retry_after};
-
-    #[test]
-    fn connect_compute_total_wait() {
-        let mut total_wait = tokio::time::Duration::ZERO;
-        let config = RetryConfig {
-            base_delay: Duration::from_secs(1),
-            max_retries: 5,
-            backoff_factor: 2.0,
-        };
-        for num_retries in 1..config.max_retries {
-            total_wait += retry_after(num_retries, config);
-        }
-        assert!(f64::abs(total_wait.as_secs_f64() - 15.0) < 0.1);
-    }
 }
