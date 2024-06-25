@@ -30,7 +30,7 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::tenant::timeline::GetVectoredImpl;
+use crate::tenant::timeline::{l0_flush::L0FlushConfig, GetVectoredImpl};
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};

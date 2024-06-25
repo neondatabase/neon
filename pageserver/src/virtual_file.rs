@@ -20,7 +20,7 @@ use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
+use tokio_epoll_uring::{BoundedBuf, BoundedBufMut, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -592,7 +592,7 @@ impl VirtualFile {
         ctx: &RequestContext,
     ) -> Result<B, Error>
     where
-        B: IoBufMut + Send,
+        B: BoundedBufMut + Send,
     {
         let (buf, res) = read_exact_at_impl(buf, offset, None, |buf, offset| {
             self.read_at(buf, offset, ctx)
@@ -788,7 +788,7 @@ pub async fn read_exact_at_impl<B, F, Fut>(
     mut read_at: F,
 ) -> (B, std::io::Result<()>)
 where
-    B: IoBufMut + Send,
+    B: BoundedBufMut + Send,
     F: FnMut(tokio_epoll_uring::Slice<B>, u64) -> Fut,
     Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B>, std::io::Result<usize>)>,
 {

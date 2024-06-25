@@ -621,6 +621,7 @@ impl InMemoryLayer {
         let inner = self.inner.read().await;
 
         let l0_flush_global_state = timeline.l0_flush_global_state.inner();
+        use l0_flush::Inner;
         let _memory_permit = match l0_flush_global_state {
             Inner::PageCached => None,
             Inner::Direct { semaphore, .. } => Some(semaphore.acquire(inner.file.len()).await),

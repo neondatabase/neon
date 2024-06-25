@@ -17,6 +17,7 @@ use bytes::Bytes;
 use camino::Utf8Path;
 use enumset::EnumSet;
 use fail::fail_point;
+use l0_flush::L0FlushGlobalState;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{

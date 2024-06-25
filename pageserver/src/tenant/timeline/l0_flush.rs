@@ -1,4 +1,4 @@
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
 #[derive(Default)]
 pub enum L0FlushConfig {
@@ -8,7 +8,7 @@ pub enum L0FlushConfig {
         /// Concurrent L0 flushes are limited to consume at most `max_memory` bytes of memory.
         /// If there are a lot of small L0s that need to be flushed, a lot of flushes can happen in parallel.
         /// If there is a large L0 to be flushed, it might have to wait until preceding flushes are done.
-        pub max_memory: MaxMemory,
+        max_memory: MaxMemory,
     },
 }
 
@@ -17,7 +17,7 @@ pub struct MaxMemory(NonZeroUsize);
 
 pub struct L0FlushGlobalState(Arc<Inner>);
 
-pub(in crate::tenant::storage_layer::inmemory_layer) enum Inner {
+pub(crate) enum Inner {
     PageCached,
     Direct {
         config: L0FlushConfig,
@@ -36,7 +36,7 @@ impl L0FlushGlobalState {
         }
     }
 
-    pub(in crate::tenant::storage_layer::inmemory_layer) fn inner(&self) -> &Inner {
+    pub(crate) fn inner(&self) -> &Inner {
         &self.0
     }
 }

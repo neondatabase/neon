@@ -49,32 +49,39 @@ impl RW {
         self.rw.bytes_written()
     }
 
+    /// Load all blocks that can be read via read_blk into a contiguous memory buffer.
+    ///
+    /// This includes blocks that are in the internal buffered writer's buffer.
+    /// The last block is zero-padded to `PAGE_SZ`, so, the returned buffer is always a multiple of `PAGE_SZ`.
     pub(crate) async fn load_into_contiguous_memory(
         &self,
         ctx: &RequestContext,
     ) -> Result<Vec<u8>, io::Error> {
+        // round up to the next PAGE_SZ multiple, required by blob_io
         let size = {
-            let s = self.bytes_written();
-            s += s % PAGE_SZ; // round up to the next PAGE_SZ multiple, required by blob_io
+            let s = usize::try_from(self.bytes_written()).unwrap();
+            s.checked_add(s % PAGE_SZ).unwrap()
         };
         let buf = Vec::with_capacity(size);
 
         // read from disk what we've already flushed
         let writer = self.rw.as_writer();
+        let nwritten_blocks = usize::try_from(writer.nwritten_blocks).unwrap();
         let buf = writer
             .read_all_written_blocks_into_memory_directly_from_disk(
-                buf.slice(0..writer.nwritten_blocks * PAGE_SZ),
+                buf.slice(0..nwritten_blocks * PAGE_SZ),
                 ctx,
             )
             .await?;
-        let vec = buf.into_inner();
+        let mut vec = buf.into_inner();
         assert_eq!(vec.len() % PAGE_SZ, 0);
-        assert_eq!(vec.len() / PAGE_SZ, writer.nwritten_blocks as usize);
+        assert_eq!(vec.len() / PAGE_SZ, nwritten_blocks);
 
         // copy from in-memory buffer what we haven't flushed yet but would return when accessed via read_blk
         let buffered = self.rw.inspect_buffer_zero_padded();
         vec.extend_from_slice(buffered);
         assert_eq!(vec.len(), size);
+        assert_eq!(vec.len() % PAGE_SZ, 0);
         Ok(vec)
     }
 
@@ -160,15 +167,17 @@ impl PreWarmingWriter {
     }
 
     async fn read_all_written_blocks_into_memory_directly_from_disk<
-        B: tokio_epoll_uring::Slice<Buf = Buf>,
-        Buf: tokio_epoll_uring::IoBufMut + Send,
+        B: tokio_epoll_uring::BoundedBufMut + Send,
     >(
         &self,
         buf: B,
         ctx: &RequestContext,
     ) -> std::io::Result<B> {
         assert_eq!(buf.bytes_total() % PAGE_SZ, 0);
-        assert_eq!(buf.bytes_total() / PAGE_SZ, self.nwritten_blocks);
+        assert_eq!(
+            buf.bytes_total() / PAGE_SZ,
+            usize::try_from(self.nwritten_blocks).unwrap()
+        );
         self.file.read_exact_at(buf, 0, ctx).await
     }
 }
