@@ -13,14 +13,14 @@
 use crate::context::RequestContext;
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
-use crate::page_cache::PageWriteGuard;
+use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
+use tokio_epoll_uring::{BoundedBuf, BoundedBufMut, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -138,37 +138,6 @@ struct SlotInner {
 
     /// the underlying file
     file: Option<OwnedFd>,
-}
-
-/// Impl of [`tokio_epoll_uring::IoBuf`] and [`tokio_epoll_uring::IoBufMut`] for [`PageWriteGuard`].
-struct PageWriteGuardBuf {
-    page: PageWriteGuard<'static>,
-    init_up_to: usize,
-}
-// Safety: the [`PageWriteGuard`] gives us exclusive ownership of the page cache slot,
-// and the location remains stable even if [`Self`] or the [`PageWriteGuard`] is moved.
-unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {
-    fn stable_ptr(&self) -> *const u8 {
-        self.page.as_ptr()
-    }
-    fn bytes_init(&self) -> usize {
-        self.init_up_to
-    }
-    fn bytes_total(&self) -> usize {
-        self.page.len()
-    }
-}
-// Safety: see above, plus: the ownership of [`PageWriteGuard`] means exclusive access,
-// hence it's safe to hand out the `stable_mut_ptr()`.
-unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuardBuf {
-    fn stable_mut_ptr(&mut self) -> *mut u8 {
-        self.page.as_mut_ptr()
-    }
-
-    unsafe fn set_init(&mut self, pos: usize) {
-        assert!(pos <= self.page.len());
-        self.init_up_to = pos;
-    }
 }
 
 impl OpenFiles {
@@ -585,14 +554,18 @@ impl VirtualFile {
         Ok(self.pos)
     }
 
-    pub async fn read_exact_at<B>(
+    /// Read `buf.bytes_total()` bytes into buf, starting at offset `offset`.
+    ///
+    /// The returned slice is guaranteed to be the same view into the underlying `Buf` as the input argument `buf`.
+    pub async fn read_exact_at<Buf, B>(
         &self,
         buf: B,
         offset: u64,
         ctx: &RequestContext,
-    ) -> Result<B, Error>
+    ) -> Result<tokio_epoll_uring::Slice<Buf>, Error>
     where
-        B: IoBufMut + Send,
+        Buf: IoBufMut + Send,
+        B: BoundedBufMut<BufMut = Buf>,
     {
         let (buf, res) = read_exact_at_impl(buf, offset, None, |buf, offset| {
             self.read_at(buf, offset, ctx)
@@ -601,21 +574,25 @@ impl VirtualFile {
         res.map(|()| buf)
     }
 
-    pub async fn read_exact_at_n<B>(
+    /// Read `count` bytes into `buf`, starting at offset `offset`.
+    ///
+    /// The returned `B` is the same `buf` that was passed in.
+    /// On success, it is guaranteed that the returned `B` has `bytes_init() >= count`.
+    pub async fn read_exact_at_n<Buf>(
         &self,
-        buf: B,
+        buf: Buf,
         offset: u64,
         count: usize,
         ctx: &RequestContext,
-    ) -> Result<B, Error>
+    ) -> Result<Buf, Error>
     where
-        B: IoBufMut + Send,
+        Buf: IoBufMut + Send,
     {
         let (buf, res) = read_exact_at_impl(buf, offset, Some(count), |buf, offset| {
             self.read_at(buf, offset, ctx)
         })
         .await;
-        res.map(|()| buf)
+        res.map(|()| buf.into_inner())
     }
 
     /// Like [`Self::read_exact_at`] but for [`PageWriteGuard`].
@@ -625,13 +602,9 @@ impl VirtualFile {
         offset: u64,
         ctx: &RequestContext,
     ) -> Result<PageWriteGuard<'static>, Error> {
-        let buf = PageWriteGuardBuf {
-            page,
-            init_up_to: 0,
-        };
-        let res = self.read_exact_at(buf, offset, ctx).await;
-        res.map(|PageWriteGuardBuf { page, .. }| page)
-            .map_err(|e| Error::new(ErrorKind::Other, e))
+        assert_eq!(page.len(), PAGE_SZ);
+        let res = self.read_exact_at_n(page, offset, PAGE_SZ, ctx).await;
+        res.map_err(|e| Error::new(ErrorKind::Other, e))
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
@@ -781,17 +754,20 @@ impl VirtualFile {
 }
 
 // Adapted from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
-pub async fn read_exact_at_impl<B, F, Fut>(
+pub async fn read_exact_at_impl<Buf, B, F, Fut>(
     buf: B,
     mut offset: u64,
     count: Option<usize>,
     mut read_at: F,
-) -> (B::Buf, std::io::Result<()>)
+) -> (tokio_epoll_uring::Slice<Buf>, std::io::Result<()>)
 where
-    B: BoundedBuf + Send,
-    F: FnMut(tokio_epoll_uring::Slice<B::Buf>, u64) -> Fut,
-    Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B::Buf>, std::io::Result<usize>)>,
+    Buf: IoBufMut + Send,
+    B: BoundedBufMut<BufMut = Buf>,
+    F: FnMut(tokio_epoll_uring::Slice<Buf>, u64) -> Fut,
+    Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<Buf>, std::io::Result<usize>)>,
 {
+    let original_bounds = buf.bounds();
+
     let mut buf: tokio_epoll_uring::Slice<_> = match count {
         Some(count) => {
             assert!(count <= buf.bytes_total());
@@ -811,7 +787,7 @@ where
                 offset += n as u64;
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return (buf.into_inner(), Err(e)),
+            Err(e) => return (buf.into_inner().slice(original_bounds), Err(e)),
         }
     }
     // NB: don't use `buf.is_empty()` here; it is from the
@@ -821,7 +797,7 @@ where
     // buffer that the user passed in.
     if buf.bytes_total() != 0 {
         (
-            buf.into_inner(),
+            buf.into_inner().slice(original_bounds),
             Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "failed to fill whole buffer",
@@ -829,7 +805,7 @@ where
         )
     } else {
         assert_eq!(buf.len(), buf.bytes_total());
-        (buf.into_inner(), Ok(()))
+        (buf.into_inner().slice(original_bounds), Ok(()))
     }
 }
 
@@ -1053,7 +1029,7 @@ impl VirtualFile {
         use crate::page_cache::PAGE_SZ;
         let buf = vec![0; PAGE_SZ];
         let buf = self
-            .read_exact_at(buf, blknum as u64 * (PAGE_SZ as u64), ctx)
+            .read_exact_at_n(buf, blknum as u64 * (PAGE_SZ as u64), PAGE_SZ, ctx)
             .await?;
         Ok(crate::tenant::block_io::BlockLease::Vec(buf))
     }
@@ -1211,7 +1187,9 @@ mod tests {
             ctx: &RequestContext,
         ) -> Result<Vec<u8>, Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(buf, offset, ctx).await,
+                MaybeVirtualFile::VirtualFile(file) => {
+                    file.read_exact_at_n(buf, offset, buf.len(), ctx).await
+                }
                 MaybeVirtualFile::File(file) => file.read_exact_at(&mut buf, offset).map(|()| buf),
             }
         }
@@ -1507,7 +1485,7 @@ mod tests {
                 let mut rng = rand::rngs::OsRng;
                 for _ in 1..1000 {
                     let f = &files[rng.gen_range(0..files.len())];
-                    buf = f.read_exact_at(buf, 0, &ctx).await.unwrap();
+                    buf = f.read_exact_at_n(buf, 0, SIZE, &ctx).await.unwrap();
                     assert!(buf == SAMPLE);
                 }
             });

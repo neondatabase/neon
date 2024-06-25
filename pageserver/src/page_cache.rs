@@ -320,6 +320,37 @@ impl Drop for PageWriteGuard<'_> {
     }
 }
 
+/// SAFETY: page cache slots are stable in memory and are zero-initialized.
+unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuard<'static> {
+    fn stable_ptr(&self) -> *const u8 {
+        let data: &[u8; PAGE_SZ] = self.deref();
+        data.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        PAGE_SZ
+    }
+
+    fn bytes_total(&self) -> usize {
+        PAGE_SZ
+    }
+}
+
+/// SAFETY: underlying RwLockGuard guarantees unique access to the buffer
+/// and the `&mut self` ensures something has unique ownership of `Self`.
+unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuard<'static> {
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        let data: &mut [u8; PAGE_SZ] = self.deref_mut();
+        data.as_mut_ptr()
+    }
+
+    unsafe fn set_init(&mut self, pos: usize) {
+        // There should never be a reason to call this because bytes_init() == bytes_total().
+        // But there's nothing preventing a caller from doing so.
+        assert_eq!(pos, PAGE_SZ);
+    }
+}
+
 /// lock_for_read() return value
 pub enum ReadBufResult<'a> {
     Found(PageReadGuard<'a>),
