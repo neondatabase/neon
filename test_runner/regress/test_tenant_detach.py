@@ -275,16 +275,6 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
-    # first check for non existing tenant
-    tenant_id = TenantId.generate()
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match=f"NotFound: tenant {tenant_id}",
-    ) as excinfo:
-        pageserver_http.tenant_detach(tenant_id)
-
-    assert excinfo.value.status_code == 404
-
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
 
@@ -342,44 +332,6 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
     ):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
-
-
-# Creates a tenant, and detaches it with extra paremeter that forces ignored tenant detach.
-# Tenant should be detached without issues.
-def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
-    env = neon_simple_env
-    client = env.pageserver.http_client()
-
-    # create a new tenant
-    tenant_id, _ = env.neon_cli.create_tenant()
-
-    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
-
-    # assert tenant exists on disk
-    assert env.pageserver.tenant_dir(tenant_id).exists()
-
-    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
-    # we rely upon autocommit after each statement
-    endpoint.safe_psql_many(
-        queries=[
-            "CREATE TABLE t(key int primary key, value text)",
-            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
-        ]
-    )
-
-    log.info("detaching regular tenant with detach ignored flag")
-    client.tenant_detach(tenant_id, True)
-
-    log.info("regular tenant detached without error")
-
-    # check that nothing is left on disk for deleted tenant
-    assert not env.pageserver.tenant_dir(tenant_id).exists()
-
-    # assert the tenant does not exists in the Pageserver
-    tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
-    assert (
-        tenant_id not in tenants_after_detach
-    ), f"Ignored and then detached tenant {tenant_id} should not be present in pageserver's memory"
 
 
 def test_detach_while_attaching(

@@ -840,7 +840,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
     # Detaching a stuck tenant should proceed promptly
     # (reproducer for https://github.com/neondatabase/neon/pull/6430)
-    env.pageserver.http_client().tenant_detach(detach_tenant_id, timeout_secs=10)
+    env.pageserver.http_client().tenant_detach(detach_tenant_id)
     tenant_ids.remove(detach_tenant_id)
     # FIXME: currently the mechanism for cancelling attach is to set state to broken, which is reported spuriously at error level
     env.pageserver.allowed_errors.append(

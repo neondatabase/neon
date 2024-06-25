@@ -1231,6 +1231,13 @@ impl Service {
         &self,
         attach_req: AttachHookRequest,
     ) -> anyhow::Result<AttachHookResponse> {
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            attach_req.tenant_shard_id.tenant_id,
+            TenantOperations::ShardSplit,
+        )
+        .await;
+
         // This is a test hook.  To enable using it on tenants that were created directly with
         // the pageserver API (not via this service), we will auto-create any missing tenant
         // shards with default state.
