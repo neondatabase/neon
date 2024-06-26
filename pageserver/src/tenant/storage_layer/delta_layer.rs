@@ -44,7 +44,7 @@ use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::{BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -188,20 +188,6 @@ impl DeltaKey {
         let mut lsn_buf = [0u8; 8];
         lsn_buf.copy_from_slice(&buf[KEY_SIZE..]);
         Lsn(u64::from_be_bytes(lsn_buf))
-    }
-
-    fn next(&self) -> Self {
-        let key = self.key();
-        let lsn = self.lsn();
-        if lsn == Lsn::MAX {
-            Self::from_key_lsn(&key.next(), Lsn::MIN)
-        } else {
-            Self::from_key_lsn(&key, Lsn(lsn.0 + 1))
-        }
-    }
-
-    fn min() -> Self {
-        Self::from_key_lsn(&Key::MIN, Lsn::MIN)
     }
 }
 
@@ -1515,7 +1501,7 @@ impl DeltaLayerInner {
         DeltaLayerIterator {
             delta_layer: self,
             ctx,
-            index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
+            index_iter: tree_reader.iter(&[0; DELTA_KEY_SIZE], ctx),
             key_values_batch: std::collections::VecDeque::new(),
             is_end: false,
             planner: crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner::new(
@@ -1623,7 +1609,7 @@ impl<'a> DeltaLayerIterator<'a> {
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf: Bytes = blobs_buf.buf.freeze();
+        let frozen_buf = blobs_buf.buf.freeze();
         for meta in blobs_buf.blobs.iter() {
             let value = Value::des(&frozen_buf[meta.start..meta.end])?;
             next_batch.push_back((meta.meta.key, meta.meta.lsn, value));
@@ -2280,6 +2266,7 @@ mod test {
     #[tokio::test]
     async fn delta_layer_iterator() {
         use crate::repository::Value;
+        use bytes::Bytes;
 
         let harness = TenantHarness::create("delta_layer_iterator").unwrap();
         let (tenant, ctx) = harness.load().await;
