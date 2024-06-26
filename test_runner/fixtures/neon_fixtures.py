@@ -3087,9 +3087,16 @@ class PSQL:
         host: str = "127.0.0.1",
         port: int = 5432,
     ):
-        assert shutil.which(path)
+        search_path = None
+        if (d := os.getenv("POSTGRES_DISTRIB_DIR")) is not None and (
+            v := os.getenv("DEFAULT_PG_VERSION")
+        ) is not None:
+            search_path = Path(d) / f"v{v}" / "bin"
 
-        self.path = path
+        full_path = shutil.which(path, path=search_path)
+        assert full_path is not None
+
+        self.path = full_path
         self.database_url = f"postgres://{host}:{port}/main?options=project%3Dgeneric-project-name"
 
     async def run(self, query: Optional[str] = None) -> asyncio.subprocess.Process:
@@ -3551,7 +3558,6 @@ class Endpoint(PgProtocol, LogUtils):
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
 
-        config_lines = ["neon.primary_is_running=on"] + config_lines
         self.config(config_lines)
 
         return self
@@ -3922,6 +3928,8 @@ class Safekeeper(LogUtils):
 
     def assert_no_errors(self):
         assert not self.log_contains("manager task finished prematurely")
+        assert not self.log_contains("error while acquiring WalResidentTimeline guard")
+        assert not self.log_contains("timeout while acquiring WalResidentTimeline guard")
 
     def append_logical_message(
         self, tenant_id: TenantId, timeline_id: TimelineId, request: Dict[str, Any]

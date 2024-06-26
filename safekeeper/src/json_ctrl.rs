@@ -21,7 +21,7 @@ use crate::safekeeper::{
 };
 use crate::safekeeper::{Term, TermHistory, TermLsn};
 use crate::state::TimelinePersistentState;
-use crate::timeline::FullAccessTimeline;
+use crate::timeline::WalResidentTimeline;
 use crate::GlobalTimelines;
 use postgres_backend::PostgresBackend;
 use postgres_ffi::encode_logical_message;
@@ -102,7 +102,7 @@ pub async fn handle_json_ctrl<IO: AsyncRead + AsyncWrite + Unpin>(
 async fn prepare_safekeeper(
     ttid: TenantTimelineId,
     pg_version: u32,
-) -> anyhow::Result<FullAccessTimeline> {
+) -> anyhow::Result<WalResidentTimeline> {
     let tli = GlobalTimelines::create(
         ttid,
         ServerInfo {
@@ -115,11 +115,11 @@ async fn prepare_safekeeper(
     )
     .await?;
 
-    tli.full_access_guard().await
+    tli.wal_residence_guard().await
 }
 
 async fn send_proposer_elected(
-    tli: &FullAccessTimeline,
+    tli: &WalResidentTimeline,
     term: Term,
     lsn: Lsn,
 ) -> anyhow::Result<()> {
@@ -151,7 +151,7 @@ pub struct InsertedWAL {
 /// Extend local WAL with new LogicalMessage record. To do that,
 /// create AppendRequest with new WAL and pass it to safekeeper.
 pub async fn append_logical_message(
-    tli: &FullAccessTimeline,
+    tli: &WalResidentTimeline,
     msg: &AppendLogicalMessage,
 ) -> anyhow::Result<InsertedWAL> {
     let wal_data = encode_logical_message(&msg.lm_prefix, &msg.lm_message);

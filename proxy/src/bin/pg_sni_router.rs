@@ -10,7 +10,7 @@ use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
 use proxy::metrics::{Metrics, ThreadPoolMetrics};
-use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled};
+use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
 
@@ -286,7 +286,10 @@ async fn handle_client(
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
-    let _ = copy_bidirectional_client_compute(&mut tls_stream, &mut client).await?;
 
-    Ok(())
+    match copy_bidirectional_client_compute(&mut tls_stream, &mut client).await {
+        Ok(_) => Ok(()),
+        Err(ErrorSource::Client(err)) => Err(err).context("client"),
+        Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
+    }
 }

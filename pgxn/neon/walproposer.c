@@ -1447,7 +1447,7 @@ RecvAppendResponses(Safekeeper *sk)
 			 * core as this is kinda expected scenario.
 			 */
 			disable_core_dump();
-			wp_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT "",
+			wp_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT ", meaning another compute is running at the same time, and it conflicts with us",
 				   sk->host, sk->port,
 				   sk->appendResponse.term, wp->propTerm);
 		}
