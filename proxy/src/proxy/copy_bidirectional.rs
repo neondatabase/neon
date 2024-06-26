@@ -13,7 +13,8 @@ enum TransferState {
     Done(u64),
 }
 
-enum ErrorDirection {
+#[derive(Debug)]
+pub enum ErrorDirection {
     Read(io::Error),
     Write(io::Error),
 }
@@ -33,6 +34,7 @@ impl ErrorDirection {
     }
 }
 
+#[derive(Debug)]
 pub enum ErrorSource {
     Client(io::Error),
     Compute(io::Error),
@@ -167,7 +169,7 @@ impl CopyBuffer {
         cx: &mut Context<'_>,
         mut reader: Pin<&mut R>,
         mut writer: Pin<&mut W>,
-    ) -> Poll<io::Result<usize>>
+    ) -> Poll<Result<usize, ErrorDirection>>
     where
         R: AsyncRead + ?Sized,
         W: AsyncWrite + ?Sized,
@@ -178,11 +180,11 @@ impl CopyBuffer {
                 // Top up the buffer towards full if we can read a bit more
                 // data - this should improve the chances of a large write
                 if !me.read_done && me.cap < me.buf.len() {
-                    ready!(me.poll_fill_buf(cx, reader.as_mut()))?;
+                    ready!(me.poll_fill_buf(cx, reader.as_mut())).map_err(ErrorDirection::Read)?;
                 }
                 Poll::Pending
             }
-            res => res,
+            res => res.map_err(ErrorDirection::Write),
         }
     }
 
@@ -210,7 +212,8 @@ impl CopyBuffer {
                         // Try flushing when the reader has no progress to avoid deadlock
                         // when the reader depends on buffered writer.
                         if self.need_flush {
-                            ready!(writer.as_mut().poll_flush(cx))?;
+                            ready!(writer.as_mut().poll_flush(cx))
+                                .map_err(ErrorDirection::Write)?;
                             self.need_flush = false;
                         }
 
@@ -245,7 +248,7 @@ impl CopyBuffer {
             // If we've written all the data and we've seen EOF, flush out the
             // data and finish the transfer.
             if self.pos == self.cap && self.read_done {
-                ready!(writer.as_mut().poll_flush(cx))?;
+                ready!(writer.as_mut().poll_flush(cx)).map_err(ErrorDirection::Write)?;
                 return Poll::Ready(Ok(self.amt));
             }
         }

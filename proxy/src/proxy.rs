@@ -8,7 +8,7 @@ pub mod passthrough;
 pub mod retry;
 pub mod wake_compute;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
-use copy_bidirectional::ErrorSource;
+pub use copy_bidirectional::ErrorSource;
 
 use crate::{
     auth,
