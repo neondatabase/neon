@@ -168,16 +168,15 @@ close_range_syscall(unsigned int start_fd, unsigned int count, unsigned int flag
 static void
 enter_seccomp_mode(void)
 {
-
 	/*
 	 * The pageserver process relies on us to close all the file descriptors
 	 * it potentially leaked to us, _before_ we start processing potentially dangerous
 	 * wal records. See the comment in the Rust code that launches this process.
 	 */
-	int err;
-	if (err = close_range_syscall(3, ~0U, 0)) {
-		ereport(FATAL, (errcode(ERRCODE_SYSTEM_ERROR), errmsg("seccomp: could not close files >= fd 3")));
-	}
+	if (close_range_syscall(3, ~0U, 0) != 0)
+		ereport(FATAL,
+				(errcode(ERRCODE_SYSTEM_ERROR),
+				 errmsg("seccomp: could not close files >= fd 3")));
 
 	PgSeccompRule syscalls[] =
 	{
