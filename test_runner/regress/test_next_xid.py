@@ -1,13 +1,14 @@
-import json
 import os
 import time
 from pathlib import Path
 
-from fixtures.common_types import Lsn, TenantId, TimelineId
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_wal_insert_lsn
-from fixtures.pageserver.utils import (
-    wait_for_last_record_lsn,
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    PgBin,
+    import_timeline_from_vanilla_postgres,
+    wait_for_wal_insert_lsn,
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import query_scalar
@@ -76,7 +77,6 @@ def test_import_at_2bil(
 ):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
-    ps_http = env.pageserver.http_client()
 
     # Reset the vanilla Postgres instance to somewhat before 2 billion transactions.
     pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, "pg_resetwal")
@@ -92,68 +92,28 @@ def test_import_at_2bil(
     assert vanilla_pg.safe_psql("select count(*) from tt") == [(300000,)]
     vanilla_pg.safe_psql("CREATE TABLE t (t text);")
     vanilla_pg.safe_psql("INSERT INTO t VALUES ('inserted in vanilla')")
-
-    endpoint_id = "ep-import_from_vanilla"
-    tenant = TenantId.generate()
-    timeline = TimelineId.generate()
-
-    env.pageserver.tenant_create(tenant)
-
-    # Take basebackup
-    basebackup_dir = os.path.join(test_output_dir, "basebackup")
-    base_tar = os.path.join(basebackup_dir, "base.tar")
-    wal_tar = os.path.join(basebackup_dir, "pg_wal.tar")
-    os.mkdir(basebackup_dir)
     vanilla_pg.safe_psql("CHECKPOINT")
-    pg_bin.run(
-        [
-            "pg_basebackup",
-            "-F",
-            "tar",
-            "-d",
-            vanilla_pg.connstr(),
-            "-D",
-            basebackup_dir,
-        ]
+
+    tenant_id = TenantId.generate()
+    env.pageserver.tenant_create(tenant_id)
+    timeline_id = TimelineId.generate()
+
+    # Import the cluster to Neon
+    import_timeline_from_vanilla_postgres(
+        test_output_dir,
+        env,
+        pg_bin,
+        tenant_id,
+        timeline_id,
+        "imported_2bil_xids",
+        vanilla_pg.connstr(),
     )
+    vanilla_pg.stop()  # don't need the original server anymore
 
-    # Get start_lsn and end_lsn
-    with open(os.path.join(basebackup_dir, "backup_manifest")) as f:
-        manifest = json.load(f)
-        start_lsn = manifest["WAL-Ranges"][0]["Start-LSN"]
-        end_lsn = manifest["WAL-Ranges"][0]["End-LSN"]
-
-    def import_tar(base, wal):
-        env.neon_cli.raw_cli(
-            [
-                "timeline",
-                "import",
-                "--tenant-id",
-                str(tenant),
-                "--timeline-id",
-                str(timeline),
-                "--node-name",
-                endpoint_id,
-                "--base-lsn",
-                start_lsn,
-                "--base-tarfile",
-                base,
-                "--end-lsn",
-                end_lsn,
-                "--wal-tarfile",
-                wal,
-                "--pg-version",
-                env.pg_version,
-            ]
-        )
-
-    # Importing correct backup works
-    import_tar(base_tar, wal_tar)
-    wait_for_last_record_lsn(ps_http, tenant, timeline, Lsn(end_lsn))
-
+    # Check that it works
     endpoint = env.endpoints.create_start(
-        endpoint_id,
-        tenant_id=tenant,
+        "imported_2bil_xids",
+        tenant_id=tenant_id,
         config_lines=[
             "log_autovacuum_min_duration = 0",
             "autovacuum_naptime='5 s'",
@@ -161,7 +121,6 @@ def test_import_at_2bil(
     )
     assert endpoint.safe_psql("select count(*) from t") == [(1,)]
 
-    # Ok, consume
     conn = endpoint.connect()
     cur = conn.cursor()
 
@@ -213,7 +172,7 @@ def test_import_at_2bil(
     cur.execute("checkpoint")
 
     # wait until pageserver receives that data
-    wait_for_wal_insert_lsn(env, endpoint, tenant, timeline)
+    wait_for_wal_insert_lsn(env, endpoint, tenant_id, timeline_id)
 
     # Restart endpoint
     endpoint.stop()
