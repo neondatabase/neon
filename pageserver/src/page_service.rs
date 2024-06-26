@@ -945,9 +945,8 @@ impl PageServerHandler {
             b"valid_until",
         )]))?
         .write_message_noflush(&BeMessage::DataRow(&[Some(
-            &valid_until.as_millis().to_be_bytes(),
-        )]))?
-        .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            valid_until.as_millis().to_string().as_bytes(),
+        )]))?;
 
         Ok(())
     }
