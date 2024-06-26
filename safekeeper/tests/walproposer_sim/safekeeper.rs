@@ -21,7 +21,7 @@ use safekeeper::{
     wal_storage::Storage,
     SafeKeeperConf,
 };
-use tracing::{debug, info_span};
+use tracing::{debug, info_span, warn};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -247,7 +247,12 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
                 NetEvent::Message(msg) => {
                     let res = conn.process_any(msg, &mut global);
                     if res.is_err() {
-                        debug!("conn {:?} error: {:#}", connection_id, res.unwrap_err());
+                        let e = res.unwrap_err();
+                        let estr = e.to_string();
+                        if !estr.contains("finished processing START_REPLICATION") {
+                            warn!("conn {:?} error: {:?}", connection_id, e);
+                            panic!("unexpected error at safekeeper: {:#}", e);
+                        }
                         conns.remove(&connection_id);
                         break;
                     }
