@@ -889,7 +889,7 @@ async fn tenant_list_handler(
             attachment_status: state.attachment_status(),
             generation: (*gen)
                 .into()
-                .expect("Generation::None should never be used"),
+                .expect("Tenants are always attached with a generation"),
         })
         .collect::<Vec<TenantInfo>>();
 
@@ -940,7 +940,7 @@ async fn tenant_status(
                 generation: tenant
                     .generation()
                     .into()
-                    .expect("Generation::None should never be used"),
+                    .expect("Tenants are always attached with a generation"),
             },
             walredo: tenant.wal_redo_manager_status(),
             timelines: tenant.list_timeline_ids(),
