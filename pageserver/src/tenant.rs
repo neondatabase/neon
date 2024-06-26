@@ -2470,7 +2470,9 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
     ) -> Tenant {
-        debug_assert!(!attached_conf.location.generation.is_none());
+        debug_assert!(
+            !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
+        );
 
         let (state, mut rx) = watch::channel(state);
 
