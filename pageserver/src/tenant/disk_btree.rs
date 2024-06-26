@@ -22,7 +22,7 @@ use async_stream::try_stream;
 use byteorder::{ReadBytesExt, BE};
 use bytes::{BufMut, Bytes, BytesMut};
 use either::Either;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use hex;
 use std::{
     cmp::Ordering,
@@ -212,6 +212,7 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
 ///
 /// Public reader object, to search the tree.
 ///
+#[derive(Clone)]
 pub struct DiskBtreeReader<R, const L: usize>
 where
     R: BlockReader,
@@ -259,17 +260,38 @@ where
         Ok(result)
     }
 
+    pub fn iter<'a>(self, start_key: &'a [u8; L], ctx: &'a RequestContext) -> DiskBtreeIterator<'a>
+    where
+        R: 'a,
+    {
+        DiskBtreeIterator {
+            stream: Box::pin(self.into_stream(start_key, ctx)),
+        }
+    }
+
     /// Return a stream which yields all key, value pairs from the index
     /// starting from the first key greater or equal to `start_key`.
     ///
-    /// Note that this is a copy of [`Self::visit`].
+    /// Note 1: that this is a copy of [`Self::visit`].
     /// TODO: Once the sequential read path is removed this will become
     /// the only index traversal method.
-    pub fn get_stream_from<'a>(
-        &'a self,
+    ///
+    /// Note 2: this function used to take `&self` but it now consumes `self`. This is due to
+    /// the lifetime constraints of the reader and the stream / iterator it creates. Using `&self`
+    /// requires the reader to be present when the stream is used, and this creates a lifetime
+    /// dependency between the reader and the stream. Now if we want to create an iterator that
+    /// holds the stream, someone will need to keep a reference to the reader, which is inconvenient
+    /// to use from the image/delta layer APIs.
+    ///
+    /// Feel free to add the `&self` variant back if it's necessary.
+    pub fn into_stream<'a>(
+        self,
         start_key: &'a [u8; L],
         ctx: &'a RequestContext,
-    ) -> impl Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a {
+    ) -> impl Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a
+    where
+        R: 'a,
+    {
         try_stream! {
             let mut stack = Vec::new();
             stack.push((self.root_blk, None));
@@ -493,6 +515,19 @@ where
             }
         }
         Ok(())
+    }
+}
+
+pub struct DiskBtreeIterator<'a> {
+    #[allow(clippy::type_complexity)]
+    stream: std::pin::Pin<
+        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a>,
+    >,
+}
+
+impl<'a> DiskBtreeIterator<'a> {
+    pub async fn next(&mut self) -> Option<std::result::Result<(Vec<u8>, u64), DiskBtreeError>> {
+        self.stream.next().await
     }
 }
 
@@ -1087,6 +1122,17 @@ pub(crate) mod tests {
             reader.get(&u128::to_be_bytes(u128::MAX), &ctx).await?
                 == all_data.get(&u128::MAX).cloned()
         );
+
+        // Test iterator and get_stream API
+        let mut iter = reader.iter(&[0; 16], &ctx);
+        let mut cnt = 0;
+        while let Some(res) = iter.next().await {
+            let (key, val) = res?;
+            let key = u128::from_be_bytes(key.as_slice().try_into().unwrap());
+            assert_eq!(val, *all_data.get(&key).unwrap());
+            cnt += 1;
+        }
+        assert_eq!(cnt, all_data.len());
 
         Ok(())
     }

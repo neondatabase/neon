@@ -211,7 +211,7 @@ impl PhysicalStorage {
     /// Returns `file` and `is_partial`.
     async fn open_or_create(&mut self, segno: XLogSegNo) -> Result<(File, bool)> {
         let (wal_file_path, wal_file_partial_path) =
-            wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+            wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
 
         // Try to open already completed segment
         if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_path).await {
@@ -231,11 +231,7 @@ impl PhysicalStorage {
             // half initialized segment, first bake it under tmp filename and
             // then rename.
             let tmp_path = self.timeline_dir.join("waltmp");
-            #[allow(clippy::suspicious_open_options)]
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(&tmp_path)
+            let mut file = File::create(&tmp_path)
                 .await
                 .with_context(|| format!("Failed to open tmp wal file {:?}", &tmp_path))?;
 
@@ -280,7 +276,7 @@ impl PhysicalStorage {
 
             // Rename partial file to completed file
             let (wal_file_path, wal_file_partial_path) =
-                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
             fs::rename(wal_file_partial_path, wal_file_path).await?;
         } else {
             // otherwise, file can be reused later
@@ -465,7 +461,7 @@ impl Storage for PhysicalStorage {
         if !is_partial {
             // Make segment partial once again
             let (wal_file_path, wal_file_partial_path) =
-                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
             fs::rename(wal_file_path, wal_file_partial_path).await?;
         }
 
@@ -684,13 +680,12 @@ impl WalReader {
         let xlogoff = self.pos.segment_offset(self.wal_seg_size);
         let segno = self.pos.segment_number(self.wal_seg_size);
         let wal_file_name = XLogFileName(PG_TLI, segno, self.wal_seg_size);
-        let wal_file_path = self.timeline_dir.join(&wal_file_name);
 
         // Try to open local file, if we may have WAL locally
         if self.pos >= self.local_start_lsn {
-            let res = Self::open_wal_file(&wal_file_path).await;
+            let res = open_wal_file(&self.timeline_dir, segno, self.wal_seg_size).await;
             match res {
-                Ok(mut file) => {
+                Ok((mut file, _)) => {
                     file.seek(SeekFrom::Start(xlogoff as u64)).await?;
                     return Ok(Box::pin(file));
                 }
@@ -718,25 +713,6 @@ impl WalReader {
 
         bail!("WAL segment is not found")
     }
-
-    /// Helper function for opening a wal file.
-    async fn open_wal_file(wal_file_path: &Utf8Path) -> Result<tokio::fs::File> {
-        // First try to open the .partial file.
-        let mut partial_path = wal_file_path.to_owned();
-        partial_path.set_extension("partial");
-        if let Ok(opened_file) = tokio::fs::File::open(&partial_path).await {
-            return Ok(opened_file);
-        }
-
-        // If that failed, try it without the .partial extension.
-        tokio::fs::File::open(&wal_file_path)
-            .await
-            .with_context(|| format!("Failed to open WAL file {:?}", wal_file_path))
-            .map_err(|e| {
-                warn!("{}", e);
-                e
-            })
-    }
 }
 
 /// Zero block for filling created WAL segments.
@@ -758,14 +734,42 @@ async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
     Ok(())
 }
 
+/// Helper function for opening WAL segment `segno` in `dir`. Returns file and
+/// whether it is .partial.
+pub(crate) async fn open_wal_file(
+    timeline_dir: &Utf8Path,
+    segno: XLogSegNo,
+    wal_seg_size: usize,
+) -> Result<(tokio::fs::File, bool)> {
+    let (wal_file_path, wal_file_partial_path) = wal_file_paths(timeline_dir, segno, wal_seg_size);
+
+    // First try to open the .partial file.
+    let mut partial_path = wal_file_path.to_owned();
+    partial_path.set_extension("partial");
+    if let Ok(opened_file) = tokio::fs::File::open(&wal_file_partial_path).await {
+        return Ok((opened_file, true));
+    }
+
+    // If that failed, try it without the .partial extension.
+    let pf = tokio::fs::File::open(&wal_file_path)
+        .await
+        .with_context(|| format!("failed to open WAL file {:#}", wal_file_path))
+        .map_err(|e| {
+            warn!("{}", e);
+            e
+        })?;
+
+    Ok((pf, false))
+}
+
 /// Helper returning full path to WAL segment file and its .partial brother.
 pub fn wal_file_paths(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
     wal_seg_size: usize,
-) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
+) -> (Utf8PathBuf, Utf8PathBuf) {
     let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
     let wal_file_path = timeline_dir.join(wal_file_name.clone());
     let wal_file_partial_path = timeline_dir.join(wal_file_name + ".partial");
-    Ok((wal_file_path, wal_file_partial_path))
+    (wal_file_path, wal_file_partial_path)
 }

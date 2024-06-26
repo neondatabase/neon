@@ -59,6 +59,10 @@ impl Node {
         self.id
     }
 
+    pub(crate) fn get_scheduling(&self) -> NodeSchedulingPolicy {
+        self.scheduling
+    }
+
     pub(crate) fn set_scheduling(&mut self, scheduling: NodeSchedulingPolicy) {
         self.scheduling = scheduling
     }
@@ -151,6 +155,7 @@ impl Node {
             NodeSchedulingPolicy::Draining => MaySchedule::No,
             NodeSchedulingPolicy::Filling => MaySchedule::Yes(score),
             NodeSchedulingPolicy::Pause => MaySchedule::No,
+            NodeSchedulingPolicy::PauseForRestart => MaySchedule::No,
         }
     }
 
@@ -167,7 +172,7 @@ impl Node {
             listen_http_port,
             listen_pg_addr,
             listen_pg_port,
-            scheduling: NodeSchedulingPolicy::Filling,
+            scheduling: NodeSchedulingPolicy::Active,
             availability: NodeAvailability::Offline,
             cancel: CancellationToken::new(),
         }

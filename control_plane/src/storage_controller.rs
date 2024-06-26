@@ -18,7 +18,7 @@ use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use reqwest::Method;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{fs, str::FromStr};
+use std::{fs, str::FromStr, time::Duration};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
@@ -46,6 +46,7 @@ const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
 pub struct AttachHookRequest {
     pub tenant_shard_id: TenantShardId,
     pub node_id: Option<NodeId>,
+    pub generation_override: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -223,7 +224,7 @@ impl StorageController {
         Ok(database_url)
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
+    pub async fn start(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
         // Start a vanilla Postgres process used by the storage controller for persistence.
         let pg_data_path = Utf8PathBuf::from_path_buf(self.env.base_data_dir.clone())
             .unwrap()
@@ -271,6 +272,7 @@ impl StorageController {
             db_start_args,
             [],
             background_process::InitialPidFile::Create(self.postgres_pid_file()),
+            retry_timeout,
             || self.pg_isready(&pg_bin_dir),
         )
         .await?;
@@ -313,16 +315,19 @@ impl StorageController {
             args.push(format!("--split-threshold={split_threshold}"))
         }
 
+        args.push(format!(
+            "--neon-local-repo-dir={}",
+            self.env.base_data_dir.display()
+        ));
+
         background_process::start_process(
             COMMAND,
             &self.env.base_data_dir,
             &self.env.storage_controller_bin(),
             args,
-            [(
-                "NEON_REPO_DIR".to_string(),
-                self.env.base_data_dir.to_string_lossy().to_string(),
-            )],
+            [],
             background_process::InitialPidFile::Create(self.pid_file()),
+            retry_timeout,
             || async {
                 match self.ready().await {
                     Ok(_) => Ok(true),
@@ -440,6 +445,7 @@ impl StorageController {
         let request = AttachHookRequest {
             tenant_shard_id,
             node_id: Some(pageserver_id),
+            generation_override: None,
         };
 
         let response = self

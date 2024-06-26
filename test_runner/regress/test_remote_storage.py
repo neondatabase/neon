@@ -164,13 +164,14 @@ def test_remote_storage_backup_and_restore(
         "data": {"reason": "storage-sync-list-remote-timelines"},
     }
 
+    # Even though the tenant is broken, subsequent calls to location_conf API will succeed, but
+    # the tenant will always end up in a broken state as a result of the failpoint.
     # Ensure that even though the tenant is broken, retrying the attachment fails
-    with pytest.raises(Exception, match="Tenant state is Broken"):
-        # Use same generation as in previous attempt
-        gen_state = env.storage_controller.inspect(tenant_id)
-        assert gen_state is not None
-        generation = gen_state[0]
-        env.pageserver.tenant_attach(tenant_id, generation=generation)
+    tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+    gen_state = env.storage_controller.inspect(tenant_id)
+    assert gen_state is not None
+    generation = gen_state[0]
+    env.pageserver.tenant_attach(tenant_id, generation=generation)
 
     # Restart again, this implicitly clears the failpoint.
     # test_remote_failures=1 remains active, though, as it's in the pageserver config.

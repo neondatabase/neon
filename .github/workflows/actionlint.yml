@@ -36,15 +36,16 @@ jobs:
           fail_on_error: true
           filter_mode: nofilter
           level: error
-      - run: |
+
+      - name: Disallow 'ubuntu-latest' runners
+        run: |
           PAT='^\s*runs-on:.*-latest'
-          if grep -ERq $PAT .github/workflows
-          then
+          if grep -ERq $PAT .github/workflows; then
             grep -ERl $PAT .github/workflows |\
             while read -r f
             do
               l=$(grep -nE $PAT .github/workflows/release.yml | awk -F: '{print $1}' | head -1)
-              echo "::error file=$f,line=$l::Please, do not use ubuntu-latest images to run on, use LTS instead."
+              echo "::error file=$f,line=$l::Please use 'ubuntu-22.04' instead of 'ubuntu-latest'"
             done
             exit 1
           fi

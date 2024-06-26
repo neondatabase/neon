@@ -15,7 +15,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
-    tenant_delete_wait_completed,
     timeline_delete_wait_completed,
     wait_until_tenant_active,
 )
@@ -669,7 +668,7 @@ def test_synthetic_size_while_deleting(neon_env_builder: NeonEnvBuilder):
             ),
         )
 
-        tenant_delete_wait_completed(client, env.initial_tenant, 10)
+        client.tenant_delete(env.initial_tenant)
 
         client.configure_failpoints((failpoint, "off"))
 

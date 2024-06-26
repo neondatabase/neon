@@ -160,8 +160,9 @@ impl Key {
         key
     }
 
-    /// Convert a 18B slice to a key. This function should not be used for metadata keys because field2 is handled differently.
-    /// Use [`Key::from_i128`] instead if you want to handle 16B keys (i.e., metadata keys).
+    /// Convert a 18B slice to a key. This function should not be used for 16B metadata keys because `field2` is handled differently.
+    /// Use [`Key::from_i128`] instead if you want to handle 16B keys (i.e., metadata keys). There are some restrictions on `field2`,
+    /// and therefore not all 18B slices are valid page server keys.
     pub fn from_slice(b: &[u8]) -> Self {
         Key {
             field1: b[0],
@@ -173,7 +174,7 @@ impl Key {
         }
     }
 
-    /// Convert a key to a 18B slice. This function should not be used for metadata keys because field2 is handled differently.
+    /// Convert a key to a 18B slice. This function should not be used for getting a 16B metadata key because `field2` is handled differently.
     /// Use [`Key::to_i128`] instead if you want to get a 16B key (i.e., metadata keys).
     pub fn write_to_byte_slice(&self, buf: &mut [u8]) {
         buf[0] = self.field1;

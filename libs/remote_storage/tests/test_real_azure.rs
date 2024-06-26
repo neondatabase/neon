@@ -212,6 +212,7 @@ fn create_azure_client(
     let remote_storage_config = RemoteStorageConfig {
         storage: RemoteStorageKind::AzureContainer(AzureConfig {
             container_name: remote_storage_azure_container,
+            storage_account: None,
             container_region: remote_storage_azure_region,
             prefix_in_container: Some(format!("test_{millis}_{random:08x}/")),
             concurrency_limit: NonZeroUsize::new(100).unwrap(),

@@ -177,6 +177,20 @@ serde_with::serde_conv!(
     |value: String| -> Result<_, humantime::TimestampError> { humantime::parse_rfc3339(&value) }
 );
 
+impl LsnLease {
+    /// The default length for an explicit LSN lease request (10 minutes).
+    pub const DEFAULT_LENGTH: Duration = Duration::from_secs(10 * 60);
+
+    /// The default length for an implicit LSN lease granted during
+    /// `get_lsn_by_timestamp` request (1 minutes).
+    pub const DEFAULT_LENGTH_FOR_TS: Duration = Duration::from_secs(60);
+
+    /// Checks whether the lease is expired.
+    pub fn is_expired(&self, now: &SystemTime) -> bool {
+        now > &self.valid_until
+    }
+}
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
@@ -279,22 +293,6 @@ pub struct TenantCreateRequest {
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct TenantLoadRequest {
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
-}
-
-impl std::ops::Deref for TenantCreateRequest {
-    type Target = TenantConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.config
-    }
-}
-
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
@@ -322,6 +320,8 @@ pub struct TenantConfig {
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
+    pub lsn_lease_length: Option<String>,
+    pub lsn_lease_length_for_ts: Option<String>,
 }
 
 /// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`
@@ -607,31 +607,6 @@ impl TenantConfigRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TenantAttachRequest {
-    #[serde(default)]
-    pub config: TenantAttachConfig,
-    #[serde(default)]
-    pub generation: Option<u32>,
-}
-
-/// Newtype to enforce deny_unknown_fields on TenantConfig for
-/// its usage inside `TenantAttachRequest`.
-#[derive(Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct TenantAttachConfig {
-    #[serde(flatten)]
-    allowing_unknown_fields: TenantConfig,
-}
-
-impl std::ops::Deref for TenantAttachConfig {
-    type Target = TenantConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.allowing_unknown_fields
-    }
-}
-
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "slug", content = "data", rename_all = "snake_case")]
@@ -650,8 +625,7 @@ pub struct TenantInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
+    pub generation: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1478,7 +1452,7 @@ mod tests {
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -1488,7 +1462,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         let original_broken = TenantInfo {
@@ -1499,7 +1474,7 @@ mod tests {
             },
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
@@ -1513,7 +1488,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         assert_eq!(
@@ -1549,18 +1525,6 @@ mod tests {
             "unknown_field": "unknown_value".to_string(),
         });
         let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
-        );
-
-        let attach_request = json!({
-            "config": {
-                "unknown_field": "unknown_value".to_string(),
-            },
-        });
-        let err = serde_json::from_value::<TenantAttachRequest>(attach_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
             "expect unknown field `unknown_field` error, got: {}",

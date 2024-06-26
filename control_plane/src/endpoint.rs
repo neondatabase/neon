@@ -592,7 +592,6 @@ impl Endpoint {
             remote_extensions,
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
-            primary_is_running: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

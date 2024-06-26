@@ -190,19 +190,20 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
     """
     Test that after a split, we clean up parent layer data in the child shards via compaction.
     """
+
     TENANT_CONF = {
         # small checkpointing and compaction targets to ensure we generate many upload operations
-        "checkpoint_distance": f"{128 * 1024}",
-        "compaction_threshold": "1",
-        "compaction_target_size": f"{128 * 1024}",
+        "checkpoint_distance": 128 * 1024,
+        "compaction_threshold": 1,
+        "compaction_target_size": 128 * 1024,
         # no PITR horizon, we specify the horizon when we request on-demand GC
         "pitr_interval": "3600s",
         # disable background compaction and GC. We invoke it manually when we want it to happen.
         "gc_period": "0s",
         "compaction_period": "0s",
         # create image layers eagerly, so that GC can remove some layers
-        "image_creation_threshold": "1",
-        "image_layer_creation_check_threshold": "0",
+        "image_creation_threshold": 1,
+        "image_layer_creation_check_threshold": 0,
     }
 
     neon_env_builder.storage_controller_config = {
@@ -261,7 +262,9 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
     env.pageserver.start()
 
     # Cleanup part 2: once layers are outside the PITR window, they will be rewritten if they are partially redundant
-    env.storage_controller.pageserver_api().set_tenant_config(tenant_id, {"pitr_interval": "0s"})
+    updated_conf = TENANT_CONF.copy()
+    updated_conf["pitr_interval"] = "0s"
+    env.storage_controller.pageserver_api().set_tenant_config(tenant_id, updated_conf)
     env.storage_controller.reconcile_until_idle()
 
     for shard in shards:

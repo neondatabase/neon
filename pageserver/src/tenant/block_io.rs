@@ -160,6 +160,7 @@ impl<'a> BlockCursor<'a> {
 ///
 /// The file is assumed to be immutable. This doesn't provide any functions
 /// for modifying the file, nor for invalidating the cache if it is modified.
+#[derive(Clone)]
 pub struct FileBlockReader<'a> {
     pub file: &'a VirtualFile,
 

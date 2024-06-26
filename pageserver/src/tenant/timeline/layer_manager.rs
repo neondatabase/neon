@@ -227,7 +227,6 @@ impl LayerManager {
     }
 
     /// Called when a GC-compaction is completed.
-    #[cfg(test)]
     pub(crate) fn finish_gc_compaction(
         &mut self,
         compact_from: &[Layer],

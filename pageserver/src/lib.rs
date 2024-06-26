@@ -113,11 +113,7 @@ pub async fn shutdown_pageserver(
 }
 
 /// Per-tenant configuration file.
-/// Full path: `tenants/<tenant_id>/config`.
-pub(crate) const TENANT_CONFIG_NAME: &str = "config";
-
-/// Per-tenant configuration file.
-/// Full path: `tenants/<tenant_id>/config`.
+/// Full path: `tenants/<tenant_id>/config-v1`.
 pub(crate) const TENANT_LOCATION_CONFIG_NAME: &str = "config-v1";
 
 /// Per-tenant copy of their remote heatmap, downloaded into the local
@@ -135,13 +131,6 @@ pub(crate) const TEMP_FILE_SUFFIX: &str = "___temp";
 pub(crate) const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
 
 pub(crate) const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
-
-/// A marker file to prevent pageserver from loading a certain tenant on restart.
-/// Different from [`TIMELINE_UNINIT_MARK_SUFFIX`] due to semantics of the corresponding
-/// `ignore` management API command, that expects the ignored tenant to be properly loaded
-/// into pageserver's memory before being ignored.
-/// Full path: `tenants/<tenant_id>/___ignored_tenant`.
-pub const IGNORED_TENANT_FILE_NAME: &str = "___ignored_tenant";
 
 pub fn is_temporary(path: &Utf8Path) -> bool {
     match path.file_name() {

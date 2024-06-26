@@ -52,13 +52,15 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
       run: |
+        TITLE="Storage & Compute release ${RELEASE_DATE}"
+
         cat << EOF > body.md
-          ## Storage & Compute release ${RELEASE_DATE}
+          ## ${TITLE}
 
           **Please merge this Pull Request using 'Create a merge commit' button**
         EOF
 
-        gh pr create --title "Release ${RELEASE_DATE}" \
+        gh pr create --title "${TITLE}" \
                      --body-file "body.md" \
                      --head "${RELEASE_BRANCH}" \
                      --base "release"
@@ -91,13 +93,15 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
       run: |
+        TITLE="Proxy release ${RELEASE_DATE}"
+
         cat << EOF > body.md
-          ## Proxy release ${RELEASE_DATE}
+          ## ${TITLE}
 
           **Please merge this Pull Request using 'Create a merge commit' button**
         EOF
 
-        gh pr create --title "Proxy release ${RELEASE_DATE}" \
+        gh pr create --title "${TITLE}" \
                      --body-file "body.md" \
                      --head "${RELEASE_BRANCH}" \
                      --base "release-proxy"

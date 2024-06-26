@@ -100,16 +100,11 @@ static void StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd);
 static void WalSndLoop(WalProposer *wp);
 static void XLogBroadcastWalProposer(WalProposer *wp);
 
-static void XLogWalPropWrite(WalProposer *wp, char *buf, Size nbytes, XLogRecPtr recptr);
-static void XLogWalPropClose(XLogRecPtr recptr);
-
 static void add_nwr_event_set(Safekeeper *sk, uint32 events);
 static void update_nwr_event_set(Safekeeper *sk, uint32 events);
 static void rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk);
 
 static void CheckGracefulShutdown(WalProposer *wp);
-
-static XLogRecPtr GetLogRepRestartLSN(WalProposer *wp);
 
 static void
 init_walprop_config(bool syncSafekeepers)
@@ -1236,8 +1231,6 @@ StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 static void
 WalSndLoop(WalProposer *wp)
 {
-	XLogRecPtr	flushPtr;
-
 	/* Clear any already-pending wakeups */
 	ResetLatch(MyLatch);
 
@@ -1333,143 +1326,14 @@ XLogBroadcastWalProposer(WalProposer *wp)
 }
 
 /*
-  Used to download WAL before basebackup for logical walsenders from sk, no longer
-  needed because walsender always uses neon_walreader.
+  Used to download WAL before basebackup for walproposer/logical walsenders. No
+  longer used, replaced by neon_walreader; but callback still exists because
+  simulation tests use it.
  */
 static bool
 WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 {
 	return true;
-}
-
-/*
- * These variables are used similarly to openLogFile/SegNo,
- * but for walproposer to write the XLOG during recovery. walpropFileTLI is the TimeLineID
- * corresponding the filename of walpropFile.
- */
-static int	walpropFile = -1;
-static TimeLineID walpropFileTLI = 0;
-static XLogSegNo walpropSegNo = 0;
-
-/*
- * Write XLOG data to disk.
- */
-static void
-XLogWalPropWrite(WalProposer *wp, char *buf, Size nbytes, XLogRecPtr recptr)
-{
-	int			startoff;
-	int			byteswritten;
-
-	/*
-	 * Apart from walproposer, basebackup LSN page is also written out by
-	 * postgres itself which writes WAL only in pages, and in basebackup it is
-	 * inherently dummy (only safekeepers have historic WAL). Update WAL
-	 * buffers here to avoid dummy page overwriting correct one we download
-	 * here. Ugly, but alternatives are about the same ugly. We won't need
-	 * that if we switch to on-demand WAL download from safekeepers, without
-	 * writing to disk.
-	 *
-	 * https://github.com/neondatabase/neon/issues/5749
-	 */
-	if (!wp->config->syncSafekeepers)
-		XLogUpdateWalBuffers(buf, recptr, nbytes);
-
-	while (nbytes > 0)
-	{
-		int			segbytes;
-
-		/* Close the current segment if it's completed */
-		if (walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size))
-			XLogWalPropClose(recptr);
-
-		if (walpropFile < 0)
-		{
-#if PG_VERSION_NUM >= 150000
-			/* FIXME Is it ok to use hardcoded value here? */
-			TimeLineID	tli = 1;
-#else
-			bool		use_existent = true;
-#endif
-			/* Create/use new log file */
-			XLByteToSeg(recptr, walpropSegNo, wal_segment_size);
-#if PG_VERSION_NUM >= 150000
-			walpropFile = XLogFileInit(walpropSegNo, tli);
-			walpropFileTLI = tli;
-#else
-			walpropFile = XLogFileInit(walpropSegNo, &use_existent, false);
-			walpropFileTLI = ThisTimeLineID;
-#endif
-		}
-
-		/* Calculate the start offset of the received logs */
-		startoff = XLogSegmentOffset(recptr, wal_segment_size);
-
-		if (startoff + nbytes > wal_segment_size)
-			segbytes = wal_segment_size - startoff;
-		else
-			segbytes = nbytes;
-
-		/* OK to write the logs */
-		errno = 0;
-
-		byteswritten = pg_pwrite(walpropFile, buf, segbytes, (off_t) startoff);
-		if (byteswritten <= 0)
-		{
-			char		xlogfname[MAXFNAMELEN];
-			int			save_errno;
-
-			/* if write didn't set errno, assume no disk space */
-			if (errno == 0)
-				errno = ENOSPC;
-
-			save_errno = errno;
-			XLogFileName(xlogfname, walpropFileTLI, walpropSegNo, wal_segment_size);
-			errno = save_errno;
-			ereport(PANIC,
-					(errcode_for_file_access(),
-					 errmsg("could not write to log segment %s "
-							"at offset %u, length %lu: %m",
-							xlogfname, startoff, (unsigned long) segbytes)));
-		}
-
-		/* Update state for write */
-		recptr += byteswritten;
-
-		nbytes -= byteswritten;
-		buf += byteswritten;
-	}
-
-	/*
-	 * Close the current segment if it's fully written up in the last cycle of
-	 * the loop.
-	 */
-	if (walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size))
-	{
-		XLogWalPropClose(recptr);
-	}
-}
-
-/*
- * Close the current segment.
- */
-static void
-XLogWalPropClose(XLogRecPtr recptr)
-{
-	Assert(walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size));
-
-	if (close(walpropFile) != 0)
-	{
-		char		xlogfname[MAXFNAMELEN];
-
-		XLogFileName(xlogfname, walpropFileTLI, walpropSegNo, wal_segment_size);
-
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg("could not close log segment %s: %m",
-						xlogfname)));
-	}
-
-	walpropFile = -1;
 }
 
 static void
@@ -1985,58 +1849,6 @@ static void
 walprop_pg_log_internal(WalProposer *wp, int level, const char *line)
 {
 	elog(FATAL, "unexpected log_internal message at level %d: %s", level, line);
-}
-
-static XLogRecPtr
-GetLogRepRestartLSN(WalProposer *wp)
-{
-	FILE	   *f;
-	XLogRecPtr	lrRestartLsn = InvalidXLogRecPtr;
-
-	/* We don't need to do anything in syncSafekeepers mode. */
-	if (wp->config->syncSafekeepers)
-		return InvalidXLogRecPtr;
-
-	/*
-	 * If there are active logical replication subscription we need to provide
-	 * enough WAL for their WAL senders based on th position of their
-	 * replication slots.
-	 */
-	f = fopen("restart.lsn", "rb");
-	if (f != NULL)
-	{
-		size_t		rc = fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
-
-		fclose(f);
-		if (rc == 1 && lrRestartLsn != InvalidXLogRecPtr)
-		{
-			uint64		download_range_mb;
-
-			wpg_log(LOG, "logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
-
-			/*
-			 * If we need to download more than a max_slot_wal_keep_size,
-			 * don't do it to avoid risk of exploding pg_wal. Logical
-			 * replication won't work until recreated, but at least compute
-			 * would start; this also follows max_slot_wal_keep_size
-			 * semantics.
-			 */
-			download_range_mb = (wp->propEpochStartLsn - lrRestartLsn) / MB;
-			if (max_slot_wal_keep_size_mb > 0 && download_range_mb >= max_slot_wal_keep_size_mb)
-			{
-				wpg_log(WARNING, "not downloading WAL for logical replication since %X/%X as max_slot_wal_keep_size=%dMB",
-						LSN_FORMAT_ARGS(lrRestartLsn), max_slot_wal_keep_size_mb);
-				return InvalidXLogRecPtr;
-			}
-
-			/*
-			 * start from the beginning of the segment to fetch page headers
-			 * verifed by XLogReader
-			 */
-			lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
-		}
-	}
-	return lrRestartLsn;
 }
 
 void

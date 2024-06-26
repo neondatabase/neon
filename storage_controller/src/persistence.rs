@@ -442,13 +442,15 @@ impl Persistence {
     #[tracing::instrument(skip_all, fields(node_id))]
     pub(crate) async fn re_attach(
         &self,
-        node_id: NodeId,
+        input_node_id: NodeId,
     ) -> DatabaseResult<HashMap<TenantShardId, Generation>> {
+        use crate::schema::nodes::dsl::scheduling_policy;
+        use crate::schema::nodes::dsl::*;
         use crate::schema::tenant_shards::dsl::*;
         let updated = self
             .with_measured_conn(DatabaseOperation::ReAttach, move |conn| {
                 let rows_updated = diesel::update(tenant_shards)
-                    .filter(generation_pageserver.eq(node_id.0 as i64))
+                    .filter(generation_pageserver.eq(input_node_id.0 as i64))
                     .set(generation.eq(generation + 1))
                     .execute(conn)?;
 
@@ -457,9 +459,23 @@ impl Persistence {
                 // TODO: UPDATE+SELECT in one query
 
                 let updated = tenant_shards
-                    .filter(generation_pageserver.eq(node_id.0 as i64))
+                    .filter(generation_pageserver.eq(input_node_id.0 as i64))
                     .select(TenantShardPersistence::as_select())
                     .load(conn)?;
+
+                // If the node went through a drain and restart phase before re-attaching,
+                // then reset it's node scheduling policy to active.
+                diesel::update(nodes)
+                    .filter(node_id.eq(input_node_id.0 as i64))
+                    .filter(
+                        scheduling_policy
+                            .eq(String::from(NodeSchedulingPolicy::PauseForRestart))
+                            .or(scheduling_policy.eq(String::from(NodeSchedulingPolicy::Draining)))
+                            .or(scheduling_policy.eq(String::from(NodeSchedulingPolicy::Filling))),
+                    )
+                    .set(scheduling_policy.eq(String::from(NodeSchedulingPolicy::Active)))
+                    .execute(conn)?;
+
                 Ok(updated)
             })
             .await?;

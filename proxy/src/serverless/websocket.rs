@@ -1,3 +1,4 @@
+use crate::proxy::ErrorSource;
 use crate::{
     cancellation::CancellationHandlerMain,
     config::ProxyConfig,
@@ -7,6 +8,7 @@ use crate::{
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
 };
+use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
@@ -141,7 +143,7 @@ pub async fn serve_websocket(
         .client_connections
         .guard(crate::metrics::Protocol::Ws);
 
-    let res = handle_client(
+    let res = Box::pin(handle_client(
         config,
         &mut ctx,
         cancellation_handler,
@@ -149,7 +151,7 @@ pub async fn serve_websocket(
         ClientMode::Websockets { hostname },
         endpoint_rate_limiter,
         conn_gauge,
-    )
+    ))
     .await;
 
     match res {
@@ -165,7 +167,11 @@ pub async fn serve_websocket(
         Ok(Some(p)) => {
             ctx.set_success();
             ctx.log_connect();
-            p.proxy_pass().await
+            match p.proxy_pass().await {
+                Ok(()) => Ok(()),
+                Err(ErrorSource::Client(err)) => Err(err).context("client"),
+                Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
+            }
         }
     }
 }

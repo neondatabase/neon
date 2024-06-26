@@ -3,6 +3,9 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Where to install Postgres, default is ./pg_install, maybe useful for package managers
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 
+OPENSSL_PREFIX_DIR := /usr/local/openssl
+ICU_PREFIX_DIR := /usr/local/icu
+
 #
 # We differentiate between release / debug build types using the BUILD_TYPE
 # environment variable.
@@ -20,6 +23,16 @@ else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
 
+ifeq ($(shell test -e /home/nonroot/.docker_build && echo -n yes),yes)
+	# Exclude static build openssl, icu for local build (MacOS, Linux)
+	# Only keep for build type release and debug
+	PG_CFLAGS += -I$(OPENSSL_PREFIX_DIR)/include
+	PG_CONFIGURE_OPTS += --with-icu
+	PG_CONFIGURE_OPTS += ICU_CFLAGS='-I/$(ICU_PREFIX_DIR)/include -DU_STATIC_IMPLEMENTATION'
+	PG_CONFIGURE_OPTS += ICU_LIBS='-L$(ICU_PREFIX_DIR)/lib -L$(ICU_PREFIX_DIR)/lib64 -licui18n -licuuc -licudata -lstdc++ -Wl,-Bdynamic -lm'
+	PG_CONFIGURE_OPTS += LDFLAGS='-L$(OPENSSL_PREFIX_DIR)/lib -L$(OPENSSL_PREFIX_DIR)/lib64 -L$(ICU_PREFIX_DIR)/lib -L$(ICU_PREFIX_DIR)/lib64 -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -lrt -lm -ldl -lpthread'
+endif
+
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
@@ -28,7 +41,7 @@ else ifeq ($(UNAME_S),Darwin)
 	ifndef DISABLE_HOMEBREW
 		# macOS with brew-installed openssl requires explicit paths
 		# It can be configured with OPENSSL_PREFIX variable
-		OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
+		OPENSSL_PREFIX := $(shell brew --prefix openssl@3)
 		PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
 		PG_CONFIGURE_OPTS += PKG_CONFIG_PATH=$(shell brew --prefix icu4c)/lib/pkgconfig
 		# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure

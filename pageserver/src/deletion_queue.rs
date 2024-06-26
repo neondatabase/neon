@@ -382,17 +382,6 @@ pub enum DeletionQueueError {
 }
 
 impl DeletionQueueClient {
-    pub(crate) fn broken() -> Self {
-        // Channels whose receivers are immediately dropped.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let (executor_tx, _executor_rx) = tokio::sync::mpsc::channel(1);
-        Self {
-            tx,
-            executor_tx,
-            lsn_table: Arc::default(),
-        }
-    }
-
     /// This is cancel-safe.  If you drop the future before it completes, the message
     /// is not pushed, although in the context of the deletion queue it doesn't matter: once
     /// we decide to do a deletion the decision is always final.
@@ -850,7 +839,9 @@ mod test {
         std::fs::create_dir_all(remote_fs_dir)?;
         let remote_fs_dir = harness.conf.workdir.join("remote_fs").canonicalize_utf8()?;
         let storage_config = RemoteStorageConfig {
-            storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            storage: RemoteStorageKind::LocalFs {
+                local_path: remote_fs_dir.clone(),
+            },
             timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
         };
         let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();

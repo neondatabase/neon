@@ -11,7 +11,7 @@ from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_api import connection_parameters_to_env
-from fixtures.neon_fixtures import logical_replication_sync
+from fixtures.neon_fixtures import AuxFileStore, NeonEnv, PgBin, logical_replication_sync
 
 if TYPE_CHECKING:
     from fixtures.benchmark_fixture import NeonBenchmarker
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from fixtures.pg_version import PgVersion
 
 
+@pytest.mark.parametrize("pageserver_aux_file_policy", [AuxFileStore.V2])
 @pytest.mark.timeout(1000)
 def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg):
     env = neon_simple_env
