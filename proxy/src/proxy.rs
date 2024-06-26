@@ -8,6 +8,7 @@ pub mod passthrough;
 pub mod retry;
 pub mod wake_compute;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
+pub use copy_bidirectional::ErrorSource;
 
 use crate::{
     auth,
@@ -148,8 +149,11 @@ pub async fn task_main(
                     ctx.log_connect();
                     match p.proxy_pass().instrument(span.clone()).await {
                         Ok(()) => {}
-                        Err(e) => {
-                            error!(parent: &span, "per-client task finished with an error: {e:#}");
+                        Err(ErrorSource::Client(e)) => {
+                            error!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
+                        }
+                        Err(ErrorSource::Compute(e)) => {
+                            error!(parent: &span, "per-client task finished with an IO error from the compute: {e:#}");
                         }
                     }
                 }
