@@ -581,7 +581,7 @@ class NeonEnvBuilder:
             timeline_id=env.initial_timeline,
             shard_count=initial_tenant_shard_count,
             shard_stripe_size=initial_tenant_shard_stripe_size,
-            aux_file_v2=self.pageserver_aux_file_policy,
+            aux_file_policy=self.pageserver_aux_file_policy,
         )
         assert env.initial_tenant == initial_tenant
         assert env.initial_timeline == initial_timeline
@@ -1604,7 +1604,7 @@ class NeonCli(AbstractNeonCli):
         shard_stripe_size: Optional[int] = None,
         placement_policy: Optional[str] = None,
         set_default: bool = False,
-        aux_file_v2: Optional[AuxFileStore] = None,
+        aux_file_policy: Optional[AuxFileStore] = None,
     ) -> Tuple[TenantId, TimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -1629,13 +1629,11 @@ class NeonCli(AbstractNeonCli):
                 )
             )
 
-        if aux_file_v2 is AuxFileStore.V2:
+        if aux_file_policy is AuxFileStore.V2:
             args.extend(["-c", "switch_aux_file_policy:v2"])
-
-        if aux_file_v2 is AuxFileStore.V1:
+        elif aux_file_policy is AuxFileStore.V1:
             args.extend(["-c", "switch_aux_file_policy:v1"])
-
-        if aux_file_v2 is AuxFileStore.CrossValidation:
+        elif aux_file_policy is AuxFileStore.CrossValidation:
             args.extend(["-c", "switch_aux_file_policy:cross-validation"])
 
         if set_default:
