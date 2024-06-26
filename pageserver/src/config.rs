@@ -30,11 +30,11 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::{l0_flush::L0FlushConfig, tenant::timeline::GetVectoredImpl};
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
+use crate::{l0_flush::L0FlushConfig, tenant::timeline::GetVectoredImpl};
 use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{
     TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME,
@@ -1025,7 +1025,7 @@ impl PageServerConf {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
                 }
                 "l0_flush" => {
-                    builder.l0_flush(toml_edit::de::from_document(item))
+                    builder.l0_flush(utils::toml_edit_ext::deserialize_item(item)?)
                 }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }

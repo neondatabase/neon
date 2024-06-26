@@ -1,12 +1,15 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
-#[derive(Default, Debug, PartialEq, Eq, Clone)]
+#[derive(Default, Debug, PartialEq, Eq, Clone, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum L0FlushConfig {
     #[default]
     PageCached,
+    #[serde(rename_all = "snake_case")]
     Direct {
         max_concurrency: NonZeroUsize,
     },
+    #[serde(skip)]
     Fail(&'static str),
 }
 
