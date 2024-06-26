@@ -1,6 +1,5 @@
 use std::{fmt::Debug, num::NonZeroUsize, str::FromStr, time::Duration};
 
-use anyhow::bail;
 use aws_sdk_s3::types::StorageClass;
 use camino::Utf8PathBuf;
 
@@ -177,19 +176,7 @@ impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
 
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
-        let document: toml_edit::Document = match toml {
-            toml_edit::Item::Table(toml) => toml.clone().into(),
-            toml_edit::Item::Value(toml_edit::Value::InlineTable(toml)) => {
-                toml.clone().into_table().into()
-            }
-            _ => bail!("toml not a table or inline table"),
-        };
-
-        if document.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(toml_edit::de::from_document(document)?))
+        Ok(utils::toml_edit_ext::deserialize_item(toml)?)
     }
 }
 
