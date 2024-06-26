@@ -686,6 +686,7 @@ pub enum GetLogicalSizePriority {
 pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
+    EnhancedGcBottomMostCompaction,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1096,7 +1097,6 @@ impl Timeline {
     /// scan iterator interface. We could optimize this interface later to avoid some checks in the vectored
     /// get path to maintain and split the probing and to-be-probe keyspace. We also need to ensure that
     /// the scan operation will not cause OOM in the future.
-    #[allow(dead_code)]
     pub(crate) async fn scan(
         &self,
         keyspace: KeySpace,
