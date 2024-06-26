@@ -59,16 +59,15 @@ pub enum OutboundMsgKind {
     /// properly deserialize it.
     InvalidMessage { error: String },
     /// Indicates that we experienced an internal error while processing a message.
-    /// For example, if a cgroup operation fails while trying to handle an upscale,
+    /// For example, if enlarging the file cache fails while trying to handle an upscale,
     /// we return `InternalError`.
     InternalError { error: String },
     /// Returned to the agent once we have finished handling an upscale. If the
     /// handling was unsuccessful, an `InternalError` will get returned instead.
     /// *Note*: this is a struct variant because of the way go serializes struct{}
     UpscaleConfirmation {},
-    /// Indicates to the monitor that we are urgently requesting resources.
-    /// *Note*: this is a struct variant because of the way go serializes struct{}
-    UpscaleRequest {},
+    /// Indicates to the monitor that we are requesting the VM to be scaled to this size.
+    ScaleRequest { target: Resources },
     /// Returned to the agent once we have finished attempting to downscale. If
     /// an error occured trying to do so, an `InternalError` will get returned instead.
     /// However, if we are simply unsuccessful (for example, do to needing the resources),
@@ -126,7 +125,7 @@ pub enum InboundMsgKind {
 }
 
 /// Represents the resources granted to a VM.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 // Renamed because the agent has multiple resources types:
 // `Resources` (milliCPU/memory slots)
 // `Allocation` (vCPU/bytes) <- what we correspond to

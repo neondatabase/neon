@@ -10,23 +10,23 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use axum::extract::ws::{Message, WebSocket};
 use futures::StreamExt;
-use tokio::sync::{broadcast, watch};
+use sysinfo::System;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::cgroup::{self, CgroupWatcher};
 use crate::dispatcher::Dispatcher;
 use crate::filecache::{FileCacheConfig, FileCacheState};
 use crate::protocol::{InboundMsg, InboundMsgKind, OutboundMsg, OutboundMsgKind, Resources};
-use crate::{bytes_to_mebibytes, get_total_system_memory, spawn_with_cancel, Args, MiB};
+use crate::sliding_window::SlidingMax;
+use crate::{bytes_to_mebibytes, Args, MiB};
 
-/// Central struct that interacts with agent, dispatcher, and cgroup to handle
-/// signals from the agent.
+/// Central struct that tracks the desired scaling target, and interacts with the agent
+/// and dispatcher to handle signals from the agent.
 #[derive(Debug)]
 pub struct Runner {
     config: Config,
     filecache: Option<FileCacheState>,
-    cgroup: Option<CgroupState>,
     dispatcher: Dispatcher,
 
     /// We "mint" new message ids by incrementing this counter and taking the value.
@@ -35,20 +35,17 @@ pub struct Runner {
     /// by us vs the autoscaler-agent.
     counter: usize,
 
-    last_upscale_request_at: Option<Instant>,
+    last_scale_request: Option<(Resources, Instant)>,
+
+    cpu_window: SlidingMax<f64, Instant>,
+    mem_window: SlidingMax<u64, Instant>,
+
+    system: System,
 
     /// A signal to kill the main thread produced by `self.run()`. This is triggered
     /// when the server receives a new connection. When the thread receives the
     /// signal off this channel, it will gracefully shutdown.
     kill: broadcast::Receiver<()>,
-}
-
-#[derive(Debug)]
-struct CgroupState {
-    watcher: watch::Receiver<(Instant, cgroup::MemoryHistory)>,
-    /// If [`cgroup::MemoryHistory::avg_non_reclaimable`] exceeds `threshold`, we send upscale
-    /// requests.
-    threshold: u64,
 }
 
 /// Configuration for a `Runner`
@@ -69,52 +66,42 @@ pub struct Config {
     /// should be removed once we have a better solution there.
     sys_buffer_bytes: u64,
 
-    /// Minimum fraction of total system memory reserved *before* the cgroup threshold; in
-    /// other words, providing a ceiling for the highest value of the threshold by enforcing that
-    /// there's at least `cgroup_min_overhead_fraction` of the total memory remaining beyond the
-    /// threshold.
-    ///
-    /// For example, a value of `0.1` means that 10% of total memory must remain after exceeding
-    /// the threshold, so the value of the cgroup threshold would always be capped at 90% of total
-    /// memory.
-    ///
-    /// The default value of `0.15` means that we *guarantee* sending upscale requests if the
-    /// cgroup is using more than 85% of total memory (even if we're *not* separately reserving
-    /// memory for the file cache).
-    cgroup_min_overhead_fraction: f64,
+    /// Interval at which we poll memory and CPU statistics for scaling decisions.
+    poll_interval: Duration,
 
-    cgroup_downscale_threshold_buffer_bytes: u64,
+    /// The resources requested from the agent are calculated based on the Max of memory
+    /// usage and load average over a sliding window of the last X seconds. This controls
+    /// the length of the window to consider.
+    sliding_window_length: Duration,
+
+    /// Desired fraction of current CPU that the load average should be. For example, with a value
+    /// of 0.7, we'd want load average to sit at 0.7 × CPU, scaling CPU to make this happen.
+    load_average_fraction_target: f64,
+
+    /// Desired fraction of current memory that we would like to be using. For example, with a value
+    /// of 0.7, on a 4GB VM we'd like to be using 2.8GB of memory.
+    memory_usage_fraction_target: f64,
+
+    /// When requesting scaling to a certain # of CPUs, the request is rounded up to the
+    /// nearest multiple of 'cpu_quantum'. For example, if the desired # of CPUs based on the
+    /// usage is 3.1, and cpu_quantum is 0.25, we'd request 3.25 CPUs.
+    cpu_quantum: f64,
+
+    /// Like 'cpu_quantum', but for memory. In bytes.
+    mem_quantum: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             sys_buffer_bytes: 100 * MiB,
-            cgroup_min_overhead_fraction: 0.15,
-            cgroup_downscale_threshold_buffer_bytes: 100 * MiB,
+            poll_interval: Duration::from_millis(100),
+            sliding_window_length: Duration::from_secs(60),
+            cpu_quantum: 0.25,
+            mem_quantum: 512 * 1024 * 1024,
+            load_average_fraction_target: 0.9,
+            memory_usage_fraction_target: 0.75,
         }
-    }
-}
-
-impl Config {
-    fn cgroup_threshold(&self, total_mem: u64, file_cache_disk_size: u64) -> u64 {
-        // If the file cache is in tmpfs, then it will count towards shmem usage of the cgroup,
-        // and thus be non-reclaimable, so we should allow for additional memory usage.
-        //
-        // If the file cache sits on disk, our desired stable system state is for it to be fully
-        // page cached (its contents should only be paged to/from disk in situations where we can't
-        // upscale fast enough). Page-cached memory is reclaimable, so we need to lower the
-        // threshold for non-reclaimable memory so we scale up *before* the kernel starts paging
-        // out the file cache.
-        let memory_remaining_for_cgroup = total_mem.saturating_sub(file_cache_disk_size);
-
-        // Even if we're not separately making room for the file cache (if it's in tmpfs), we still
-        // want our threshold to be met gracefully instead of letting postgres get OOM-killed.
-        // So we guarantee that there's at least `cgroup_min_overhead_fraction` of total memory
-        // remaining above the threshold.
-        let max_threshold = (total_mem as f64 * (1.0 - self.cgroup_min_overhead_fraction)) as u64;
-
-        memory_remaining_for_cgroup.min(max_threshold)
     }
 }
 
@@ -137,23 +124,25 @@ impl Runner {
             .await
             .context("error creating new dispatcher")?;
 
+        let now = Instant::now();
         let mut state = Runner {
             config,
             filecache: None,
-            cgroup: None,
             dispatcher,
             counter: 1, // NB: must be odd, see the comment about the field for more.
-            last_upscale_request_at: None,
+            last_scale_request: None,
+            cpu_window: SlidingMax::new(0.0, now),
+            mem_window: SlidingMax::new(0, now),
             kill,
+            system: System::new(),
         };
 
-        let mem = get_total_system_memory();
+        state.system.refresh_specifics(
+            sysinfo::RefreshKind::new().with_memory(sysinfo::MemoryRefreshKind::new().with_ram()),
+        );
 
-        let mut file_cache_disk_size = 0;
+        let mem = state.system.total_memory();
 
-        // We need to process file cache initialization before cgroup initialization, so that the memory
-        // allocated to the file cache is appropriately taken into account when we decide the cgroup's
-        // memory limits.
         if let Some(connstr) = &args.pgconnstr {
             info!("initializing file cache");
             let config = FileCacheConfig::default();
@@ -184,51 +173,19 @@ impl Runner {
                 info!("file cache size actually got set to {actual_size}")
             }
 
-            file_cache_disk_size = actual_size;
             state.filecache = Some(file_cache);
-        }
-
-        if let Some(name) = &args.cgroup {
-            // Best not to set up cgroup stuff more than once, so we'll initialize cgroup state
-            // now, and then set limits later.
-            info!("initializing cgroup");
-
-            let cgroup =
-                CgroupWatcher::new(name.clone()).context("failed to create cgroup manager")?;
-
-            let init_value = cgroup::MemoryHistory {
-                avg_non_reclaimable: 0,
-                samples_count: 0,
-                samples_span: Duration::ZERO,
-            };
-            let (hist_tx, hist_rx) = watch::channel((Instant::now(), init_value));
-
-            spawn_with_cancel(token, |_| error!("cgroup watcher terminated"), async move {
-                cgroup.watch(hist_tx).await
-            });
-
-            let threshold = state.config.cgroup_threshold(mem, file_cache_disk_size);
-            info!(threshold, "set initial cgroup threshold",);
-
-            state.cgroup = Some(CgroupState {
-                watcher: hist_rx,
-                threshold,
-            });
         }
 
         Ok(state)
     }
 
-    /// Attempt to downscale filecache + cgroup
+    /// Attempt to downscale filecache
     #[tracing::instrument(skip_all, fields(?target))]
     pub async fn try_downscale(&mut self, target: Resources) -> anyhow::Result<(bool, String)> {
         // Nothing to adjust
-        if self.cgroup.is_none() && self.filecache.is_none() {
-            info!("no action needed for downscale (no cgroup or file cache enabled)");
-            return Ok((
-                true,
-                "monitor is not managing cgroup or file cache".to_string(),
-            ));
+        if self.filecache.is_none() {
+            info!("no action needed for downscale (no file cache enabled)");
+            return Ok((true, "monitor is not managing file cache".to_string()));
         }
 
         let requested_mem = target.mem;
@@ -238,77 +195,18 @@ impl Runner {
             .as_ref()
             .map(|file_cache| file_cache.config.calculate_cache_size(usable_system_memory))
             .unwrap_or(0);
-        if let Some(cgroup) = &self.cgroup {
-            let (last_time, last_history) = *cgroup.watcher.borrow();
 
-            // NB: The ordering of these conditions is intentional. During startup, we should deny
-            // downscaling until we have enough information to determine that it's safe to do so
-            // (i.e. enough samples have come in). But if it's been a while and we *still* haven't
-            // received any information, we should *fail* instead of just denying downscaling.
-            //
-            // `last_time` is set to `Instant::now()` on startup, so checking `last_time.elapsed()`
-            // serves double-duty: it trips if we haven't received *any* metrics for long enough,
-            // OR if we haven't received metrics *recently enough*.
-            //
-            // TODO: make the duration here configurable.
-            if last_time.elapsed() > Duration::from_secs(5) {
-                bail!("haven't gotten cgroup memory stats recently enough to determine downscaling information");
-            } else if last_history.samples_count <= 1 {
-                let status = "haven't received enough cgroup memory stats yet";
-                info!(status, "discontinuing downscale");
-                return Ok((false, status.to_owned()));
-            }
-
-            let new_threshold = self
-                .config
-                .cgroup_threshold(usable_system_memory, expected_file_cache_size);
-
-            let current = last_history.avg_non_reclaimable;
-
-            if new_threshold < current + self.config.cgroup_downscale_threshold_buffer_bytes {
-                let status = format!(
-                    "{}: {} MiB (new threshold) < {} (current usage) + {} (downscale buffer)",
-                    "calculated memory threshold too low",
-                    bytes_to_mebibytes(new_threshold),
-                    bytes_to_mebibytes(current),
-                    bytes_to_mebibytes(self.config.cgroup_downscale_threshold_buffer_bytes)
-                );
-
-                info!(status, "discontinuing downscale");
-
-                return Ok((false, status));
-            }
-        }
-
-        // The downscaling has been approved. Downscale the file cache, then the cgroup.
+        // The downscaling has been approved. Downscale the file cache.
         let mut status = vec![];
-        let mut file_cache_disk_size = 0;
         if let Some(file_cache) = &mut self.filecache {
             let actual_usage = file_cache
                 .set_file_cache_size(expected_file_cache_size)
                 .await
                 .context("failed to set file cache size")?;
-            file_cache_disk_size = actual_usage;
             let message = format!(
                 "set file cache size to {} MiB",
                 bytes_to_mebibytes(actual_usage),
             );
-            info!("downscale: {message}");
-            status.push(message);
-        }
-
-        if let Some(cgroup) = &mut self.cgroup {
-            let new_threshold = self
-                .config
-                .cgroup_threshold(usable_system_memory, file_cache_disk_size);
-
-            let message = format!(
-                "set cgroup memory threshold from {} MiB to {} MiB, of new total {} MiB",
-                bytes_to_mebibytes(cgroup.threshold),
-                bytes_to_mebibytes(new_threshold),
-                bytes_to_mebibytes(usable_system_memory)
-            );
-            cgroup.threshold = new_threshold;
             info!("downscale: {message}");
             status.push(message);
         }
@@ -321,15 +219,14 @@ impl Runner {
     /// Handle new resources
     #[tracing::instrument(skip_all, fields(?resources))]
     pub async fn handle_upscale(&mut self, resources: Resources) -> anyhow::Result<()> {
-        if self.filecache.is_none() && self.cgroup.is_none() {
-            info!("no action needed for upscale (no cgroup or file cache enabled)");
+        if self.filecache.is_none() {
+            info!("no action needed for upscale (file cache is disabled)");
             return Ok(());
         }
 
         let new_mem = resources.mem;
         let usable_system_memory = new_mem.saturating_sub(self.config.sys_buffer_bytes);
 
-        let mut file_cache_disk_size = 0;
         if let Some(file_cache) = &mut self.filecache {
             let expected_usage = file_cache.config.calculate_cache_size(usable_system_memory);
             info!(
@@ -342,7 +239,6 @@ impl Runner {
                 .set_file_cache_size(expected_usage)
                 .await
                 .context("failed to set file cache size")?;
-            file_cache_disk_size = actual_usage;
 
             if actual_usage != expected_usage {
                 warn!(
@@ -351,20 +247,6 @@ impl Runner {
                     bytes_to_mebibytes(actual_usage)
                 )
             }
-        }
-
-        if let Some(cgroup) = &mut self.cgroup {
-            let new_threshold = self
-                .config
-                .cgroup_threshold(usable_system_memory, file_cache_disk_size);
-
-            info!(
-                "set cgroup memory threshold from {} MiB to {} MiB of new total {} MiB",
-                bytes_to_mebibytes(cgroup.threshold),
-                bytes_to_mebibytes(new_threshold),
-                bytes_to_mebibytes(usable_system_memory)
-            );
-            cgroup.threshold = new_threshold;
         }
 
         Ok(())
@@ -413,10 +295,57 @@ impl Runner {
         }
     }
 
+    /// Calculate the desired size of the VM, based on the CPU and memory usage right now.
+    pub fn calculate_raw_target(&mut self) -> Resources {
+        self.system.refresh_specifics(
+            sysinfo::RefreshKind::new().with_memory(sysinfo::MemoryRefreshKind::new().with_ram()),
+        );
+
+        // For CPU:
+        //
+        // We use the 1 minute load average to measure "current" CPU usage. Target # of
+        // CPUs is at the point where:
+        //
+        // (CPUs) * (LoadAverageFractionTarget) == (load average).
+        let load_avg_1min = System::load_average().one;
+        let goal_cpus = load_avg_1min / self.config.load_average_fraction_target;
+
+        // For Memory:
+        //
+        // Target point is where (Mem) * (MemoryUsageFractionTarget) == (Mem Usage)
+        let used_memory = self.system.used_memory();
+        let goal_memory_bytes: u64 =
+            (self.system.used_memory() as f64 / self.config.memory_usage_fraction_target) as u64;
+
+        debug!("load avg: {load_avg_1min} used memory: {used_memory}");
+        Resources {
+            cpu: goal_cpus,
+            mem: goal_memory_bytes,
+        }
+    }
+
+    /// To avoid overly fine-grained requests to the agent, round up the request to a
+    /// multiple of the CPU and memory size of one a Compute Unit.
+    ///
+    /// We still track CPU and memory separately though. The autoscaler agent will combine
+    /// the CPU and memory requests to a single "# of Compute Units" measure.
+    fn quantize_resources(&self, res: Resources) -> Resources {
+        Resources {
+            cpu: (res.cpu / self.config.cpu_quantum).ceil() * self.config.cpu_quantum,
+            mem: ((res.mem as f64 / self.config.mem_quantum as f64).ceil()
+                * self.config.mem_quantum as f64) as u64,
+        }
+    }
+
     // TODO: don't propagate errors, probably just warn!?
     #[tracing::instrument(skip_all)]
     pub async fn run(&mut self) -> anyhow::Result<()> {
         info!("starting dispatcher");
+
+        let mut ticker = tokio::time::interval(self.config.poll_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // ticker.reset_immediately(); // FIXME: enable this once updating to tokio >= 1.30.0
+
         loop {
             tokio::select! {
                 signal = self.kill.recv() => {
@@ -426,25 +355,39 @@ impl Runner {
                     }
                 }
 
-                // New memory stats from the cgroup, *may* need to request upscaling, if we've
-                // exceeded the threshold
-                result = self.cgroup.as_mut().unwrap().watcher.changed(), if self.cgroup.is_some() => {
-                    result.context("failed to receive from cgroup memory stats watcher")?;
+                // Time to re-evaluate the scaling target
+                _ = ticker.tick() => {
+                    let now = Instant::now();
 
-                    let cgroup = self.cgroup.as_ref().unwrap();
+                    // Calculate the desired resources based on current usage
+                    let target_now = self.calculate_raw_target();
 
-                    let (_time, cgroup_mem_stat) = *cgroup.watcher.borrow();
+                    // Round it up to the nearest CU sizes, to avoid overly fine-grained
+                    // requests.
+                    let quantized_target_now = self.quantize_resources(target_now);
 
-                    // If we haven't exceeded the threshold, then we're all ok
-                    if cgroup_mem_stat.avg_non_reclaimable < cgroup.threshold {
-                        continue;
-                    }
+                    // Smoothen using sliding windows.
+                    self.cpu_window.add_sample(quantized_target_now.cpu, now);
+                    self.cpu_window.trim(now - self.config.sliding_window_length);
+                    self.mem_window.add_sample(quantized_target_now.mem, now);
+                    self.mem_window.trim(now - self.config.sliding_window_length);
 
-                    // Otherwise, we generally want upscaling. But, if it's been less than 1 second
-                    // since the last time we requested upscaling, ignore the event, to avoid
-                    // spamming the agent.
-                    if let Some(t) = self.last_upscale_request_at {
-                        let elapsed = t.elapsed();
+                    let sliding_target = Resources {
+                        cpu: *self.cpu_window.get_max(),
+                        mem: *self.mem_window.get_max(),
+                    };
+
+                    // If no change, we're all ok.
+                    //
+                    // XXX: If the agent doesn't perform the scaling, should we retry after a while though?
+                    if let Some((last_request_target, last_request_at)) = self.last_scale_request {
+                        if last_request_target == sliding_target {
+                            continue;
+                        }
+
+                        // If it's been less than 1 second since the last time we requested
+                        // scaling, don't send a request to avoid spamming the agent.
+                        let elapsed = now.duration_since(last_request_at);
                         if elapsed < Duration::from_secs(1) {
                             // *Ideally* we'd like to log here that we're ignoring the fact the
                             // memory stats are too high, but in practice this can result in
@@ -453,20 +396,28 @@ impl Runner {
                             // See https://github.com/neondatabase/neon/issues/5865 for more.
                             continue;
                         }
+
+                        info!(
+                            old_target_cpu = last_request_target.cpu,
+                            old_target_mem = last_request_target.mem,
+                            target_cpu = sliding_target.cpu,
+                            target_mem = sliding_target.mem,
+                            "scaling target changed, requesting scaling",
+                        );
+                    } else {
+                        info!(
+                            target_cpu = sliding_target.cpu,
+                            target_mem = sliding_target.mem,
+                            "no previous scaling request, requesting initial scale",
+                        );
                     }
 
-                    self.last_upscale_request_at = Some(Instant::now());
-
-                    info!(
-                        avg_non_reclaimable = bytes_to_mebibytes(cgroup_mem_stat.avg_non_reclaimable),
-                        threshold = bytes_to_mebibytes(cgroup.threshold),
-                        "cgroup memory stats are high enough to upscale, requesting upscale",
-                    );
+                    self.last_scale_request = Some((sliding_target, now));
 
                     self.counter += 2; // Increment, preserving parity (i.e. keep the
                                        // counter odd). See the field comment for more.
                     self.dispatcher
-                        .send(OutboundMsg::new(OutboundMsgKind::UpscaleRequest {}, self.counter))
+                        .send(OutboundMsg::new(OutboundMsgKind::ScaleRequest {target: sliding_target}, self.counter))
                         .await
                         .context("failed to send message")?;
                 },
