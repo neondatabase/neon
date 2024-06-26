@@ -10,9 +10,9 @@ use crate::repository::{Key, Value};
 use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::ValueReconstructResult;
-use crate::tenant::timeline::{l0_flush, GetVectoredError};
+use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{PageReconstructError, Timeline};
-use crate::{page_cache, walrecord};
+use crate::{l0_flush, page_cache, walrecord};
 use anyhow::{anyhow, ensure, Result};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
@@ -620,11 +620,12 @@ impl InMemoryLayer {
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().await;
 
-        let l0_flush_global_state = timeline.l0_flush_global_state.inner();
+        let l0_flush_global_state = timeline.l0_flush_global_state.inner().clone();
         use l0_flush::Inner;
-        let _concurrency_permit = match l0_flush_global_state {
+        let _concurrency_permit = match &*l0_flush_global_state {
             Inner::PageCached => None,
             Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
+            Inner::Fail(msg) => anyhow::bail!(*msg),
         };
 
         let end_lsn = *self.end_lsn.get().unwrap();
@@ -652,7 +653,7 @@ impl InMemoryLayer {
         )
         .await?;
 
-        match l0_flush_global_state {
+        match &*l0_flush_global_state {
             l0_flush::Inner::PageCached => {
                 let ctx = RequestContextBuilder::extend(ctx)
                     .page_content_kind(PageContentKind::InMemoryLayer)
@@ -701,6 +702,7 @@ impl InMemoryLayer {
                 // => we'd have more concurrenct Vec<u8> than allowed as per the semaphore.
                 drop(_concurrency_permit);
             }
+            l0_flush::Inner::Fail(_) => unreachable!("we bail out earlier in this function"),
         }
 
         // MAX is used here because we identify L0 layers by full key range

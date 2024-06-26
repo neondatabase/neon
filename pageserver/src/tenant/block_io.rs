@@ -64,6 +64,7 @@ impl<'a> Deref for BlockLease<'a> {
         match self {
             BlockLease::PageReadGuard(v) => v.deref(),
             BlockLease::EphemeralFileMutableTail(v) => v,
+            BlockLease::Slice(v) => v,
             #[cfg(test)]
             BlockLease::Arc(v) => v.deref(),
             #[cfg(test)]
@@ -124,7 +125,7 @@ impl<'a> BlockReaderRef<'a> {
         let page_sized: &[u8; PAGE_SZ] = slice
             .try_into()
             .expect("we add PAGE_SZ to start, so the slice must have PAGE_SZ");
-        Ok(BlockLease::Slice(slice))
+        Ok(BlockLease::Slice(page_sized))
     }
 }
 

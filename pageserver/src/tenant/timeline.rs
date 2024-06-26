@@ -9,7 +9,6 @@ pub(crate) mod logical_size;
 pub mod span;
 pub mod uninit;
 mod walreceiver;
-pub(crate) mod l0_flush;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use arc_swap::ArcSwap;
@@ -17,7 +16,6 @@ use bytes::Bytes;
 use camino::Utf8Path;
 use enumset::EnumSet;
 use fail::fail_point;
-use l0_flush::L0FlushGlobalState;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
@@ -67,7 +65,7 @@ use std::{
     ops::{Deref, Range},
 };
 
-use crate::metrics::GetKind;
+use crate::{l0_flush::{self, L0FlushGlobalState}, metrics::GetKind};
 use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -210,7 +208,7 @@ pub struct TimelineResources {
     pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
-    pub l0_flush_semaphore: Arc<tokio::sync::Semaphore>,
+    pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
 pub(crate) struct AuxFilesState {
@@ -2381,6 +2379,8 @@ impl Timeline {
 
                 #[cfg(test)]
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
+
+                l0_flush_global_state: resources.l0_flush_global_state,
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;

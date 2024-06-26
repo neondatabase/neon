@@ -30,7 +30,7 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::tenant::timeline::{l0_flush::L0FlushConfig, GetVectoredImpl};
+use crate::{l0_flush::L0FlushConfig, tenant::timeline::GetVectoredImpl};
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -298,7 +298,6 @@ pub struct PageServerConf {
     pub l0_flush: L0FlushConfig,
 }
 
-
 /// We do not want to store this in a PageServerConf because the latter may be logged
 /// and/or serialized at a whim, while the token is secret. Currently this token is the
 /// same for accessing all tenants/timelines, but may become per-tenant/per-timeline in
@@ -402,6 +401,8 @@ struct PageServerConfigBuilder {
     validate_vectored_get: BuilderValue<bool>,
 
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
+
+    l0_flush: BuilderValue<L0FlushConfig>,
 }
 
 impl PageServerConfigBuilder {
@@ -490,6 +491,7 @@ impl PageServerConfigBuilder {
             )),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
+            l0_flush: Set(L0FlushConfig::PageCached),
         }
     }
 }
@@ -677,6 +679,10 @@ impl PageServerConfigBuilder {
         self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
     }
 
+    pub fn l0_flush(&mut self, value: L0FlushConfig) {
+        self.l0_flush = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
@@ -734,6 +740,7 @@ impl PageServerConfigBuilder {
                 max_vectored_read_bytes,
                 validate_vectored_get,
                 ephemeral_bytes_per_memory_kb,
+                l0_flush,
             }
             CUSTOM LOGIC
             {
@@ -1017,6 +1024,9 @@ impl PageServerConf {
                 "ephemeral_bytes_per_memory_kb" => {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
                 }
+                "l0_flush" => {
+                    builder.l0_flush(toml_edit::de::from_document(item))
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -1100,6 +1110,7 @@ impl PageServerConf {
             ),
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+            l0_flush: L0FlushConfig::PageCached,
         }
     }
 }
@@ -1339,6 +1350,7 @@ background_task_maximum_delay = '334 s'
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                l0_flush: L0FlushConfig::PageCached,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1412,6 +1424,7 @@ background_task_maximum_delay = '334 s'
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                l0_flush: L0FlushConfig::PageCached,
             },
             "Should be able to parse all basic config values correctly"
         );

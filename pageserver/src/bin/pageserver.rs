@@ -421,7 +421,8 @@ fn start_pageserver(
         background_jobs_can_start: background_jobs_barrier.clone(),
     };
 
-    let l0_flush_semaphore = Arc::new(tokio::sync::Semaphore::new(conf.l0_flush_max_concurrency));
+    let l0_flush_global_state =
+        pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let deletion_queue_client = deletion_queue.new_client();
@@ -431,7 +432,7 @@ fn start_pageserver(
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
-            l0_flush_semaphore,
+            l0_flush_global_state,
         },
         order,
         shutdown_pageserver.clone(),

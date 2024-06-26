@@ -73,6 +73,8 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
+use crate::l0_flush::L0FlushConfig;
+use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::TENANT;
 use crate::metrics::{
     remove_tenant_metrics, BROKEN_TENANTS_SET, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC,
@@ -165,7 +167,7 @@ pub struct TenantSharedResources {
     pub broker_client: storage_broker::BrokerClientChannel,
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
-    pub l0_flush_semaphore: Arc<tokio::sync::Semaphore>,
+    pub l0_flush_global_state: L0FlushGlobalState,
 }
 
 /// A [`Tenant`] is really an _attached_ tenant.  The configuration
@@ -297,8 +299,7 @@ pub struct Tenant {
     /// An ongoing timeline detach must be checked during attempts to GC or compact a timeline.
     ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
 
-    /// Global semaphore for L0 flushes, passed in from tenant_mgr and we pass references to it to each timeline.
-    pub(crate) l0_flush_semaphore: Arc<tokio::sync::Semaphore>,
+    l0_flush_global_state: L0FlushGlobalState,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -662,7 +663,7 @@ impl Tenant {
             broker_client,
             remote_storage,
             deletion_queue_client,
-            l0_flush_semaphore,
+            l0_flush_global_state,
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -677,7 +678,7 @@ impl Tenant {
             tenant_shard_id,
             remote_storage.clone(),
             deletion_queue_client,
-            l0_flush_semaphore,
+            l0_flush_global_state,
         ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
@@ -990,7 +991,7 @@ impl Tenant {
                 TimelineResources {
                     remote_client,
                     timeline_get_throttle: self.timeline_get_throttle.clone(),
-                    l0_flush_semaphore: self.l0_flush_semaphore.clone(),
+                    l0_flush_global_state: self.l0_flush_global_state.clone(),
                 },
                 ctx,
             )
@@ -1175,8 +1176,7 @@ impl Tenant {
             tenant_shard_id,
             remote_storage,
             DeletionQueueClient::broken(),
-            // broken tenant should never be flushing
-            Arc::new(tokio::sync::Semaphore::new(0)),
+            L0FlushGlobalState::new(L0FlushConfig::Fail("broken tenant should not be flushing L0s")),
         ))
     }
 
@@ -2502,7 +2502,7 @@ impl Tenant {
         tenant_shard_id: TenantShardId,
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
-        l0_flush_semaphore: Arc<tokio::sync::Semaphore>,
+        l0_flush_global_state: L0FlushGlobalState,
     ) -> Tenant {
         let (state, mut rx) = watch::channel(state);
 
@@ -2586,7 +2586,7 @@ impl Tenant {
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
-            l0_flush_semaphore,
+            l0_flush_global_state,
         }
     }
 
@@ -3411,7 +3411,7 @@ impl Tenant {
         TimelineResources {
             remote_client,
             timeline_get_throttle: self.timeline_get_throttle.clone(),
-            l0_flush_semaphore: self.l0_flush_semaphore.clone(),
+            l0_flush_global_state: self.l0_flush_global_state.clone(),
         }
     }
 
@@ -3937,8 +3937,8 @@ pub(crate) mod harness {
                 self.tenant_shard_id,
                 self.remote_storage.clone(),
                 self.deletion_queue.new_client(),
-                // in the past we didn't have a semaphore => use large value to avoid changing test behavior
-                Arc::new(tokio::sync::Semaphore::new(tokio::sync::Semaphore::MAX_PERMITS)),
+                // TODO: ideally we should run all unit tests with both configs
+                L0FlushGlobalState::new(L0FlushConfig::default()),
             ));
 
             let preload = tenant

@@ -36,10 +36,6 @@ impl<const N: usize> Buffer<N> {
     pub fn as_zero_padded_slice(&self) -> &[u8; N] {
         &self.allocation
     }
-
-    pub fn as_unpadded_slice(&self) -> &[u8] {
-        &self.allocation[0..self.written]
-    }
 }
 
 impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Buffer<N> {
