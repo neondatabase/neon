@@ -43,7 +43,8 @@ use crate::tenant::config::{
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::timeline::ShutdownMode;
-use crate::tenant::{AttachedTenantConf, GcError, SpawnMode, Tenant, TenantState};
+use crate::tenant::{AttachedTenantConf, GcError, LoadConfigError, SpawnMode, Tenant, TenantState};
+use crate::virtual_file::MaybeFatalIo;
 use crate::{InitializationOrder, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -272,7 +273,7 @@ pub struct TenantManager {
 }
 
 fn emergency_generations(
-    tenant_confs: &HashMap<TenantShardId, anyhow::Result<LocationConf>>,
+    tenant_confs: &HashMap<TenantShardId, Result<LocationConf, LoadConfigError>>,
 ) -> HashMap<TenantShardId, TenantStartupMode> {
     tenant_confs
         .iter()
@@ -296,7 +297,7 @@ fn emergency_generations(
 
 async fn init_load_generations(
     conf: &'static PageServerConf,
-    tenant_confs: &HashMap<TenantShardId, anyhow::Result<LocationConf>>,
+    tenant_confs: &HashMap<TenantShardId, Result<LocationConf, LoadConfigError>>,
     resources: &TenantSharedResources,
     cancel: &CancellationToken,
 ) -> anyhow::Result<Option<HashMap<TenantShardId, TenantStartupMode>>> {
@@ -346,56 +347,32 @@ async fn init_load_generations(
 /// Given a directory discovered in the pageserver's tenants/ directory, attempt
 /// to load a tenant config from it.
 ///
-/// If file is missing, return Ok(None)
+/// If we cleaned up something expected (like an empty dir or a temp dir), return Ok(None).
 fn load_tenant_config(
     conf: &'static PageServerConf,
+    tenant_shard_id: TenantShardId,
     dentry: Utf8DirEntry,
-) -> anyhow::Result<Option<(TenantShardId, anyhow::Result<LocationConf>)>> {
+) -> Option<Result<LocationConf, LoadConfigError>> {
     let tenant_dir_path = dentry.path().to_path_buf();
     if crate::is_temporary(&tenant_dir_path) {
         info!("Found temporary tenant directory, removing: {tenant_dir_path}");
         // No need to use safe_remove_tenant_dir_all because this is already
         // a temporary path
-        if let Err(e) = std::fs::remove_dir_all(&tenant_dir_path) {
-            error!(
-                "Failed to remove temporary directory '{}': {:?}",
-                tenant_dir_path, e
-            );
-        }
-        return Ok(None);
+        std::fs::remove_dir_all(&tenant_dir_path).fatal_err("Deleting temporary tenant dir");
+        return None;
     }
 
     // This case happens if we crash during attachment before writing a config into the dir
     let is_empty = tenant_dir_path
         .is_empty_dir()
-        .with_context(|| format!("Failed to check whether {tenant_dir_path:?} is an empty dir"))?;
+        .fatal_err("Checking for empty tenant dir");
     if is_empty {
         info!("removing empty tenant directory {tenant_dir_path:?}");
-        if let Err(e) = std::fs::remove_dir(&tenant_dir_path) {
-            error!(
-                "Failed to remove empty tenant directory '{}': {e:#}",
-                tenant_dir_path
-            )
-        }
-        return Ok(None);
+        std::fs::remove_dir(&tenant_dir_path).fatal_err("Deleting empty tenant dir");
+        return None;
     }
 
-    let tenant_shard_id = match tenant_dir_path
-        .file_name()
-        .unwrap_or_default()
-        .parse::<TenantShardId>()
-    {
-        Ok(id) => id,
-        Err(_) => {
-            warn!("Invalid tenant path (garbage in our repo directory?): {tenant_dir_path}",);
-            return Ok(None);
-        }
-    };
-
-    Ok(Some((
-        tenant_shard_id,
-        Tenant::load_tenant_config(conf, &tenant_shard_id),
-    )))
+    Some(Tenant::load_tenant_config(conf, &tenant_shard_id))
 }
 
 /// Initial stage of load: walk the local tenants directory, clean up any temp files,
@@ -405,32 +382,51 @@ fn load_tenant_config(
 /// seconds even on reasonably fast drives.
 async fn init_load_tenant_configs(
     conf: &'static PageServerConf,
-) -> anyhow::Result<HashMap<TenantShardId, anyhow::Result<LocationConf>>> {
+) -> HashMap<TenantShardId, Result<LocationConf, LoadConfigError>> {
     let tenants_dir = conf.tenants_path();
 
-    let dentries = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Utf8DirEntry>> {
-        let dir_entries = tenants_dir
-            .read_dir_utf8()
-            .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
+    let dentries = tokio::task::spawn_blocking(move || -> Vec<Utf8DirEntry> {
+        let context = format!("Reading tenants dir {tenants_dir}");
+        let dir_entries = tenants_dir.read_dir_utf8().fatal_err(&context);
 
-        Ok(dir_entries.collect::<Result<Vec<_>, std::io::Error>>()?)
+        dir_entries
+            .collect::<Result<Vec<_>, std::io::Error>>()
+            .fatal_err(&context)
     })
-    .await??;
+    .await
+    .expect("Config load task panicked");
 
     let mut configs = HashMap::new();
 
     let mut join_set = JoinSet::new();
     for dentry in dentries {
-        join_set.spawn_blocking(move || load_tenant_config(conf, dentry));
+        let tenant_shard_id = match dentry.file_name().parse::<TenantShardId>() {
+            Ok(id) => id,
+            Err(_) => {
+                warn!(
+                    "Invalid tenant path (garbage in our repo directory?): '{}'",
+                    dentry.file_name()
+                );
+                continue;
+            }
+        };
+
+        join_set.spawn_blocking(move || {
+            (
+                tenant_shard_id,
+                load_tenant_config(conf, tenant_shard_id, dentry),
+            )
+        });
     }
 
     while let Some(r) = join_set.join_next().await {
-        if let Some((tenant_id, tenant_config)) = r?? {
-            configs.insert(tenant_id, tenant_config);
+        let (tenant_shard_id, tenant_config) = r.expect("Panic in config load task");
+        if let Some(tenant_config) = tenant_config {
+            configs.insert(tenant_shard_id, tenant_config);
         }
     }
 
-    Ok(configs)
+    configs
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -472,7 +468,7 @@ pub async fn init_tenant_mgr(
     );
 
     // Scan local filesystem for attached tenants
-    let tenant_configs = init_load_tenant_configs(conf).await?;
+    let tenant_configs = init_load_tenant_configs(conf).await;
 
     // Determine which tenants are to be secondary or attached, and in which generation
     let tenant_modes = init_load_generations(conf, &tenant_configs, &resources, &cancel).await?;
@@ -590,8 +586,8 @@ pub async fn init_tenant_mgr(
     );
     // For those shards that have live configurations, construct `Tenant` or `SecondaryTenant` objects and start them running
     for (tenant_shard_id, location_conf, config_write_result) in config_write_results {
-        // Errors writing configs are fatal
-        config_write_result?;
+        // Writing a config to local disk is foundational to startup up tenants: panic if we can't.
+        config_write_result.fatal_err("writing tenant shard config file");
 
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
         let shard_identity = location_conf.shard;
@@ -971,7 +967,8 @@ impl TenantManager {
         match fast_path_taken {
             Some(FastPathModified::Attached(tenant)) => {
                 Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await?;
+                    .await
+                    .fatal_err("writing tenant shard config");
 
                 // Transition to AttachedStale means we may well hold a valid generation
                 // still, and have been requested to go stale as part of a migration.  If
@@ -1001,7 +998,8 @@ impl TenantManager {
             }
             Some(FastPathModified::Secondary(_secondary_tenant)) => {
                 Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await?;
+                    .await
+                    .fatal_err("writing tenant shard config");
 
                 return Ok(None);
             }
@@ -1091,7 +1089,9 @@ impl TenantManager {
         // Before activating either secondary or attached mode, persist the
         // configuration, so that on restart we will re-attach (or re-start
         // secondary) on the tenant.
-        Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config).await?;
+        Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
+            .await
+            .fatal_err("writing tenant shard config");
 
         let new_slot = match &new_location_config.mode {
             LocationMode::Secondary(secondary_config) => {
