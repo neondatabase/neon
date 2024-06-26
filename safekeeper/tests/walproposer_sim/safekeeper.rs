@@ -16,7 +16,7 @@ use desim::{
 use hyper::Uri;
 use safekeeper::{
     safekeeper::{ProposerAcceptorMessage, SafeKeeper, ServerInfo, UNKNOWN_SERVER_VERSION},
-    state::TimelinePersistentState,
+    state::{TimelinePersistentState, TimelineState},
     timeline::TimelineError,
     wal_storage::Storage,
     SafeKeeperConf,
@@ -68,7 +68,7 @@ impl GlobalMap {
             let control_store = DiskStateStorage::new(disk.clone());
             let wal_store = DiskWALStorage::new(disk.clone(), &control_store)?;
 
-            let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
+            let sk = SafeKeeper::new(TimelineState::new(control_store), wal_store, conf.my_id)?;
             timelines.insert(
                 ttid,
                 SharedState {
@@ -118,7 +118,11 @@ impl GlobalMap {
         let control_store = DiskStateStorage::new(disk_timeline.clone());
         let wal_store = DiskWALStorage::new(disk_timeline.clone(), &control_store)?;
 
-        let sk = SafeKeeper::new(control_store, wal_store, self.conf.my_id)?;
+        let sk = SafeKeeper::new(
+            TimelineState::new(control_store),
+            wal_store,
+            self.conf.my_id,
+        )?;
 
         self.timelines.insert(
             ttid,
@@ -180,6 +184,9 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         partial_backup_enabled: false,
         partial_backup_timeout: Duration::from_secs(0),
         disable_periodic_broker_push: false,
+        enable_offload: false,
+        delete_offloaded_wal: false,
+        control_file_save_interval: Duration::from_secs(1),
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;

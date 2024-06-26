@@ -6,7 +6,7 @@ use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 use crate::safekeeper::ServerInfo;
-use crate::timeline::FullAccessTimeline;
+use crate::timeline::WalResidentTimeline;
 use crate::wal_service::ConnectionId;
 use crate::GlobalTimelines;
 use anyhow::{anyhow, Context};
@@ -213,7 +213,7 @@ impl SafekeeperPostgresHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
-        let mut tli: Option<FullAccessTimeline> = None;
+        let mut tli: Option<WalResidentTimeline> = None;
         if let Err(end) = self.handle_start_wal_push_guts(pgb, &mut tli).await {
             // Log the result and probably send it to the client, closing the stream.
             let handle_end_fut = pgb.handle_copy_stream_end(end);
@@ -233,7 +233,7 @@ impl SafekeeperPostgresHandler {
     pub async fn handle_start_wal_push_guts<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
-        tli: &mut Option<FullAccessTimeline>,
+        tli: &mut Option<WalResidentTimeline>,
     ) -> Result<(), CopyStreamHandlerEnd> {
         // Notify the libpq client that it's allowed to send `CopyData` messages
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
@@ -269,11 +269,11 @@ impl SafekeeperPostgresHandler {
                     .get_walreceivers()
                     .pageserver_feedback_tx
                     .subscribe();
-            *tli = Some(timeline.clone());
+            *tli = Some(timeline.wal_residence_guard().await?);
 
             tokio::select! {
                 // todo: add read|write .context to these errors
-                r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline.clone(), next_msg) => r,
+                r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline, next_msg) => r,
                 r = network_write(pgb, reply_rx, pageserver_feedback_rx) => r,
             }
         } else {
@@ -323,7 +323,7 @@ struct NetworkReader<'a, IO> {
 impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
     async fn read_first_message(
         &mut self,
-    ) -> Result<(FullAccessTimeline, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
+    ) -> Result<(WalResidentTimeline, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
         // Receive information about server to create timeline, if not yet.
         let next_msg = read_message(self.pgb_reader).await?;
         let tli = match next_msg {
@@ -340,7 +340,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
                 let tli =
                     GlobalTimelines::create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID)
                         .await?;
-                tli.full_access_guard().await?
+                tli.wal_residence_guard().await?
             }
             _ => {
                 return Err(CopyStreamHandlerEnd::Other(anyhow::anyhow!(
@@ -356,7 +356,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
         msg_tx: Sender<ProposerAcceptorMessage>,
         msg_rx: Receiver<ProposerAcceptorMessage>,
         reply_tx: Sender<AcceptorProposerMessage>,
-        tli: FullAccessTimeline,
+        tli: WalResidentTimeline,
         next_msg: ProposerAcceptorMessage,
     ) -> Result<(), CopyStreamHandlerEnd> {
         *self.acceptor_handle = Some(WalAcceptor::spawn(
@@ -451,7 +451,7 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 /// replies to reply_tx; reading from socket and writing to disk in parallel is
 /// beneficial for performance, this struct provides writing to disk part.
 pub struct WalAcceptor {
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     msg_rx: Receiver<ProposerAcceptorMessage>,
     reply_tx: Sender<AcceptorProposerMessage>,
     conn_id: Option<ConnectionId>,
@@ -464,7 +464,7 @@ impl WalAcceptor {
     ///
     /// conn_id None means WalAcceptor is used by recovery initiated at this safekeeper.
     pub fn spawn(
-        tli: FullAccessTimeline,
+        tli: WalResidentTimeline,
         msg_rx: Receiver<ProposerAcceptorMessage>,
         reply_tx: Sender<AcceptorProposerMessage>,
         conn_id: Option<ConnectionId>,

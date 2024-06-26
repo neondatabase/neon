@@ -15,7 +15,7 @@ use crate::{
     control_file::{FileStorage, Storage},
     pull_timeline::{create_temp_timeline_dir, load_temp_timeline, validate_temp_timeline},
     state::TimelinePersistentState,
-    timeline::{FullAccessTimeline, Timeline, TimelineError},
+    timeline::{Timeline, TimelineError, WalResidentTimeline},
     wal_backup::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
     GlobalTimelines,
@@ -46,7 +46,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
         }
     }
 
-    let source_tli = request.source.full_access_guard().await?;
+    let source_tli = request.source.wal_residence_guard().await?;
 
     let conf = &GlobalTimelines::get_global_config();
     let ttid = request.destination_ttid;
@@ -159,7 +159,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
 }
 
 async fn copy_disk_segments(
-    tli: &FullAccessTimeline,
+    tli: &WalResidentTimeline,
     wal_seg_size: usize,
     start_lsn: Lsn,
     end_lsn: Lsn,
@@ -183,7 +183,7 @@ async fn copy_disk_segments(
         let copy_end = copy_end - segment_start;
 
         let wal_file_path = {
-            let (normal, partial) = wal_file_paths(tli_dir_path, segment, wal_seg_size)?;
+            let (normal, partial) = wal_file_paths(tli_dir_path, segment, wal_seg_size);
 
             if segment == last_segment {
                 partial
