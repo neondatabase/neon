@@ -1025,7 +1025,7 @@ impl PageServerConf {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
                 }
                 "l0_flush" => {
-                    builder.l0_flush(utils::toml_edit_ext::deserialize_item(item)?)
+                    builder.l0_flush(utils::toml_edit_ext::deserialize_item(item).context("l0_flush")?)
                 }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }

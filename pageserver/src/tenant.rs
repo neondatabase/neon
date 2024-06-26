@@ -1176,7 +1176,9 @@ impl Tenant {
             tenant_shard_id,
             remote_storage,
             DeletionQueueClient::broken(),
-            L0FlushGlobalState::new(L0FlushConfig::Fail("broken tenant should not be flushing L0s")),
+            L0FlushGlobalState::new(L0FlushConfig::Fail(
+                "broken tenant should not be flushing L0s".to_owned(),
+            )),
         ))
     }
 

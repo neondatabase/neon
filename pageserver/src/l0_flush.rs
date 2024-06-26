@@ -6,11 +6,9 @@ pub enum L0FlushConfig {
     #[default]
     PageCached,
     #[serde(rename_all = "snake_case")]
-    Direct {
-        max_concurrency: NonZeroUsize,
-    },
+    Direct { max_concurrency: NonZeroUsize },
     #[serde(skip)]
-    Fail(&'static str),
+    Fail(String),
 }
 
 #[derive(Clone)]
@@ -19,7 +17,7 @@ pub struct L0FlushGlobalState(Arc<Inner>);
 pub(crate) enum Inner {
     PageCached,
     Direct { semaphore: tokio::sync::Semaphore },
-    Fail(&'static str),
+    Fail(String),
 }
 
 impl L0FlushGlobalState {

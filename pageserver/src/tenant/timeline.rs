@@ -65,7 +65,6 @@ use std::{
     ops::{Deref, Range},
 };
 
-use crate::{l0_flush::{self, L0FlushGlobalState}, metrics::GetKind};
 use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -89,6 +88,10 @@ use crate::{
 };
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
+};
+use crate::{
+    l0_flush::{self, L0FlushGlobalState},
+    metrics::GetKind,
 };
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,

@@ -625,7 +625,7 @@ impl InMemoryLayer {
         let _concurrency_permit = match &*l0_flush_global_state {
             Inner::PageCached => None,
             Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
-            Inner::Fail(msg) => anyhow::bail!(*msg),
+            Inner::Fail(msg) => anyhow::bail!(msg.clone()),
         };
 
         let end_lsn = *self.end_lsn.get().unwrap();
