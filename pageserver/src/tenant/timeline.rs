@@ -3671,6 +3671,7 @@ impl Timeline {
                 self.conf,
                 self.timeline_id,
                 self.tenant_shard_id,
+                self.l0_flush_global_state.prewarm_on_write(),
                 ctx,
             )
             .await?;

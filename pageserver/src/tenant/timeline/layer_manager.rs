@@ -13,6 +13,7 @@ use crate::{
     context::RequestContext,
     metrics::TimelineMetrics,
     tenant::{
+        ephemeral_file,
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
             AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
@@ -73,6 +74,7 @@ impl LayerManager {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
+        prewarm_on_write: ephemeral_file::PrewarmPageCacheOnWrite,
         ctx: &RequestContext,
     ) -> Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
@@ -109,8 +111,15 @@ impl LayerManager {
                 lsn
             );
 
-            let new_layer =
-                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn, ctx).await?;
+            let new_layer = InMemoryLayer::create(
+                conf,
+                timeline_id,
+                tenant_shard_id,
+                start_lsn,
+                prewarm_on_write,
+                ctx,
+            )
+            .await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());

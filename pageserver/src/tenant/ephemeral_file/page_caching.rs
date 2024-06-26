@@ -19,14 +19,21 @@ pub struct RW {
     rw: super::zero_padded_read_write::RW<PreWarmingWriter>,
 }
 
+#[derive(Clone, Copy)]
+pub enum PrewarmOnWrite {
+    Yes,
+    No,
+}
+
 impl RW {
-    pub fn new(file: VirtualFile) -> Self {
+    pub fn new(file: VirtualFile, prewarm_on_write: PrewarmOnWrite) -> Self {
         let page_cache_file_id = page_cache::next_file_id();
         Self {
             page_cache_file_id,
             rw: super::zero_padded_read_write::RW::new(PreWarmingWriter::new(
                 page_cache_file_id,
                 file,
+                prewarm_on_write,
             )),
         }
     }
@@ -156,14 +163,20 @@ impl Drop for RW {
 }
 
 struct PreWarmingWriter {
+    prewarm_on_write: PrewarmOnWrite,
     nwritten_blocks: u32,
     page_cache_file_id: page_cache::FileId,
     file: VirtualFile,
 }
 
 impl PreWarmingWriter {
-    fn new(page_cache_file_id: page_cache::FileId, file: VirtualFile) -> Self {
+    fn new(
+        page_cache_file_id: page_cache::FileId,
+        file: VirtualFile,
+        prewarm_on_write: PrewarmOnWrite,
+    ) -> Self {
         Self {
+            prewarm_on_write,
             nwritten_blocks: 0,
             page_cache_file_id,
             file,
@@ -235,45 +248,51 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
             assert_eq!(&check_bounds_stuff_works, &*buf);
         }
 
-        // Pre-warm page cache with the contents.
-        // At least in isolated bulk ingest benchmarks (test_bulk_insert.py), the pre-warming
-        // benefits the code that writes InMemoryLayer=>L0 layers.
         let nblocks = buflen / PAGE_SZ;
         let nblocks32 = u32::try_from(nblocks).unwrap();
-        let cache = page_cache::get();
-        static CTX: Lazy<RequestContext> = Lazy::new(|| {
-            RequestContext::new(
-                crate::task_mgr::TaskKind::EphemeralFilePreWarmPageCache,
-                crate::context::DownloadBehavior::Error,
-            )
-        });
-        for blknum_in_buffer in 0..nblocks {
-            let blk_in_buffer = &buf[blknum_in_buffer * PAGE_SZ..(blknum_in_buffer + 1) * PAGE_SZ];
-            let blknum = self
-                .nwritten_blocks
-                .checked_add(blknum_in_buffer as u32)
-                .unwrap();
-            match cache
-                .read_immutable_buf(self.page_cache_file_id, blknum, &CTX)
-                .await
-            {
-                Err(e) => {
-                    error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
-                    // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
-                }
-                Ok(v) => match v {
-                    page_cache::ReadBufResult::Found(_guard) => {
-                        // This function takes &mut self, so, it shouldn't be possible to reach this point.
-                        unreachable!("we just wrote block {blknum} to the VirtualFile, which is owned by Self, \
+
+        if matches!(self.prewarm_on_write, PrewarmOnWrite::Yes) {
+            // Pre-warm page cache with the contents.
+            // At least in isolated bulk ingest benchmarks (test_bulk_insert.py), the pre-warming
+            // benefits the code that writes InMemoryLayer=>L0 layers.
+
+            let cache = page_cache::get();
+            static CTX: Lazy<RequestContext> = Lazy::new(|| {
+                RequestContext::new(
+                    crate::task_mgr::TaskKind::EphemeralFilePreWarmPageCache,
+                    crate::context::DownloadBehavior::Error,
+                )
+            });
+            for blknum_in_buffer in 0..nblocks {
+                let blk_in_buffer =
+                    &buf[blknum_in_buffer * PAGE_SZ..(blknum_in_buffer + 1) * PAGE_SZ];
+                let blknum = self
+                    .nwritten_blocks
+                    .checked_add(blknum_in_buffer as u32)
+                    .unwrap();
+                match cache
+                    .read_immutable_buf(self.page_cache_file_id, blknum, &CTX)
+                    .await
+                {
+                    Err(e) => {
+                        error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
+                        // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
+                    }
+                    Ok(v) => match v {
+                        page_cache::ReadBufResult::Found(_guard) => {
+                            // This function takes &mut self, so, it shouldn't be possible to reach this point.
+                            unreachable!("we just wrote block {blknum} to the VirtualFile, which is owned by Self, \
                                       and this function takes &mut self, so, no concurrent read_blk is possible");
-                    }
-                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                        write_guard.copy_from_slice(blk_in_buffer);
-                        let _ = write_guard.mark_valid();
-                    }
-                },
+                        }
+                        page_cache::ReadBufResult::NotFound(mut write_guard) => {
+                            write_guard.copy_from_slice(blk_in_buffer);
+                            let _ = write_guard.mark_valid();
+                        }
+                    },
+                }
             }
         }
+
         self.nwritten_blocks = self.nwritten_blocks.checked_add(nblocks32).unwrap();
         Ok((buflen, buf.into_inner()))
     }

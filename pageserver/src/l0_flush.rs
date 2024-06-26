@@ -1,5 +1,7 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
+use crate::tenant::ephemeral_file;
+
 #[derive(Default, Debug, PartialEq, Eq, Clone, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum L0FlushConfig {
@@ -34,5 +36,12 @@ impl L0FlushGlobalState {
 
     pub(crate) fn inner(&self) -> &Arc<Inner> {
         &self.0
+    }
+
+    pub(crate) fn prewarm_on_write(&self) -> ephemeral_file::PrewarmPageCacheOnWrite {
+        match &*self.0 {
+            Inner::PageCached => ephemeral_file::PrewarmPageCacheOnWrite::Yes,
+            Inner::Direct { .. } | Inner::Fail(_) => ephemeral_file::PrewarmPageCacheOnWrite::No,
+        }
     }
 }
