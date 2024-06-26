@@ -115,7 +115,7 @@ impl<'a> BlockReaderRef<'a> {
     fn read_blk_slice(slice: &[u8], blknum: u32) -> std::io::Result<BlockLease> {
         let start = (blknum as usize).checked_mul(PAGE_SZ).unwrap();
         let end = start.checked_add(PAGE_SZ).unwrap();
-        if slice.len() > end {
+        if end > slice.len() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 format!("slice too short, len={} end={}", slice.len(), end),

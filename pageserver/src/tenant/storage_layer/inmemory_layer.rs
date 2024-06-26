@@ -6,6 +6,7 @@
 //!
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
+use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
 use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
 use crate::tenant::ephemeral_file::EphemeralFile;
@@ -678,7 +679,19 @@ impl InMemoryLayer {
             }
             l0_flush::Inner::Direct { .. } => {
                 let file_contents: Vec<u8> = inner.file.load_into_contiguous_memory(ctx).await?;
-                assert_eq!(file_contents.len(), inner.file.len() as usize);
+                assert_eq!(
+                    file_contents.len() % PAGE_SZ,
+                    0,
+                    "needed by BlockReaderRef::Slice"
+                );
+                assert_eq!(file_contents.len(), {
+                    let written = usize::try_from(inner.file.len()).unwrap();
+                    if written % PAGE_SZ == 0 {
+                        written
+                    } else {
+                        written.checked_add(PAGE_SZ - (written % PAGE_SZ)).unwrap()
+                    }
+                });
 
                 let cursor = BlockCursor::new(BlockReaderRef::Slice(&file_contents));
 

@@ -60,7 +60,11 @@ impl RW {
         // round up to the next PAGE_SZ multiple, required by blob_io
         let size = {
             let s = usize::try_from(self.bytes_written()).unwrap();
-            s.checked_add(s % PAGE_SZ).unwrap()
+            if s % PAGE_SZ == 0 {
+                s
+            } else {
+                s.checked_add(PAGE_SZ - (s % PAGE_SZ)).unwrap()
+            }
         };
         let buf = Vec::with_capacity(size);
 
@@ -78,7 +82,7 @@ impl RW {
         assert_eq!(vec.len() / PAGE_SZ, nwritten_blocks);
 
         // copy from in-memory buffer what we haven't flushed yet but would return when accessed via read_blk
-        let buffered = self.rw.inspect_buffer_zero_padded();
+        let buffered = self.rw.inspect_served_from_zero_padded_mutable_tail();
         vec.extend_from_slice(buffered);
         assert_eq!(vec.len(), size);
         assert_eq!(vec.len() % PAGE_SZ, 0);

@@ -421,6 +421,7 @@ fn start_pageserver(
         background_jobs_can_start: background_jobs_barrier.clone(),
     };
 
+    info!(config=?conf.l0_flush, "using l0_flush config");
     let l0_flush_global_state =
         pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
 

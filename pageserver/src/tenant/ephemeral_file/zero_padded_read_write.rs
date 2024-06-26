@@ -75,11 +75,18 @@ where
         flushed_offset + u64::try_from(buffer.pending()).unwrap()
     }
 
-    pub fn inspect_buffer_zero_padded(&self) -> &[u8] {
+    /// Get a slice of all blocks that read_blk would return as [`ReadResult::ServedFromZeroPaddedMutableTail`].
+    pub fn inspect_served_from_zero_padded_mutable_tail(&self) -> &[u8] {
         let buffer: &zero_padded::Buffer<TAIL_SZ> = self.buffered_writer.inspect_buffer();
         let buffer_written_up_to = usize::try_from(buffer.pending()).unwrap();
         // pad to next page boundary
-        let read_up_to = buffer_written_up_to + (buffer_written_up_to % PAGE_SZ);
+        let read_up_to = if buffer_written_up_to % PAGE_SZ == 0 {
+            buffer_written_up_to
+        } else {
+            buffer_written_up_to
+                .checked_add(PAGE_SZ - (buffer_written_up_to % PAGE_SZ))
+                .unwrap()
+        };
         &buffer.as_zero_padded_slice()[0..read_up_to]
     }
 
