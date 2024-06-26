@@ -4659,6 +4659,70 @@ def fork_at_current_lsn(
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
 
 
+def import_timeline_from_vanilla_postgres(
+    test_output_dir: Path,
+    env: NeonEnv,
+    pg_bin: PgBin,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    branch_name: str,
+    vanilla_pg_connstr: str,
+):
+    """
+    Create a new timeline, by importing an existing PostgreSQL cluster.
+
+    This works by taking a physical backup of the running PostgreSQL cluster, and importing that.
+    """
+
+    # Take backup of the existing PostgreSQL server with pg_basebackup
+    basebackup_dir = os.path.join(test_output_dir, "basebackup")
+    base_tar = os.path.join(basebackup_dir, "base.tar")
+    wal_tar = os.path.join(basebackup_dir, "pg_wal.tar")
+    os.mkdir(basebackup_dir)
+    pg_bin.run(
+        [
+            "pg_basebackup",
+            "-F",
+            "tar",
+            "-d",
+            vanilla_pg_connstr,
+            "-D",
+            basebackup_dir,
+        ]
+    )
+
+    # Extract start_lsn and end_lsn form the backup manifest file
+    with open(os.path.join(basebackup_dir, "backup_manifest")) as f:
+        manifest = json.load(f)
+        start_lsn = manifest["WAL-Ranges"][0]["Start-LSN"]
+        end_lsn = manifest["WAL-Ranges"][0]["End-LSN"]
+
+    # Import the backup tarballs into the pageserver
+    env.neon_cli.raw_cli(
+        [
+            "timeline",
+            "import",
+            "--tenant-id",
+            str(tenant_id),
+            "--timeline-id",
+            str(timeline_id),
+            "--branch-name",
+            branch_name,
+            "--base-lsn",
+            start_lsn,
+            "--base-tarfile",
+            base_tar,
+            "--end-lsn",
+            end_lsn,
+            "--wal-tarfile",
+            wal_tar,
+            "--pg-version",
+            env.pg_version,
+        ]
+    )
+    wait_for_last_record_lsn(env.pageserver.http_client(), tenant_id, timeline_id, Lsn(end_lsn))
+
+
 def last_flush_lsn_upload(
     env: NeonEnv,
     endpoint: Endpoint,
