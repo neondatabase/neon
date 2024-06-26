@@ -55,7 +55,7 @@ concurrency:
 
 jobs:
   bench:
-    if: false
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
@@ -184,12 +184,12 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: "Periodic replication testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   generate-matrices:
-    if: false
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     # Create matrices for the benchmarking jobs, so we run benchmarks on rds only once a week (on Saturday)
     #
     # Available platforms:
@@ -267,7 +267,7 @@ jobs:
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
   pgbench-compare:
-    if: false
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     needs: [ generate-matrices ]
 
     strategy:
@@ -415,7 +415,6 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   pgbench-pgvector:
-    if: false
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
       TEST_PG_BENCH_SCALES_MATRIX: "1"
@@ -502,7 +501,6 @@ jobs:
 
 
   clickbench-compare:
-    if: false
     # ClichBench DB for rds-aurora and rds-Postgres deployed to the same clusters
     # we use for performance testing in pgbench-compare.
     # Run this job only when pgbench-compare is finished to avoid the intersection.
@@ -510,6 +508,7 @@ jobs:
     #
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
+    if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
     needs: [ generate-matrices, pgbench-compare ]
 
     strategy:
@@ -607,13 +606,13 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   tpch-compare:
-    if: false
     # TCP-H DB for rds-aurora and rds-Postgres deployed to the same clusters
     # we use for performance testing in pgbench-compare & clickbench-compare.
     # Run this job only when clickbench-compare is finished to avoid the intersection.
     # We might change it after https://github.com/neondatabase/neon/issues/2900.
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
+    if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
     needs: [ generate-matrices, clickbench-compare ]
 
     strategy:
@@ -715,7 +714,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   user-examples-compare:
-    if: false
+    if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
     needs: [ generate-matrices, tpch-compare ]
 
     strategy:
