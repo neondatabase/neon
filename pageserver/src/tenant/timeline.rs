@@ -3336,7 +3336,13 @@ impl Timeline {
                     .await
                 {
                     Ok(result) => result,
-                    Err(e) => return Err(PageReconstructError::from(e)),
+                    Err(e) => {
+                        return Err(if self.cancel.is_cancelled() {
+                            PageReconstructError::Cancelled
+                        } else {
+                            PageReconstructError::Other(e)
+                        })
+                    }
                 };
                 cont_lsn = lsn_floor;
                 *read_count += 1;
