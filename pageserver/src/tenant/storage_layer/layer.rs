@@ -389,7 +389,6 @@ impl Layer {
     }
 
     /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
-    #[cfg(test)]
     pub(crate) async fn load_key_values(
         &self,
         ctx: &RequestContext,
@@ -1774,7 +1773,6 @@ impl DownloadedLayer {
         }
     }
 
-    #[cfg(test)]
     async fn load_key_values(
         &self,
         owner: &Arc<LayerInner>,
@@ -1905,7 +1903,7 @@ impl ResidentLayer {
     }
 
     #[cfg(test)]
-    pub(crate) async fn as_delta(
+    pub(crate) async fn get_as_delta(
         &self,
         ctx: &RequestContext,
     ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
@@ -1913,6 +1911,18 @@ impl ResidentLayer {
         match self.downloaded.get(&self.owner.0, ctx).await? {
             Delta(ref d) => Ok(d),
             Image(_) => Err(anyhow::anyhow!("image layer")),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn get_as_image(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<&image_layer::ImageLayerInner> {
+        use LayerKind::*;
+        match self.downloaded.get(&self.owner.0, ctx).await? {
+            Image(ref d) => Ok(d),
+            Delta(_) => Err(anyhow::anyhow!("delta layer")),
         }
     }
 }
