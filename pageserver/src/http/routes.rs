@@ -227,7 +227,7 @@ impl From<UpsertLocationError> for ApiError {
             BadRequest(e) => ApiError::BadRequest(e),
             Unavailable(_) => ApiError::ShuttingDown,
             e @ InProgress => ApiError::Conflict(format!("{e}")),
-            Flush(e) | Other(e) => ApiError::InternalServerError(e),
+            Flush(e) | InternalError(e) => ApiError::InternalServerError(e),
         }
     }
 }
