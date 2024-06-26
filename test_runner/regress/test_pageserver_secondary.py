@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import pytest
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, StorageScrubber
+from fixtures.neon_fixtures import NeonEnvBuilder, StorageScrubber
 from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
@@ -32,30 +32,6 @@ TENANT_CONF = {
     # create image layers eagerly, so that GC can remove some layers
     "image_creation_threshold": "1",
 }
-
-
-def evict_random_layers(
-    rng: random.Random, pageserver: NeonPageserver, tenant_id: TenantId, timeline_id: TimelineId
-):
-    """
-    Evict 50% of the layers on a pageserver
-    """
-    timeline_path = pageserver.timeline_dir(tenant_id, timeline_id)
-    initial_local_layers = sorted(
-        list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
-    )
-    client = pageserver.http_client()
-    for layer in initial_local_layers:
-        if "ephemeral" in layer.name or "temp_download" in layer.name:
-            continue
-
-        layer_name = parse_layer_file_name(layer.name)
-
-        if rng.choice([True, False]):
-            log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer_name.to_str()}")
-            client.evict_layer(
-                tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer_name.to_str()
-            )
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
@@ -136,7 +112,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
         if mode == "_Evictions":
             if last_state_ps[0].startswith("Attached"):
                 log.info(f"Action: evictions on pageserver {pageserver.id}")
-                evict_random_layers(rng, pageserver, tenant_id, timeline_id)
+                pageserver.evict_random_layers(rng, tenant_id, timeline_id, 0.5)
             else:
                 log.info(
                     f"Action: skipping evictions on pageserver {pageserver.id}, is not attached"

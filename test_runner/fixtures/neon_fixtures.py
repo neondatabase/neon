@@ -6,6 +6,7 @@ import concurrent.futures
 import filecmp
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -2787,6 +2788,33 @@ class NeonPageserver(PgProtocol, LogUtils):
     ) -> bool:
         layers = self.list_layers(tenant_id, timeline_id)
         return layer_name in [parse_layer_file_name(p.name) for p in layers]
+
+    def evict_random_layers(
+        self, rng: random.Random, tenant_id: TenantId, timeline_id: TimelineId, ratio: float
+    ):
+        """
+        Evict 50% of the layers on a pageserver
+        """
+        timeline_path = self.timeline_dir(tenant_id, timeline_id)
+        initial_local_layers = sorted(
+            list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
+        )
+        client = self.http_client()
+        for layer in initial_local_layers:
+            if (
+                "ephemeral" in layer.name
+                or "temp_download" in layer.name
+                or "___temp" in layer.name
+            ):
+                continue
+
+            layer_name = parse_layer_file_name(layer.name)
+
+            if rng.uniform(0.0, 1.0) < ratio:
+                log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer_name.to_str()}")
+                client.evict_layer(
+                    tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer_name.to_str()
+                )
 
 
 class PgBin:
