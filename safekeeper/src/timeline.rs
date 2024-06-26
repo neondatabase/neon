@@ -135,7 +135,8 @@ impl<'a> DerefMut for WriteGuardSharedState<'a> {
 
 impl<'a> Drop for WriteGuardSharedState<'a> {
     fn drop(&mut self) {
-        let term_flush_lsn = TermLsn::from((self.guard.sk.get_term(), self.guard.sk.flush_lsn()));
+        let term_flush_lsn =
+            TermLsn::from((self.guard.sk.last_log_term(), self.guard.sk.flush_lsn()));
         let commit_lsn = self.guard.sk.state().inmem.commit_lsn;
 
         let _ = self.tli.term_flush_lsn_watch_tx.send_if_modified(|old| {
@@ -205,11 +206,7 @@ impl StateSK {
         }
     }
 
-    pub fn get_term(&self) -> Term {
-        self.state().acceptor_state.term
-    }
-
-    pub fn get_last_log_term(&self) -> Term {
+    pub fn last_log_term(&self) -> Term {
         self.state()
             .acceptor_state
             .get_last_log_term(self.flush_lsn())
@@ -406,7 +403,7 @@ impl SharedState {
                 timeline_id: ttid.timeline_id.as_ref().to_owned(),
             }),
             term: self.sk.state().acceptor_state.term,
-            last_log_term: self.sk.get_last_log_term(),
+            last_log_term: self.sk.last_log_term(),
             flush_lsn: self.sk.flush_lsn().0,
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: self.sk.state().inmem.commit_lsn.0,
@@ -515,7 +512,7 @@ impl Timeline {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state().commit_lsn);
         let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) = watch::channel(TermLsn::from((
-            shared_state.sk.get_term(),
+            shared_state.sk.last_log_term(),
             shared_state.sk.flush_lsn(),
         )));
         let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
@@ -1055,10 +1052,10 @@ impl ManagerTimeline {
             );
         }
 
-        if partial.term != pstate.acceptor_state.term {
+        if partial.term != shared.sk.last_log_term() {
             bail!(
                 "term mismatch in partial backup, expected {}, got {}",
-                pstate.acceptor_state.term,
+                shared.sk.last_log_term(),
                 partial.term
             );
         }

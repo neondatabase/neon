@@ -37,11 +37,14 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UploadStatus {
-    /// Upload is in progress
+    /// Upload is in progress. This status should be used only for garbage collection,
+    /// don't read data from the remote storage with this status.
     InProgress,
-    /// Upload is finished
+    /// Upload is finished. There is always at most one segment with this status.
+    /// It means that the segment is actual and can be used.
     Uploaded,
-    /// Deletion is in progress
+    /// Deletion is in progress. This status should be used only for garbage collection,
+    /// don't read data from the remote storage with this status.
     Deleting,
 }
 
@@ -51,6 +54,10 @@ pub struct PartialRemoteSegment {
     pub name: String,
     pub commit_lsn: Lsn,
     pub flush_lsn: Lsn,
+    // We should use last_log_term here, otherwise it's possible to have inconsistent data in the
+    // remote storage.
+    //
+    // More info here: https://github.com/neondatabase/neon/pull/8022#discussion_r1654738405
     pub term: Term,
 }
 
@@ -133,17 +140,17 @@ impl PartialBackup {
         let sk_info = self.tli.get_safekeeper_info(&self.conf).await;
         let flush_lsn = Lsn(sk_info.flush_lsn);
         let commit_lsn = Lsn(sk_info.commit_lsn);
-        let term = sk_info.term;
+        let last_log_term = sk_info.last_log_term;
         let segno = self.segno(flush_lsn);
 
-        let name = self.remote_segment_name(segno, term, commit_lsn, flush_lsn);
+        let name = self.remote_segment_name(segno, last_log_term, commit_lsn, flush_lsn);
 
         PartialRemoteSegment {
             status: UploadStatus::InProgress,
             name,
             commit_lsn,
             flush_lsn,
-            term,
+            term: last_log_term,
         }
     }
 
@@ -166,7 +173,7 @@ impl PartialBackup {
         // If the term changed, we cannot guarantee the validity of the uploaded data.
         // If the term is the same, we know the data is not corrupted.
         let sk_info = self.tli.get_safekeeper_info(&self.conf).await;
-        if sk_info.term != prepared.term {
+        if sk_info.last_log_term != prepared.term {
             anyhow::bail!("term changed during upload");
         }
         assert!(prepared.commit_lsn <= Lsn(sk_info.commit_lsn));
@@ -285,7 +292,7 @@ pub(crate) fn needs_uploading(
             uploaded.status != UploadStatus::Uploaded
                 || uploaded.flush_lsn != state.flush_lsn
                 || uploaded.commit_lsn != state.commit_lsn
-                || uploaded.term != state.term
+                || uploaded.term != state.last_log_term
         }
         None => true,
     }

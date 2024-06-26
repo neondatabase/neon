@@ -183,8 +183,8 @@ impl WalResidentTimeline {
             bail!("snapshot is called on uninitialized timeline");
         }
         let from_segno = from_lsn.segment_number(wal_seg_size);
-        let term = shared_state.sk.get_term();
-        let last_log_term = shared_state.sk.get_last_log_term();
+        let term = shared_state.sk.state().acceptor_state.term;
+        let last_log_term = shared_state.sk.last_log_term();
         let flush_lsn = shared_state.sk.flush_lsn();
         let upto_segno = flush_lsn.segment_number(wal_seg_size);
         // have some limit on max number of segments as a sanity check
@@ -230,8 +230,8 @@ impl WalResidentTimeline {
     /// forget this if snapshotting fails mid the way.
     pub async fn finish_snapshot(&self, bctx: &SnapshotContext) -> Result<()> {
         let shared_state = self.read_shared_state().await;
-        let term = shared_state.sk.get_term();
-        let last_log_term = shared_state.sk.get_last_log_term();
+        let term = shared_state.sk.state().acceptor_state.term;
+        let last_log_term = shared_state.sk.last_log_term();
         // There are some cases to relax this check (e.g. last_log_term might
         // change, but as long as older history is strictly part of new that's
         // fine), but there is no need to do it.

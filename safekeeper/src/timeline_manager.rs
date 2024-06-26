@@ -49,7 +49,7 @@ pub(crate) struct StateSnapshot {
 
     // latest state
     pub(crate) flush_lsn: Lsn,
-    pub(crate) term: Term,
+    pub(crate) last_log_term: Term,
 
     // misc
     pub(crate) cfile_last_persist_at: std::time::Instant,
@@ -70,7 +70,7 @@ impl StateSnapshot {
             cfile_remote_consistent_lsn: state.remote_consistent_lsn,
             cfile_backup_lsn: state.backup_lsn,
             flush_lsn: read_guard.sk.flush_lsn(),
-            term: state.acceptor_state.term,
+            last_log_term: read_guard.sk.last_log_term(),
             cfile_last_persist_at: state.pers.last_persist_at(),
             inmem_flush_pending: Self::has_unflushed_inmem_state(state),
             wal_removal_on_hold: read_guard.wal_removal_on_hold,

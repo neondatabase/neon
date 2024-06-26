@@ -530,11 +530,6 @@ where
             .up_to(self.flush_lsn())
     }
 
-    /// Get current term.
-    pub fn get_term(&self) -> Term {
-        self.state.acceptor_state.term
-    }
-
     pub fn get_last_log_term(&self) -> Term {
         self.state
             .acceptor_state
