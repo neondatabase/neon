@@ -19,17 +19,17 @@ pub enum ErrorDirection {
     Write(io::Error),
 }
 
-impl ErrorDirection {
-    fn from_client(self) -> ErrorSource {
-        match self {
-            ErrorDirection::Read(client) => ErrorSource::Client(client),
-            ErrorDirection::Write(compute) => ErrorSource::Compute(compute),
+impl ErrorSource {
+    fn from_client(err: ErrorDirection) -> ErrorSource {
+        match err {
+            ErrorDirection::Read(client) => Self::Client(client),
+            ErrorDirection::Write(compute) => Self::Compute(compute),
         }
     }
-    fn to_client(self) -> ErrorSource {
-        match self {
-            ErrorDirection::Write(client) => ErrorSource::Client(client),
-            ErrorDirection::Read(compute) => ErrorSource::Compute(compute),
+    fn from_compute(err: ErrorDirection) -> ErrorSource {
+        match err {
+            ErrorDirection::Write(client) => Self::Client(client),
+            ErrorDirection::Read(compute) => Self::Compute(compute),
         }
     }
 }
@@ -82,10 +82,10 @@ where
     poll_fn(|cx| {
         let mut client_to_compute_result =
             transfer_one_direction(cx, &mut client_to_compute, client, compute)
-                .map_err(ErrorDirection::from_client)?;
+                .map_err(ErrorSource::from_client)?;
         let mut compute_to_client_result =
             transfer_one_direction(cx, &mut compute_to_client, compute, client)
-                .map_err(ErrorDirection::to_client)?;
+                .map_err(ErrorSource::from_compute)?;
 
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = compute_to_client {
@@ -95,7 +95,7 @@ where
                 client_to_compute = TransferState::ShuttingDown(buf.amt);
                 client_to_compute_result =
                     transfer_one_direction(cx, &mut client_to_compute, client, compute)
-                        .map_err(ErrorDirection::from_client)?;
+                        .map_err(ErrorSource::from_client)?;
             }
         }
 
@@ -107,7 +107,7 @@ where
                 compute_to_client = TransferState::ShuttingDown(buf.amt);
                 compute_to_client_result =
                     transfer_one_direction(cx, &mut compute_to_client, compute, client)
-                        .map_err(ErrorDirection::to_client)?;
+                        .map_err(ErrorSource::from_compute)?;
             }
         }
 
