@@ -2273,4 +2273,8 @@ def test_s3_eviction(
 
     # require at least one successful eviction in at least one safekeeper
     # TODO: require eviction in each safekeeper after https://github.com/neondatabase/neon/issues/8148 is fixed
-    assert any(sk.log_contains("successfully evicted timeline") for sk in env.safekeepers)
+    assert any(
+        sk.log_contains("successfully evicted timeline")
+        and sk.log_contains("successfully restored evicted timeline")
+        for sk in env.safekeepers
+    )
