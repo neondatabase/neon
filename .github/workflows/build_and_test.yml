@@ -125,7 +125,11 @@ jobs:
 
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    strategy:
+      matrix:
+        arch: [ x64, arm64 ]
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -195,7 +199,15 @@ jobs:
 
   build-neon:
     needs: [ check-permissions, tag, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, large ]
+    strategy:
+      matrix:
+        build_type: [ debug, release ]
+        arch: [ x64 ]
+        include:
+          - build_type: release
+            arch: arm64
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -206,10 +218,7 @@ jobs:
       # io_uring will account the memory of the CQ and SQ as locked.
       # More details: https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
+
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
