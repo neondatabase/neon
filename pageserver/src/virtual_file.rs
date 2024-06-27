@@ -13,7 +13,7 @@
 use crate::context::RequestContext;
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
-use crate::page_cache::PageWriteGuard;
+use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
@@ -586,25 +586,58 @@ impl VirtualFile {
         Ok(self.pos)
     }
 
-    /// Read `count` bytes into `buf`, starting at offset `offset`.
+    /// Read the file contents in range `offset..(offset+count)` into `slice[0..count]`.
     ///
-    /// The returned `B` is the same `buf` that was passed in.
-    /// On success, it is guaranteed that the returned `B` has `bytes_init() >= count`.
-    pub async fn read_exact_at_n<Buf>(
+    /// The returned `Buf` is `slice`'s underlying buffer.
+    pub async fn read_exact_at_n<Buf, B>(
         &self,
-        buf: Buf,
+        slice: B,
         offset: u64,
         count: usize,
         ctx: &RequestContext,
     ) -> Result<Buf, Error>
     where
         Buf: IoBufMut + Send,
+        B: BoundedBufMut<BufMut = Buf>,
     {
-        let (buf, res) = read_exact_at_impl(buf, offset, Some(count), |buf, offset| {
+        let (buf, res) = read_exact_at_impl(slice, offset, Some(count), |buf, offset| {
             self.read_at(buf, offset, ctx)
         })
         .await;
-        res.map(|()| buf.into_inner())
+        res.map(|_| buf)
+    }
+
+    /// Read the file contents in range `offset..(offset + slice.bytes_total())` into `slice[0..slice.bytes_total()]`.
+    ///
+    /// The returned `Slice<Buf>` is equivalent to the input `slice`, i.e., it's the same view into the same buffer.
+    pub async fn read_exact_at<Buf, B>(
+        &self,
+        slice: B,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> Result<tokio_epoll_uring::Slice<Buf>, Error>
+    where
+        Buf: IoBufMut + Send,
+        B: BoundedBufMut<BufMut = Buf>,
+    {
+        let check_equal_view = if cfg!(debug_assertions) {
+            Some((slice.stable_ptr(), slice.bytes_total()))
+        } else {
+            None
+        };
+        let original_bounds = slice.bounds();
+        let (buf, res) = read_exact_at_impl(slice, offset, None, |buf, offset| {
+            self.read_at(buf, offset, ctx)
+        })
+        .await;
+        let res = res.map(|_| buf.slice(original_bounds));
+        if let Some(orig) = check_equal_view {
+            if let Ok(slice) = &res {
+                let returning = (slice.stable_ptr(), slice.bytes_total());
+                assert_eq!(orig, returning);
+            }
+        }
+        res
     }
 
     /// Like [`Self::read_exact_at`] but for [`PageWriteGuard`].
@@ -614,11 +647,11 @@ impl VirtualFile {
         offset: u64,
         ctx: &RequestContext,
     ) -> Result<PageWriteGuard<'static>, Error> {
-        let page_sz = page.len();
         let buf = PageWriteGuardBuf { page };
-        let res = self.read_exact_at_n(buf, offset, page_sz, ctx).await;
-        res.map(|PageWriteGuardBuf { page, .. }| page)
-            .map_err(|e| Error::new(ErrorKind::Other, e))
+        debug_assert_eq!(BoundedBufMut::bytes_total(&buf), PAGE_SZ);
+        self.read_exact_at(buf, offset, ctx)
+            .await
+            .map(|PageWriteGuardBuf { page }| page)
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
@@ -778,10 +811,8 @@ where
     Buf: IoBufMut + Send,
     B: BoundedBufMut<BufMut = Buf>,
     F: FnMut(tokio_epoll_uring::Slice<Buf>, u64) -> Fut,
-    Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<Buf>, std::io::Result<usize>)>,
+    Fut: std::future::Future<Output = (Buf, std::io::Result<usize>)>,
 {
-    let original_bounds = buf.bounds();
-
     let mut buf: tokio_epoll_uring::Slice<_> = match count {
         Some(count) => {
             assert!(count <= buf.bytes_total());
@@ -801,7 +832,7 @@ where
                 offset += n as u64;
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return (buf.into_inner().slice(original_bounds), Err(e)),
+            Err(e) => return (buf.into_inner(), Err(e)),
         }
     }
     // NB: don't use `buf.is_empty()` here; it is from the
@@ -811,7 +842,7 @@ where
     // buffer that the user passed in.
     if buf.bytes_total() != 0 {
         (
-            buf.into_inner().slice(original_bounds),
+            buf.into_inner(),
             Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "failed to fill whole buffer",
@@ -819,7 +850,7 @@ where
         )
     } else {
         assert_eq!(buf.len(), buf.bytes_total());
-        (buf.into_inner().slice(original_bounds), Ok(()))
+        (buf.into_inner(), Ok(()))
     }
 }
 
@@ -1041,9 +1072,9 @@ impl VirtualFile {
         ctx: &RequestContext,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
-        let buf = vec![0; PAGE_SZ];
+        let buf = Vec::with_capacity(PAGE_SZ);
         let buf = self
-            .read_exact_at_n(buf, blknum as u64 * (PAGE_SZ as u64), PAGE_SZ, ctx)
+            .read_exact_at(buf, blknum as u64 * (PAGE_SZ as u64), ctx)
             .await?;
         Ok(crate::tenant::block_io::BlockLease::Vec(buf))
     }
@@ -1196,14 +1227,14 @@ mod tests {
     impl MaybeVirtualFile {
         async fn read_exact_at(
             &self,
-            mut buf: Vec<u8>,
+            mut buf: tokio_epoll_uring::Slice<u8>,
             offset: u64,
             ctx: &RequestContext,
         ) -> Result<Vec<u8>, Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
                     let n = buf.len();
-                    file.read_exact_at_n(buf, offset, n, ctx).await
+                    file.read_exact_at(buf, offset, n, ctx).await
                 }
                 MaybeVirtualFile::File(file) => file.read_exact_at(&mut buf, offset).map(|()| buf),
             }
