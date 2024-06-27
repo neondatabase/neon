@@ -34,7 +34,7 @@ use utils::backoff;
 
 use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
 use crate::{
-    error::Cancelled, AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing,
+    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError, Listing,
     ListingMode, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
 };
 

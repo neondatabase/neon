@@ -211,7 +211,7 @@ impl PhysicalStorage {
     /// Returns `file` and `is_partial`.
     async fn open_or_create(&mut self, segno: XLogSegNo) -> Result<(File, bool)> {
         let (wal_file_path, wal_file_partial_path) =
-            wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+            wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
 
         // Try to open already completed segment
         if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_path).await {
@@ -231,11 +231,7 @@ impl PhysicalStorage {
             // half initialized segment, first bake it under tmp filename and
             // then rename.
             let tmp_path = self.timeline_dir.join("waltmp");
-            #[allow(clippy::suspicious_open_options)]
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(&tmp_path)
+            let mut file = File::create(&tmp_path)
                 .await
                 .with_context(|| format!("Failed to open tmp wal file {:?}", &tmp_path))?;
 
@@ -280,7 +276,7 @@ impl PhysicalStorage {
 
             // Rename partial file to completed file
             let (wal_file_path, wal_file_partial_path) =
-                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
             fs::rename(wal_file_partial_path, wal_file_path).await?;
         } else {
             // otherwise, file can be reused later
@@ -465,7 +461,7 @@ impl Storage for PhysicalStorage {
         if !is_partial {
             // Make segment partial once again
             let (wal_file_path, wal_file_partial_path) =
-                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
             fs::rename(wal_file_path, wal_file_partial_path).await?;
         }
 
@@ -745,7 +741,7 @@ pub(crate) async fn open_wal_file(
     segno: XLogSegNo,
     wal_seg_size: usize,
 ) -> Result<(tokio::fs::File, bool)> {
-    let (wal_file_path, wal_file_partial_path) = wal_file_paths(timeline_dir, segno, wal_seg_size)?;
+    let (wal_file_path, wal_file_partial_path) = wal_file_paths(timeline_dir, segno, wal_seg_size);
 
     // First try to open the .partial file.
     let mut partial_path = wal_file_path.to_owned();
@@ -771,9 +767,9 @@ pub fn wal_file_paths(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
     wal_seg_size: usize,
-) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
+) -> (Utf8PathBuf, Utf8PathBuf) {
     let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
     let wal_file_path = timeline_dir.join(wal_file_name.clone());
     let wal_file_partial_path = timeline_dir.join(wal_file_name + ".partial");
-    Ok((wal_file_path, wal_file_partial_path))
+    (wal_file_path, wal_file_partial_path)
 }

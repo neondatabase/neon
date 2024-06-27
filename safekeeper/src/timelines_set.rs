@@ -80,6 +80,10 @@ impl TimelineSetGuard {
         self.timelines_set.set_present(self.tli.clone(), present);
         true
     }
+
+    pub fn get(&self) -> bool {
+        self.is_present
+    }
 }
 
 impl Drop for TimelineSetGuard {

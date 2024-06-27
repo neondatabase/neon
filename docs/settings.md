@@ -134,7 +134,7 @@ depends on that, so if you change it, bad things will happen.
 
 #### page_cache_size
 
-Size of the page cache, to hold materialized page versions. Unit is
+Size of the page cache. Unit is
 number of 8 kB blocks. The default is 8192, which means 64 MB.
 
 #### max_file_descriptors

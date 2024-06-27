@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -253,39 +252,30 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self,
         tenant_id: Union[TenantId, TenantShardId],
         config: None | Dict[str, Any] = None,
-        config_null: bool = False,
         generation: Optional[int] = None,
     ):
-        if config_null:
-            assert config is None
-            body: Any = None
-        else:
-            # null-config is prohibited by the API
-            config = config or {}
-            body = {"config": config}
-            if generation is not None:
-                body.update({"generation": generation})
+        config = config or {}
 
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach",
-            data=json.dumps(body),
-            headers={"Content-Type": "application/json"},
+        return self.tenant_location_conf(
+            tenant_id,
+            location_conf={
+                "mode": "AttachedSingle",
+                "secondary_conf": None,
+                "tenant_conf": config,
+                "generation": generation,
+            },
         )
-        self.verbose_error(res)
 
-    def tenant_detach(self, tenant_id: TenantId, detach_ignored=False, timeout_secs=None):
-        params = {}
-        if detach_ignored:
-            params["detach_ignored"] = "true"
-
-        kwargs = {}
-        if timeout_secs is not None:
-            kwargs["timeout"] = timeout_secs
-
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach", params=params, **kwargs
+    def tenant_detach(self, tenant_id: TenantId):
+        return self.tenant_location_conf(
+            tenant_id,
+            location_conf={
+                "mode": "Detached",
+                "secondary_conf": None,
+                "tenant_conf": {},
+                "generation": None,
+            },
         )
-        self.verbose_error(res)
 
     def tenant_reset(self, tenant_id: Union[TenantId, TenantShardId], drop_cache: bool):
         params = {}
@@ -339,17 +329,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)
         return res
-
-    def tenant_load(self, tenant_id: TenantId, generation=None):
-        body = None
-        if generation is not None:
-            body = {"generation": generation}
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load", json=body)
-        self.verbose_error(res)
-
-    def tenant_ignore(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/ignore")
-        self.verbose_error(res)
 
     def tenant_status(
         self, tenant_id: Union[TenantId, TenantShardId], activate: bool = False
@@ -594,6 +573,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_repartition=False,
         force_image_layer_creation=False,
         wait_until_uploaded=False,
+        enhanced_gc_bottom_most_compaction=False,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -603,6 +583,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_image_layer_creation"] = "true"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
+        if enhanced_gc_bottom_most_compaction:
+            query["enhanced_gc_bottom_most_compaction"] = "true"
 
         log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
@@ -630,13 +612,15 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
         timestamp: datetime,
+        with_lease: bool = False,
         **kwargs,
     ):
         log.info(
-            f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}"
+            f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}, {with_lease=}"
         )
+        with_lease_query = f"{with_lease=}".lower()
         res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp.isoformat()}Z",
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp.isoformat()}Z&{with_lease_query}",
             **kwargs,
         )
         self.verbose_error(res)

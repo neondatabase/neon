@@ -3,7 +3,6 @@
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
-use hyper::StatusCode;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::LocationConfigMode;
@@ -27,8 +26,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
-use remote_storage::GenericRemoteStorage;
-use utils::{completion, crashsafe};
+use utils::{backoff, completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -42,19 +40,17 @@ use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
 };
-use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
 use crate::tenant::storage_layer::inmemory_layer;
 use crate::tenant::timeline::ShutdownMode;
 use crate::tenant::{AttachedTenantConf, GcError, SpawnMode, Tenant, TenantState};
-use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
+use crate::{InitializationOrder, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext::PathExt;
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 
-use super::delete::DeleteTenantError;
 use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
 use super::timeline::detach_ancestor::PreparedTimelineDetach;
@@ -110,12 +106,6 @@ pub(crate) enum TenantsMap {
     /// The pageserver has entered shutdown mode via [`TenantManager::shutdown`].
     /// Existing tenants are still accessible, but no new tenants can be created.
     ShuttingDown(BTreeMap<TenantShardId, TenantSlot>),
-}
-
-pub(crate) enum TenantsMapRemoveResult {
-    Occupied(TenantSlot),
-    Vacant,
-    InProgress(utils::completion::Barrier),
 }
 
 /// When resolving a TenantId to a shard, we may be looking for the 0th
@@ -191,26 +181,6 @@ impl TenantsMap {
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 m.get(tenant_shard_id).and_then(|slot| slot.get_attached())
             }
-        }
-    }
-
-    /// Only for use from DeleteTenantFlow.  This method directly removes a TenantSlot from the map.
-    ///
-    /// The normal way to remove a tenant is using a SlotGuard, which will gracefully remove the guarded
-    /// slot if the enclosed tenant is shutdown.
-    pub(crate) fn remove(&mut self, tenant_shard_id: TenantShardId) -> TenantsMapRemoveResult {
-        use std::collections::btree_map::Entry;
-        match self {
-            TenantsMap::Initializing => TenantsMapRemoveResult::Vacant,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => match m.entry(tenant_shard_id) {
-                Entry::Occupied(entry) => match entry.get() {
-                    TenantSlot::InProgress(barrier) => {
-                        TenantsMapRemoveResult::InProgress(barrier.clone())
-                    }
-                    _ => TenantsMapRemoveResult::Occupied(entry.remove()),
-                },
-                Entry::Vacant(_entry) => TenantsMapRemoveResult::Vacant,
-            },
         }
     }
 
@@ -422,12 +392,6 @@ fn load_tenant_config(
         }
     };
 
-    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
-    if tenant_ignore_mark_file.exists() {
-        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
-        return Ok(None);
-    }
-
     Ok(Some((
         tenant_shard_id,
         Tenant::load_tenant_config(conf, &tenant_shard_id),
@@ -467,6 +431,18 @@ async fn init_load_tenant_configs(
     }
 
     Ok(configs)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DeleteTenantError {
+    #[error("Tenant map slot error {0}")]
+    SlotError(#[from] TenantSlotError),
+
+    #[error("Cancelled")]
+    Cancelled,
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 /// Initialize repositories with locally available timelines.
@@ -519,17 +495,8 @@ pub async fn init_tenant_mgr(
         let mut location_conf = match location_conf {
             Ok(l) => l,
             Err(e) => {
-                warn!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Marking tenant broken, failed to {e:#}");
-
-                tenants.insert(
-                    tenant_shard_id,
-                    TenantSlot::Attached(Tenant::create_broken_tenant(
-                        conf,
-                        tenant_shard_id,
-                        resources.remote_storage.clone(),
-                        format!("{}", e),
-                    )),
-                );
+                // This should only happen in the case of a serialization bug or critical local I/O error: we cannot load this tenant
+                error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Failed to load tenant config, failed to {e:#}");
                 continue;
             }
         };
@@ -638,7 +605,6 @@ pub async fn init_tenant_mgr(
                     AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
                     shard_identity,
                     Some(init_order.clone()),
-                    &TENANTS,
                     SpawnMode::Lazy,
                     &ctx,
                 ) {
@@ -694,7 +660,6 @@ fn tenant_spawn(
     location_conf: AttachedTenantConf,
     shard_identity: ShardIdentity,
     init_order: Option<InitializationOrder>,
-    tenants: &'static std::sync::RwLock<TenantsMap>,
     mode: SpawnMode,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
@@ -713,30 +678,16 @@ fn tenant_spawn(
         "Cannot load tenant from empty directory {tenant_path:?}"
     );
 
-    let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
-    anyhow::ensure!(
-        !conf.tenant_ignore_mark_file_path(&tenant_shard_id).exists(),
-        "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
-    );
-
-    let remote_storage = resources.remote_storage.clone();
-    let tenant = match Tenant::spawn(
+    let tenant = Tenant::spawn(
         conf,
         tenant_shard_id,
         resources,
         location_conf,
         shard_identity,
         init_order,
-        tenants,
         mode,
         ctx,
-    ) {
-        Ok(tenant) => tenant,
-        Err(e) => {
-            error!("Failed to spawn tenant {tenant_shard_id}, reason: {e:#}");
-            Tenant::create_broken_tenant(conf, tenant_shard_id, remote_storage, format!("{e:#}"))
-        }
-    };
+    );
 
     Ok(tenant)
 }
@@ -1067,7 +1018,7 @@ impl TenantManager {
         // not do significant I/O, and shutdowns should be prompt via cancellation tokens.
         let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)
             .map_err(|e| match e {
-                TenantSlotError::AlreadyExists(_, _) | TenantSlotError::NotFound(_) => {
+                TenantSlotError::NotFound(_) => {
                     unreachable!("Called with mode Any")
                 }
                 TenantSlotError::InProgress => UpsertLocationError::InProgress,
@@ -1176,7 +1127,6 @@ impl TenantManager {
                     attached_conf,
                     shard_identity,
                     None,
-                    self.tenants,
                     spawn_mode,
                     ctx,
                 )?;
@@ -1298,7 +1248,6 @@ impl TenantManager {
             AttachedTenantConf::try_from(config)?,
             shard_identity,
             None,
-            self.tenants,
             SpawnMode::Eager,
             ctx,
         )?;
@@ -1367,56 +1316,10 @@ impl TenantManager {
         }
     }
 
-    pub(crate) async fn delete_tenant(
+    async fn delete_tenant_remote(
         &self,
         tenant_shard_id: TenantShardId,
-        activation_timeout: Duration,
-    ) -> Result<StatusCode, DeleteTenantError> {
-        super::span::debug_assert_current_span_has_tenant_id();
-        // We acquire a SlotGuard during this function to protect against concurrent
-        // changes while the ::prepare phase of DeleteTenantFlow executes, but then
-        // have to return the Tenant to the map while the background deletion runs.
-        //
-        // TODO: refactor deletion to happen outside the lifetime of a Tenant.
-        // Currently, deletion requires a reference to the tenants map in order to
-        // keep the Tenant in the map until deletion is complete, and then remove
-        // it at the end.
-        //
-        // See https://github.com/neondatabase/neon/issues/5080
-
-        // Tenant deletion can happen two ways:
-        // - Legacy: called on an attached location. The attached Tenant object stays alive in Stopping
-        //   state until deletion is complete.
-        // - New: called on a pageserver without an attached location.  We proceed with deletion from
-        //   remote storage.
-        //
-        // See https://github.com/neondatabase/neon/issues/5080 for more context on this transition.
-
-        let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
-        match &slot_guard.old_value {
-            Some(TenantSlot::Attached(tenant)) => {
-                // Legacy deletion flow: the tenant remains attached, goes to Stopping state, and
-                // deletion will be resumed across restarts.
-                let tenant = tenant.clone();
-                return self
-                    .delete_tenant_attached(slot_guard, tenant, activation_timeout)
-                    .await;
-            }
-            Some(TenantSlot::Secondary(secondary_tenant)) => {
-                secondary_tenant.shutdown().await;
-                let local_tenant_directory = self.conf.tenant_path(&tenant_shard_id);
-                let tmp_dir = safe_rename_tenant_dir(&local_tenant_directory)
-                    .await
-                    .with_context(|| {
-                        format!("local tenant directory {local_tenant_directory:?} rename")
-                    })?;
-                spawn_background_purge(tmp_dir);
-            }
-            Some(TenantSlot::InProgress(_)) => unreachable!(),
-            None => {}
-        };
-
-        // Fall through: local state for this tenant is no longer present, proceed with remote delete
+    ) -> Result<(), DeleteTenantError> {
         let remote_path = remote_tenant_path(&tenant_shard_id);
         let keys = match self
             .resources
@@ -1433,7 +1336,7 @@ impl TenantManager {
             Err(remote_storage::DownloadError::Cancelled) => {
                 return Err(DeleteTenantError::Cancelled)
             }
-            Err(remote_storage::DownloadError::NotFound) => return Ok(StatusCode::NOT_FOUND),
+            Err(remote_storage::DownloadError::NotFound) => return Ok(()),
             Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
         };
 
@@ -1447,60 +1350,83 @@ impl TenantManager {
                 .await?;
         }
 
-        // Callers use 404 as success for deletions, for historical reasons.
-        Ok(StatusCode::NOT_FOUND)
+        Ok(())
     }
 
-    async fn delete_tenant_attached(
+    /// If a tenant is attached, detach it.  Then remove its data from remote storage.
+    ///
+    /// A tenant is considered deleted once it is gone from remote storage.  It is the caller's
+    /// responsibility to avoid trying to attach the tenant again or use it any way once deletion
+    /// has started: this operation is not atomic, and must be retried until it succeeds.
+    pub(crate) async fn delete_tenant(
         &self,
-        slot_guard: SlotGuard,
-        tenant: Arc<Tenant>,
-        activation_timeout: Duration,
-    ) -> Result<StatusCode, DeleteTenantError> {
-        match tenant.current_state() {
-            TenantState::Broken { .. } | TenantState::Stopping { .. } => {
-                // If deletion is already in progress, return success (the semantics of this
-                // function are to rerturn success afterr deletion is spawned in background).
-                // Otherwise fall through and let [`DeleteTenantFlow`] handle this state.
-                if DeleteTenantFlow::is_in_progress(&tenant) {
-                    // The `delete_progress` lock is held: deletion is already happening
-                    // in the bacckground
-                    slot_guard.revert();
-                    return Ok(StatusCode::ACCEPTED);
-                }
-            }
-            _ => {
-                tenant
-                    .wait_to_become_active(activation_timeout)
-                    .await
-                    .map_err(|e| match e {
-                        GetActiveTenantError::WillNotBecomeActive(_)
-                        | GetActiveTenantError::Broken(_) => {
-                            DeleteTenantError::InvalidState(tenant.current_state())
-                        }
-                        GetActiveTenantError::Cancelled => DeleteTenantError::Cancelled,
-                        GetActiveTenantError::NotFound(_) => DeleteTenantError::NotAttached,
-                        GetActiveTenantError::WaitForActiveTimeout {
-                            latest_state: _latest_state,
-                            wait_time: _wait_time,
-                        } => DeleteTenantError::InvalidState(tenant.current_state()),
-                    })?;
-            }
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), DeleteTenantError> {
+        super::span::debug_assert_current_span_has_tenant_id();
+
+        async fn delete_local(
+            conf: &PageServerConf,
+            tenant_shard_id: &TenantShardId,
+        ) -> anyhow::Result<()> {
+            let local_tenant_directory = conf.tenant_path(tenant_shard_id);
+            let tmp_dir = safe_rename_tenant_dir(&local_tenant_directory)
+                .await
+                .with_context(|| {
+                    format!("local tenant directory {local_tenant_directory:?} rename")
+                })?;
+            spawn_background_purge(tmp_dir);
+            Ok(())
         }
 
-        let result = DeleteTenantFlow::run(
-            self.conf,
-            self.resources.remote_storage.clone(),
-            &TENANTS,
-            tenant,
+        let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        match &slot_guard.old_value {
+            Some(TenantSlot::Attached(tenant)) => {
+                // Legacy deletion flow: the tenant remains attached, goes to Stopping state, and
+                // deletion will be resumed across restarts.
+                let tenant = tenant.clone();
+                let (_guard, progress) = utils::completion::channel();
+                match tenant.shutdown(progress, ShutdownMode::Hard).await {
+                    Ok(()) => {}
+                    Err(barrier) => {
+                        info!("Shutdown already in progress, waiting for it to complete");
+                        barrier.wait().await;
+                    }
+                }
+                delete_local(self.conf, &tenant_shard_id).await?;
+            }
+            Some(TenantSlot::Secondary(secondary_tenant)) => {
+                secondary_tenant.shutdown().await;
+
+                delete_local(self.conf, &tenant_shard_id).await?;
+            }
+            Some(TenantSlot::InProgress(_)) => unreachable!(),
+            None => {}
+        };
+
+        // Fall through: local state for this tenant is no longer present, proceed with remote delete.
+        // - We use a retry wrapper here so that common transient S3 errors (e.g. 503, 429) do not result
+        //   in 500 responses to delete requests.
+        // - We keep the `SlotGuard` during this I/O, so that if a concurrent delete request comes in, it will
+        //   503/retry, rather than kicking off a wasteful concurrent deletion.
+        match backoff::retry(
+            || async move { self.delete_tenant_remote(tenant_shard_id).await },
+            |e| match e {
+                DeleteTenantError::Cancelled => true,
+                DeleteTenantError::SlotError(_) => {
+                    unreachable!("Remote deletion doesn't touch slots")
+                }
+                _ => false,
+            },
+            1,
+            3,
+            &format!("delete_tenant[tenant_shard_id={tenant_shard_id}]"),
             &self.cancel,
         )
-        .await;
-
-        // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
-        slot_guard.revert();
-        let () = result?;
-        Ok(StatusCode::ACCEPTED)
+        .await
+        {
+            Some(r) => r,
+            None => Err(DeleteTenantError::Cancelled),
+        }
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant.get_tenant_shard_id().tenant_id, shard_id=%tenant.get_tenant_shard_id().shard_slug(), new_shard_count=%new_shard_count.literal()))]
@@ -1672,7 +1598,7 @@ impl TenantManager {
         for child_shard_id in &child_shards {
             let child_shard_id = *child_shard_id;
             let child_shard = {
-                let locked = TENANTS.read().unwrap();
+                let locked = self.tenants.read().unwrap();
                 let peek_slot =
                     tenant_map_peek_slot(&locked, &child_shard_id, TenantSlotPeekMode::Read)?;
                 peek_slot.and_then(|s| s.get_attached()).cloned()
@@ -1773,6 +1699,7 @@ impl TenantManager {
             let timelines = parent_shard.timelines.lock().unwrap().clone();
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
+                tracing::info!(timeline_id=%timeline.timeline_id, "Loading list of layers to hardlink");
                 let timeline_layers = timeline
                     .layers
                     .read()
@@ -1812,7 +1739,12 @@ impl TenantManager {
 
         // Since we will do a large number of small filesystem metadata operations, batch them into
         // spawn_blocking calls rather than doing each one as a tokio::fs round-trip.
+        let span = tracing::Span::current();
         let jh = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            // Run this synchronous code in the same log context as the outer function that spawned it.
+            let _span = span.enter();
+
+            tracing::info!("Creating {} directories", create_dirs.len());
             for dir in &create_dirs {
                 if let Err(e) = std::fs::create_dir_all(dir) {
                     // Ignore AlreadyExists errors, drop out on all other errors
@@ -1826,6 +1758,11 @@ impl TenantManager {
             }
 
             for child_prefix in child_prefixes {
+                tracing::info!(
+                    "Hard-linking {} parent layers into child path {}",
+                    parent_layers.len(),
+                    child_prefix
+                );
                 for relative_layer in &parent_layers {
                     let parent_path = parent_path.join(relative_layer);
                     let child_path = child_prefix.join(relative_layer);
@@ -1851,6 +1788,7 @@ impl TenantManager {
             // Durability is not required for correctness, but if we crashed during split and
             // then came restarted with empty timeline dirs, it would be very inefficient to
             // re-populate from remote storage.
+            tracing::info!("fsyncing {} directories", create_dirs.len());
             for dir in create_dirs {
                 if let Err(e) = crashsafe::fsync(&dir) {
                     // Something removed a newly created timeline dir out from underneath us?  Extremely
@@ -1901,17 +1839,10 @@ impl TenantManager {
         &self,
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
-        detach_ignored: bool,
         deletion_queue_client: &DeletionQueueClient,
     ) -> Result<(), TenantStateError> {
         let tmp_path = self
-            .detach_tenant0(
-                conf,
-                &TENANTS,
-                tenant_shard_id,
-                detach_ignored,
-                deletion_queue_client,
-            )
+            .detach_tenant0(conf, tenant_shard_id, deletion_queue_client)
             .await?;
         spawn_background_purge(tmp_path);
 
@@ -1921,9 +1852,7 @@ impl TenantManager {
     async fn detach_tenant0(
         &self,
         conf: &'static PageServerConf,
-        tenants: &std::sync::RwLock<TenantsMap>,
         tenant_shard_id: TenantShardId,
-        detach_ignored: bool,
         deletion_queue_client: &DeletionQueueClient,
     ) -> Result<Utf8PathBuf, TenantStateError> {
         let tenant_dir_rename_operation = |tenant_id_to_clean: TenantShardId| async move {
@@ -1936,7 +1865,7 @@ impl TenantManager {
         };
 
         let removal_result = remove_tenant_from_memory(
-            tenants,
+            self.tenants,
             tenant_shard_id,
             tenant_dir_rename_operation(tenant_shard_id),
         )
@@ -1946,33 +1875,13 @@ impl TenantManager {
         // before this tenant is potentially re-attached elsewhere.
         deletion_queue_client.flush_advisory();
 
-        // Ignored tenants are not present in memory and will bail the removal from memory operation.
-        // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
-        if detach_ignored
-            && matches!(
-                removal_result,
-                Err(TenantStateError::SlotError(TenantSlotError::NotFound(_)))
-            )
-        {
-            let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
-            if tenant_ignore_mark.exists() {
-                info!("Detaching an ignored tenant");
-                let tmp_path = tenant_dir_rename_operation(tenant_shard_id)
-                    .await
-                    .with_context(|| {
-                        format!("Ignored tenant {tenant_shard_id} local directory rename")
-                    })?;
-                return Ok(tmp_path);
-            }
-        }
-
         removal_result
     }
 
     pub(crate) fn list_tenants(
         &self,
     ) -> Result<Vec<(TenantShardId, TenantState, Generation)>, TenantMapListError> {
-        let tenants = TENANTS.read().unwrap();
+        let tenants = self.tenants.read().unwrap();
         let m = match &*tenants {
             TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
@@ -2073,7 +1982,6 @@ impl TenantManager {
             AttachedTenantConf::try_from(config)?,
             shard_identity,
             None,
-            self.tenants,
             SpawnMode::Eager,
             ctx,
         )?;
@@ -2222,97 +2130,6 @@ pub(crate) enum TenantStateError {
     Other(#[from] anyhow::Error),
 }
 
-pub(crate) async fn load_tenant(
-    conf: &'static PageServerConf,
-    tenant_id: TenantId,
-    generation: Generation,
-    broker_client: storage_broker::BrokerClientChannel,
-    remote_storage: GenericRemoteStorage,
-    deletion_queue_client: DeletionQueueClient,
-    ctx: &RequestContext,
-) -> Result<(), TenantMapInsertError> {
-    // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-
-    let slot_guard =
-        tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustNotExist)?;
-    let tenant_path = conf.tenant_path(&tenant_shard_id);
-
-    let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
-    if tenant_ignore_mark.exists() {
-        std::fs::remove_file(&tenant_ignore_mark).with_context(|| {
-            format!(
-                "Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"
-            )
-        })?;
-    }
-
-    let resources = TenantSharedResources {
-        broker_client,
-        remote_storage,
-        deletion_queue_client,
-    };
-
-    let mut location_conf =
-        Tenant::load_tenant_config(conf, &tenant_shard_id).map_err(TenantMapInsertError::Other)?;
-    location_conf.attach_in_generation(AttachmentMode::Single, generation);
-
-    Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
-
-    let shard_identity = location_conf.shard;
-    let new_tenant = tenant_spawn(
-        conf,
-        tenant_shard_id,
-        &tenant_path,
-        resources,
-        AttachedTenantConf::try_from(location_conf)?,
-        shard_identity,
-        None,
-        &TENANTS,
-        SpawnMode::Eager,
-        ctx,
-    )
-    .with_context(|| format!("Failed to schedule tenant processing in path {tenant_path:?}"))?;
-
-    slot_guard.upsert(TenantSlot::Attached(new_tenant))?;
-    Ok(())
-}
-
-pub(crate) async fn ignore_tenant(
-    conf: &'static PageServerConf,
-    tenant_id: TenantId,
-) -> Result<(), TenantStateError> {
-    ignore_tenant0(conf, &TENANTS, tenant_id).await
-}
-
-#[instrument(skip_all, fields(shard_id))]
-async fn ignore_tenant0(
-    conf: &'static PageServerConf,
-    tenants: &std::sync::RwLock<TenantsMap>,
-    tenant_id: TenantId,
-) -> Result<(), TenantStateError> {
-    // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-    tracing::Span::current().record(
-        "shard_id",
-        tracing::field::display(tenant_shard_id.shard_slug()),
-    );
-
-    remove_tenant_from_memory(tenants, tenant_shard_id, async {
-        let ignore_mark_file = conf.tenant_ignore_mark_file_path(&tenant_shard_id);
-        fs::File::create(&ignore_mark_file)
-            .await
-            .context("Failed to create ignore mark file")
-            .and_then(|_| {
-                crashsafe::fsync_file_and_parent(&ignore_mark_file)
-                    .context("Failed to fsync ignore mark file")
-            })
-            .with_context(|| format!("Failed to crate ignore mark for tenant {tenant_shard_id}"))?;
-        Ok(())
-    })
-    .await
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TenantMapListError {
     #[error("tenant map is still initiailizing")]
@@ -2336,10 +2153,6 @@ pub(crate) enum TenantSlotError {
     /// When acquiring a slot with the expectation that the tenant already exists.
     #[error("Tenant {0} not found")]
     NotFound(TenantShardId),
-
-    /// When acquiring a slot with the expectation that the tenant does not already exist.
-    #[error("tenant {0} already exists, state: {1:?}")]
-    AlreadyExists(TenantShardId, TenantState),
 
     // Tried to read a slot that is currently being mutated by another administrative
     // operation.
@@ -2656,8 +2469,6 @@ enum TenantSlotAcquireMode {
     Any,
     /// Return an error if trying to acquire a slot and it doesn't already exist
     MustExist,
-    /// Return an error if trying to acquire a slot and it already exists
-    MustNotExist,
 }
 
 fn tenant_map_acquire_slot(
@@ -2711,27 +2522,6 @@ fn tenant_map_acquire_slot_impl(
                     tracing::debug!("Occupied, failing for InProgress");
                     Err(TenantSlotError::InProgress)
                 }
-                (slot, MustNotExist) => match slot {
-                    TenantSlot::Attached(tenant) => {
-                        tracing::debug!("Attached && MustNotExist, return AlreadyExists");
-                        Err(TenantSlotError::AlreadyExists(
-                            *tenant_shard_id,
-                            tenant.current_state(),
-                        ))
-                    }
-                    _ => {
-                        // FIXME: the AlreadyExists error assumes that we have a Tenant
-                        // to get the state from
-                        tracing::debug!("Occupied & MustNotExist, return AlreadyExists");
-                        Err(TenantSlotError::AlreadyExists(
-                            *tenant_shard_id,
-                            TenantState::Broken {
-                                reason: "Present but not attached".to_string(),
-                                backtrace: "".to_string(),
-                            },
-                        ))
-                    }
-                },
                 _ => {
                     // Happy case: the slot was not in any state that violated our mode
                     let (completion, barrier) = utils::completion::channel();
