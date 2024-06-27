@@ -189,7 +189,12 @@ where
 
     /// Persist given state. c.f. start_change.
     pub async fn finish_change(&mut self, s: &TimelinePersistentState) -> Result<()> {
-        self.pers.persist(s).await?;
+        if s.eq(&*self.pers) {
+            // nothing to do if state didn't change
+        } else {
+            self.pers.persist(s).await?;
+        }
+
         // keep in memory values up to date
         self.inmem.commit_lsn = s.commit_lsn;
         self.inmem.backup_lsn = s.backup_lsn;
