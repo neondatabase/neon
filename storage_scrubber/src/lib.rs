@@ -247,7 +247,6 @@ pub fn init_logging(file_name: &str) -> WorkerGuard {
 
     let file_logs = fmt::Layer::new()
         .with_target(false)
-        .with_ansi(false)
         .with_writer(file_writer);
     let stderr_logs = fmt::Layer::new()
         .with_target(false)
