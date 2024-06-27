@@ -5511,30 +5511,53 @@ impl Timeline {
     #[cfg(test)]
     pub(super) async fn force_create_delta_layer(
         self: &Arc<Timeline>,
-        mut deltas: Vec<(Key, Lsn, Value)>,
+        deltas: (Lsn, Lsn, Vec<(Key, Lsn, Value)>),
         check_start_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let last_record_lsn = self.get_last_record_lsn();
+        let (min_lsn, end_lsn, mut deltas) = deltas;
         deltas.sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
         let min_key = *deltas.first().map(|(k, _, _)| k).unwrap();
         let end_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
-        let min_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
-        let max_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
+        for (_, lsn, _) in &deltas {
+            assert!(min_lsn <= *lsn && *lsn < end_lsn);
+        }
         assert!(
-            max_lsn <= last_record_lsn,
-            "advance last record lsn before inserting a layer, max_lsn={max_lsn}, last_record_lsn={last_record_lsn}"
+            end_lsn <= last_record_lsn,
+            "advance last record lsn before inserting a layer, end_lsn={end_lsn}, last_record_lsn={last_record_lsn}"
         );
-        let end_lsn = Lsn(max_lsn.0 + 1);
         if let Some(check_start_lsn) = check_start_lsn {
             assert!(min_lsn >= check_start_lsn);
+        }
+        let lsn_range = min_lsn..end_lsn;
+        // check if the delta layer does not violate the LSN invariant, the legacy compaction should always produce a batch of
+        // layers of the same start/end LSN, and so should the force inserted layer
+        {
+            pub fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
+                !(a.end <= b.start || b.end <= a.start)
+            }
+
+            let guard = self.layers.read().await;
+            for layer in guard.layer_map().iter_historic_layers() {
+                if layer.is_delta()
+                    && overlaps_with(&layer.lsn_range, &lsn_range)
+                    && layer.lsn_range != lsn_range
+                {
+                    // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
+                    panic!(
+                        "inserted layer violates delta layer LSN invariant: current_lsn_range={}..{}, conflict_lsn_range={}..{}",
+                        lsn_range.start, lsn_range.end, layer.lsn_range.start, layer.lsn_range.end
+                    );
+                }
+            }
         }
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
             self.timeline_id,
             self.tenant_shard_id,
             min_key,
-            min_lsn..end_lsn,
+            lsn_range,
             ctx,
         )
         .await?;
