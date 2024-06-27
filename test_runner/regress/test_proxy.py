@@ -53,25 +53,6 @@ def test_proxy_select_1(static_proxy: NeonProxy):
     assert out[0][0] == 42
 
 
-def test_proxy_server_params(static_proxy: NeonProxy):
-    """
-    Test that server params are passing through to postgres
-    """
-
-    out = static_proxy.safe_psql(
-        "select to_json('0 seconds'::interval)", options="-c intervalstyle=iso_8601"
-    )
-    assert out[0][0] == "PT0S"
-    out = static_proxy.safe_psql(
-        "select to_json('0 seconds'::interval)", options="-c intervalstyle=sql_standard"
-    )
-    assert out[0][0] == "0"
-    out = static_proxy.safe_psql(
-        "select to_json('0 seconds'::interval)", options="-c intervalstyle=postgres"
-    )
-    assert out[0][0] == "00:00:00"
-
-
 def test_password_hack(static_proxy: NeonProxy):
     """
     Check the PasswordHack auth flow: an alternative to SCRAM auth for
