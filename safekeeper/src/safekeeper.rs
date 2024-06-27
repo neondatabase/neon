@@ -15,6 +15,7 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use tracing::*;
 
 use crate::control_file;
+use crate::metrics::MISC_OPERATION_SECONDS;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::state::TimelineState;
@@ -696,6 +697,10 @@ where
         &mut self,
         msg: &ProposerElected,
     ) -> Result<Option<AcceptorProposerMessage>> {
+        let _timer = MISC_OPERATION_SECONDS
+            .with_label_values(&["handle_elected"])
+            .start_timer();
+
         info!("received ProposerElected {:?}", msg);
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.start_change();
