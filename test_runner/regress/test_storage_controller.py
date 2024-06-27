@@ -1636,7 +1636,7 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_configs()
     env.start()
 
-    tenant_count = 5
+    tenant_count = 10
     shard_count_per_tenant = 8
     tenant_ids = []
 

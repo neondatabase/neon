@@ -629,7 +629,6 @@ impl InMemoryLayer {
         let _concurrency_permit = match &*l0_flush_global_state {
             Inner::PageCached => None,
             Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
-            Inner::Fail(msg) => anyhow::bail!(msg.clone()),
         };
 
         let end_lsn = *self.end_lsn.get().unwrap();
@@ -709,11 +708,11 @@ impl InMemoryLayer {
                         // 3. the use `Bytes::slice` to get the `buf` that is our blob
                         // 4. pass that `buf` into `put_value_bytes`
                         // => https://github.com/neondatabase/neon/issues/8183
-                        cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
+                        cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
                         let will_init = Value::des(&buf)?.will_init();
                         let res;
                         (buf, res) = delta_layer_writer
-                            .put_value_bytes(*key, *lsn, buf, will_init, &ctx)
+                            .put_value_bytes(*key, *lsn, buf, will_init, ctx)
                             .await;
                         res?;
                     }
@@ -724,11 +723,10 @@ impl InMemoryLayer {
                 // => we'd have more concurrenct Vec<u8> than allowed as per the semaphore.
                 drop(_concurrency_permit);
             }
-            l0_flush::Inner::Fail(_) => unreachable!("we bail out earlier in this function"),
         }
 
         // MAX is used here because we identify L0 layers by full key range
-        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline, &ctx).await?;
+        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline, ctx).await?;
         Ok(Some(delta_layer))
     }
 }

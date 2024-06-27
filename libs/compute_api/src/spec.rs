@@ -96,12 +96,6 @@ pub struct ComputeSpec {
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
     pub shard_stripe_size: Option<usize>,
-
-    // When we are starting a new replica in hot standby mode,
-    // we need to know if the primary is running.
-    // This is used to determine if replica should wait for
-    // RUNNING_XACTS from primary or not.
-    pub primary_is_running: Option<bool>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.

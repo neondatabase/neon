@@ -67,6 +67,7 @@ impl LayerManager {
 
     /// Open a new writable layer to append data if there is no open layer, otherwise return the current open layer,
     /// called within `get_layer_for_write`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
@@ -236,7 +237,6 @@ impl LayerManager {
     }
 
     /// Called when a GC-compaction is completed.
-    #[cfg(test)]
     pub(crate) fn finish_gc_compaction(
         &mut self,
         compact_from: &[Layer],

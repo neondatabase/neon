@@ -9,8 +9,6 @@ pub enum L0FlushConfig {
     PageCached,
     #[serde(rename_all = "snake_case")]
     Direct { max_concurrency: NonZeroUsize },
-    #[serde(skip)]
-    Fail(String),
 }
 
 #[derive(Clone)]
@@ -19,7 +17,6 @@ pub struct L0FlushGlobalState(Arc<Inner>);
 pub(crate) enum Inner {
     PageCached,
     Direct { semaphore: tokio::sync::Semaphore },
-    Fail(String),
 }
 
 impl L0FlushGlobalState {
@@ -30,7 +27,6 @@ impl L0FlushGlobalState {
                 let semaphore = tokio::sync::Semaphore::new(max_concurrency.get());
                 Self(Arc::new(Inner::Direct { semaphore }))
             }
-            L0FlushConfig::Fail(msg) => Self(Arc::new(Inner::Fail(msg))),
         }
     }
 
@@ -41,7 +37,7 @@ impl L0FlushGlobalState {
     pub(crate) fn prewarm_on_write(&self) -> ephemeral_file::PrewarmPageCacheOnWrite {
         match &*self.0 {
             Inner::PageCached => ephemeral_file::PrewarmPageCacheOnWrite::Yes,
-            Inner::Direct { .. } | Inner::Fail(_) => ephemeral_file::PrewarmPageCacheOnWrite::No,
+            Inner::Direct { .. } => ephemeral_file::PrewarmPageCacheOnWrite::No,
         }
     }
 }

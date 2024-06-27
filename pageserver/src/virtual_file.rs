@@ -13,14 +13,14 @@
 use crate::context::RequestContext;
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
-use crate::page_cache::PageWriteGuard;
+use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use tokio_epoll_uring::{BoundedBuf, BoundedBufMut, IoBuf, IoBufMut, Slice};
+use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -48,6 +48,7 @@ pub(crate) mod owned_buffers_io {
     //! but for the time being we're proving out the primitives in the neon.git repo
     //! for faster iteration.
 
+    pub(crate) mod slice;
     pub(crate) mod write;
     pub(crate) mod util {
         pub(crate) mod size_tracking_writer;
@@ -586,45 +587,37 @@ impl VirtualFile {
         Ok(self.pos)
     }
 
-    /// Read `buf.bytes_total()` bytes into buf, starting at offset `offset`.
+    /// Read the file contents in range `offset..(offset + slice.bytes_total())` into `slice[0..slice.bytes_total()]`.
     ///
-    /// The returned slice is guaranteed to be the same view into the underlying `Buf` as the input argument `buf`.
-    pub async fn read_exact_at<Buf, B>(
+    /// The returned `Slice<Buf>` is equivalent to the input `slice`, i.e., it's the same view into the same buffer.
+    pub async fn read_exact_at<Buf>(
         &self,
-        buf: B,
+        slice: Slice<Buf>,
         offset: u64,
         ctx: &RequestContext,
-    ) -> Result<tokio_epoll_uring::Slice<Buf>, Error>
+    ) -> Result<Slice<Buf>, Error>
     where
         Buf: IoBufMut + Send,
-        B: BoundedBufMut<BufMut = Buf>,
     {
-        let (buf, res) = read_exact_at_impl(buf, offset, None, |buf, offset| {
-            self.read_at(buf, offset, ctx)
-        })
-        .await;
-        res.map(|()| buf)
-    }
+        let assert_we_return_original_bounds = if cfg!(debug_assertions) {
+            Some((slice.stable_ptr() as usize, slice.bytes_total()))
+        } else {
+            None
+        };
 
-    /// Read `count` bytes into `buf`, starting at offset `offset`.
-    ///
-    /// The returned `B` is the same `buf` that was passed in.
-    /// On success, it is guaranteed that the returned `B` has `bytes_init() >= count`.
-    pub async fn read_exact_at_n<Buf>(
-        &self,
-        buf: Buf,
-        offset: u64,
-        count: usize,
-        ctx: &RequestContext,
-    ) -> Result<Buf, Error>
-    where
-        Buf: IoBufMut + Send,
-    {
-        let (buf, res) = read_exact_at_impl(buf, offset, Some(count), |buf, offset| {
-            self.read_at(buf, offset, ctx)
-        })
-        .await;
-        res.map(|()| buf.into_inner())
+        let original_bounds = slice.bounds();
+        let (buf, res) =
+            read_exact_at_impl(slice, offset, |buf, offset| self.read_at(buf, offset, ctx)).await;
+        let res = res.map(|_| buf.slice(original_bounds));
+
+        if let Some(original_bounds) = assert_we_return_original_bounds {
+            if let Ok(slice) = &res {
+                let returned_bounds = (slice.stable_ptr() as usize, slice.bytes_total());
+                assert_eq!(original_bounds, returned_bounds);
+            }
+        }
+
+        res
     }
 
     /// Like [`Self::read_exact_at`] but for [`PageWriteGuard`].
@@ -634,11 +627,11 @@ impl VirtualFile {
         offset: u64,
         ctx: &RequestContext,
     ) -> Result<PageWriteGuard<'static>, Error> {
-        let page_sz = page.len();
-        let buf = PageWriteGuardBuf { page };
-        let res = self.read_exact_at_n(buf, offset, page_sz, ctx).await;
-        res.map(|PageWriteGuardBuf { page, .. }| page)
-            .map_err(|e| Error::new(ErrorKind::Other, e))
+        let buf = PageWriteGuardBuf { page }.slice_full();
+        debug_assert_eq!(buf.bytes_total(), PAGE_SZ);
+        self.read_exact_at(buf, offset, ctx)
+            .await
+            .map(|slice| slice.into_inner().page)
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
@@ -729,14 +722,14 @@ impl VirtualFile {
         (buf, Ok(n))
     }
 
-    pub(crate) async fn read_at<B>(
+    pub(crate) async fn read_at<Buf>(
         &self,
-        buf: B,
+        buf: tokio_epoll_uring::Slice<Buf>,
         offset: u64,
         _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
-    ) -> (B, Result<usize, Error>)
+    ) -> (tokio_epoll_uring::Slice<Buf>, Result<usize, Error>)
     where
-        B: tokio_epoll_uring::BoundedBufMut + Send,
+        Buf: tokio_epoll_uring::IoBufMut + Send,
     {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
@@ -788,29 +781,16 @@ impl VirtualFile {
 }
 
 // Adapted from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
-pub async fn read_exact_at_impl<Buf, B, F, Fut>(
-    buf: B,
+pub async fn read_exact_at_impl<Buf, F, Fut>(
+    mut buf: tokio_epoll_uring::Slice<Buf>,
     mut offset: u64,
-    count: Option<usize>,
     mut read_at: F,
-) -> (tokio_epoll_uring::Slice<Buf>, std::io::Result<()>)
+) -> (Buf, std::io::Result<()>)
 where
     Buf: IoBufMut + Send,
-    B: BoundedBufMut<BufMut = Buf>,
     F: FnMut(tokio_epoll_uring::Slice<Buf>, u64) -> Fut,
     Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<Buf>, std::io::Result<usize>)>,
 {
-    let original_bounds = buf.bounds();
-
-    let mut buf: tokio_epoll_uring::Slice<_> = match count {
-        Some(count) => {
-            assert!(count <= buf.bytes_total());
-            assert!(count > 0);
-            buf.slice(..count) // may include uninitialized memory
-        }
-        None => buf.slice_full(), // includes all the uninitialized memory
-    };
-
     while buf.bytes_total() != 0 {
         let res;
         (buf, res) = read_at(buf, offset).await;
@@ -821,7 +801,7 @@ where
                 offset += n as u64;
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return (buf.into_inner().slice(original_bounds), Err(e)),
+            Err(e) => return (buf.into_inner(), Err(e)),
         }
     }
     // NB: don't use `buf.is_empty()` here; it is from the
@@ -831,7 +811,7 @@ where
     // buffer that the user passed in.
     if buf.bytes_total() != 0 {
         (
-            buf.into_inner().slice(original_bounds),
+            buf.into_inner(),
             Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "failed to fill whole buffer",
@@ -839,7 +819,7 @@ where
         )
     } else {
         assert_eq!(buf.len(), buf.bytes_total());
-        (buf.into_inner().slice(original_bounds), Ok(()))
+        (buf.into_inner(), Ok(()))
     }
 }
 
@@ -892,7 +872,7 @@ mod test_read_exact_at_impl {
 
     #[tokio::test]
     async fn test_basic() {
-        let buf = Vec::with_capacity(5);
+        let buf = Vec::with_capacity(5).slice_full();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::from(vec![Expectation {
                 offset: 0,
@@ -900,42 +880,22 @@ mod test_read_exact_at_impl {
                 result: Ok(vec![b'a', b'b', b'c', b'd', b'e']),
             }]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
         .await;
         assert!(res.is_ok());
-        assert_eq!(buf.into_inner(), vec![b'a', b'b', b'c', b'd', b'e']);
-    }
-
-    #[tokio::test]
-    async fn test_with_count() {
-        let buf = Vec::with_capacity(5);
-        let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
-            expectations: VecDeque::from(vec![Expectation {
-                offset: 0,
-                bytes_total: 3,
-                result: Ok(vec![b'a', b'b', b'c']),
-            }]),
-        }));
-
-        let (buf, res) = read_exact_at_impl(buf, 0, Some(3), |buf, offset| {
-            let mock_read_at = Arc::clone(&mock_read_at);
-            async move { mock_read_at.lock().await.read_at(buf, offset).await }
-        })
-        .await;
-        assert!(res.is_ok());
-        assert_eq!(buf.into_inner(), vec![b'a', b'b', b'c']);
+        assert_eq!(buf, vec![b'a', b'b', b'c', b'd', b'e']);
     }
 
     #[tokio::test]
     async fn test_empty_buf_issues_no_syscall() {
-        let buf = Vec::new();
+        let buf = Vec::new().slice_full();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::new(),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -945,7 +905,7 @@ mod test_read_exact_at_impl {
 
     #[tokio::test]
     async fn test_two_read_at_calls_needed_until_buf_filled() {
-        let buf = Vec::with_capacity(4);
+        let buf = Vec::with_capacity(4).slice_full();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::from(vec![
                 Expectation {
@@ -960,18 +920,18 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
         .await;
         assert!(res.is_ok());
-        assert_eq!(buf.into_inner(), vec![b'a', b'b', b'c', b'd']);
+        assert_eq!(buf, vec![b'a', b'b', b'c', b'd']);
     }
 
     #[tokio::test]
     async fn test_eof_before_buffer_full() {
-        let buf = Vec::with_capacity(3);
+        let buf = Vec::with_capacity(3).slice_full();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::from(vec![
                 Expectation {
@@ -991,7 +951,7 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -1061,27 +1021,29 @@ impl VirtualFile {
         ctx: &RequestContext,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
-        let buf = vec![0; PAGE_SZ];
-        let buf = self
-            .read_exact_at_n(buf, blknum as u64 * (PAGE_SZ as u64), PAGE_SZ, ctx)
+        let slice = Vec::with_capacity(PAGE_SZ).slice_full();
+        assert_eq!(slice.bytes_total(), PAGE_SZ);
+        let slice = self
+            .read_exact_at(slice, blknum as u64 * (PAGE_SZ as u64), ctx)
             .await?;
-        Ok(crate::tenant::block_io::BlockLease::Vec(buf))
+        Ok(crate::tenant::block_io::BlockLease::Vec(slice.into_inner()))
     }
 
     async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
         let mut tmp = vec![0; 128];
         loop {
-            let res;
-            (tmp, res) = self.read_at(tmp, self.pos, ctx).await;
+            let slice = tmp.slice(..128);
+            let (slice, res) = self.read_at(slice, self.pos, ctx).await;
             match res {
                 Ok(0) => return Ok(()),
                 Ok(n) => {
                     self.pos += n as u64;
-                    buf.extend_from_slice(&tmp[..n]);
+                    buf.extend_from_slice(&slice[..n]);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
+            tmp = slice.into_inner();
         }
     }
 }
@@ -1195,6 +1157,7 @@ mod tests {
     use crate::task_mgr::TaskKind;
 
     use super::*;
+    use owned_buffers_io::slice::SliceExt;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
@@ -1216,16 +1179,16 @@ mod tests {
     impl MaybeVirtualFile {
         async fn read_exact_at(
             &self,
-            mut buf: Vec<u8>,
+            mut slice: tokio_epoll_uring::Slice<Vec<u8>>,
             offset: u64,
             ctx: &RequestContext,
-        ) -> Result<Vec<u8>, Error> {
+        ) -> Result<tokio_epoll_uring::Slice<Vec<u8>>, Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => {
-                    let n = buf.len();
-                    file.read_exact_at_n(buf, offset, n, ctx).await
+                MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(slice, offset, ctx).await,
+                MaybeVirtualFile::File(file) => {
+                    let rust_slice: &mut [u8] = slice.as_mut_rust_slice_full_zeroed();
+                    file.read_exact_at(rust_slice, offset).map(|()| slice)
                 }
-                MaybeVirtualFile::File(file) => file.read_exact_at(&mut buf, offset).map(|()| buf),
             }
         }
         async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
@@ -1299,9 +1262,12 @@ mod tests {
             len: usize,
             ctx: &RequestContext,
         ) -> Result<String, Error> {
-            let buf = vec![0; len];
-            let buf = self.read_exact_at(buf, pos, ctx).await?;
-            Ok(String::from_utf8(buf).unwrap())
+            let slice = Vec::with_capacity(len).slice_full();
+            assert_eq!(slice.bytes_total(), len);
+            let slice = self.read_exact_at(slice, pos, ctx).await?;
+            let vec = slice.into_inner();
+            assert_eq!(vec.len(), len);
+            Ok(String::from_utf8(vec).unwrap())
         }
     }
 
@@ -1520,7 +1486,11 @@ mod tests {
                 let mut rng = rand::rngs::OsRng;
                 for _ in 1..1000 {
                     let f = &files[rng.gen_range(0..files.len())];
-                    buf = f.read_exact_at_n(buf, 0, SIZE, &ctx).await.unwrap();
+                    buf = f
+                        .read_exact_at(buf.slice_full(), 0, &ctx)
+                        .await
+                        .unwrap()
+                        .into_inner();
                     assert!(buf == SAMPLE);
                 }
             });

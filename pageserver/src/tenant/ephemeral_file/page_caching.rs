@@ -186,13 +186,12 @@ impl PreWarmingWriter {
     }
 
     /// Load all the blocks that we already flushed to disk into `buf`.
-    async fn load_flushed_blocks_into_contiguous_memory<B, Buf>(
+    async fn load_flushed_blocks_into_contiguous_memory<Buf>(
         &self,
-        buf: B,
+        buf: tokio_epoll_uring::Slice<Buf>,
         ctx: &RequestContext,
     ) -> std::io::Result<tokio_epoll_uring::Slice<Buf>>
     where
-        B: tokio_epoll_uring::BoundedBufMut<BufMut = Buf>,
         Buf: tokio_epoll_uring::IoBufMut + Send,
     {
         assert_eq!(buf.bytes_total() % PAGE_SZ, 0);

@@ -72,6 +72,9 @@ impl FileStorage {
         conf: &SafeKeeperConf,
         state: TimelinePersistentState,
     ) -> Result<FileStorage> {
+        // we don't support creating new timelines in offloaded state
+        assert!(matches!(state.eviction_state, EvictionState::Present));
+
         let store = FileStorage {
             timeline_dir,
             no_sync: conf.no_sync,
@@ -103,7 +106,7 @@ impl FileStorage {
     }
 
     /// Load control file from given directory.
-    pub fn load_control_file_from_dir(timeline_dir: &Utf8Path) -> Result<TimelinePersistentState> {
+    fn load_control_file_from_dir(timeline_dir: &Utf8Path) -> Result<TimelinePersistentState> {
         let path = timeline_dir.join(CONTROL_FILE_NAME);
         Self::load_control_file(path)
     }

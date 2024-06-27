@@ -1445,6 +1445,46 @@ pub(crate) static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+#[derive(Clone, Copy, enum_map::Enum, IntoStaticStr)]
+pub(crate) enum ComputeCommandKind {
+    PageStreamV2,
+    PageStream,
+    Basebackup,
+    GetLastRecordRlsn,
+    Fullbackup,
+    ImportBasebackup,
+    ImportWal,
+    LeaseLsn,
+    Show,
+}
+
+pub(crate) struct ComputeCommandCounters {
+    map: EnumMap<ComputeCommandKind, IntCounter>,
+}
+
+pub(crate) static COMPUTE_COMMANDS_COUNTERS: Lazy<ComputeCommandCounters> = Lazy::new(|| {
+    let inner = register_int_counter_vec!(
+        "pageserver_compute_commands",
+        "Number of compute -> pageserver commands processed",
+        &["command"]
+    )
+    .expect("failed to define a metric");
+
+    ComputeCommandCounters {
+        map: EnumMap::from_array(std::array::from_fn(|i| {
+            let command = <ComputeCommandKind as enum_map::Enum>::from_usize(i);
+            let command_str: &'static str = command.into();
+            inner.with_label_values(&[command_str])
+        })),
+    }
+});
+
+impl ComputeCommandCounters {
+    pub(crate) fn for_command(&self, command: ComputeCommandKind) -> &IntCounter {
+        &self.map[command]
+    }
+}
+
 // remote storage metrics
 
 static REMOTE_TIMELINE_CLIENT_CALLS: Lazy<IntCounterPairVec> = Lazy::new(|| {
@@ -2949,4 +2989,5 @@ pub fn preinitialize_metrics() {
     Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&tenant_throttling::TIMELINE_GET);
     Lazy::force(&BASEBACKUP_QUERY_TIME);
+    Lazy::force(&COMPUTE_COMMANDS_COUNTERS);
 }

@@ -36,10 +36,7 @@ use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
 use crate::{l0_flush::L0FlushConfig, tenant::timeline::GetVectoredImpl};
 use crate::{tenant::config::TenantConf, virtual_file};
-use crate::{
-    TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME,
-    TIMELINE_DELETE_MARK_SUFFIX,
-};
+use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
 use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
 
@@ -820,15 +817,11 @@ impl PageServerConf {
     }
 
     /// Points to a place in pageserver's local directory,
-    /// where certain tenant's tenantconf file should be located.
-    ///
-    /// Legacy: superseded by tenant_location_config_path.  Eventually
-    /// remove this function.
-    pub fn tenant_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
-        self.tenant_path(tenant_shard_id).join(TENANT_CONFIG_NAME)
-    }
-
-    pub fn tenant_location_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+    /// where certain tenant's LocationConf be stored.
+    pub(crate) fn tenant_location_config_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+    ) -> Utf8PathBuf {
         self.tenant_path(tenant_shard_id)
             .join(TENANT_LOCATION_CONFIG_NAME)
     }
@@ -1711,7 +1704,7 @@ threshold = "20m"
         let input = r#"
 remote_storage = {}
         "#;
-        let doc = toml_edit::Document::from_str(&input).unwrap();
+        let doc = toml_edit::Document::from_str(input).unwrap();
         let err = PageServerConf::parse_and_validate(&doc, &workdir)
             .expect_err("empty remote_storage field should fail, don't specify it if you want no remote_storage");
         assert!(format!("{err}").contains("remote_storage"), "{err}");

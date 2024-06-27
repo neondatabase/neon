@@ -73,7 +73,6 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
-use crate::l0_flush::L0FlushConfig;
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::TENANT;
 use crate::metrics::{
@@ -90,6 +89,7 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
+use crate::walredo;
 use crate::InitializationOrder;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
@@ -328,6 +328,16 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
+    pub(crate) async fn shutdown(&self) {
+        match self {
+            Self::Prod(mgr) => mgr.shutdown().await,
+            #[cfg(test)]
+            Self::Test(_) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         match self {
             Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
@@ -348,7 +358,7 @@ impl WalRedoManager {
         base_img: Option<(Lsn, bytes::Bytes)>,
         records: Vec<(Lsn, crate::walrecord::NeonWalRecord)>,
         pg_version: u32,
-    ) -> anyhow::Result<bytes::Bytes> {
+    ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
             Self::Prod(mgr) => {
                 mgr.request_redo(key, lsn, base_img, records, pg_version)
@@ -653,7 +663,7 @@ impl Tenant {
         init_order: Option<InitializationOrder>,
         mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Tenant>> {
+    ) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf,
             tenant_shard_id,
@@ -863,7 +873,7 @@ impl Tenant {
             }
             .instrument(tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), gen=?generation)),
         );
-        Ok(tenant)
+        tenant
     }
 
     #[instrument(skip_all)]
@@ -1153,33 +1163,6 @@ impl Tenant {
             ctx,
         )
         .await
-    }
-
-    /// Create a placeholder Tenant object for a broken tenant
-    pub fn create_broken_tenant(
-        conf: &'static PageServerConf,
-        tenant_shard_id: TenantShardId,
-        remote_storage: GenericRemoteStorage,
-        reason: String,
-    ) -> Arc<Tenant> {
-        Arc::new(Tenant::new(
-            TenantState::Broken {
-                reason,
-                backtrace: String::new(),
-            },
-            conf,
-            AttachedTenantConf::try_from(LocationConf::default()).unwrap(),
-            // Shard identity isn't meaningful for a broken tenant: it's just a placeholder
-            // to occupy the slot for this TenantShardId.
-            ShardIdentity::broken(tenant_shard_id.shard_number, tenant_shard_id.shard_count),
-            None,
-            tenant_shard_id,
-            remote_storage,
-            DeletionQueueClient::broken(),
-            L0FlushGlobalState::new(L0FlushConfig::Fail(
-                "broken tenant should not be flushing L0s".to_owned(),
-            )),
-        ))
     }
 
     async fn load_timeline_metadata(
@@ -1888,6 +1871,10 @@ impl Tenant {
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), None).await;
 
+        if let Some(walredo_mgr) = self.walredo_mgr.as_ref() {
+            walredo_mgr.shutdown().await;
+        }
+
         // Wait for any in-flight operations to complete
         self.gate.close().await;
 
@@ -2506,6 +2493,10 @@ impl Tenant {
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
     ) -> Tenant {
+        debug_assert!(
+            !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
+        );
+
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
@@ -2597,45 +2588,22 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_shard_id: &TenantShardId,
     ) -> anyhow::Result<LocationConf> {
-        let legacy_config_path = conf.tenant_config_path(tenant_shard_id);
         let config_path = conf.tenant_location_config_path(tenant_shard_id);
 
         if config_path.exists() {
             // New-style config takes precedence
             let deserialized = Self::read_config(&config_path)?;
             Ok(toml_edit::de::from_document::<LocationConf>(deserialized)?)
-        } else if legacy_config_path.exists() {
-            // Upgrade path: found an old-style configuration only
-            let deserialized = Self::read_config(&legacy_config_path)?;
-
-            let mut tenant_conf = TenantConfOpt::default();
-            for (key, item) in deserialized.iter() {
-                match key {
-                    "tenant_config" => {
-                        tenant_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("Failed to parse config from file '{legacy_config_path}' as pageserver config"))?;
-                    }
-                    _ => bail!(
-                        "config file {legacy_config_path} has unrecognized pageserver option '{key}'"
-                    ),
-                }
-            }
-
-            // Legacy configs are implicitly in attached state, and do not support sharding
-            Ok(LocationConf::attached_single(
-                tenant_conf,
-                Generation::none(),
-                &models::ShardParameters::default(),
-            ))
         } else {
-            // FIXME If the config file is not found, assume that we're attaching
-            // a detached tenant and config is passed via attach command.
-            // https://github.com/neondatabase/neon/issues/1555
-            // OR: we're loading after incomplete deletion that managed to remove config.
-            info!(
-                "tenant config not found in {} or {}",
-                config_path, legacy_config_path
-            );
-            Ok(LocationConf::default())
+            // The config should almost always exist for a tenant directory:
+            //  - When attaching a tenant, the config is the first thing we write
+            //  - When detaching a tenant, we atomically move the directory to a tmp location
+            //    before deleting contents.
+            //
+            // The very rare edge case that can result in a missing config is if we crash during attach
+            // between creating directory and writing config.  Callers should handle that as if the
+            // directory didn't exist.
+            anyhow::bail!("tenant config not found in {}", config_path);
         }
     }
 
@@ -2657,47 +2625,17 @@ impl Tenant {
         tenant_shard_id: &TenantShardId,
         location_conf: &LocationConf,
     ) -> anyhow::Result<()> {
-        let legacy_config_path = conf.tenant_config_path(tenant_shard_id);
         let config_path = conf.tenant_location_config_path(tenant_shard_id);
 
-        Self::persist_tenant_config_at(
-            tenant_shard_id,
-            &config_path,
-            &legacy_config_path,
-            location_conf,
-        )
-        .await
+        Self::persist_tenant_config_at(tenant_shard_id, &config_path, location_conf).await
     }
 
     #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(super) async fn persist_tenant_config_at(
         tenant_shard_id: &TenantShardId,
         config_path: &Utf8Path,
-        legacy_config_path: &Utf8Path,
         location_conf: &LocationConf,
     ) -> anyhow::Result<()> {
-        if let LocationMode::Attached(attach_conf) = &location_conf.mode {
-            // The modern-style LocationConf config file requires a generation to be set. In case someone
-            // is running a pageserver without the infrastructure to set generations, write out the legacy-style
-            // config file that only contains TenantConf.
-            //
-            // This will eventually be removed in https://github.com/neondatabase/neon/issues/5388
-
-            if attach_conf.generation.is_none() {
-                tracing::info!(
-                    "Running without generations, writing legacy-style tenant config file"
-                );
-                Self::persist_tenant_config_legacy(
-                    tenant_shard_id,
-                    legacy_config_path,
-                    &location_conf.tenant_conf,
-                )
-                .await?;
-
-                return Ok(());
-            }
-        }
-
         debug!("persisting tenantconf to {config_path}");
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
@@ -2721,37 +2659,6 @@ impl Tenant {
             .await
             .with_context(|| format!("write tenant {tenant_shard_id} config to {config_path}"))?;
 
-        Ok(())
-    }
-
-    #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
-    async fn persist_tenant_config_legacy(
-        tenant_shard_id: &TenantShardId,
-        target_config_path: &Utf8Path,
-        tenant_conf: &TenantConfOpt,
-    ) -> anyhow::Result<()> {
-        debug!("persisting tenantconf to {target_config_path}");
-
-        let mut conf_content = r#"# This file contains a specific per-tenant's config.
-#  It is read in case of pageserver restart.
-
-[tenant_config]
-"#
-        .to_string();
-
-        // Convert the config to a toml file.
-        conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
-
-        let temp_path = path_with_suffix_extension(target_config_path, TEMP_FILE_SUFFIX);
-
-        let tenant_shard_id = *tenant_shard_id;
-        let target_config_path = target_config_path.to_owned();
-        let conf_content = conf_content.into_bytes();
-        VirtualFile::crashsafe_overwrite(target_config_path.clone(), temp_path, conf_content)
-            .await
-            .with_context(|| {
-                format!("write tenant {tenant_shard_id} config to {target_config_path}")
-            })?;
         Ok(())
     }
 
@@ -3750,6 +3657,7 @@ pub(crate) mod harness {
     use utils::logging;
 
     use crate::deletion_queue::mock::MockDeletionQueue;
+    use crate::l0_flush::L0FlushConfig;
     use crate::walredo::apply_neon;
     use crate::{repository::Key, walrecord::NeonWalRecord};
 
@@ -3974,7 +3882,7 @@ pub(crate) mod harness {
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
-        ) -> anyhow::Result<Bytes> {
+        ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
             if records_neon {
                 // For Neon wal records, we can decode without spawning postgres, so do so.
@@ -7087,6 +6995,16 @@ mod tests {
             ),
             (
                 get_key(3),
+                Lsn(0x28),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x28")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x30")),
+            ),
+            (
+                get_key(3),
                 Lsn(0x40),
                 Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
             ),
@@ -7144,7 +7062,7 @@ mod tests {
             Bytes::from_static(b"value 0@0x10"),
             Bytes::from_static(b"value 1@0x10@0x20"),
             Bytes::from_static(b"value 2@0x10@0x30"),
-            Bytes::from_static(b"value 3@0x10@0x40"),
+            Bytes::from_static(b"value 3@0x10@0x28@0x30@0x40"),
             Bytes::from_static(b"value 4@0x10"),
             Bytes::from_static(b"value 5@0x10@0x20"),
             Bytes::from_static(b"value 6@0x10@0x20"),
@@ -7157,7 +7075,7 @@ mod tests {
             Bytes::from_static(b"value 0@0x10"),
             Bytes::from_static(b"value 1@0x10@0x20"),
             Bytes::from_static(b"value 2@0x10@0x30"),
-            Bytes::from_static(b"value 3@0x10"),
+            Bytes::from_static(b"value 3@0x10@0x28@0x30"),
             Bytes::from_static(b"value 4@0x10"),
             Bytes::from_static(b"value 5@0x10@0x20"),
             Bytes::from_static(b"value 6@0x10@0x20"),

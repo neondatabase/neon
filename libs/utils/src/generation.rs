@@ -9,20 +9,11 @@ use serde::{Deserialize, Serialize};
 /// numbers are used.
 #[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum Generation {
-    // Generations with this magic value will not add a suffix to S3 keys, and will not
-    // be included in persisted index_part.json.  This value is only to be used
-    // during migration from pre-generation metadata to generation-aware metadata,
-    // and should eventually go away.
-    //
-    // A special Generation is used rather than always wrapping Generation in an Option,
-    // so that code handling generations doesn't have to be aware of the legacy
-    // case everywhere it touches a generation.
+    // The None Generation is used in the metadata of layers written before generations were
+    // introduced.  A running Tenant always has a valid generation, but the layer metadata may
+    // include None generations.
     None,
-    // Generations with this magic value may never be used to construct S3 keys:
-    // we will panic if someone tries to.  This is for Tenants in the "Broken" state,
-    // so that we can satisfy their constructor with a Generation without risking
-    // a code bug using it in an S3 write (broken tenants should never write)
-    Broken,
+
     Valid(u32),
 }
 
@@ -42,11 +33,6 @@ impl Generation {
         Self::None
     }
 
-    // Create a new generation that will panic if you try to use get_suffix
-    pub fn broken() -> Self {
-        Self::Broken
-    }
-
     pub const fn new(v: u32) -> Self {
         Self::Valid(v)
     }
@@ -60,9 +46,6 @@ impl Generation {
         match self {
             Self::Valid(v) => GenerationFileSuffix(Some(*v)),
             Self::None => GenerationFileSuffix(None),
-            Self::Broken => {
-                panic!("Tried to use a broken generation");
-            }
         }
     }
 
@@ -86,7 +69,6 @@ impl Generation {
                 }
             }
             Self::None => Self::None,
-            Self::Broken => panic!("Attempted to use a broken generation"),
         }
     }
 
@@ -95,7 +77,6 @@ impl Generation {
         match self {
             Self::Valid(n) => Self::Valid(*n + 1),
             Self::None => Self::Valid(1),
-            Self::Broken => panic!("Attempted to use a broken generation"),
         }
     }
 
@@ -128,7 +109,7 @@ impl Serialize for Generation {
         if let Self::Valid(v) = self {
             v.serialize(serializer)
         } else {
-            // We should never be asked to serialize a None or Broken.  Structures
+            // We should never be asked to serialize a None. Structures
             // that include an optional generation should convert None to an
             // Option<Generation>::None
             Err(serde::ser::Error::custom(
@@ -158,9 +139,6 @@ impl Debug for Generation {
             }
             Self::None => {
                 write!(f, "<none>")
-            }
-            Self::Broken => {
-                write!(f, "<broken>")
             }
         }
     }
