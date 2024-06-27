@@ -68,9 +68,9 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       # The image has been uploaded to ECR manually:
-      # docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:6b6285988eec05ca3c0be36783029859629c5944bfaf09652c002d203ca76b41 \
-      #                                                                       neondatabase/build-tools:6b6285988eec05ca3c0be36783029859629c5944bfaf09652c002d203ca76b41
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:6b6285988eec05ca3c0be36783029859629c5944bfaf09652c002d203ca76b41
+      # docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:c6b377d375d8870e78a1ffb05ccdc14e101f4e7eb8841b275c23674fb66e088d \
+      #                                                                       neondatabase/build-tools:c6b377d375d8870e78a1ffb05ccdc14e101f4e7eb8841b275c23674fb66e088d
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:c6b377d375d8870e78a1ffb05ccdc14e101f4e7eb8841b275c23674fb66e088d
       options: --init
 
     steps:
@@ -81,7 +81,7 @@ jobs:
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
         path: /tmp/neon/
-        prefix: f22934e0585ea337d1cd4480b241888763e7c3af/9678602941/1
+        prefix: 95038653d5f0fe416fbd51ab3296c44b8bf90e36/9703932965/1
 
     - name: Add Postgres binaries to PATH
       run: |
