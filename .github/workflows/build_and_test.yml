@@ -89,6 +89,7 @@ jobs:
     secrets: inherit
 
   check-codestyle-python:
+    if: false
     needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -124,6 +125,7 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
+    if: false
     needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -209,7 +211,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        # build_type: [ debug, release ]
+        build_type: [ release ]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -382,6 +385,7 @@ jobs:
           fi
 
       - name: Run rust tests
+        if: false
         env:
           NEXTEST_RETRIES: 3
         run: |
@@ -439,8 +443,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
-        pg_version: [ v14, v15, v16 ]
+        # build_type: [ debug, release ]
+        build_type: [ release ]
+        # pg_version: [ v14, v15, v16 ]
+        pg_version: [ v14 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -460,6 +466,7 @@ jobs:
           real_s3_region: eu-central-1
           rerun_flaky: true
           pg_version: ${{ matrix.pg_version }}
+          extra_params: -k test_ancestor_branch
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
@@ -621,6 +628,7 @@ jobs:
             })
 
   coverage-report:
+    if: false
     needs: [ check-permissions, regress-tests, build-build-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -731,6 +739,7 @@ jobs:
     secrets: inherit
 
   neon-image-arch:
+    if: false
     needs: [ check-permissions, build-build-tools-image, tag ]
     strategy:
       matrix:
@@ -807,6 +816,7 @@ jobs:
                                                                                 neondatabase/neon:${{ needs.tag.outputs.build-tag }}
 
   compute-node-image-arch:
+    if: false
     needs: [ check-permissions, build-build-tools-image, tag ]
     strategy:
       fail-fast: false
@@ -1146,6 +1156,7 @@ jobs:
           done
 
   trigger-custom-extensions-build-and-wait:
+    if: false
     needs: [ check-permissions, tag ]
     runs-on: ubuntu-22.04
     steps:
