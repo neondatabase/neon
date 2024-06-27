@@ -1180,7 +1180,7 @@ class NeonEnv:
     def start(self, timeout_in_seconds: Optional[int] = None):
         # Storage controller starts first, so that pageserver /re-attach calls don't
         # bounce through retries on startup
-        self.storage_controller.start(timeout_in_seconds=timeout_in_seconds)
+        self.storage_controller.start(timeout_in_seconds=60)
 
         # Wait for storage controller readiness to prevent unnecessary post start-up
         # reconcile.
