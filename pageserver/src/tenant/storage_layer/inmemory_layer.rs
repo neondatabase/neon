@@ -411,7 +411,7 @@ impl InMemoryLayer {
                 continue;
             }
 
-            // TODO: this uses the page cache
+            // TODO: this uses the page cache => https://github.com/neondatabase/neon/issues/8183
             let buf = reader.read_blob(block_read.block_offset, &ctx).await;
             if let Err(e) = buf {
                 reconstruct_state
@@ -480,7 +480,8 @@ impl InMemoryLayer {
     ) -> Result<InMemoryLayer> {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
-        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, prewarm_on_write, ctx).await?;
+        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, prewarm_on_write, ctx)
+            .await?;
         let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {
@@ -702,6 +703,12 @@ impl InMemoryLayer {
                 for (key, vec_map) in inner.index.iter() {
                     // Write all page versions
                     for (lsn, pos) in vec_map.as_slice() {
+                        // TODO: once we have blob lengths in the in-memory index, we can
+                        // 1. get rid of the blob_io / BlockReaderRef::Slice business and
+                        // 2. load the file contents into a Bytes and
+                        // 3. the use `Bytes::slice` to get the `buf` that is our blob
+                        // 4. pass that `buf` into `put_value_bytes`
+                        // => https://github.com/neondatabase/neon/issues/8183
                         cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
                         let will_init = Value::des(&buf)?.will_init();
                         let res;

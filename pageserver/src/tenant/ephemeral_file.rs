@@ -67,6 +67,7 @@ impl EphemeralFile {
         self.rw.page_cache_file_id()
     }
 
+    /// See [`self::page_caching::RW::load_into_contiguous_memory`].
     pub(crate) async fn load_into_contiguous_memory(
         &self,
         ctx: &RequestContext,

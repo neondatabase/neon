@@ -19,6 +19,8 @@ pub struct RW {
     rw: super::zero_padded_read_write::RW<PreWarmingWriter>,
 }
 
+/// When we flush a block to the underlying [`crate::virtual_file::VirtualFile`],
+/// should we pre-warm the [`crate::page_cache`] with the contents?
 #[derive(Clone, Copy)]
 pub enum PrewarmOnWrite {
     Yes,
@@ -56,11 +58,11 @@ impl RW {
         self.rw.bytes_written()
     }
 
-    /// Load all blocks that can be read via read_blk into a contiguous memory buffer.
+    /// Load all blocks that can be read via [`Self::read_blk`] into a contiguous memory buffer.
     ///
-    /// This includes blocks that are in the internal buffered writer's buffer.
-    /// The last block is zero-padded to `PAGE_SZ`, so, the returned buffer is always a multiple of `PAGE_SZ`.
-    pub(crate) async fn load_into_contiguous_memory(
+    /// This includes the blocks that aren't yet flushed to disk by the internal buffered writer.
+    /// The last block is zero-padded to [`PAGE_SZ`], so, the returned buffer is always a multiple of [`PAGE_SZ`].
+    pub(super) async fn load_into_contiguous_memory(
         &self,
         ctx: &RequestContext,
     ) -> Result<Vec<u8>, io::Error> {
@@ -79,7 +81,7 @@ impl RW {
         let writer = self.rw.as_writer();
         let nwritten_blocks = usize::try_from(writer.nwritten_blocks).unwrap();
         let buf = writer
-            .read_all_written_blocks_into_memory_directly_from_disk(
+            .load_flushed_blocks_into_contiguous_memory(
                 buf.slice(0..nwritten_blocks * PAGE_SZ),
                 ctx,
             )
@@ -183,7 +185,8 @@ impl PreWarmingWriter {
         }
     }
 
-    async fn read_all_written_blocks_into_memory_directly_from_disk<B, Buf>(
+    /// Load all the blocks that we already flushed to disk into `buf`.
+    async fn load_flushed_blocks_into_contiguous_memory<B, Buf>(
         &self,
         buf: B,
         ctx: &RequestContext,
