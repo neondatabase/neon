@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 from typing import Optional
 
 import pytest
@@ -111,6 +112,14 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     workload.validate()
 
 
+def drop_local_state(env, tenant_id):
+    env.storage_controller.tenant_policy_update(tenant_id, {"placement": "Detached"})
+    env.storage_controller.reconcile_until_idle()
+
+    env.storage_controller.tenant_policy_update(tenant_id, {"placement": {"Attached": 0}})
+    env.storage_controller.reconcile_until_idle()
+
+
 @pytest.mark.parametrize("shard_count", [None, 4])
 def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
@@ -133,11 +142,7 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
 
     # For each cycle, detach and attach the tenant to bump the generation, and do some writes to generate uploads
     for _i in range(0, n_cycles):
-        env.storage_controller.tenant_policy_update(tenant_id, {"placement": "Detached"})
-        env.storage_controller.reconcile_until_idle()
-
-        env.storage_controller.tenant_policy_update(tenant_id, {"placement": {"Attached": 0}})
-        env.storage_controller.reconcile_until_idle()
+        drop_local_state(env, tenant_id)
 
         # This write includes remote upload, will generate an index in this generation
         workload.write_rows(1)
@@ -158,3 +163,99 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
     gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=1)
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == (expect_indices_per_shard - 2) * shard_count
+
+
+@pytest.mark.parametrize("shard_count", [None, 2])
+def test_scrubber_physical_gc_ancestors(
+    neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
+):
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.num_pageservers = 2
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_tenant(
+        tenant_id,
+        timeline_id,
+        shard_count=shard_count,
+        conf={
+            # Small layers and low compaction thresholds, so that when we split we can expect some to
+            # be dropped by child shards
+            "checkpoint_distance": f"{1024 * 1024}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{1024 * 1024}",
+            "image_creation_threshold": "2",
+            "image_layer_creation_check_threshold": "0",
+            # Disable background compaction, we will do it explicitly
+            "compaction_period": "0s",
+            # No PITR, so that as soon as child shards generate an image layer, it covers ancestor deltas
+            # and makes them GC'able
+            "pitr_interval": "0s",
+        },
+    )
+
+    # Make sure the original shard has some layers
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(100)
+
+    new_shard_count = 4
+    assert shard_count is None or new_shard_count > shard_count
+    shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
+
+    # Make sure child shards have some layers
+    workload.write_rows(100)
+
+    # Flush deletion queue so that we don't leave any orphan layers in the parent that will confuse subsequent checks: once
+    # a shard is split, any layers in its prefix that aren't referenced by a child will be considered GC'able, even
+    # if they were logically deleted before the shard split, just not physically deleted yet because of the queue.
+    for ps in env.pageservers:
+        ps.http_client().deletion_queue_flush(execute=True)
+
+    # Before compacting, all the layers in the ancestor should still be referenced by the children: the scrubber
+    # should not erase any ancestor layers
+    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(
+        min_age_secs=1, mode="full"
+    )
+    assert gc_summary["remote_storage_errors"] == 0
+    assert gc_summary["indices_deleted"] == 0
+    assert gc_summary["ancestor_layers_deleted"] == 0
+
+    # Write some data and compact: compacting, some ancestor layers should no longer be needed by children
+    # (the compaction is part of the checkpoint that Workload does for us)
+    workload.churn_rows(100)
+    workload.churn_rows(100)
+    workload.churn_rows(100)
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        ps.http_client().timeline_compact(shard, timeline_id)
+        ps.http_client().timeline_gc(shard, timeline_id, 0)
+
+    # We will use a 1s threshold for deletion, let it pass
+    time.sleep(2)
+
+    # Our time threshold should be respected: check that with a high threshold we delete nothing
+    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(
+        min_age_secs=3600, mode="full"
+    )
+    assert gc_summary["remote_storage_errors"] == 0
+    assert gc_summary["indices_deleted"] == 0
+    assert gc_summary["ancestor_layers_deleted"] == 0
+
+    # Now run with a low time threshold: deletions of ancestor layers should be executed
+    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(
+        min_age_secs=1, mode="full"
+    )
+    assert gc_summary["remote_storage_errors"] == 0
+    assert gc_summary["indices_deleted"] == 0
+    assert gc_summary["ancestor_layers_deleted"] > 0
+
+    # We deleted some layers: now check we didn't corrupt the tenant by doing so. Detach and
+    # attach it, to drop any local state, then check it's still readable.
+    workload.stop()
+    drop_local_state(env, tenant_id)
+
+    workload.validate()

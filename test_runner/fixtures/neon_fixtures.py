@@ -4267,7 +4267,10 @@ class StorageScrubber:
         log.info(f"tenant-snapshot output: {stdout}")
 
     def pageserver_physical_gc(
-        self, min_age_secs: int, tenant_ids: Optional[list[TenantId]] = None
+        self,
+        min_age_secs: int,
+        tenant_ids: Optional[list[TenantId]] = None,
+        mode: Optional[str] = None,
     ):
         args = ["pageserver-physical-gc", "--min-age", f"{min_age_secs}s"]
 
@@ -4276,6 +4279,9 @@ class StorageScrubber:
 
         for tenant_id in tenant_ids:
             args.extend(["--tenant-id", str(tenant_id)])
+
+        if mode is not None:
+            args.extend(["--mode", mode])
 
         stdout = self.scrubber_cli(
             args,
