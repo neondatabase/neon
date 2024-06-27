@@ -3,6 +3,10 @@ name: Build and Test Locally
 on:
   workflow_call:
     inputs:
+      arch:
+        description: 'x64 or arm64'
+        required: true
+        type: string
       build-tag:
         description: 'build tag'
         required: true
@@ -28,7 +32,7 @@ env:
 
 jobs:
   build-neon:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
@@ -236,8 +240,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
+    # Run test on x64 only
+    if: inputs.arch == 'x64'
     needs: [ build-neon ]
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:

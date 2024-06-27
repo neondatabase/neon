@@ -125,7 +125,11 @@ jobs:
 
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    strategy:
+      matrix:
+        arch: [ x64, arm64 ]
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -198,10 +202,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        arch: [ x64 ]
         build-type: [ debug, release ]
-
+        include:
+          - build-type: release
+            arch: arm64
     uses: ./.github/workflows/_build-and-test-locally.yml
     with:
+      arch: ${{ matrix.arch }}
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
