@@ -1515,6 +1515,9 @@ class AbstractNeonCli(abc.ABC):
         env_vars = os.environ.copy()
         env_vars["NEON_REPO_DIR"] = str(self.env.repo_dir)
         env_vars["POSTGRES_DISTRIB_DIR"] = str(self.env.pg_distrib_dir)
+        env_vars["LD_LIBRARY_PATH"] = str(
+            self.env.pg_distrib_dir / self.env.pg_version.v_prefixed / "lib"
+        )
         if self.env.rust_log_override is not None:
             env_vars["RUST_LOG"] = self.env.rust_log_override
         for extra_env_key, extra_env_value in (extra_env_vars or {}).items():
