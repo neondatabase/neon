@@ -129,8 +129,6 @@ pub struct LsnParseError;
 impl Lsn {
     /// Maximum possible value for an LSN
     pub const MAX: Lsn = Lsn(u64::MAX);
-    /// Minimum possible value for an LSN
-    pub const MIN: Lsn = Lsn(u64::MIN);
 
     /// Invalid value for InvalidXLogRecPtr, as defined in xlogdefs.h
     pub const INVALID: Lsn = Lsn(0);
