@@ -586,26 +586,6 @@ impl VirtualFile {
         Ok(self.pos)
     }
 
-    /// Read `buf.bytes_total()` bytes into buf, starting at offset `offset`.
-    ///
-    /// The returned slice is guaranteed to be the same view into the underlying `Buf` as the input argument `buf`.
-    pub async fn read_exact_at<Buf, B>(
-        &self,
-        buf: B,
-        offset: u64,
-        ctx: &RequestContext,
-    ) -> Result<tokio_epoll_uring::Slice<Buf>, Error>
-    where
-        Buf: IoBufMut + Send,
-        B: BoundedBufMut<BufMut = Buf>,
-    {
-        let (buf, res) = read_exact_at_impl(buf, offset, None, |buf, offset| {
-            self.read_at(buf, offset, ctx)
-        })
-        .await;
-        res.map(|()| buf)
-    }
-
     /// Read `count` bytes into `buf`, starting at offset `offset`.
     ///
     /// The returned `B` is the same `buf` that was passed in.
