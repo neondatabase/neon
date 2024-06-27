@@ -887,7 +887,9 @@ async fn tenant_list_handler(
             state: state.clone(),
             current_physical_size: None,
             attachment_status: state.attachment_status(),
-            generation: (*gen).into(),
+            generation: (*gen)
+                .into()
+                .expect("Tenants are always attached with a generation"),
         })
         .collect::<Vec<TenantInfo>>();
 
@@ -935,7 +937,10 @@ async fn tenant_status(
                 state: state.clone(),
                 current_physical_size: Some(current_physical_size),
                 attachment_status: state.attachment_status(),
-                generation: tenant.generation().into(),
+                generation: tenant
+                    .generation()
+                    .into()
+                    .expect("Tenants are always attached with a generation"),
             },
             walredo: tenant.wal_redo_manager_status(),
             timelines: tenant.list_timeline_ids(),
@@ -1651,6 +1656,14 @@ async fn timeline_compact_handler(
     }
     if Some(true) == parse_query_param::<_, bool>(&request, "force_image_layer_creation")? {
         flags |= CompactFlags::ForceImageLayerCreation;
+    }
+    if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
+        if !cfg!(feature = "testing") {
+            return Err(ApiError::InternalServerError(anyhow!(
+                "enhanced_gc_bottom_most_compaction is only available in testing mode"
+            )));
+        }
+        flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);

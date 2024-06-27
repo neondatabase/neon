@@ -1,4 +1,5 @@
 import filecmp
+import logging
 import os
 import random
 import shutil
@@ -1724,7 +1725,10 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
 
 # Basic pull_timeline test.
-def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
+# When live_sk_change is False, compute is restarted to change set of
+# safekeepers; otherwise it is live reload.
+@pytest.mark.parametrize("live_sk_change", [False, True])
+def test_pull_timeline(neon_env_builder: NeonEnvBuilder, live_sk_change: bool):
     neon_env_builder.auth_enabled = True
 
     def execute_payload(endpoint: Endpoint):
@@ -1757,8 +1761,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
     endpoint = env.endpoints.create("main")
-    endpoint.active_safekeepers = [1, 2, 3]
-    endpoint.start()
+    endpoint.start(safekeepers=[1, 2, 3])
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
@@ -1770,29 +1773,22 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
     log.info("Initialize new safekeeper 4, pull data from 1 & 3")
     env.safekeepers[3].start()
 
-    res = (
-        env.safekeepers[3]
-        .http_client(auth_token=env.auth_keys.generate_safekeeper_token())
-        .pull_timeline(
-            {
-                "tenant_id": str(tenant_id),
-                "timeline_id": str(timeline_id),
-                "http_hosts": [
-                    f"http://localhost:{env.safekeepers[0].port.http}",
-                    f"http://localhost:{env.safekeepers[2].port.http}",
-                ],
-            }
-        )
+    res = env.safekeepers[3].pull_timeline(
+        [env.safekeepers[0], env.safekeepers[2]], tenant_id, timeline_id
     )
     log.info("Finished pulling timeline")
     log.info(res)
 
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
-    log.info("Restarting compute with new config to verify that it works")
-    endpoint.stop_and_destroy().create("main")
-    endpoint.active_safekeepers = [1, 3, 4]
-    endpoint.start()
+    action = "reconfiguing" if live_sk_change else "restarting"
+    log.info(f"{action} compute with new config to verify that it works")
+    new_sks = [1, 3, 4]
+    if not live_sk_change:
+        endpoint.stop_and_destroy().create("main")
+        endpoint.start(safekeepers=new_sks)
+    else:
+        endpoint.reconfigure(safekeepers=new_sks)
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
@@ -2178,3 +2174,102 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
 
     do_something()
     do_something()
+
+
+# Test creates 5 endpoints and tries to wake them up randomly. All timeouts are
+# configured to be very short, so that we expect that:
+# - pageserver will update remote_consistent_lsn very often
+# - safekeepers will upload partial WAL segments very often
+# - safekeeper will try to evict and unevict timelines
+#
+# Test checks that there are no critical errors while doing this. Also it checks
+# that every safekeeper has at least one successful eviction.
+@pytest.mark.parametrize("delete_offloaded_wal", [False, True])
+@pytest.mark.parametrize("restart_chance", [0.0, 0.2])
+def test_s3_eviction(
+    neon_env_builder: NeonEnvBuilder, delete_offloaded_wal: bool, restart_chance: float
+):
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "checkpoint_timeout": "100ms",
+        }
+    )
+
+    extra_opts = [
+        "--enable-offload",
+        "--partial-backup-timeout",
+        "50ms",
+        "--control-file-save-interval",
+        "1s",
+    ]
+    if delete_offloaded_wal:
+        extra_opts.append("--delete-offloaded-wal")
+
+    for sk in env.safekeepers:
+        sk.stop().start(extra_opts=extra_opts)
+
+    n_timelines = 5
+
+    branch_names = [f"branch{tlin}" for tlin in range(n_timelines)]
+    timelines = []
+    ps_client = env.pageservers[0].http_client()
+
+    # start postgres on each timeline
+    endpoints: list[Endpoint] = []
+    for branch_name in branch_names:
+        timeline_id = env.neon_cli.create_branch(branch_name)
+        timelines.append(timeline_id)
+
+        endpoints.append(env.endpoints.create_start(branch_name))
+        endpoints[-1].safe_psql("CREATE TABLE t(i int)")
+        endpoints[-1].safe_psql("INSERT INTO t VALUES (0)")
+
+        lsn = endpoints[-1].safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
+        log.info(f"{branch_name}: LSN={lsn}")
+
+        endpoints[-1].stop()
+
+        # update remote_consistent_lsn on pageserver
+        ps_client.timeline_checkpoint(env.initial_tenant, timelines[-1], wait_until_uploaded=True)
+
+    check_values = [0] * n_timelines
+
+    n_iters = 20
+    for _ in range(n_iters):
+        if log.isEnabledFor(logging.DEBUG):
+            for j in range(n_timelines):
+                detail = ps_client.timeline_detail(env.initial_tenant, timelines[j])
+                log.debug(
+                    f'{branch_names[j]}: RCL={detail["remote_consistent_lsn"]}, LRL={detail["last_record_lsn"]}'
+                )
+
+        i = random.randint(0, n_timelines - 1)
+        log.info(f"Starting endpoint {i}")
+        endpoints[i].start()
+        check_values[i] += 1
+        res = endpoints[i].safe_psql("UPDATE t SET i = i + 1 RETURNING i")
+        assert res[0][0] == check_values[i]
+
+        lsn = endpoints[i].safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
+        log.info(f"{branch_names[i]}: LSN={lsn}")
+
+        endpoints[i].stop()
+
+        # update remote_consistent_lsn on pageserver
+        ps_client.timeline_checkpoint(env.initial_tenant, timelines[i], wait_until_uploaded=True)
+
+        # restarting random safekeepers
+        for sk in env.safekeepers:
+            if random.random() < restart_chance:
+                sk.stop().start(extra_opts=extra_opts)
+        time.sleep(0.5)
+
+    # require at least one successful eviction in at least one safekeeper
+    # TODO: require eviction in each safekeeper after https://github.com/neondatabase/neon/issues/8148 is fixed
+    assert any(
+        sk.log_contains("successfully evicted timeline")
+        and sk.log_contains("successfully restored evicted timeline")
+        for sk in env.safekeepers
+    )

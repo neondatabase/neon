@@ -323,7 +323,7 @@ impl ComputeHook {
             if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("Reconfiguring endpoint {}", endpoint_name,);
                 endpoint
-                    .reconfigure(compute_pageservers.clone(), *stripe_size)
+                    .reconfigure(compute_pageservers.clone(), *stripe_size, None)
                     .await
                     .map_err(NotifyError::NeonLocal)?;
             }
