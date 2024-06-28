@@ -23,6 +23,8 @@ use super::{
     storage_layer::LayerName,
 };
 
+use crate::metrics::SECONDARY_RESIDENT_PHYSICAL_SIZE;
+use metrics::UIntGauge;
 use pageserver_api::{
     models,
     shard::{ShardIdentity, TenantShardId},
@@ -99,6 +101,17 @@ pub(crate) struct SecondaryTenant {
 
     // Public state indicating overall progress of downloads relative to the last heatmap seen
     pub(crate) progress: std::sync::Mutex<models::SecondaryProgress>,
+
+    // Sum of layer sizes on local disk
+    pub(super) resident_size_metric: UIntGauge,
+}
+
+impl Drop for SecondaryTenant {
+    fn drop(&mut self) {
+        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
+        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+    }
 }
 
 impl SecondaryTenant {
@@ -108,6 +121,12 @@ impl SecondaryTenant {
         tenant_conf: TenantConfOpt,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", tenant_shard_id.shard_slug());
+        let resident_size_metric = SECONDARY_RESIDENT_PHYSICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id])
+            .unwrap();
+
         Arc::new(Self {
             tenant_shard_id,
             // todo: shall we make this a descendent of the
@@ -123,6 +142,8 @@ impl SecondaryTenant {
             detail: std::sync::Mutex::new(SecondaryDetail::new(config.clone())),
 
             progress: std::sync::Mutex::default(),
+
+            resident_size_metric,
         })
     }
 
