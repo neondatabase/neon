@@ -1,7 +1,7 @@
 from contextlib import closing
 
 import pytest
-from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonPageserver
+from fixtures.neon_fixtures import NeonEnv
 from psycopg2.errors import QueryCanceled
 
 """
@@ -49,13 +49,11 @@ def test_pageserver_breaks_while_running(neon_simple_env: NeonEnv):
             )
             with pytest.raises(QueryCanceled):
                 # definitely uncached relation
-                cur.execute( 
+                cur.execute(
                     """
                     SELECT count(*) FROM pg_rewrite;
                     """
                 )
 
     ep.stop()
-    ep.log_contains(
-        """could not complete handshake: PageServer returned error: """
-    )
+    ep.log_contains("""could not complete handshake: PageServer returned error: """)
