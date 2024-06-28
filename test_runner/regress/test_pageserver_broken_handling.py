@@ -1,7 +1,6 @@
 from contextlib import closing
 
 import pytest
-from fixtures.neon_fixtures import NeonEnv
 from psycopg2.errors import QueryCanceled
 
 """
@@ -9,7 +8,7 @@ Test that we can handle broken pageservers correctly
 """
 
 
-def test_pageserver_breaks_while_running(neon_simple_env: NeonEnv):
+def test_pageserver_breaks_while_running(neon_simple_env):
     env = neon_simple_env
     ps = env.pageserver
     ps_http = ps.http_client()
@@ -17,10 +16,12 @@ def test_pageserver_breaks_while_running(neon_simple_env: NeonEnv):
 
     (tid, tlid) = env.neon_cli.create_tenant()
     env.neon_cli.create_branch("test_config", tenant_id=tid)
+    env.pageserver.quiesce_tenants()
 
     # We don't want to have any racy behaviour with autovacuum IOs
     ep = env.endpoints.create_start(
         "test_config",
+        tenant_id=tid,
         config_lines=[
             "autovacuum = off",
             "shared_buffers = 128MB",
