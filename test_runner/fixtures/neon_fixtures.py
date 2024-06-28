@@ -1167,7 +1167,9 @@ class NeonEnv:
             if config.auth_enabled:
                 sk_cfg["auth_enabled"] = True
             if self.safekeepers_remote_storage is not None:
-                sk_cfg["remote_storage"] = self.safekeepers_remote_storage.to_toml_inline_table()
+                sk_cfg[
+                    "remote_storage"
+                ] = self.safekeepers_remote_storage.to_toml_inline_table().strip()
             self.safekeepers.append(Safekeeper(env=self, id=id, port=port))
             cfg["safekeepers"].append(sk_cfg)
 

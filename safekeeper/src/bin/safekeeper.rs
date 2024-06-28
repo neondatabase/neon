@@ -124,7 +124,7 @@ struct Args {
     peer_recovery: bool,
     /// Remote storage configuration for WAL backup (offloading to s3) as TOML
     /// inline table, e.g.
-    ///   {"max_concurrent_syncs" = 17, "max_sync_errors": 13, "bucket_name": "<BUCKETNAME>", "bucket_region":"<REGION>", "concurrency_limit": 119}
+    ///   {max_concurrent_syncs = 17, max_sync_errors = 13, bucket_name = "<BUCKETNAME>", bucket_region = "<REGION>", concurrency_limit = 119}
     /// Safekeeper offloads WAL to
     ///   [prefix_in_bucket/]<tenant_id>/<timeline_id>/<segment_file>, mirroring
     /// structure on the file system.
