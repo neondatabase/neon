@@ -643,6 +643,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		case PGRES_BAD_RESPONSE:
 		case PGRES_NONFATAL_ERROR:
 		case PGRES_FATAL_ERROR:
+			CLEANUP_AND_DISCONNECT(shard);
 			neon_shard_log(shard_no, elevel,
 						   "could not complete handshake: PageServer returned error: %s",
 						   PQresultErrorMessage(result));
