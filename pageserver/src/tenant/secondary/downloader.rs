@@ -716,6 +716,25 @@ impl<'a> TenantDownloader<'a> {
                 .await?;
         }
 
+        // Metrics consistency check in testing builds
+        if cfg!(feature = "testing") {
+            let detail = self.secondary_state.detail.lock().unwrap();
+            let resident_size = detail
+                .timelines
+                .values()
+                .map(|tl| {
+                    tl.on_disk_layers
+                        .values()
+                        .map(|v| v.metadata.file_size)
+                        .sum::<u64>()
+                })
+                .sum::<u64>();
+            assert_eq!(
+                resident_size,
+                self.secondary_state.resident_size_metric.get()
+            );
+        }
+
         // Only update last_etag after a full successful download: this way will not skip
         // the next download, even if the heatmap's actual etag is unchanged.
         self.secondary_state.detail.lock().unwrap().last_download = Some(DownloadSummary {
