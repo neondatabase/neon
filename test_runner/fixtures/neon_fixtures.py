@@ -2741,7 +2741,19 @@ class NeonPageserver(PgProtocol, LogUtils):
         if generation is None:
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         client = self.http_client(auth_token=auth_token)
-        return client.tenant_create(tenant_id, conf, generation=generation)
+
+        conf = conf or {}
+
+        client.tenant_location_conf(
+            tenant_id,
+            {
+                "mode": "AttachedSingle",
+                "generation": generation,
+                "tenant_conf": conf,
+                "secondary_conf": None,
+            },
+        )
+        return tenant_id
 
     def list_layers(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId

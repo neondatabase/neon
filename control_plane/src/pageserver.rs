@@ -17,8 +17,7 @@ use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
 use pageserver_api::models::{
-    self, AuxFilePolicy, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo,
-    TimelineInfo,
+    self, AuxFilePolicy, LocationConfig, TenantHistorySize, TenantInfo, TimelineInfo,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -395,28 +394,6 @@ impl PageServerNode {
         } else {
             Ok(result)
         }
-    }
-
-    pub async fn tenant_create(
-        &self,
-        new_tenant_id: TenantId,
-        generation: Option<u32>,
-        settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<TenantId> {
-        let config = Self::parse_config(settings.clone())?;
-
-        let request = models::TenantCreateRequest {
-            new_tenant_id: TenantShardId::unsharded(new_tenant_id),
-            generation,
-            config,
-            shard_parameters: ShardParameters::default(),
-            // Placement policy is not meaningful for creations not done via storage controller
-            placement_policy: None,
-        };
-        if !settings.is_empty() {
-            bail!("Unrecognized tenant settings: {settings:?}")
-        }
-        Ok(self.http_client.tenant_create(&request).await?)
     }
 
     pub async fn tenant_config(
