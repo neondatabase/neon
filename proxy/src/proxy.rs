@@ -10,6 +10,8 @@ pub mod wake_compute;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
 pub use copy_bidirectional::ErrorSource;
 
+use crate::intern::EndpointIdInt;
+use crate::EndpointCacheKeyExtra;
 use crate::{
     auth,
     cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
@@ -404,11 +406,19 @@ impl NeonOptions {
         Self(options)
     }
 
-    pub fn get_cache_key(&self, prefix: &str) -> EndpointCacheKey {
+    pub fn get_cache_key(&self, endpoint: EndpointIdInt) -> EndpointCacheKey {
+        EndpointCacheKey {
+            id: endpoint,
+            extra: self.get_cache_key_extras(),
+        }
+    }
+
+    pub fn get_cache_key_extras(&self) -> EndpointCacheKeyExtra {
         // prefix + format!(" {k}:{v}")
         // kinda jank because SmolStr is immutable
-        std::iter::once(prefix)
-            .chain(self.0.iter().flat_map(|(k, v)| [" ", &**k, ":", &**v]))
+        self.0
+            .iter()
+            .flat_map(|(k, v)| [" ", &**k, ":", &**v])
             .collect::<SmolStr>()
             .into()
     }
