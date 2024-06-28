@@ -232,16 +232,12 @@ impl SecondaryTenant {
             // have to 100% match what is on disk, because it's a best-effort warming
             // of the cache.
             let mut detail = this.detail.lock().unwrap();
-            if let Some(timeline_detail) = detail.timelines.get_mut(&timeline_id) {
-                let removed = timeline_detail.on_disk_layers.remove(&name);
-
-                // We might race with removal of the same layer during downloads, if it was removed
-                // from the heatmap.  If we see that the OnDiskState is gone, then no need to
-                // do a physical deletion or store in evicted_at.
-                if let Some(removed) = removed {
-                    removed.remove_blocking();
-                    timeline_detail.evicted_at.insert(name, now);
-                }
+            if let Some(removed) =
+                detail.evict_layer(name, &timeline_id, now, &this.resident_size_metric)
+            {
+                // We might race with removal of the same layer during downloads, so finding the layer we
+                // were trying to remove is optional.  Only issue the disk I/O to remove it if we found it.
+                removed.remove_blocking();
             }
         })
         .await
