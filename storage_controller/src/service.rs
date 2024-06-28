@@ -1390,7 +1390,7 @@ impl Service {
                             tenant_shard.generation.unwrap(),
                             &tenant_shard.shard,
                             &tenant_shard.config,
-                            false,
+                            &PlacementPolicy::Attached(0),
                         )),
                     },
                 )]);
@@ -3321,7 +3321,7 @@ impl Service {
                                 generation,
                                 &child_shard,
                                 &config,
-                                matches!(policy, PlacementPolicy::Attached(n) if n > 0),
+                                &policy,
                             )),
                         },
                     );
