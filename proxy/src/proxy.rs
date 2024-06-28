@@ -11,7 +11,6 @@ pub use copy_bidirectional::copy_bidirectional_client_compute;
 pub use copy_bidirectional::ErrorSource;
 
 use crate::intern::EndpointIdInt;
-use crate::EndpointCacheKeyExtra;
 use crate::{
     auth,
     cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
@@ -413,14 +412,13 @@ impl NeonOptions {
         }
     }
 
-    pub fn get_cache_key_extras(&self) -> EndpointCacheKeyExtra {
-        // prefix + format!(" {k}:{v}")
-        // kinda jank because SmolStr is immutable
-        self.0
-            .iter()
-            .flat_map(|(k, v)| [" ", &**k, ":", &**v])
-            .collect::<SmolStr>()
-            .into()
+    pub fn get_cache_key_extras(&self) -> Box<str> {
+        let mut extras = String::new();
+        for (k, v) in &self.0 {
+            use std::fmt::Write;
+            write!(&mut extras, " {k}:{v}").unwrap();
+        }
+        extras.into_boxed_str()
     }
 
     /// <https://swagger.io/docs/specification/serialization/> DeepObject format

@@ -157,12 +157,10 @@ smol_str_wrapper!(BranchId);
 // 90% of project strings are 23 characters or less.
 smol_str_wrapper!(ProjectId);
 
-// ket value neon_option fields
-smol_str_wrapper!(EndpointCacheKeyExtra);
 #[derive(PartialEq, Eq, Hash, Debug, Clone)]
 pub struct EndpointCacheKey {
     pub id: EndpointIdInt,
-    pub extra: EndpointCacheKeyExtra,
+    pub extra: Box<str>,
 }
 impl std::fmt::Display for EndpointCacheKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
