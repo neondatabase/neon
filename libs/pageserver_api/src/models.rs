@@ -25,7 +25,6 @@ use utils::{
     serde_system_time,
 };
 
-use crate::controller_api::PlacementPolicy;
 use crate::{
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
@@ -269,28 +268,6 @@ impl Default for ShardParameters {
             stripe_size: Self::DEFAULT_STRIPE_SIZE,
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct TenantCreateRequest {
-    pub new_tenant_id: TenantShardId,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
-
-    // If omitted, create a single shard with TenantShardId::unsharded()
-    #[serde(default)]
-    #[serde(skip_serializing_if = "ShardParameters::is_unsharded")]
-    pub shard_parameters: ShardParameters,
-
-    // This parameter is only meaningful in requests sent to the storage controller
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub placement_policy: Option<PlacementPolicy>,
-
-    #[serde(flatten)]
-    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
@@ -546,10 +523,6 @@ pub struct LocationConfig {
 pub struct LocationConfigListResponse {
     pub tenant_shards: Vec<(TenantShardId, Option<LocationConfig>)>,
 }
-
-#[derive(Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TenantCreateResponse(pub TenantId);
 
 #[derive(Serialize)]
 pub struct StatusResponse {
@@ -1507,18 +1480,6 @@ mod tests {
 
     #[test]
     fn test_reject_unknown_field() {
-        let id = TenantId::generate();
-        let create_request = json!({
-            "new_tenant_id": id.to_string(),
-            "unknown_field": "unknown_value".to_string(),
-        });
-        let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
-        );
-
         let id = TenantId::generate();
         let config_request = json!({
             "tenant_id": id.to_string(),

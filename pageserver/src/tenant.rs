@@ -215,8 +215,6 @@ pub(crate) enum SpawnMode {
     Eager,
     /// Lazy activation in the background, with the option to skip the queue if the need comes up
     Lazy,
-    /// Tenant has been created during the lifetime of this process
-    Create,
 }
 
 ///
@@ -814,9 +812,6 @@ impl Tenant {
                 };
 
                 let preload = match &mode {
-                    SpawnMode::Create => {
-                        None
-                    },
                     SpawnMode::Eager | SpawnMode::Lazy => {
                         let _preload_timer = TENANT.preload.start_timer();
                         let res = tenant_clone
@@ -838,11 +833,8 @@ impl Tenant {
 
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
                 let attached = {
-                    let _attach_timer = match mode {
-                        SpawnMode::Create => None,
-                        SpawnMode::Eager | SpawnMode::Lazy => Some(TENANT.attach.start_timer()),
-                    };
-                    tenant_clone.attach(preload, mode, &ctx).await
+                    let _attach_timer = Some(TENANT.attach.start_timer());
+                    tenant_clone.attach(preload, &ctx).await
                 };
 
                 match attached {
@@ -918,21 +910,14 @@ impl Tenant {
     async fn attach(
         self: &Arc<Tenant>,
         preload: Option<TenantPreload>,
-        mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
-        let preload = match (preload, mode) {
-            (Some(p), _) => p,
-            (None, SpawnMode::Create) => TenantPreload {
-                timelines: HashMap::new(),
-            },
-            (None, _) => {
-                anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
-            }
+        let Some(preload) = preload else {
+            anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
         };
 
         let mut timelines_to_resume_deletions = vec![];
@@ -3854,7 +3839,7 @@ pub(crate) mod harness {
             let preload = tenant
                 .preload(&self.remote_storage, CancellationToken::new())
                 .await?;
-            tenant.attach(Some(preload), SpawnMode::Eager, ctx).await?;
+            tenant.attach(Some(preload), ctx).await?;
 
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
