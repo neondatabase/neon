@@ -918,7 +918,7 @@ impl PageServerConf {
                 "http_auth_type" => builder.http_auth_type(parse_toml_from_str(key, item)?),
                 "pg_auth_type" => builder.pg_auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
-                    builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
+                    builder.remote_storage_config(Some(RemoteStorageConfig::from_toml(item).context("remote_storage")?))
                 }
                 "tenant_config" => {
                     t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
@@ -946,7 +946,7 @@ impl PageServerConf {
                     builder.metric_collection_endpoint(Some(endpoint));
                 },
                 "metric_collection_bucket" => {
-                    builder.metric_collection_bucket(RemoteStorageConfig::from_toml(item)?)
+                    builder.metric_collection_bucket(Some(RemoteStorageConfig::from_toml(item)?))
                 }
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
@@ -1679,6 +1679,19 @@ threshold = "20m"
             }
             other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
         }
+    }
+
+    #[test]
+    fn empty_remote_storage_is_error() {
+        let tempdir = tempdir().unwrap();
+        let (workdir, _) = prepare_fs(&tempdir).unwrap();
+        let input = r#"
+remote_storage = {}
+        "#;
+        let doc = toml_edit::Document::from_str(input).unwrap();
+        let err = PageServerConf::parse_and_validate(&doc, &workdir)
+            .expect_err("empty remote_storage field should fail, don't specify it if you want no remote_storage");
+        assert!(format!("{err}").contains("remote_storage"), "{err}");
     }
 
     fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {
