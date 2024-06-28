@@ -15,7 +15,8 @@ def test_pageserver_breaks_while_running(neon_simple_env: NeonEnv):
     ps_http = ps.http_client()
     ps_http.is_testing_enabled_or_skip()
 
-    env.neon_cli.create_branch("test_config", "empty")
+    (tid, tlid) = env.neon_cli.create_tenant()
+    env.neon_cli.create_branch("test_config", tenant_id=tid)
 
     # We don't want to have any racy behaviour with autovacuum IOs
     ep = env.endpoints.create_start(
@@ -37,7 +38,7 @@ def test_pageserver_breaks_while_running(neon_simple_env: NeonEnv):
                 """
             )
 
-    ps_http.tenant_detach(ep.tenant_id)
+    ps_http.tenant_detach(tid)
 
     # create a new connection to PS, this will cause errors.
     with closing(ep.connect()) as conn:
