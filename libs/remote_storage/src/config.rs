@@ -175,7 +175,7 @@ fn serialize_storage_class<S: serde::Serializer>(
 impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
 
-    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
+    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
         Ok(utils::toml_edit_ext::deserialize_item(toml)?)
     }
 }
@@ -184,7 +184,7 @@ impl RemoteStorageConfig {
 mod tests {
     use super::*;
 
-    fn parse(input: &str) -> anyhow::Result<Option<RemoteStorageConfig>> {
+    fn parse(input: &str) -> anyhow::Result<RemoteStorageConfig> {
         let toml = input.parse::<toml_edit::Document>().unwrap();
         RemoteStorageConfig::from_toml(toml.as_item())
     }
@@ -194,7 +194,7 @@ mod tests {
         let input = "local_path = '.'
 timeout = '5s'";
 
-        let config = parse(input).unwrap().expect("it exists");
+        let config = parse(input).unwrap();
 
         assert_eq!(
             config,
@@ -216,7 +216,7 @@ timeout = '5s'";
     timeout = '7s'
     ";
 
-        let config = parse(toml).unwrap().expect("it exists");
+        let config = parse(toml).unwrap();
 
         assert_eq!(
             config,
@@ -244,7 +244,7 @@ timeout = '5s'";
     timeout = '7s'
     ";
 
-        let config = parse(toml).unwrap().expect("it exists");
+        let config = parse(toml).unwrap();
 
         assert_eq!(
             config,
