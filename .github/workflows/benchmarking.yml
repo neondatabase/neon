@@ -58,68 +58,68 @@ env:
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
 jobs:
-  create-test-container:
-    runs-on: [ self-hosted, small ]
-    steps:
-      - uses: actions/checkout@v4
-      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
-      # The default value is ~/.docker
-      - name: Set custom docker config directory
-        run: |
-          mkdir -p .docker-custom
-          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+  # create-test-container:
+  #   runs-on: [ self-hosted, small ]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+  #     # The default value is ~/.docker
+  #     - name: Set custom docker config directory
+  #       run: |
+  #         mkdir -p .docker-custom
+  #         echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
 
-      - uses: docker/setup-buildx-action@v2
+  #     - uses: docker/setup-buildx-action@v2
 
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+  #     - uses: docker/login-action@v3
+  #       with:
+  #         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Download Neon artifact
-        uses: ./.github/actions/download
-        with:
-          name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-          path: /tmp/neon/
-          prefix: 95038653d5f0fe416fbd51ab3296c44b8bf90e36/9703932965/1
+  #     - name: Download Neon artifact
+  #       uses: ./.github/actions/download
+  #       with:
+  #         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
+  #         path: /tmp/neon/
+  #         prefix: 95038653d5f0fe416fbd51ab3296c44b8bf90e36/9703932965/1
 
-      - run: |
-          mv /tmp/neon ./neon
+  #     - run: |
+  #         mv /tmp/neon ./neon
 
-          cat <<'EOF' > .dockerignore
-            *
-            !neon/
-          EOF
+  #         cat <<'EOF' > .dockerignore
+  #           *
+  #           !neon/
+  #         EOF
 
-          cat <<'EOF' > Dockerfile
-            FROM neondatabase/build-tools:c6b377d375d8870e78a1ffb05ccdc14e101f4e7eb8841b275c23674fb66e088d
-            COPY neon /tmp/neon
+  #         cat <<'EOF' > Dockerfile
+  #           FROM neondatabase/build-tools:c6b377d375d8870e78a1ffb05ccdc14e101f4e7eb8841b275c23674fb66e088d
+  #           COPY neon /tmp/neon
 
-            ENV LD_LIBRARY_PATH=/tmp/neon/pg_install/v16/lib:$LD_LIBRARY_PATH
-            ENV PATH=/tmp/neon/pg_install/v16/bin:$PATH
-          EOF
+  #           ENV LD_LIBRARY_PATH=/tmp/neon/pg_install/v16/lib:$LD_LIBRARY_PATH
+  #           ENV PATH=/tmp/neon/pg_install/v16/bin:$PATH
+  #         EOF
 
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+  #     - uses: docker/login-action@v3
+  #       with:
+  #         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          provenance: false
-          push: true
-          pull: true
-          file: Dockerfile
-          tags: neondatabase/test:pr-8167
+  #     - uses: docker/build-push-action@v5
+  #       with:
+  #         context: .
+  #         provenance: false
+  #         push: true
+  #         pull: true
+  #         file: Dockerfile
+  #         tags: neondatabase/test:pr-8167
 
-      - name: Remove custom docker config directory
-        if: always()
-        run: |
-          rm -rf .docker-custom
+  #     - name: Remove custom docker config directory
+  #       if: always()
+  #       run: |
+  #         rm -rf .docker-custom
 
   pgbench-pgvector:
-    needs: create-test-container
+    # needs: create-test-container
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
       TEST_PG_BENCH_SCALES_MATRIX: "1"
@@ -130,7 +130,8 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: "neon-captest-pgvector"
 
-    runs-on: [ self-hosted, us-east-2, x64 ]
+    # runs-on: [ self-hosted, us-east-2, x64 ]
+    runs-on: [ self-hosted, small ]
     container:
       # The image has been uploaded to ECR manually:
       # docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:c6b377d375d8870e78a1ffb05ccdc14e101f4e7eb8841b275c23674fb66e088d \
