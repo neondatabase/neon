@@ -542,6 +542,13 @@ def test_sharding_split_smoke(
             for k, v in non_default_tenant_config.items():
                 assert config.effective_config[k] == v
 
+            # Check that heatmap uploads remain enabled after shard split
+            # (https://github.com/neondatabase/neon/issues/8189)
+            assert (
+                config.effective_config["heatmap_period"]
+                and config.effective_config["heatmap_period"] != "0s"
+            )
+
     # Validate pageserver state: expect every child shard to have an attached and secondary location
     (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
     assert sum(attached.values()) == split_shard_count
