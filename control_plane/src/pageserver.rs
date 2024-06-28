@@ -241,11 +241,13 @@ impl PageServerNode {
             background_process::InitialPidFile::Expect(self.pid_file()),
             retry_timeout,
             || async {
-                let st = self.check_status().await;
-                match st {
-                    Ok(()) => Ok(true),
-                    Err(mgmt_api::Error::ReceiveBody(_)) => Ok(false),
-                    Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
+                let res =
+                    tokio::time::timeout(Duration::from_secs(1), self.http_client.status()).await;
+                match res {
+                    Ok(Ok(_)) => Ok(true),
+                    Ok(Err(mgmt_api::Error::ReceiveBody(e))) if e.is_connect() => Ok(false),
+                    Ok(Err(e)) => anyhow::bail!(e),
+                    Err(_timeout) => Ok(false),
                 }
             },
         )
