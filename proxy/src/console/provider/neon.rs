@@ -359,7 +359,7 @@ impl super::Api for Api {
                     self.caches.node_info.insert_ttl(
                         key,
                         Err(Box::new(err.clone())),
-                        Duration::from_secs(10),
+                        Duration::from_secs(30),
                     );
 
                     Err(WakeComputeError::ApiError(ApiError::Console(err)))
