@@ -111,35 +111,6 @@ pub enum LsnKind {
     LeaseEnd,
 }
 
-#[derive(Debug, Copy, Clone, Hash, Default, PartialEq, Eq)]
-pub struct FakeTimelineId(u64);
-
-#[derive(Default, Debug)]
-pub struct FakeTimelineIdMap {
-    next_id: FakeTimelineId,
-    map: HashMap<FakeTimelineId, Option<TimelineId>>,
-}
-
-impl FakeTimelineIdMap {
-    pub fn new() -> Self {
-        Self {
-            next_id: FakeTimelineId(0),
-            ..Default::default()
-        }
-    }
-
-    pub fn insert(&mut self, timeline_id: Option<TimelineId>) -> FakeTimelineId {
-        let res = self.next_id;
-        self.map.insert(res, timeline_id);
-        self.next_id.0 += 1;
-        res
-    }
-
-    pub fn get(&self, fake_id: &FakeTimelineId) -> Option<Option<TimelineId>> {
-        self.map.get(fake_id).copied()
-    }
-}
-
 /// Collect all relevant LSNs to the inputs. These will only be helpful in the serialized form as
 /// part of [`ModelInputs`] from the HTTP api, explaining the inputs.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
