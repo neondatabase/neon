@@ -162,8 +162,15 @@ impl<K: Hash + Eq, V> TimedLru<K, V> {
     /// existed, return the previous value and its creation timestamp.
     #[tracing::instrument(level = "debug", fields(cache = self.name), skip_all)]
     fn insert_raw(&self, key: K, value: V) -> (Instant, Option<V>) {
+        self.insert_raw_ttl(key, value, self.ttl)
+    }
+
+    /// Insert an entry to the cache. If an entry with the same key already
+    /// existed, return the previous value and its creation timestamp.
+    #[tracing::instrument(level = "debug", fields(cache = self.name), skip_all)]
+    fn insert_raw_ttl(&self, key: K, value: V, ttl: Duration) -> (Instant, Option<V>) {
         let created_at = Instant::now();
-        let expires_at = created_at.checked_add(self.ttl).expect("time overflow");
+        let expires_at = created_at.checked_add(ttl).expect("time overflow");
 
         let entry = Entry {
             created_at,
@@ -190,6 +197,21 @@ impl<K: Hash + Eq, V> TimedLru<K, V> {
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
+    pub fn insert_ttl(&self, key: K, value: V, ttl: Duration) {
+        self.insert_raw_ttl(key, value, ttl);
+    }
+
+    pub fn insert_unit(&self, key: K, value: V) -> (Option<V>, Cached<&Self, ()>) {
+        let (created_at, old) = self.insert_raw(key.clone(), value);
+
+        let cached = Cached {
+            token: Some((self, LookupInfo { created_at, key })),
+            value: (),
+        };
+
+        (old, cached)
+    }
+
     pub fn insert(&self, key: K, value: V) -> (Option<V>, Cached<&Self>) {
         let (created_at, old) = self.insert_raw(key.clone(), value.clone());
 
