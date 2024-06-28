@@ -5,21 +5,21 @@ mod mitm;
 use std::time::Duration;
 
 use super::connect_compute::ConnectMechanism;
-use super::retry::ShouldRetry;
+use super::retry::CouldRetry;
 use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
 };
 use crate::config::{CertResolver, RetryConfig};
 use crate::console::caches::NodeInfoCache;
-use crate::console::messages::{ConsoleError, MetricsAuxInfo};
+use crate::console::messages::{ConsoleError, Details, MetricsAuxInfo, Status};
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
-use crate::proxy::retry::retry_after;
 use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
+use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
 use rustls::pki_types;
 use tokio_postgres::config::SslMode;
@@ -438,9 +438,14 @@ impl std::fmt::Display for TestConnectError {
 
 impl std::error::Error for TestConnectError {}
 
-impl ShouldRetry for TestConnectError {
+impl CouldRetry for TestConnectError {
     fn could_retry(&self) -> bool {
         self.retryable
+    }
+}
+impl ShouldRetryWakeCompute for TestConnectError {
+    fn should_retry_wake_compute(&self) -> bool {
+        true
     }
 }
 
@@ -485,7 +490,7 @@ impl TestBackend for TestConnectMechanism {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
                 let err = console::errors::ApiError::Console(ConsoleError {
-                    http_status_code: http::StatusCode::FORBIDDEN,
+                    http_status_code: http::StatusCode::BAD_REQUEST,
                     error: "TEST".into(),
                     status: None,
                 });
@@ -496,7 +501,15 @@ impl TestBackend for TestConnectMechanism {
                 let err = console::errors::ApiError::Console(ConsoleError {
                     http_status_code: http::StatusCode::BAD_REQUEST,
                     error: "TEST".into(),
-                    status: None,
+                    status: Some(Status {
+                        code: "error".into(),
+                        message: "error".into(),
+                        details: Details {
+                            error_info: None,
+                            retry_info: Some(console::messages::RetryInfo { retry_delay_ms: 1 }),
+                            user_facing_message: None,
+                        },
+                    }),
                 });
                 assert!(err.could_retry());
                 Err(console::errors::WakeComputeError::ApiError(err))

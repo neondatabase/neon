@@ -32,13 +32,11 @@ use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
-use pageserver_api::models::TenantState;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
 use pageserver_api::models::{
-    DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
-    TenantLocationConfigRequest,
+    DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantLocationConfigRequest,
 };
 use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
@@ -52,12 +50,10 @@ use utils::auth::JwtAuth;
 use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::prometheus_metrics_handler;
 use utils::http::endpoint::request_span;
-use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
-use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
@@ -80,13 +76,12 @@ use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
-use crate::tenant::SpawnMode;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
-    StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
-    TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
+    StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
+    TimelineInfo,
 };
 use utils::{
     auth::SwappableJwtAuth,
@@ -823,58 +818,6 @@ async fn get_timestamp_of_lsn_handler(
     }
 }
 
-async fn tenant_attach_handler(
-    mut request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
-    let maybe_body: Option<TenantAttachRequest> = json_request_or_empty_body(&mut request).await?;
-    let tenant_conf = match &maybe_body {
-        Some(request) => TenantConfOpt::try_from(&*request.config).map_err(ApiError::BadRequest)?,
-        None => TenantConfOpt::default(),
-    };
-
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
-    info!("Handling tenant attach {tenant_id}");
-
-    let state = get_state(&request);
-
-    let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
-
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-    let shard_params = ShardParameters::default();
-    let location_conf = LocationConf::attached_single(tenant_conf, generation, &shard_params);
-
-    let tenant = state
-        .tenant_manager
-        .upsert_location(tenant_shard_id, location_conf, None, SpawnMode::Eager, &ctx)
-        .await?;
-
-    let Some(tenant) = tenant else {
-        // This should never happen: indicates a bug in upsert_location
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "Upsert succeeded but didn't return tenant!"
-        )));
-    };
-
-    // We might have successfully constructed a Tenant, but it could still
-    // end up in a broken state:
-    if let TenantState::Broken {
-        reason,
-        backtrace: _,
-    } = tenant.current_state()
-    {
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "Tenant state is Broken: {reason}"
-        )));
-    }
-
-    json_response(StatusCode::ACCEPTED, ())
-}
-
 async fn timeline_delete_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -903,26 +846,6 @@ async fn timeline_delete_handler(
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
-}
-
-async fn tenant_detach_handler(
-    request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-    // This is a legacy API (`/location_conf` is the replacement).  It only supports unsharded tenants
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-
-    let state = get_state(&request);
-    let conf = state.conf;
-    state
-        .tenant_manager
-        .detach_tenant(conf, tenant_shard_id, &state.deletion_queue_client)
-        .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
-        .await?;
-
-    json_response(StatusCode::OK, ())
 }
 
 async fn tenant_reset_handler(
@@ -964,7 +887,9 @@ async fn tenant_list_handler(
             state: state.clone(),
             current_physical_size: None,
             attachment_status: state.attachment_status(),
-            generation: (*gen).into(),
+            generation: (*gen)
+                .into()
+                .expect("Tenants are always attached with a generation"),
         })
         .collect::<Vec<TenantInfo>>();
 
@@ -1012,7 +937,10 @@ async fn tenant_status(
                 state: state.clone(),
                 current_physical_size: Some(current_physical_size),
                 attachment_status: state.attachment_status(),
-                generation: tenant.generation().into(),
+                generation: tenant
+                    .generation()
+                    .into()
+                    .expect("Tenants are always attached with a generation"),
             },
             walredo: tenant.wal_redo_manager_status(),
             timelines: tenant.list_timeline_ids(),
@@ -1312,75 +1240,6 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
         .body(Body::from(data.as_bytes().to_vec()))
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
     Ok(response)
-}
-
-/// Helper for requests that may take a generation, which is mandatory
-/// when control_plane_api is set, but otherwise defaults to Generation::none()
-fn get_request_generation(state: &State, req_gen: Option<u32>) -> Result<Generation, ApiError> {
-    if state.conf.control_plane_api.is_some() {
-        req_gen
-            .map(Generation::new)
-            .ok_or(ApiError::BadRequest(anyhow!(
-                "generation attribute missing"
-            )))
-    } else {
-        // Legacy mode: all tenants operate with no generation
-        Ok(Generation::none())
-    }
-}
-
-async fn tenant_create_handler(
-    mut request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let request_data: TenantCreateRequest = json_request(&mut request).await?;
-    let target_tenant_id = request_data.new_tenant_id;
-    check_permission(&request, None)?;
-
-    let _timer = STORAGE_TIME_GLOBAL
-        .get_metric_with_label_values(&[StorageTimeOperation::CreateTenant.into()])
-        .expect("bug")
-        .start_timer();
-
-    let tenant_conf =
-        TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
-
-    let state = get_state(&request);
-
-    let generation = get_request_generation(state, request_data.generation)?;
-
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
-    let location_conf =
-        LocationConf::attached_single(tenant_conf, generation, &request_data.shard_parameters);
-
-    let new_tenant = state
-        .tenant_manager
-        .upsert_location(
-            target_tenant_id,
-            location_conf,
-            None,
-            SpawnMode::Create,
-            &ctx,
-        )
-        .await?;
-
-    let Some(new_tenant) = new_tenant else {
-        // This should never happen: indicates a bug in upsert_location
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "Upsert succeeded but didn't return tenant!"
-        )));
-    };
-    // We created the tenant. Existing API semantics are that the tenant
-    // is Active when this function returns.
-    new_tenant
-        .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
-        .await?;
-
-    json_response(
-        StatusCode::CREATED,
-        TenantCreateResponse(new_tenant.tenant_shard_id().tenant_id),
-    )
 }
 
 async fn get_tenant_config_handler(
@@ -1731,6 +1590,14 @@ async fn timeline_compact_handler(
     }
     if Some(true) == parse_query_param::<_, bool>(&request, "force_image_layer_creation")? {
         flags |= CompactFlags::ForceImageLayerCreation;
+    }
+    if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
+        if !cfg!(feature = "testing") {
+            return Err(ApiError::InternalServerError(anyhow!(
+                "enhanced_gc_bottom_most_compaction is only available in testing mode"
+            )));
+        }
+        flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
@@ -2678,7 +2545,6 @@ pub fn make_router(
             api_handler(r, reload_auth_validation_keys_handler)
         })
         .get("/v1/tenant", |r| api_handler(r, tenant_list_handler))
-        .post("/v1/tenant", |r| api_handler(r, tenant_create_handler))
         .get("/v1/tenant/:tenant_shard_id", |r| {
             api_handler(r, tenant_status)
         })
@@ -2715,12 +2581,6 @@ pub fn make_router(
         })
         .post("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_create_handler)
-        })
-        .post("/v1/tenant/:tenant_id/attach", |r| {
-            api_handler(r, tenant_attach_handler)
-        })
-        .post("/v1/tenant/:tenant_id/detach", |r| {
-            api_handler(r, tenant_detach_handler)
         })
         .post("/v1/tenant/:tenant_shard_id/reset", |r| {
             api_handler(r, tenant_reset_handler)

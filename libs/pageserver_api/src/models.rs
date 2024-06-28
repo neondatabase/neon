@@ -25,7 +25,6 @@ use utils::{
     serde_system_time,
 };
 
-use crate::controller_api::PlacementPolicy;
 use crate::{
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
@@ -274,28 +273,6 @@ impl Default for ShardParameters {
             stripe_size: Self::DEFAULT_STRIPE_SIZE,
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct TenantCreateRequest {
-    pub new_tenant_id: TenantShardId,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
-
-    // If omitted, create a single shard with TenantShardId::unsharded()
-    #[serde(default)]
-    #[serde(skip_serializing_if = "ShardParameters::is_unsharded")]
-    pub shard_parameters: ShardParameters,
-
-    // This parameter is only meaningful in requests sent to the storage controller
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub placement_policy: Option<PlacementPolicy>,
-
-    #[serde(flatten)]
-    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
@@ -552,10 +529,6 @@ pub struct LocationConfigListResponse {
     pub tenant_shards: Vec<(TenantShardId, Option<LocationConfig>)>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TenantCreateResponse(pub TenantId);
-
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub id: NodeId,
@@ -612,31 +585,6 @@ impl TenantConfigRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TenantAttachRequest {
-    #[serde(default)]
-    pub config: TenantAttachConfig,
-    #[serde(default)]
-    pub generation: Option<u32>,
-}
-
-/// Newtype to enforce deny_unknown_fields on TenantConfig for
-/// its usage inside `TenantAttachRequest`.
-#[derive(Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct TenantAttachConfig {
-    #[serde(flatten)]
-    allowing_unknown_fields: TenantConfig,
-}
-
-impl std::ops::Deref for TenantAttachConfig {
-    type Target = TenantConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.allowing_unknown_fields
-    }
-}
-
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "slug", content = "data", rename_all = "snake_case")]
@@ -655,8 +603,7 @@ pub struct TenantInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
+    pub generation: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1483,7 +1430,7 @@ mod tests {
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -1493,7 +1440,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         let original_broken = TenantInfo {
@@ -1504,7 +1452,7 @@ mod tests {
             },
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
@@ -1518,7 +1466,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         assert_eq!(
@@ -1537,35 +1486,11 @@ mod tests {
     #[test]
     fn test_reject_unknown_field() {
         let id = TenantId::generate();
-        let create_request = json!({
-            "new_tenant_id": id.to_string(),
-            "unknown_field": "unknown_value".to_string(),
-        });
-        let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
-        );
-
-        let id = TenantId::generate();
         let config_request = json!({
             "tenant_id": id.to_string(),
             "unknown_field": "unknown_value".to_string(),
         });
         let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
-        );
-
-        let attach_request = json!({
-            "config": {
-                "unknown_field": "unknown_value".to_string(),
-            },
-        });
-        let err = serde_json::from_value::<TenantAttachRequest>(attach_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
             "expect unknown field `unknown_field` error, got: {}",
