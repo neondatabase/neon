@@ -159,7 +159,7 @@ pub mod defaults {
 
 #ephemeral_bytes_per_memory_kb = {DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB}
 
-[remote_storage]
+#[remote_storage]
 
 "#
     );
