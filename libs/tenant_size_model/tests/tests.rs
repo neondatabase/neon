@@ -93,6 +93,14 @@ impl ScenarioBuilder {
         let storage_model = StorageModel {
             segments: self.segments.clone(),
         };
+
+        let segs = storage_model
+            .segments
+            .iter()
+            .enumerate()
+            .collect::<Vec<_>>();
+        eprintln!("segs before: {:#?}", segs);
+
         let size_result = storage_model.calculate();
         (storage_model, size_result)
     }
@@ -158,6 +166,212 @@ fn scenario_2() {
     let (_model, result) = scenario.calculate(1000);
 
     assert_eq!(result.total_size, 5000 + 1000 + 1000);
+}
+
+// Main branch only. Some updates on it.
+#[test]
+fn scenario_ro_branch() {
+    const MB: u64 = 1;
+    const GB: u64 = 1_000;
+    const TB: u64 = 1_000_000;
+
+    // Create main branch
+    let mut scenario = ScenarioBuilder::new("main");
+
+    scenario.modify_branch("main", 4 * TB, 600 * GB as i64);
+
+    // Branch
+    scenario.branch("main", "child");
+    scenario.modify_branch("child", 0, 0);
+    scenario.modify_branch("child", 0, 0);
+
+    // 1TB snapshot at GC cutoff
+    scenario.modify_branch("main", 2 * TB, 400 * GB as i64);
+
+    scenario.modify_branch("main", 1 * MB, 0);
+
+    let (_model, result) = scenario.calculate(2 * TB + 1 * MB);
+
+    let segs = _model
+        .segments
+        .iter()
+        .zip(result.segments)
+        .enumerate()
+        .collect::<Vec<_>>();
+    eprintln!("segs size result: {:#?}", segs);
+    assert_eq!(result.total_size, 1 * TB + 1 * MB + 600 * GB);
+}
+
+#[test]
+fn scenario_handcraft_lease_before_gc() {
+    const MB: u64 = 1;
+    const GB: u64 = 1_000;
+    const TB: u64 = 1_000_000;
+
+    let mut segs = Vec::new();
+    let mut lsn = 0;
+    let mut size = Some(0);
+    let needed = false;
+    {
+        let main_start = Segment {
+            parent: None,
+            lsn,
+            size,
+            needed,
+        };
+        segs.push(main_start);
+    }
+    {
+        lsn += 4 * TB;
+        size = size.map(|n| n + 600 * GB);
+        let branchpoint = Segment {
+            parent: Some(0),
+            lsn,
+            size,
+            needed,
+        };
+        segs.push(branchpoint);
+    }
+    {
+        let child_start = Segment {
+            parent: Some(1),
+            lsn,
+            size,
+            needed,
+        };
+
+        segs.push(child_start);
+
+        let child_end = Segment {
+            parent: Some(2),
+            lsn,
+            size,
+            needed: true,
+        };
+
+        segs.push(child_end);
+    }
+    {
+        lsn += 3 * MB;
+        size = size.map(|n| n + 100 * GB);
+        let gc_cutoff = Segment {
+            parent: Some(1),
+            lsn,
+            size,
+            needed,
+        };
+
+        segs.push(gc_cutoff);
+    }
+    {
+        lsn += 1 * MB;
+        let main_end = Segment {
+            parent: Some(4),
+            lsn,
+            size,
+            needed: true,
+        };
+        segs.push(main_end);
+    }
+
+    let model = StorageModel {
+        segments: segs.clone(),
+    };
+    let res = model.calculate();
+    println!("total: {}", res.total_size);
+    let seg_res = segs
+        .iter()
+        .zip(res.segments)
+        .enumerate()
+        .collect::<Vec<_>>();
+    println!("seg_results: {:#?}", seg_res);
+    assert!(false);
+}
+
+#[test]
+fn scenario_handcraft_lease_after_gc() {
+    const MB: u64 = 1;
+    const GB: u64 = 1_000;
+    const TB: u64 = 1_000_000;
+
+    let mut segs = Vec::new();
+    let mut lsn = 0;
+    let mut size = Some(0);
+    let needed = false;
+    {
+        let main_start = Segment {
+            parent: None,
+            lsn,
+            size,
+            needed,
+        };
+        segs.push(main_start);
+    }
+    {
+        lsn += 4 * TB + 3 * MB;
+        size = Some(700 * GB);
+        let gc_cutoff = Segment {
+            parent: Some(0),
+            lsn,
+            size,
+            needed,
+        };
+
+        segs.push(gc_cutoff);
+    }
+    {
+        lsn += 1 * MB;
+        let branchpoint = Segment {
+            parent: Some(1),
+            lsn,
+            size,
+            needed: true,
+        };
+        segs.push(branchpoint);
+    }
+    {
+        let child_start = Segment {
+            parent: Some(2),
+            lsn,
+            size,
+            needed,
+        };
+
+        segs.push(child_start);
+
+        let child_end = Segment {
+            parent: Some(3),
+            lsn,
+            size,
+            needed: true,
+        };
+
+        segs.push(child_end);
+    }
+
+    {
+        lsn += 1 * MB;
+        let main_end = Segment {
+            parent: Some(2),
+            lsn,
+            size,
+            needed: true,
+        };
+        segs.push(main_end);
+    }
+
+    let model = StorageModel {
+        segments: segs.clone(),
+    };
+    let res = model.calculate();
+    println!("total: {}", res.total_size);
+    let seg_res = segs
+        .iter()
+        .zip(res.segments)
+        .enumerate()
+        .collect::<Vec<_>>();
+    println!("seg_results: {:#?}", seg_res);
+    assert!(false);
 }
 
 // Like 2, but more updates on main

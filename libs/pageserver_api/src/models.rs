@@ -229,6 +229,11 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LsnLeaseRequest {
+    pub lsn: Lsn,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TenantShardSplitRequest {
     pub new_shard_count: u8,
