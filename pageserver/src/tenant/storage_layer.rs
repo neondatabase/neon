@@ -457,6 +457,22 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum LayerVisibility {
+    /// A Visible layer might be read while serving a read, because there is not an image layer between it
+    /// and a readable LSN (the tip of the branch or a child's branch point)
+    Visible,
+    /// A Covered layer probably won't be read right now, but _can_ be read in future if someone creates
+    /// a branch or ephemeral endpoint at an LSN below the layer that covers this.
+    Covered,
+}
+
+impl Default for LayerVisibility {
+    fn default() -> Self {
+        Self::Visible
+    }
+}
+
 #[derive(Debug)]
 pub struct LayerAccessStats(Mutex<LayerAccessStatsLocked>);
 
@@ -468,6 +484,7 @@ pub struct LayerAccessStats(Mutex<LayerAccessStatsLocked>);
 struct LayerAccessStatsLocked {
     for_scraping_api: LayerAccessStatsInner,
     for_eviction_policy: LayerAccessStatsInner,
+    visibility: LayerVisibility,
 }
 
 impl LayerAccessStatsLocked {
