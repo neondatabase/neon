@@ -347,6 +347,50 @@ impl Timeline {
         Ok(())
     }
 
+    /// A post-compaction step to update the LayerVisibility of layers covered by image layers.  This
+    /// should also be called when new branches are created.
+    ///
+    /// Sweep through the layer map, identifying layers which are covered by image layers
+    /// such that they do not need to be available to service reads. The resulting LayerVisibility
+    /// result may be used as an input to eviction and secondary downloads to de-prioritize layers
+    /// that we know won't be needed for reads.
+    pub(super) async fn update_layer_visibility(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<(), CompactionError> {
+        // Start with a keyspace representing all the keys we need to read from the tip of the branch
+        let head_lsn = self.get_last_record_lsn();
+        let (mut head_keyspace, sparse_ks) = self.collect_keyspace(head_lsn, ctx).await?;
+
+        // Converting the sparse part of the keyspace into the dense keyspace is safe in this context
+        // because we will never iterate through the keys.
+        head_keyspace.merge(&sparse_ks.0);
+
+        // Option 1: O(N) but pretty fast: walk through layers in reverse LSN order, subtracting
+        // image layers from the `dense_ks` as we go, and marking layers as visible if they overlap
+        // with `dense_ks`
+
+        // Option 2: Use image_coverage() to find all the image layers that we need, and systematically
+        // mark layers as Visible if they're not covered by those images, and Covered if they are.
+        // TODO: figure out if this is actually any more efficient than option 1, given that we are going
+        // to walk through all the layers anyway, and checking if something is covered has a comparable
+        // cost to checking if it overlaps with a "shadow" keyspace that we maintain as we go.
+
+        // We will sweep through layers in reverse-LSN order.  We only do historic layers.  L0 deltas
+        // are implicitly visible, because LayerVisibility's default is Visible, and we never modify it here.
+        let layer_manager = self.layers.read().await;
+        let layer_map = layer_manager.layer_map();
+
+        let layer_visibility = layer_map.get_visibility(vec![(head_lsn, head_keyspace)]);
+        for (layer_desc, visibility) in layer_visibility {
+            // FIXME: a more efficiency bulk zip() through the layers rather than NlogN getting each one
+            let layer = layer_manager.get_from_desc(&layer_desc);
+            layer.access_stats().set_visibility(visibility);
+        }
+
+        Ok(())
+    }
+
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
     /// as Level 1 files.
     async fn compact_level0(
