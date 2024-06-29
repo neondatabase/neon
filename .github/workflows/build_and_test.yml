@@ -214,6 +214,9 @@ jobs:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
+      SCCACHE_BUCKET: neon-github-dev
+      SCCACHE_REGION: eu-central-1
+      SCCACHE_S3_KEY_PREFIX: sccache
 
     steps:
       - name: Fix git ownership
