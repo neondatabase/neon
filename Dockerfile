@@ -35,8 +35,8 @@ ARG RUSTC_WRAPPER=sccache
 ARG SCCACHE_REGION=eu-central-1
 ARG SCCACHE_S3_KEY_PREFIX=sccache
 ARG SCCACHE_BUCKET=neon-github-dev
-#ARG AWS_ACCESS_KEY_ID
-#ARG AWS_SECRET_ACCESS_KEY
+ARG AWS_ACCESS_KEY_ID
+ARG AWS_SECRET_ACCESS_KEY
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
