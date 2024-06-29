@@ -1817,6 +1817,10 @@ impl Timeline {
             self.compact_shard_ancestors(rewrite_max, ctx).await?;
         }
 
+        // TODO: be more selective: call this once at startup, and thereafter only when some branching changes or
+        // when image layer are generated.
+        self.update_layer_visibility(ctx).await?;
+
         Ok(())
     }
 

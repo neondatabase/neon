@@ -51,7 +51,7 @@ use crate::keyspace::KeyPartitioning;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use anyhow::Result;
-use pageserver_api::keyspace::KeySpaceAccum;
+use pageserver_api::keyspace::{KeySpace, KeySpaceAccum, KeySpaceRandomAccum};
 use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
@@ -61,7 +61,7 @@ use utils::lsn::Lsn;
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::LayerKey;
 
-use super::storage_layer::PersistentLayerDesc;
+use super::storage_layer::{LayerVisibility, PersistentLayerDesc};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -869,6 +869,164 @@ impl LayerMap {
         }
         println!("End dump LayerMap");
         Ok(())
+    }
+
+    /// `read_points` represent the tip of a timeline and any branch points, i.e. the places
+    /// where we expect to serve reads.
+    ///
+    /// This function is O(N) and should be called infrequently.  The caller is responsible for
+    /// looking up and updating the Layer objects for these layer descriptors.
+    pub(crate) fn get_visibility(
+        &self,
+        mut read_points: Vec<(Lsn, KeySpace)>,
+    ) -> (Vec<(Arc<PersistentLayerDesc>, LayerVisibility)>, KeySpace) {
+        // This is like a KeySpace, but written for efficient subtraction of layers and unions with KeySpaces
+        struct KeyShadow {
+            // FIXME: consider efficiency.  KeySpace is a flat vector, so in principle fairly inefficient for
+            // repeatedly calling contains(), BUT as we iterate through the layermap we expect the shadow to shrink
+            // to something quite small, and for small collections an algorithmically expensive vector is often better
+            // for performance than a more algorithmically cheap data structure.
+            inner: KeySpace,
+        }
+
+        impl KeyShadow {
+            fn new(keyspace: KeySpace) -> Self {
+                Self { inner: keyspace }
+            }
+
+            fn contains(&self, range: Range<Key>) -> bool {
+                self.inner.overlaps(&range)
+            }
+
+            /// Return true if anything was removed.
+            fn subtract(&mut self, range: Range<Key>) -> bool {
+                let removed = self.inner.remove_overlapping_with(&KeySpace {
+                    ranges: vec![range],
+                });
+                !removed.ranges.is_empty()
+            }
+
+            fn union_with(&mut self, keyspace: KeySpace) {
+                let mut accum = KeySpaceRandomAccum::new();
+                let prev = std::mem::take(&mut self.inner);
+                accum.add_keyspace(prev);
+                accum.add_keyspace(keyspace);
+                self.inner = accum.to_keyspace();
+            }
+        }
+
+        // The 'shadow' will be updated as we sweep through the layers: an image layer subtracts from the shadow,
+        // and a ReadPoint
+        read_points.sort_by_key(|rp| rp.0);
+        let mut shadow = KeyShadow::new(
+            read_points
+                .pop()
+                .expect("Every timeline has at least one read point")
+                .1,
+        );
+
+        // We will interleave all our read points and layers into a sorted collection
+        enum Item {
+            ReadPoint { lsn: Lsn, keyspace: KeySpace },
+            Layer(Arc<PersistentLayerDesc>),
+        }
+
+        let mut items = Vec::with_capacity(self.historic.len() + read_points.len());
+        items.extend(self.iter_historic_layers().map(Item::Layer));
+        items.extend(read_points.into_iter().map(|rp| Item::ReadPoint {
+            lsn: rp.0,
+            keyspace: rp.1,
+        }));
+
+        // Ordering: we want to iterate like this:
+        // 1. Highest LSNs first
+        // 2. Consider ReadPoints before image layers if they're at the same LSN
+        items.sort_by_key(|item| {
+            std::cmp::Reverse(match item {
+                Item::ReadPoint {
+                    lsn,
+                    keyspace: _keyspace,
+                } => (*lsn, 0),
+                Item::Layer(layer) => {
+                    if layer.is_delta() {
+                        (layer.get_lsn_range().end, 1)
+                    } else {
+                        (layer.image_layer_lsn(), 2)
+                    }
+                }
+            })
+        });
+
+        let mut results = Vec::with_capacity(self.historic.len());
+
+        // TODO: handle delta layers properly with multiple read points: if a read point intersects a delta layer, we might already
+        // have encountered it and marked it as not-visible.  We need to keep track of which delta layers we are currently within, and
+        // when we encounter a ReadPoint, update the delta layer's visibility as needed.
+        // let mut pending_delta : Vec= ...
+        let mut maybe_covered_deltas: Vec<Arc<PersistentLayerDesc>> = Vec::new();
+
+        for item in items {
+            let (reached_lsn, is_readpoint) = match &item {
+                Item::ReadPoint {
+                    lsn,
+                    keyspace: _keyspace,
+                } => (lsn, true),
+                Item::Layer(layer) => (&layer.lsn_range.start, false),
+            };
+            maybe_covered_deltas.retain(|d| {
+                if *reached_lsn >= d.lsn_range.start && is_readpoint {
+                    // We encountered a readpoint within the delta layer: it is visible
+                    results.push((d.clone(), LayerVisibility::Visible));
+                    false
+                } else if *reached_lsn < d.lsn_range.start {
+                    // We passed the layer's range without encountering a read point: it is not visible
+                    results.push((d.clone(), LayerVisibility::Covered));
+                    false
+                } else {
+                    // We're still in the delta layer: continue iterating
+                    true
+                }
+            });
+
+            match item {
+                Item::ReadPoint {
+                    lsn: _lsn,
+                    keyspace,
+                } => {
+                    shadow.union_with(keyspace);
+                }
+                Item::Layer(layer) => {
+                    let visibility = if layer.is_delta() {
+                        if shadow.contains(layer.get_key_range()) {
+                            LayerVisibility::Visible
+                        } else {
+                            // If a layer isn't visible based on current state, we must defer deciding whether
+                            // it is truly not visible until we have advanced past the delta's range: we might
+                            // encounter another branch point within this delta layer's LSN range.
+                            maybe_covered_deltas.push(layer);
+                            continue;
+                        }
+                    } else if shadow.subtract(layer.get_key_range()) {
+                        // An image layer, which overlapped with the shadow
+                        LayerVisibility::Visible
+                    } else {
+                        // An image layer, which did not overlap with the shadow
+                        LayerVisibility::Covered
+                    };
+
+                    results.push((layer, visibility));
+                }
+            }
+        }
+
+        // Drain any remaining maybe_covered deltas
+        results.extend(
+            maybe_covered_deltas
+                .into_iter()
+                .map(|d| (d, LayerVisibility::Covered)),
+        );
+
+        (results, shadow.inner)
     }
 }
 

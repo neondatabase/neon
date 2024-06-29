@@ -700,6 +700,10 @@ impl LayerAccessStats {
             },
         }
     }
+
+    pub(crate) fn set_visibility(&self, visibility: LayerVisibility) {
+        self.0.lock().unwrap().visibility = visibility;
+    }
 }
 
 /// Get a layer descriptor from a layer.

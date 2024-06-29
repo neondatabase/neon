@@ -500,6 +500,15 @@ static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static VISIBLE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_visible_physical_size",
+        "The size of the layer files present in the pageserver's filesystem.",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) static RESIDENT_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
         "pageserver_resident_physical_size_global",
@@ -2130,6 +2139,7 @@ pub(crate) struct TimelineMetrics {
     pub archival_size: UIntGauge,
     pub standby_horizon_gauge: IntGauge,
     pub resident_physical_size_gauge: UIntGauge,
+    pub visible_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub aux_file_size_gauge: IntGauge,
@@ -2216,6 +2226,9 @@ impl TimelineMetrics {
         let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
+        let visible_physical_size_gauge = VISIBLE_PHYSICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
         // TODO: we shouldn't expose this metric
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
@@ -2266,6 +2279,7 @@ impl TimelineMetrics {
             archival_size,
             standby_horizon_gauge,
             resident_physical_size_gauge,
+            visible_physical_size_gauge,
             current_logical_size_gauge,
             aux_file_size_gauge,
             directory_entries_count_gauge,
@@ -2317,6 +2331,7 @@ impl TimelineMetrics {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
             let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
+        let _ = VISIBLE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         if let Some(metric) = Lazy::get(&DIRECTORY_ENTRIES_COUNT) {
             let _ = metric.remove_label_values(&[tenant_id, shard_id, timeline_id]);

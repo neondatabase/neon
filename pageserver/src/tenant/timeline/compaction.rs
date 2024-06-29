@@ -26,7 +26,7 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
-use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
+use crate::tenant::storage_layer::{AsLayerDesc, LayerVisibility, PersistentLayerDesc};
 use crate::tenant::timeline::{drop_rlock, Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
@@ -343,6 +343,88 @@ impl Timeline {
         self.remote_client.wait_completion().await?;
 
         fail::fail_point!("compact-shard-ancestors-persistent");
+
+        Ok(())
+    }
+
+    /// A post-compaction step to update the LayerVisibility of layers covered by image layers.  This
+    /// should also be called when new branches are created.
+    ///
+    /// Sweep through the layer map, identifying layers which are covered by image layers
+    /// such that they do not need to be available to service reads. The resulting LayerVisibility
+    /// result may be used as an input to eviction and secondary downloads to de-prioritize layers
+    /// that we know won't be needed for reads.
+    pub(super) async fn update_layer_visibility(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<(), CompactionError> {
+        // Start with a keyspace representing all the keys we need to read from the tip of the branch
+        let head_lsn = self.get_last_record_lsn();
+        let (mut head_keyspace, sparse_ks) = self.collect_keyspace(head_lsn, ctx).await?;
+
+        // Converting the sparse part of the keyspace into the dense keyspace is safe in this context
+        // because we will never iterate through the keys.
+        head_keyspace.merge(&sparse_ks.0);
+
+        // We will sweep through layers in reverse-LSN order.  We only do historic layers.  L0 deltas
+        // are implicitly visible, because LayerVisibility's default is Visible, and we never modify it here.
+        let layer_manager = self.layers.read().await;
+        let layer_map = layer_manager.layer_map();
+
+        let mut visible_size: u64 = 0;
+
+        // FIXME: we only get accurate keyspaces from children if they've already run update_layer_visibility themselves.  At startup all the timelines
+        // initialize this in arbitrary order (at the end of initial_logical_size_calculation).  We should coordinate these.  Perhaps at the very start
+        // of the tenant compaction task we should do all the timelines' layer visibility calculations in a leaf-first order?
+        let readable_points = {
+            let children = self.gc_info.read().unwrap().retain_lsns.clone();
+
+            let mut readable_points = Vec::with_capacity(children.len() + 1);
+            for (child_lsn, _child_timeline_id, child_keyspace) in &children {
+                let keyspace = match child_keyspace {
+                    Some(ks) => ks.clone(),
+                    None => {
+                        // The child has not posted information about which parts of the keyspace they depend on: presume they depend on all of it.
+                        let (mut keyspace, sparse_keyspace) =
+                            self.collect_keyspace(*child_lsn, ctx).await?;
+                        keyspace.merge(&sparse_keyspace.0);
+                        keyspace
+                    }
+                };
+                readable_points.push((*child_lsn, keyspace));
+            }
+            readable_points.push((head_lsn, head_keyspace));
+            readable_points
+        };
+
+        let (layer_visibility, shadow) = layer_map.get_visibility(readable_points);
+        for (layer_desc, visibility) in layer_visibility {
+            // FIXME: a more efficiency bulk zip() through the layers rather than NlogN getting each one
+            let layer = layer_manager.get_from_desc(&layer_desc);
+            if matches!(visibility, LayerVisibility::Visible) {
+                visible_size += layer.metadata().file_size;
+            }
+
+            layer.access_stats().set_visibility(visibility);
+        }
+
+        if let Some(ancestor) = &self.ancestor_timeline {
+            // Having calculated the readable keyspace after walking back through all this timeline's layers, the resulting keyspace is the remaining
+            // keys for which reads may still fall through to the parent branch.  Notify the parent branch of this, so that they may GC layers which
+            // do not overlap with this keyspace, and so that they may use this as an input to their own visibility updates.
+            ancestor
+                .gc_info
+                .write()
+                .unwrap()
+                .notify_child_keyspace(self.timeline_id, shadow);
+        }
+
+        // Also include in the visible size all the layers which we would never update visibility on
+        // TODO: getter that doesn't spuriously construct a Vec<>
+        for layer in layer_map.get_level0_deltas().unwrap() {
+            visible_size += layer.file_size;
+        }
+        self.metrics.visible_physical_size_gauge.set(visible_size);
 
         Ok(())
     }
