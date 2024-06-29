@@ -131,7 +131,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
+use super::{config::TenantConf, storage_layer::LayerVisibility};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -3125,14 +3125,20 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
-        let resident = guard.likely_resident_layers().map(|layer| {
+        let resident = guard.likely_resident_layers().filter_map(|layer| {
+            // TODO: avoid taking the same access_stats lock twice.  Perhaps now is a good time
+            // to make access_stats an atomic u64 rather than a mutex.
             let last_activity_ts = layer.access_stats().latest_activity_or_now();
+            let visibility = layer.access_stats().get_visibility();
 
-            HeatMapLayer::new(
-                layer.layer_desc().layer_name(),
-                layer.metadata(),
-                last_activity_ts,
-            )
+            match visibility {
+                LayerVisibility::Covered => None,
+                LayerVisibility::Visible => Some(HeatMapLayer::new(
+                    layer.layer_desc().layer_name(),
+                    layer.metadata(),
+                    last_activity_ts,
+                )),
+            }
         });
 
         let layers = resident.collect();
