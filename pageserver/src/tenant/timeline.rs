@@ -135,7 +135,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
+use super::{config::TenantConf, storage_layer::LayerVisibility};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -3170,7 +3170,8 @@ impl Timeline {
     }
 
     /// The timeline heatmap is a hint to secondary locations from the primary location,
-    /// indicating which layers are currently on-disk on the primary.
+    /// indicating which layers should be downloaded on the secondary to give it a warm
+    /// cache, that will enable it to take over as the attached location without degrading performance.
     ///
     /// None is returned if the Timeline is in a state where uploading a heatmap
     /// doesn't make sense, such as shutting down or initializing.  The caller
@@ -3183,19 +3184,32 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
-        let resident = guard.likely_resident_layers().map(|layer| {
-            let last_activity_ts = layer.access_stats().latest_activity_or_now();
+        let mut resident_visible_layers = Vec::new();
+        let now = SystemTime::now();
+        for layer in guard.likely_resident_layers() {
+            let (atime, visibility) = layer.access_stats().atime_visibility();
 
-            HeatMapLayer::new(
-                layer.layer_desc().layer_name(),
-                layer.metadata(),
-                last_activity_ts,
-            )
-        });
+            match visibility {
+                LayerVisibility::Uninitialized => {
+                    // Refuse to generate a heatmap at all until layer visibilty is initialized
+                    return None;
+                }
+                LayerVisibility::Covered => {
+                    // This layer is covered: exclude it from the heatmap because a secondary
+                    // node is highly unlikely to need this layer in the event that it takes over as attached
+                }
+                LayerVisibility::Visible => resident_visible_layers.push(HeatMapLayer::new(
+                    layer.layer_desc().layer_name(),
+                    layer.metadata(),
+                    atime.unwrap_or(now),
+                )),
+            }
+        }
 
-        let layers = resident.collect();
-
-        Some(HeatMapTimeline::new(self.timeline_id, layers))
+        Some(HeatMapTimeline::new(
+            self.timeline_id,
+            resident_visible_layers,
+        ))
     }
 
     /// Returns true if the given lsn is or was an ancestor branchpoint.

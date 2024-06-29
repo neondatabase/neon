@@ -704,6 +704,24 @@ impl LayerAccessStats {
     pub(crate) fn set_visibility(&self, visibility: LayerVisibility) {
         self.0.lock().unwrap().visibility = visibility;
     }
+
+    pub(crate) fn get_visibility(&self) -> LayerVisibility {
+        self.0.lock().unwrap().visibility.clone()
+    }
+
+    /// Summarize how likely this layer is to be used: its access time (if accessed), and its visibility hint.
+    pub(crate) fn atime_visibility(&self) -> (Option<SystemTime>, LayerVisibility) {
+        let state = self.0.lock().unwrap();
+
+        (
+            state
+                .for_eviction_policy
+                .last_accesses
+                .recent()
+                .map(|a| a.when),
+            state.visibility.clone(),
+        )
+    }
 }
 
 /// Get a layer descriptor from a layer.
