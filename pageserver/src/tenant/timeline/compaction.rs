@@ -29,7 +29,9 @@ use crate::page_cache;
 use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
-use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc, ValueReconstructState};
+use crate::tenant::storage_layer::{
+    AsLayerDesc, LayerVisibilityHint, PersistentLayerDesc, ValueReconstructState,
+};
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{Layer, ResidentLayer};
@@ -429,6 +431,53 @@ impl Timeline {
         fail::fail_point!("compact-shard-ancestors-persistent");
 
         Ok(())
+    }
+
+    /// A post-compaction step to update the LayerVisibilityHint of layers covered by image layers.  This
+    /// should also be called when new branches are created.
+    ///
+    /// Sweep through the layer map, identifying layers which are covered by image layers
+    /// such that they do not need to be available to service reads. The resulting LayerVisibilityHint
+    /// result may be used as an input to eviction and secondary downloads to de-prioritize layers
+    /// that we know won't be needed for reads.
+    pub(super) async fn update_layer_visibility(&self) {
+        let head_lsn = self.get_last_record_lsn();
+
+        // We will sweep through layers in reverse-LSN order.  We only do historic layers.  L0 deltas
+        // are implicitly left visible, because LayerVisibilityHint's default is Visible, and we never modify it here.
+        // Note that L0 deltas _can_ be covered by image layers, but we consider them 'visible' because we anticipate that
+        // they will be subject to L0->L1 compaction in the near future.
+        let layer_manager = self.layers.read().await;
+        let layer_map = layer_manager.layer_map();
+
+        let readable_points = {
+            let children = self.gc_info.read().unwrap().retain_lsns.clone();
+
+            let mut readable_points = Vec::with_capacity(children.len() + 1);
+            for (child_lsn, _child_timeline_id) in &children {
+                readable_points.push(*child_lsn);
+            }
+            readable_points.push(head_lsn);
+            readable_points
+        };
+
+        let mut visible_size = 0;
+        let (layer_visibility, covered) = layer_map.get_visibility(readable_points);
+        for (layer_desc, visibility) in layer_visibility {
+            // FIXME: a more efficiency bulk zip() through the layers rather than NlogN getting each one
+            let layer = layer_manager.get_from_desc(&layer_desc);
+            if matches!(visibility, LayerVisibilityHint::Visible) {
+                visible_size += layer.metadata().file_size;
+            }
+
+            layer.access_stats().set_visibility(visibility);
+        }
+
+        // TODO: publish our covered KeySpace to our parent, so that when they update their visibility, they can
+        // avoid assuming that everything at a branch point is visible.
+        drop(covered);
+
+        self.metrics.visible_physical_size_gauge.set(visible_size);
     }
 
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as

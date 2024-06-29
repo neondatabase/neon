@@ -1808,9 +1808,11 @@ impl Timeline {
         }
 
         match self.get_compaction_algorithm_settings().kind {
-            CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
-            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
+            CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await?,
+            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await?,
         }
+
+        Ok(())
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
@@ -2727,6 +2729,9 @@ impl Timeline {
         self.remote_client.schedule_barrier()?;
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
+
+        // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
+        self.update_layer_visibility().await;
 
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
@@ -4686,6 +4691,9 @@ impl Timeline {
         guard.track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
         timer.stop_and_record();
+
+        // Creating image layers may have caused some previously visible layers to be covered
+        self.update_layer_visibility().await;
 
         Ok(image_layers)
     }
