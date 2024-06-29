@@ -457,6 +457,26 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum LayerVisibility {
+    /// A Visible layer might be read while serving a read, because there is not an image layer between it
+    /// and a readable LSN (the tip of the branch or a child's branch point)
+    Visible,
+    /// A Covered layer probably won't be read right now, but _can_ be read in future if someone creates
+    /// a branch or ephemeral endpoint at an LSN below the layer that covers this.
+    Covered,
+    /// Calculating layer visibilty requires I/O, so until this has happened layers are loaded
+    /// in this state.  Note that newly written layers may be called Visible immediately, this uninitialized
+    /// state is for when existing layers are constructed while loading a timeline.
+    Uninitialized,
+}
+
+impl Default for LayerVisibility {
+    fn default() -> Self {
+        Self::Uninitialized
+    }
+}
+
 #[derive(Debug)]
 pub struct LayerAccessStats(Mutex<LayerAccessStatsLocked>);
 
@@ -468,6 +488,7 @@ pub struct LayerAccessStats(Mutex<LayerAccessStatsLocked>);
 struct LayerAccessStatsLocked {
     for_scraping_api: LayerAccessStatsInner,
     for_eviction_policy: LayerAccessStatsInner,
+    visibility: LayerVisibility,
 }
 
 impl LayerAccessStatsLocked {
@@ -591,7 +612,13 @@ impl LayerAccessStats {
             inner.count_by_access_kind[access_kind] += 1;
             inner.task_kind_flag |= ctx.task_kind();
             inner.last_accesses.write(this_access);
-        })
+        });
+
+        // We may access a layer marked as Covered, if a new branch was created that depends on
+        // this layer, and background updates to layer visibility didn't notice it yet
+        if !matches!(locked.visibility, LayerVisibility::Visible) {
+            locked.visibility = LayerVisibility::Visible;
+        }
     }
 
     fn as_api_model(
