@@ -250,6 +250,8 @@ impl Layer {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
+            // Newly created layers are marked visible by default: the usual case is that they were created to be read.
+            access_stats.set_visibility(super::LayerVisibilityHint::Visible);
 
             let local_path = local_layer_path(
                 conf,
