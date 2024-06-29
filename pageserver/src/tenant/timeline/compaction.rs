@@ -26,7 +26,7 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
-use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
+use crate::tenant::storage_layer::{AsLayerDesc, LayerVisibility, PersistentLayerDesc};
 use crate::tenant::timeline::{drop_rlock, Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
@@ -381,12 +381,25 @@ impl Timeline {
         let layer_manager = self.layers.read().await;
         let layer_map = layer_manager.layer_map();
 
+        let mut visible_size: u64 = 0;
+
         let layer_visibility = layer_map.get_visibility(vec![(head_lsn, head_keyspace)]);
         for (layer_desc, visibility) in layer_visibility {
             // FIXME: a more efficiency bulk zip() through the layers rather than NlogN getting each one
             let layer = layer_manager.get_from_desc(&layer_desc);
+            if matches!(visibility, LayerVisibility::Visible) {
+                visible_size += layer.metadata().file_size;
+            }
+
             layer.access_stats().set_visibility(visibility);
         }
+
+        // Also include in the visible size all the layers which we would never update visibility on
+        // TODO: getter that doesn't spuriously construct a Vec<>
+        for layer in layer_map.get_level0_deltas().unwrap() {
+            visible_size += layer.file_size;
+        }
+        self.metrics.visible_physical_size_gauge.set(visible_size);
 
         Ok(())
     }
