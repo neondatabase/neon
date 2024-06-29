@@ -31,7 +31,7 @@ ARG BUILD_TAG
 
 # Enable https://github.com/mozilla/sccache to cache Rust crates' compilation results in Docker builds.
 # Set up sccache to use an AWS S3 bucket for cache results, to reuse it between `docker build` invocations.
-ARG RUSTC_WRAPPER=sccache
+ARG RUSTC_WRAPPER
 ARG SCCACHE_REGION=eu-central-1
 ARG SCCACHE_S3_KEY_PREFIX=sccache
 ARG SCCACHE_BUCKET=neon-github-dev

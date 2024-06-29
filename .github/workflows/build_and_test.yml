@@ -758,6 +758,7 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            RUSTC_WRAPPER=sccache
             AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_DEV }}
             AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_KEY_DEV }}
           provenance: false
