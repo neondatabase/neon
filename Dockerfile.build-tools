@@ -193,6 +193,8 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 ENV RUSTC_WRAPPER=sccache
+# Let sscache to fall back to local filesystem if S3 is misconfigured, not failing the build
+ENV SCCACHE_IGNORE_SERVER_IO_ERROR=1
 
 # Show versions
 RUN whoami \
