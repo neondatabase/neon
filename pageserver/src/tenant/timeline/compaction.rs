@@ -19,7 +19,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::keyspace::ShardedRange;
-use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
 use utils::id::TimelineId;
@@ -100,7 +100,7 @@ impl Timeline {
         // Define partitioning schema if needed
 
         // FIXME: the match should only cover repartitioning, not the next steps
-        let partition_count = match self
+        match self
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
@@ -140,7 +140,6 @@ impl Timeline {
                     .await?;
 
                 self.upload_new_image_layers(image_layers)?;
-                partitioning.parts.len()
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -152,18 +151,8 @@ impl Timeline {
                 if !self.cancel.is_cancelled() {
                     tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
-                1
             }
         };
-
-        if self.shard_identity.count >= ShardCount::new(2) {
-            // Limit the number of layer rewrites to the number of partitions: this means its
-            // runtime should be comparable to a full round of image layer creations, rather than
-            // being potentially much longer.
-            let rewrite_max = partition_count;
-
-            self.compact_shard_ancestors(rewrite_max, ctx).await?;
-        }
 
         Ok(())
     }
@@ -176,7 +165,7 @@ impl Timeline {
     ///
     /// Note: this phase may read and write many gigabytes of data: use rewrite_max to bound
     /// how much work it will try to do in each compaction pass.
-    async fn compact_shard_ancestors(
+    pub(super) async fn compact_shard_ancestors(
         self: &Arc<Self>,
         rewrite_max: usize,
         ctx: &RequestContext,

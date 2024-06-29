@@ -30,7 +30,7 @@ use pageserver_api::{
         InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
     },
     reltag::BlockNumber,
-    shard::{ShardIdentity, ShardNumber, TenantShardId},
+    shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId},
 };
 use rand::Rng;
 use serde_with::serde_as;
@@ -1802,9 +1802,22 @@ impl Timeline {
         }
 
         match self.get_compaction_algorithm_settings().kind {
-            CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
-            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
+            CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await?,
+            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await?,
         }
+
+        if self.shard_identity.count >= ShardCount::new(2) {
+            // Limit the number of layer rewrites to the number of partitions: this means its
+            // runtime should be comparable to a full round of image layer creations, rather than
+            // being potentially much longer.
+            // TODO: make `partitioning` a sync lock: see comment in `repartition()` for why there's no
+            // real async use.
+            let rewrite_max = self.partitioning.try_lock().unwrap().0 .0.parts.len();
+
+            self.compact_shard_ancestors(rewrite_max, ctx).await?;
+        }
+
+        Ok(())
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
