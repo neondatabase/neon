@@ -2737,6 +2737,10 @@ impl Timeline {
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
 
+        // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
+        drop(guard); // drop write lock, update_layer_visibility will take a read lock.
+        self.update_layer_visibility().await;
+
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
@@ -4695,6 +4699,9 @@ impl Timeline {
         guard.track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
         timer.stop_and_record();
+
+        // Creating image layers may have caused some previously visible layers to be covered
+        self.update_layer_visibility().await;
 
         Ok(image_layers)
     }

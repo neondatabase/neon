@@ -51,7 +51,8 @@ use crate::keyspace::KeyPartitioning;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use anyhow::Result;
-use pageserver_api::keyspace::KeySpaceAccum;
+use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
+use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
 use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
@@ -61,7 +62,7 @@ use utils::lsn::Lsn;
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::LayerKey;
 
-use super::storage_layer::PersistentLayerDesc;
+use super::storage_layer::{LayerVisibilityHint, PersistentLayerDesc};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -870,6 +871,164 @@ impl LayerMap {
         }
         println!("End dump LayerMap");
         Ok(())
+    }
+
+    /// `read_points` represent the tip of a timeline and any branch points, i.e. the places
+    /// where we expect to serve reads.
+    ///
+    /// This function is O(N) and should be called infrequently.  The caller is responsible for
+    /// looking up and updating the Layer objects for these layer descriptors.
+    pub(crate) fn get_visibility(
+        &self,
+        mut read_points: Vec<Lsn>,
+    ) -> (
+        Vec<(Arc<PersistentLayerDesc>, LayerVisibilityHint)>,
+        KeySpace,
+    ) {
+        // This is like a KeySpace, but this type is intended for efficient unions with image layer ranges, whereas
+        // KeySpace is intended to be composed statically and iterated over.
+        struct KeyShadow {
+            // Map of range start to range end
+            inner: RangeSetBlaze<i128>,
+        }
+
+        impl KeyShadow {
+            fn new() -> Self {
+                Self {
+                    inner: Default::default(),
+                }
+            }
+
+            fn contains(&self, range: Range<Key>) -> bool {
+                let range_incl = range.start.to_i128()..=range.end.to_i128() - 1;
+                self.inner.is_superset(&RangeSetBlaze::from_sorted_disjoint(
+                    CheckSortedDisjoint::from([range_incl]),
+                ))
+            }
+
+            /// Add the input range to the keys covered by self.
+            ///
+            /// Return true if inserting this range covered some keys that were previously not covered
+            fn cover(&mut self, insert: Range<Key>) -> bool {
+                let range_incl = insert.start.to_i128()..=insert.end.to_i128() - 1;
+                self.inner.ranges_insert(range_incl)
+            }
+
+            fn reset(&mut self) {
+                self.inner = Default::default();
+            }
+
+            fn to_keyspace(&self) -> KeySpace {
+                let mut accum = KeySpaceAccum::new();
+                for range_incl in self.inner.ranges() {
+                    let range = Range {
+                        start: Key::from_i128(*range_incl.start()),
+                        end: Key::from_i128(range_incl.end() + 1),
+                    };
+                    accum.add_range(range)
+                }
+
+                accum.to_keyspace()
+            }
+        }
+
+        // The 'shadow' will be updated as we sweep through the layers: an image layer subtracts from the shadow,
+        // and a ReadPoint
+        read_points.sort_by_key(|rp| rp.0);
+        let mut shadow = KeyShadow::new();
+
+        // We will interleave all our read points and layers into a sorted collection
+        enum Item {
+            ReadPoint { lsn: Lsn },
+            Layer(Arc<PersistentLayerDesc>),
+        }
+
+        let mut items = Vec::with_capacity(self.historic.len() + read_points.len());
+        items.extend(self.iter_historic_layers().map(Item::Layer));
+        items.extend(
+            read_points
+                .into_iter()
+                .map(|rp| Item::ReadPoint { lsn: rp }),
+        );
+
+        // Ordering: we want to iterate like this:
+        // 1. Highest LSNs first
+        // 2. Consider ReadPoints before image layers if they're at the same LSN
+        items.sort_by_key(|item| {
+            std::cmp::Reverse(match item {
+                Item::ReadPoint { lsn } => (*lsn, 0),
+                Item::Layer(layer) => {
+                    if layer.is_delta() {
+                        (layer.get_lsn_range().end, 1)
+                    } else {
+                        (layer.image_layer_lsn(), 2)
+                    }
+                }
+            })
+        });
+
+        let mut results = Vec::with_capacity(self.historic.len());
+
+        let mut maybe_covered_deltas: Vec<Arc<PersistentLayerDesc>> = Vec::new();
+
+        for item in items {
+            let (reached_lsn, is_readpoint) = match &item {
+                Item::ReadPoint { lsn } => (lsn, true),
+                Item::Layer(layer) => (&layer.lsn_range.start, false),
+            };
+            maybe_covered_deltas.retain(|d| {
+                if *reached_lsn >= d.lsn_range.start && is_readpoint {
+                    // We encountered a readpoint within the delta layer: it is visible
+                    results.push((d.clone(), LayerVisibilityHint::Visible));
+                    false
+                } else if *reached_lsn < d.lsn_range.start {
+                    // We passed the layer's range without encountering a read point: it is not visible
+                    results.push((d.clone(), LayerVisibilityHint::Covered));
+                    false
+                } else {
+                    // We're still in the delta layer: continue iterating
+                    true
+                }
+            });
+
+            match item {
+                Item::ReadPoint { lsn: _lsn } => {
+                    // TODO: propagate the child timeline's shadow from their own run of this function, so that we don't have
+                    // to assume that the whole key range is visible at the branch point.
+                    shadow.reset();
+                }
+                Item::Layer(layer) => {
+                    let visibility = if layer.is_delta() {
+                        if shadow.contains(layer.get_key_range()) {
+                            LayerVisibilityHint::Visible
+                        } else {
+                            // If a layer isn't visible based on current state, we must defer deciding whether
+                            // it is truly not visible until we have advanced past the delta's range: we might
+                            // encounter another branch point within this delta layer's LSN range.
+                            maybe_covered_deltas.push(layer);
+                            continue;
+                        }
+                    } else if shadow.cover(layer.get_key_range()) {
+                        // An image layer in a region which wasn't fully covered yet: this layer is visible, but layers below it will be covered
+                        LayerVisibilityHint::Visible
+                    } else {
+                        // An image layer in a region that was already covered
+                        LayerVisibilityHint::Covered
+                    };
+
+                    results.push((layer, visibility));
+                }
+            }
+        }
+
+        // Drain any remaining maybe_covered deltas
+        results.extend(
+            maybe_covered_deltas
+                .into_iter()
+                .map(|d| (d, LayerVisibilityHint::Covered)),
+        );
+
+        (results, shadow.to_keyspace())
     }
 }
 
