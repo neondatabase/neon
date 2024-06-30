@@ -189,6 +189,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo install cargo-deny --locked && \
     cargo install cargo-hack && \
     cargo install cargo-nextest && \
+    cargo install cargo-chef --locked && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 ENV RUSTC_WRAPPER=sccache
