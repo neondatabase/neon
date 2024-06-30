@@ -56,7 +56,7 @@ RUN set -e \
       --bin proxy  \
       --bin neon_local \
       --locked --release \
-    && sccache -s
+    && sccache --show-stats
 
 # Build final image
 #

@@ -339,7 +339,8 @@ jobs:
       - name: Run cargo build
         run: |
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
-          sccache -s
+
+      - run: sccache --show-stats
 
       # Do install *before* running rust tests because they might recompile the
       # binaries with different features/flags.
@@ -408,6 +409,8 @@ jobs:
           export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
           export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
           ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_azure)'
+
+      - run: sccache --show-stats
 
       - name: Install postgres binaries
         run: cp -a pg_install /tmp/neon/pg_install
