@@ -133,6 +133,11 @@ jobs:
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
+    env:
+      SCCACHE_BUCKET: neon-github-dev
+      SCCACHE_REGION: eu-central-1
+      SCCACHE_S3_KEY_PREFIX: sccache
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -192,6 +197,8 @@ jobs:
       - name: Check rust licenses/bans/advisories/sources
         if: ${{ !cancelled() }}
         run: cargo deny check --hide-inclusion-graph
+
+      - run: sccache --show-stats
 
   build-neon:
     needs: [ check-permissions, tag, build-build-tools-image ]
