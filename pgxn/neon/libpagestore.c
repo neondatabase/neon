@@ -432,7 +432,11 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			neon_shard_log(shard_no, elevel, "Failed to connect to pageserver: out of memory");
 			return false;
 		}
-
+		if (PQstatus(shard->conn) == CONNECTION_BAD)
+		{
+			neon_shard_log(shard_no, elevel, "Failed to connect to pageserver: %s", PQerrorMessage(shard->conn));
+			return false;
+		}
 		shard->state = PS_Connecting_Startup;
 		/* fallthrough */
 	}
