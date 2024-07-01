@@ -488,7 +488,7 @@ impl PageServerConfigBuilder {
             )),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
-            l0_flush: Set(L0FlushConfig::PageCached),
+            l0_flush: Set(L0FlushConfig::default()),
         }
     }
 }
@@ -1103,7 +1103,7 @@ impl PageServerConf {
             ),
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
-            l0_flush: L0FlushConfig::PageCached,
+            l0_flush: L0FlushConfig::default(),
         }
     }
 }
@@ -1343,7 +1343,7 @@ background_task_maximum_delay = '334 s'
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
-                l0_flush: L0FlushConfig::PageCached,
+                l0_flush: L0FlushConfig::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1417,7 +1417,7 @@ background_task_maximum_delay = '334 s'
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
-                l0_flush: L0FlushConfig::PageCached,
+                l0_flush: L0FlushConfig::default(),
             },
             "Should be able to parse all basic config values correctly"
         );
