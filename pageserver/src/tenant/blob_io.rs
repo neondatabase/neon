@@ -169,6 +169,15 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         src_buf: Slice<Buf>,
         ctx: &RequestContext,
     ) -> (Slice<Buf>, Result<(), Error>) {
+        let begin_end = (src_buf.begin(), src_buf.end());
+
+        macro_rules! return_ {
+            ($buf:expr, $val:expr) => {{
+                let buf = $buf.into_inner();
+                return (buf.slice(begin_end.0..begin_end.1), $val);
+            }};
+        }
+
         if !BUFFERED {
             assert!(self.buf.is_empty());
             return self.write_all_unbuffered(src_buf, ctx).await;
@@ -176,7 +185,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         let remaining = Self::CAPACITY - self.buf.len();
         let src_buf_len = src_buf.bytes_init();
         if src_buf_len == 0 {
-            return (src_buf, Ok(()));
+            return_!(src_buf, Ok(()));
         }
         let mut src_buf = src_buf.slice(0..src_buf_len);
         // First try to copy as much as we can into the buffer
@@ -187,7 +196,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         // Then, if the buffer is full, flush it out
         if self.buf.len() == Self::CAPACITY {
             if let Err(e) = self.flush_buffer(ctx).await {
-                return (src_buf, Err(e));
+                return_!(src_buf, Err(e));
             }
         }
         // Finally, write the tail of src_buf:
@@ -204,14 +213,14 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             } else {
                 let (src_buf, res) = self.write_all_unbuffered(src_buf, ctx).await;
                 if let Err(e) = res {
-                    return (src_buf, Err(e));
+                    return_!(src_buf, Err(e));
                 }
                 src_buf
             }
         } else {
             src_buf
         };
-        (src_buf, Ok(()))
+        return_!(src_buf, Ok(()));
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
