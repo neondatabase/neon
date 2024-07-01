@@ -3491,7 +3491,6 @@ class Endpoint(PgProtocol, LogUtils):
     ):
         super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
         self.env = env
-        self.running = False
         self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
@@ -3857,7 +3856,9 @@ class EndpointFactory:
 
         return self
 
-    def new_replica(self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]]):
+    def new_replica(
+        self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]] = None
+    ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
         assert branch_name is not None
