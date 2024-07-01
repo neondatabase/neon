@@ -680,7 +680,7 @@ impl InMemoryLayer {
                 }
             }
             l0_flush::Inner::Direct { .. } => {
-                let file_contents: Vec<u8> = inner.file.load_into_contiguous_memory(ctx).await?;
+                let file_contents: Vec<u8> = inner.file.load_to_vec(ctx).await?;
                 assert_eq!(
                     file_contents.len() % PAGE_SZ,
                     0,
