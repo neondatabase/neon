@@ -1105,8 +1105,15 @@ impl Service {
             // We will populate intent properly later in [`Self::startup_reconcile`], initially populate
             // it with what we can infer: the node for which a generation was most recently issued.
             let mut intent = IntentState::new();
-            if let Some(generation_pageserver) = tsp.generation_pageserver {
-                intent.set_attached(&mut scheduler, Some(NodeId(generation_pageserver as u64)));
+            if let Some(generation_pageserver) = tsp.generation_pageserver.map(|n| NodeId(n as u64))
+            {
+                if nodes.contains_key(&generation_pageserver) {
+                    intent.set_attached(&mut scheduler, Some(generation_pageserver));
+                } else {
+                    // This should never happen: node decommissions shouldn't leave hanging references. Nevertheless, do not panic
+                    // as this is entirely recoverable: we will just reschedule the shard to some other node, which is safe.
+                    tracing::error!("Tenant shard {tenant_shard_id} references non-existent node {generation_pageserver} in database, will be rescheduled");
+                }
             }
             let new_tenant = TenantShard::from_persistent(tsp, intent)?;
 
