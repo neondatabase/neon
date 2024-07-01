@@ -369,10 +369,12 @@ impl ImageLayer {
 }
 
 impl ImageLayerInner {
+    #[cfg(test)]
     pub(crate) fn key_range(&self) -> &Range<Key> {
         &self.key_range
     }
 
+    #[cfg(test)]
     pub(crate) fn lsn(&self) -> Lsn {
         self.lsn
     }
@@ -697,10 +699,11 @@ impl ImageLayerInner {
         }
     }
 
-    pub(crate) fn iter<'a, 'ctx>(
-        &'a self,
-        ctx: &'ctx RequestContext,
-    ) -> ImageLayerIterator<'a, 'ctx> {
+    #[cfg(test)]
+    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
         ImageLayerIterator {
             image_layer: self,
             ctx,

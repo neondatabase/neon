@@ -9,32 +9,64 @@ use utils::lsn::Lsn;
 
 use crate::{context::RequestContext, repository::Value};
 
-use super::image_layer::{ImageLayerInner, ImageLayerIterator};
+use super::{
+    delta_layer::{DeltaLayerInner, DeltaLayerIterator},
+    image_layer::{ImageLayerInner, ImageLayerIterator},
+};
 
-struct ImageIteratorWrapper<'a, 'ctx> {
+#[derive(Clone, Copy)]
+enum LayerRef<'a> {
+    Image(&'a ImageLayerInner),
+    Delta(&'a DeltaLayerInner),
+}
+
+impl<'a> LayerRef<'a> {
+    fn iter(self, ctx: &'a RequestContext) -> LayerIterRef<'a> {
+        match self {
+            Self::Image(x) => LayerIterRef::Image(x.iter(ctx)),
+            Self::Delta(x) => LayerIterRef::Delta(x.iter(ctx)),
+        }
+    }
+}
+
+enum LayerIterRef<'a> {
+    Image(ImageLayerIterator<'a>),
+    Delta(DeltaLayerIterator<'a>),
+}
+
+impl LayerIterRef<'_> {
+    async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
+        match self {
+            Self::Delta(x) => x.next().await,
+            Self::Image(x) => x.next().await,
+        }
+    }
+}
+
+struct IteratorWrapper<'a> {
     /// The potential next key of the iterator. If the layer is not loaded yet, it will be the start key encoded in the layer file.
     /// Otherwise, it is the next key of the real iterator.
     peek_next_value: Option<(Key, Lsn, Value)>,
-    image_layer: &'a ImageLayerInner,
-    ctx: &'ctx RequestContext,
-    iter: Option<ImageLayerIterator<'a, 'ctx>>,
+    layer: LayerRef<'a>,
+    ctx: &'a RequestContext,
+    iter: Option<LayerIterRef<'a>>,
 }
 
-impl<'a, 'ctx> std::cmp::PartialEq for ImageIteratorWrapper<'a, 'ctx> {
+impl<'a> std::cmp::PartialEq for IteratorWrapper<'a> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
-impl<'a, 'ctx> std::cmp::Eq for ImageIteratorWrapper<'a, 'ctx> {}
+impl<'a> std::cmp::Eq for IteratorWrapper<'a> {}
 
-impl<'a, 'ctx> std::cmp::PartialOrd for ImageIteratorWrapper<'a, 'ctx> {
+impl<'a> std::cmp::PartialOrd for IteratorWrapper<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a, 'ctx> std::cmp::Ord for ImageIteratorWrapper<'a, 'ctx> {
+impl<'a> std::cmp::Ord for IteratorWrapper<'a> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         let a = self.peek_next_key_lsn();
@@ -54,15 +86,34 @@ impl<'a, 'ctx> std::cmp::Ord for ImageIteratorWrapper<'a, 'ctx> {
     }
 }
 
-impl<'a, 'ctx> ImageIteratorWrapper<'a, 'ctx> {
-    pub fn create(image_layer: &'a ImageLayerInner, ctx: &'ctx RequestContext) -> Self {
+impl<'a> IteratorWrapper<'a> {
+    pub fn create_from_image_layer(
+        image_layer: &'a ImageLayerInner,
+        ctx: &'a RequestContext,
+    ) -> Self {
         Self {
             peek_next_value: Some((
                 image_layer.key_range().start,
                 image_layer.lsn(),
                 Value::Image(Bytes::new()),
             )),
-            image_layer,
+            layer: LayerRef::Image(image_layer),
+            ctx,
+            iter: None,
+        }
+    }
+
+    pub fn create_from_delta_layer(
+        delta_layer: &'a DeltaLayerInner,
+        ctx: &'a RequestContext,
+    ) -> Self {
+        Self {
+            peek_next_value: Some((
+                delta_layer.key_range().start,
+                delta_layer.lsn_range().start,
+                Value::Image(Bytes::new()),
+            )),
+            layer: LayerRef::Delta(delta_layer),
             ctx,
             iter: None,
         }
@@ -77,7 +128,7 @@ impl<'a, 'ctx> ImageIteratorWrapper<'a, 'ctx> {
 
     async fn load(&mut self) -> anyhow::Result<()> {
         assert!(!self.is_loaded());
-        let mut iter = self.image_layer.iter(&self.ctx);
+        let mut iter = self.layer.iter(self.ctx);
         self.peek_next_value = iter.next().await?;
         self.iter = Some(iter);
         Ok(())
@@ -98,15 +149,22 @@ impl<'a, 'ctx> ImageIteratorWrapper<'a, 'ctx> {
     }
 }
 
-pub struct MergeIterator<'a, 'ctx> {
-    heap: BinaryHeap<ImageIteratorWrapper<'a, 'ctx>>,
+pub struct MergeIterator<'a> {
+    heap: BinaryHeap<IteratorWrapper<'a>>,
 }
 
-impl<'a, 'ctx> MergeIterator<'a, 'ctx> {
-    pub fn create(images: &'a [ImageLayerInner], ctx: &'ctx RequestContext) -> Self {
-        let mut heap = BinaryHeap::with_capacity(images.len());
+impl<'a> MergeIterator<'a> {
+    pub fn create(
+        deltas: &[&'a DeltaLayerInner],
+        images: &[&'a ImageLayerInner],
+        ctx: &'a RequestContext,
+    ) -> Self {
+        let mut heap = BinaryHeap::with_capacity(images.len() + deltas.len());
         for image in images {
-            heap.push(ImageIteratorWrapper::create(image, ctx));
+            heap.push(IteratorWrapper::create_from_image_layer(image, ctx));
+        }
+        for delta in deltas {
+            heap.push(IteratorWrapper::create_from_delta_layer(delta, ctx));
         }
         Self { heap }
     }
@@ -125,4 +183,119 @@ impl<'a, 'ctx> MergeIterator<'a, 'ctx> {
         }
         Ok(None)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use itertools::Itertools;
+    use pageserver_api::key::Key;
+    use utils::lsn::Lsn;
+
+    use crate::{
+        tenant::{
+            harness::{TenantHarness, TIMELINE_ID},
+            storage_layer::delta_layer::test::{produce_delta_layer, sort_delta},
+        },
+        DEFAULT_PG_VERSION,
+    };
+
+    async fn assert_merge_iter_equal(
+        merge_iter: &mut MergeIterator<'_>,
+        expect: &[(Key, Lsn, Value)],
+    ) {
+        let mut expect_iter = expect.iter();
+        loop {
+            let o1 = merge_iter.next().await.unwrap();
+            let o2 = expect_iter.next();
+            assert_eq!(o1.is_some(), o2.is_some());
+            if o1.is_none() && o2.is_none() {
+                break;
+            }
+            let (k1, l1, v1) = o1.unwrap();
+            let (k2, l2, v2) = o2.unwrap();
+            assert_eq!(&k1, k2);
+            assert_eq!(l1, *l2);
+            assert_eq!(&v1, v2);
+        }
+    }
+
+    #[tokio::test]
+    async fn delta_merge() {
+        use crate::repository::Value;
+        use bytes::Bytes;
+
+        let harness = TenantHarness::create("merge_iterator_delta_merge").unwrap();
+        let (tenant, ctx) = harness.load().await;
+
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        // TODO: is it possible to have duplicated delta at same LSN now? we might need to test that
+
+        fn get_key(id: u32) -> Key {
+            let mut key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+        const N: usize = 1000;
+        let test_deltas1 = (0..N)
+            .map(|idx| {
+                (
+                    get_key(idx as u32 / 10),
+                    Lsn(0x20 * ((idx as u64) % 10 + 1)),
+                    Value::Image(Bytes::from(format!("img{idx:05}"))),
+                )
+            })
+            .collect_vec();
+        let resident_layer_1 = produce_delta_layer(&tenant, &tline, test_deltas1.clone(), &ctx)
+            .await
+            .unwrap();
+        let test_deltas2 = (0..N)
+            .map(|idx| {
+                (
+                    get_key(idx as u32 / 10),
+                    Lsn(0x20 * ((idx as u64) % 10 + 1) + 0x10),
+                    Value::Image(Bytes::from(format!("img{idx:05}"))),
+                )
+            })
+            .collect_vec();
+        let resident_layer_2 = produce_delta_layer(&tenant, &tline, test_deltas2.clone(), &ctx)
+            .await
+            .unwrap();
+        let test_deltas3 = (0..N)
+            .map(|idx| {
+                (
+                    get_key(idx as u32 / 10 + N as u32),
+                    Lsn(0x10 * ((idx as u64) % 10 + 1)),
+                    Value::Image(Bytes::from(format!("img{idx:05}"))),
+                )
+            })
+            .collect_vec();
+        let resident_layer_3 = produce_delta_layer(&tenant, &tline, test_deltas3.clone(), &ctx)
+            .await
+            .unwrap();
+        let mut merge_iter = MergeIterator::create(
+            &[
+                resident_layer_1.get_as_delta(&ctx).await.unwrap(),
+                resident_layer_2.get_as_delta(&ctx).await.unwrap(),
+                resident_layer_3.get_as_delta(&ctx).await.unwrap(),
+            ],
+            &[],
+            &ctx,
+        );
+        let mut expect = Vec::new();
+        expect.extend(test_deltas1);
+        expect.extend(test_deltas2);
+        expect.extend(test_deltas3);
+        expect.sort_by(sort_delta);
+        assert_merge_iter_equal(&mut merge_iter, &expect).await;
+
+        // TODO: test layers are loaded only when needed, reducing num of active iterators in k-merge
+    }
+
+    // TODO: image layer merge, delta+image mixed merge
 }
