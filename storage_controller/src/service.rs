@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    ops::Deref,
     path::PathBuf,
     str::FromStr,
     sync::Arc,
@@ -122,6 +123,7 @@ enum TenantOperations {
 enum NodeOperations {
     Register,
     Configure,
+    Delete,
 }
 
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
@@ -842,9 +844,10 @@ impl Service {
         tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
         sequence=%result.sequence
     ))]
-    fn process_result(&self, result: ReconcileResult) {
+    fn process_result(&self, mut result: ReconcileResult) {
         let mut locked = self.inner.write().unwrap();
-        let Some(tenant) = locked.tenants.get_mut(&result.tenant_shard_id) else {
+        let (nodes, tenants, _scheduler) = locked.parts_mut();
+        let Some(tenant) = tenants.get_mut(&result.tenant_shard_id) else {
             // A reconciliation result might race with removing a tenant: drop results for
             // tenants that aren't in our map.
             return;
@@ -861,6 +864,13 @@ impl Service {
         // Let the TenantShard know it is idle.
         tenant.reconcile_complete(result.sequence);
 
+        // In case a node was deleted while this reconcile is in flight, filter it out of the update we will
+        // make to the tenant
+        result
+            .observed
+            .locations
+            .retain(|node_id, _loc| nodes.contains_key(node_id));
+
         match result.result {
             Ok(()) => {
                 for (node_id, loc) in &result.observed.locations {
@@ -870,6 +880,7 @@ impl Service {
                         tracing::info!("Setting observed location {} to None", node_id,)
                     }
                 }
+
                 tenant.observed = result.observed;
                 tenant.waiter.advance(result.sequence);
             }
@@ -1111,9 +1122,10 @@ impl Service {
                 if nodes.contains_key(&generation_pageserver) {
                     intent.set_attached(&mut scheduler, Some(generation_pageserver));
                 } else {
-                    // This should never happen: node decommissions shouldn't leave hanging references. Nevertheless, do not panic
-                    // as this is entirely recoverable: we will just reschedule the shard to some other node, which is safe.
-                    tracing::error!("Tenant shard {tenant_shard_id} references non-existent node {generation_pageserver} in database, will be rescheduled");
+                    // If a node was removed before being completely drained, it is legal for it to leave behind a `generation_pageserver` referring
+                    // to a non-existent node, because node deletion doesn't block on completing the reconciliations that will issue new generations
+                    // on different pageservers.
+                    tracing::warn!("Tenant shard {tenant_shard_id} references non-existent node {generation_pageserver} in database, will be rescheduled");
                 }
             }
             let new_tenant = TenantShard::from_persistent(tsp, intent)?;
@@ -4207,8 +4219,6 @@ impl Service {
     /// This is for debug/support only: we simply drop all state for a tenant, without
     /// detaching or deleting it on pageservers.  We do not try and re-schedule any
     /// tenants that were on this node.
-    ///
-    /// TODO: proper node deletion API that unhooks things more gracefully
     pub(crate) async fn node_drop(&self, node_id: NodeId) -> Result<(), ApiError> {
         self.persistence.delete_node(node_id).await?;
 
@@ -4216,6 +4226,7 @@ impl Service {
 
         for shard in locked.tenants.values_mut() {
             shard.deref_node(node_id);
+            shard.observed.locations.remove(&node_id);
         }
 
         let mut nodes = (*locked.nodes).clone();
@@ -4223,6 +4234,94 @@ impl Service {
         locked.nodes = Arc::new(nodes);
 
         locked.scheduler.node_remove(node_id);
+
+        Ok(())
+    }
+
+    /// If a node has any work on it, it will be rescheduled: this is "clean" in the sense
+    /// that we don't leave any bad state behind in the storage controller, but unclean
+    /// in the sense that we are not carefully draining the node.
+    pub(crate) async fn node_delete(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let _node_lock =
+            trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Delete).await;
+
+        // 1. Atomically update in-memory state:
+        //    - set the scheduling state to Pause to make subsequent scheduling ops skip it
+        //    - update shards' intents to exclude the node, and reschedule any shards whose intents we modified.
+        //    - drop the node from the main nodes map, so that when running reconciles complete they do not
+        //      re-insert references to this node into the ObservedState of shards
+        //    - drop the node from the scheduler
+        {
+            let mut locked = self.inner.write().unwrap();
+            let (nodes, tenants, scheduler) = locked.parts_mut();
+
+            {
+                let mut nodes_mut = (*nodes).deref().clone();
+                match nodes_mut.get_mut(&node_id) {
+                    Some(node) => {
+                        // We do not bother setting this in the database, because we're about to delete the row anyway, and
+                        // if we crash it would not be desirable to leave the node paused after a restart.
+                        node.set_scheduling(NodeSchedulingPolicy::Pause);
+                    }
+                    None => {
+                        tracing::info!(
+                            "Node not found: presuming this is a retry and returning success"
+                        );
+                        return Ok(());
+                    }
+                }
+
+                *nodes = Arc::new(nodes_mut);
+            }
+
+            for (tenant_shard_id, shard) in tenants {
+                if shard.deref_node(node_id) {
+                    // FIXME: we need to build a ScheduleContext that reflects this shard's peers, otherwise
+                    // it won't properly do anti-affinity.
+                    let mut schedule_context = ScheduleContext::default();
+
+                    if let Err(e) = shard.schedule(scheduler, &mut schedule_context) {
+                        // TODO: implement force flag to remove a node even if we can't reschedule
+                        // a tenant
+                        tracing::error!("Refusing to delete node, shard {tenant_shard_id} can't be rescheduled: {e}");
+                        return Err(e.into());
+                    } else {
+                        tracing::info!(
+                            "Rescheduled shard {tenant_shard_id} away from node during deletion"
+                        )
+                    }
+
+                    self.maybe_reconcile_shard(shard, nodes);
+                }
+
+                // Here we remove an existing observed location for the node we're removing, and it will
+                // not be re-added by a reconciler's completion because we filter out removed nodes in
+                // process_result.
+                //
+                // Note that we update the shard's observed state _after_ calling maybe_reconcile_shard: that
+                // means any reconciles we spawned will know about the node we're deleting, enabling them
+                // to do live migrations if it's still online.
+                shard.observed.locations.remove(&node_id);
+            }
+
+            scheduler.node_remove(node_id);
+
+            {
+                let mut nodes_mut = (**nodes).clone();
+                nodes_mut.remove(&node_id);
+                *nodes = Arc::new(nodes_mut);
+            }
+        }
+
+        // Note: some `generation_pageserver` columns on tenant shards in the database may still refer to
+        // the removed node, as this column means "The pageserver to which this generation was issued", and
+        // their generations won't get updated until the reconcilers moving them away from this node complete.
+        // That is safe because in Service::spawn we only use generation_pageserver if it refers to a node
+        // that exists.
+
+        // 2. Actually delete the node from the database and from in-memory state
+        tracing::info!("Deleting node from database");
+        self.persistence.delete_node(node_id).await?;
 
         Ok(())
     }
