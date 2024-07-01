@@ -115,6 +115,7 @@ enum TenantOperations {
     SecondaryDownload,
     TimelineCreate,
     TimelineDelete,
+    AttachHook,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -1240,7 +1241,7 @@ impl Service {
         let _tenant_lock = trace_exclusive_lock(
             &self.tenant_op_locks,
             attach_req.tenant_shard_id.tenant_id,
-            TenantOperations::ShardSplit,
+            TenantOperations::AttachHook,
         )
         .await;
 
