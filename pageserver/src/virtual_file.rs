@@ -671,17 +671,27 @@ impl VirtualFile {
     }
 
     /// Writes `buf.slice(0..buf.bytes_init())`.
-    /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
-    /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
-    /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
+    ///
+    /// The returned `Slice<Buf>` is equivalent to the input `slice`, i.e., it's the same view into the same buffer.
+    /// We also return the amount of written data in the `Ok()` variant (although we could also have encountered
+    /// before an `Err()`).
     pub async fn write_all<Buf: IoBuf + Send>(
         &mut self,
         buf: Slice<Buf>,
         ctx: &RequestContext,
     ) -> (Slice<Buf>, Result<usize, Error>) {
+        let begin_end = (buf.begin(), buf.end());
+
+        macro_rules! return_ {
+            ($buf:expr, $val:expr) => {{
+                let buf = $buf.into_inner();
+                return (buf.slice(begin_end.0..begin_end.1), $val);
+            }};
+        }
+
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
-            return (buf, Ok(0));
+            return_!(buf, Ok(0));
         }
         let mut buf = buf.slice(0..nbytes);
         while !buf.is_empty() {
@@ -689,22 +699,23 @@ impl VirtualFile {
             (buf, res) = self.write(buf, ctx).await;
             match res {
                 Ok(0) => {
-                    return (
+                    return_!(
                         buf,
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
-                        )),
+                        ))
                     );
                 }
                 Ok(n) => {
                     buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (buf, Err(e)),
+                Err(e) => return_!(buf, Err(e)),
             }
         }
-        (buf, Ok(nbytes))
+
+        return_!(buf, Ok(nbytes));
     }
 
     async fn write<B: IoBuf + Send>(
