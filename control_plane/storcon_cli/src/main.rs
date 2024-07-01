@@ -56,6 +56,10 @@ enum Command {
         #[arg(long)]
         scheduling: Option<NodeSchedulingPolicy>,
     },
+    NodeDelete {
+        #[arg(long)]
+        node_id: NodeId,
+    },
     /// Modify a tenant's policies in the storage controller
     TenantPolicy {
         #[arg(long)]
@@ -654,6 +658,11 @@ async fn main() -> anyhow::Result<()> {
             }
             storcon_client
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
+                .await?;
+        }
+        Command::NodeDelete { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(Method::DELETE, format!("control/v1/node/{node_id}"), None)
                 .await?;
         }
         Command::TenantSetTimeBasedEviction {
