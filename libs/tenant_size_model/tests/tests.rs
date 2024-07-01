@@ -93,14 +93,6 @@ impl ScenarioBuilder {
         let storage_model = StorageModel {
             segments: self.segments.clone(),
         };
-
-        let segs = storage_model
-            .segments
-            .iter()
-            .enumerate()
-            .collect::<Vec<_>>();
-        eprintln!("segs before: {:#?}", segs);
-
         let size_result = storage_model.calculate();
         (storage_model, size_result)
     }
