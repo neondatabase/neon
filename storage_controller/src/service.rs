@@ -1628,7 +1628,18 @@ impl Service {
                 let mut new_nodes = (**nodes).clone();
                 if let Some(node) = new_nodes.get_mut(&reattach_req.node_id) {
                     if !node.is_available() {
-                        node.set_availability(NodeAvailability::Unavailable);
+                        if response.tenants.len() <= 1 {
+                            // Mostly as a testing convenience, short-circuit the transition from
+                            // [`NodeAvailability::Unavailable`] to [`NodeAvailability::Active(_)`].
+                            // This allows tests to schedule tenants immediately after the
+                            // pageserver is registered, instead of waiting for one round of
+                            // heartbeats.
+                            node.set_availability(NodeAvailability::Active(
+                                UtilizationScore::worst(),
+                            ));
+                        } else {
+                            node.set_availability(NodeAvailability::Unavailable);
+                        }
                     }
 
                     if reset_scheduling {
