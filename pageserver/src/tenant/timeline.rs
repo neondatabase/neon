@@ -4711,6 +4711,41 @@ impl DurationRecorder {
     }
 }
 
+/// Descriptor for a delta layer used in testing infra. The start/end key/lsn range of the
+/// delta layer might be different from the min/max key/lsn in the delta layer. Therefore,
+/// the layer descriptor requires the user to provide the ranges, which should cover all
+/// keys specified in the `data` field.
+#[cfg(test)]
+pub(crate) struct DeltaLayerTestDesc {
+    pub lsn_range: Range<Lsn>,
+    pub key_range: Range<Key>,
+    pub data: Vec<(Key, Lsn, Value)>,
+}
+
+#[cfg(test)]
+impl DeltaLayerTestDesc {
+    pub fn new(lsn_range: Range<Lsn>, key_range: Range<Key>, data: Vec<(Key, Lsn, Value)>) -> Self {
+        Self {
+            lsn_range,
+            key_range,
+            data,
+        }
+    }
+
+    pub fn new_with_inferred_key_range(
+        lsn_range: Range<Lsn>,
+        data: Vec<(Key, Lsn, Value)>,
+    ) -> Self {
+        let key_min = data.iter().map(|(key, _, _)| key).min().unwrap();
+        let key_max = data.iter().map(|(key, _, _)| key).max().unwrap();
+        Self {
+            key_range: (*key_min)..(key_max.next()),
+            lsn_range,
+            data,
+        }
+    }
+}
+
 impl Timeline {
     async fn finish_compact_batch(
         self: &Arc<Self>,
@@ -5511,29 +5546,32 @@ impl Timeline {
     #[cfg(test)]
     pub(super) async fn force_create_delta_layer(
         self: &Arc<Timeline>,
-        deltas: (Lsn, Lsn, Vec<(Key, Lsn, Value)>),
+        mut deltas: DeltaLayerTestDesc,
         check_start_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let last_record_lsn = self.get_last_record_lsn();
-        let (min_lsn, end_lsn, mut deltas) = deltas;
-        deltas.sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
-        let min_key = *deltas.first().map(|(k, _, _)| k).unwrap();
-        let end_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
-        for (_, lsn, _) in &deltas {
-            assert!(min_lsn <= *lsn && *lsn < end_lsn);
+        deltas
+            .data
+            .sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
+        assert!(deltas.data.first().unwrap().0 >= deltas.key_range.start);
+        assert!(deltas.data.last().unwrap().0 < deltas.key_range.end);
+        for (_, lsn, _) in &deltas.data {
+            assert!(deltas.lsn_range.start <= *lsn && *lsn < deltas.lsn_range.end);
         }
         assert!(
-            end_lsn <= last_record_lsn,
-            "advance last record lsn before inserting a layer, end_lsn={end_lsn}, last_record_lsn={last_record_lsn}"
+            deltas.lsn_range.end <= last_record_lsn,
+            "advance last record lsn before inserting a layer, end_lsn={}, last_record_lsn={}",
+            deltas.lsn_range.end,
+            last_record_lsn
         );
         if let Some(check_start_lsn) = check_start_lsn {
-            assert!(min_lsn >= check_start_lsn);
+            assert!(deltas.lsn_range.start >= check_start_lsn);
         }
-        let lsn_range = min_lsn..end_lsn;
         // check if the delta layer does not violate the LSN invariant, the legacy compaction should always produce a batch of
         // layers of the same start/end LSN, and so should the force inserted layer
         {
+            /// Checks if a overlaps with b, assume a/b = [start, end).
             pub fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
                 !(a.end <= b.start || b.end <= a.start)
             }
@@ -5541,13 +5579,13 @@ impl Timeline {
             let guard = self.layers.read().await;
             for layer in guard.layer_map().iter_historic_layers() {
                 if layer.is_delta()
-                    && overlaps_with(&layer.lsn_range, &lsn_range)
-                    && layer.lsn_range != lsn_range
+                    && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
+                    && layer.lsn_range != deltas.lsn_range
                 {
                     // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
                     panic!(
                         "inserted layer violates delta layer LSN invariant: current_lsn_range={}..{}, conflict_lsn_range={}..{}",
-                        lsn_range.start, lsn_range.end, layer.lsn_range.start, layer.lsn_range.end
+                        deltas.lsn_range.start, deltas.lsn_range.end, layer.lsn_range.start, layer.lsn_range.end
                     );
                 }
             }
@@ -5556,15 +5594,17 @@ impl Timeline {
             self.conf,
             self.timeline_id,
             self.tenant_shard_id,
-            min_key,
-            lsn_range,
+            deltas.key_range.start,
+            deltas.lsn_range,
             ctx,
         )
         .await?;
-        for (key, lsn, val) in deltas {
+        for (key, lsn, val) in deltas.data {
             delta_layer_writer.put_value(key, lsn, val, ctx).await?;
         }
-        let delta_layer = delta_layer_writer.finish(end_key, self, ctx).await?;
+        let delta_layer = delta_layer_writer
+            .finish(deltas.key_range.end, self, ctx)
+            .await?;
 
         {
             let mut guard = self.layers.write().await;

@@ -1364,11 +1364,7 @@ impl Tenant {
         initdb_lsn: Lsn,
         pg_version: u32,
         ctx: &RequestContext,
-        #[allow(clippy::type_complexity)] delta_layer_desc: Vec<(
-            Lsn,
-            Lsn,
-            Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>,
-        )>,
+        delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -2931,11 +2927,7 @@ impl Tenant {
         dst_id: TimelineId,
         ancestor_lsn: Option<Lsn>,
         ctx: &RequestContext,
-        #[allow(clippy::type_complexity)] delta_layer_desc: Vec<(
-            Lsn,
-            Lsn,
-            Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>,
-        )>,
+        delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -3931,7 +3923,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
-    use timeline::GcInfo;
+    use timeline::{DeltaLayerTestDesc, GcInfo};
     use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
@@ -6377,19 +6369,16 @@ mod tests {
                 &ctx,
                 // delta layers
                 vec![
-                    (
-                        Lsn(0x10),
-                        Lsn(0x20),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x10)..Lsn(0x20),
                         vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
                     ),
-                    (
-                        Lsn(0x20),
-                        Lsn(0x30),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
                         vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
                     ),
-                    (
-                        Lsn(0x20),
-                        Lsn(0x30),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
                         vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
                     ),
                 ],
@@ -6457,24 +6446,20 @@ mod tests {
                 &ctx,
                 // delta layers
                 vec![
-                    (
-                        Lsn(0x10),
-                        Lsn(0x20),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x10)..Lsn(0x20),
                         vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
                     ),
-                    (
-                        Lsn(0x20),
-                        Lsn(0x30),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
                         vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
                     ),
-                    (
-                        Lsn(0x20),
-                        Lsn(0x30),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
                         vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
                     ),
-                    (
-                        Lsn(0x30),
-                        Lsn(0x40),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x30)..Lsn(0x40),
                         vec![
                             (key0, Lsn(0x30), Value::Image(test_img("metadata key 0"))),
                             (key3, Lsn(0x30), Value::Image(test_img("metadata key 3"))),
@@ -6532,19 +6517,16 @@ mod tests {
                 &ctx,
                 // delta layers
                 vec![
-                    (
-                        Lsn(0x10),
-                        Lsn(0x20),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x10)..Lsn(0x20),
                         vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
                     ),
-                    (
-                        Lsn(0x20),
-                        Lsn(0x30),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
                         vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
                     ),
-                    (
-                        Lsn(0x20),
-                        Lsn(0x30),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
                         vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
                     ),
                 ],
@@ -6596,13 +6578,15 @@ mod tests {
 
         // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
         //
-        //  | D1 |                       | D3 |
+        //                             | D3 |
+        //  | D1 |
         // -|    |-- gc horizon -----------------
         //  |    |                | D2 |
         // --------- img layer ------------------
         //
         // What we should expact from this compaction is:
-        //  | Part of D1 |               | D3 |
+        //                             | D3 |
+        //  | Part of D1 |
         // --------- img layer with D1+D2 at GC horizon------------------
 
         // img layer at 0x10
@@ -6659,9 +6643,9 @@ mod tests {
                 DEFAULT_PG_VERSION,
                 &ctx,
                 vec![
-                    (Lsn(0x20), Lsn(0x48), delta1),
-                    (Lsn(0x20), Lsn(0x48), delta2),
-                    (Lsn(0x48), Lsn(0x50), delta3),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta1),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta2),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
                 ], // delta layers
                 vec![(Lsn(0x10), img_layer)], // image layers
                 Lsn(0x50),
@@ -6772,7 +6756,7 @@ mod tests {
                     lsn_range: Lsn(0x30)..Lsn(0x41),
                     is_delta: true
                 },
-                // The delta layer we created and should not be picked for the compaction
+                // The delta3 layer that should not be picked for the compaction
                 PersistentLayerKey {
                     key_range: get_key(8)..get_key(10),
                     lsn_range: Lsn(0x48)..Lsn(0x50),
@@ -6839,8 +6823,11 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
-                vec![(Lsn(0x10), Lsn(0x40), delta1)], // delta layers
-                vec![(Lsn(0x10), image1)],            // image layers
+                vec![DeltaLayerTestDesc::new_with_inferred_key_range(
+                    Lsn(0x10)..Lsn(0x40),
+                    delta1,
+                )], // delta layers
+                vec![(Lsn(0x10), image1)], // image layers
                 Lsn(0x50),
             )
             .await?;
@@ -7038,9 +7025,9 @@ mod tests {
                 DEFAULT_PG_VERSION,
                 &ctx,
                 vec![
-                    (Lsn(0x10), Lsn(0x48), delta1),
-                    (Lsn(0x10), Lsn(0x48), delta2),
-                    (Lsn(0x48), Lsn(0x50), delta3),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta1),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta2),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
                 ], // delta layers
                 vec![(Lsn(0x10), img_layer)], // image layers
                 Lsn(0x50),
