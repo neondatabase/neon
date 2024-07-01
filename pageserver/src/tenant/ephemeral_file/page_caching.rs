@@ -91,7 +91,7 @@ impl RW {
         assert_eq!(vec.len() / PAGE_SZ, nwritten_blocks);
 
         // copy from in-memory buffer what we haven't flushed yet but would return when accessed via read_blk
-        let buffered = self.rw.inspect_served_from_zero_padded_mutable_tail();
+        let buffered = self.rw.get_tail_zero_padded();
         vec.extend_from_slice(buffered);
         assert_eq!(vec.len(), size);
         assert_eq!(vec.len() % PAGE_SZ, 0);

@@ -76,7 +76,7 @@ where
     }
 
     /// Get a slice of all blocks that [`Self::read_blk`] would return as [`ReadResult::ServedFromZeroPaddedMutableTail`].
-    pub fn inspect_served_from_zero_padded_mutable_tail(&self) -> &[u8] {
+    pub fn get_tail_zero_padded(&self) -> &[u8] {
         let buffer: &zero_padded::Buffer<TAIL_SZ> = self.buffered_writer.inspect_buffer();
         let buffer_written_up_to = buffer.pending();
         // pad to next page boundary
