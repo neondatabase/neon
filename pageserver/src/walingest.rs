@@ -343,7 +343,33 @@ impl WalIngest {
                         xlog_checkpoint.oldestActiveXid,
                         self.checkpoint.oldestActiveXid
                     );
-                    self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
+
+                    // A shutdown checkpoint has `oldestActiveXid == InvalidTransactionid`,
+                    // because at shutdown, all in-progress transactions will implicitly
+                    // end. Postgres startup code knows that, and allows hot standby to start
+                    // immediately from a shutdown checkpoint.
+                    //
+                    // In Neon, Postgres hot standby startup always behaves as if starting from
+                    // an online checkpoint. It needs a valid `oldestActiveXid` value, so
+                    // instead of overwriting self.checkpoint.oldestActiveXid with
+                    // InvalidTransactionid from the checkpoint WAL record, update it to a
+                    // proper value, knowing that there are no in-progress transactions at this
+                    // point, except for prepared transactions.
+                    //
+                    // See also the neon code changes in the InitWalRecovery() function.
+                    if xlog_checkpoint.oldestActiveXid == pg_constants::INVALID_TRANSACTION_ID
+                        && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
+                    {
+                        let mut oldest_active_xid = self.checkpoint.nextXid.value as u32;
+                        for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                            if (xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
+                                oldest_active_xid = xid;
+                            }
+                        }
+                        self.checkpoint.oldestActiveXid = oldest_active_xid;
+                    } else {
+                        self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
+                    }
 
                     // Write a new checkpoint key-value pair on every checkpoint record, even
                     // if nothing really changed. Not strictly required, but it seems nice to
@@ -375,6 +401,7 @@ impl WalIngest {
                 if info == pg_constants::XLOG_RUNNING_XACTS {
                     let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
                     self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
+                    self.checkpoint_modified = true;
                 }
             }
             pg_constants::RM_REPLORIGIN_ID => {
@@ -1277,13 +1304,10 @@ impl WalIngest {
             xlrec.pageno, xlrec.oldest_xid, xlrec.oldest_xid_db
         );
 
-        // Here we treat oldestXid and oldestXidDB
-        // differently from postgres redo routines.
-        // In postgres checkpoint.oldestXid lags behind xlrec.oldest_xid
-        // until checkpoint happens and updates the value.
-        // Here we can use the most recent value.
-        // It's just an optimization, though and can be deleted.
-        // TODO Figure out if there will be any issues with replica.
+        // In Postgres, oldestXid and oldestXidDB are updated in memory when the CLOG is
+        // truncated, but a checkpoint record with the updated values isn't written until
+        // later. In Neon, a server can start at any LSN, not just on a checkpoint record,
+        // so we keep the oldestXid and oldestXidDB up-to-date.
         self.checkpoint.oldestXid = xlrec.oldest_xid;
         self.checkpoint.oldestXidDB = xlrec.oldest_xid_db;
         self.checkpoint_modified = true;
