@@ -121,7 +121,7 @@ pub(super) async fn handle_walreceiver_connection(
 
     // prevent timeline shutdown from finishing until we have exited
     let _guard = timeline.gate.enter().map_err(|e| match e {
-        GateError::GateClosed => WalReceiverError::ClosedGate, // this one might be candidate
+        GateError::GateClosed => WalReceiverError::ClosedGate,
     })?;
     // This function spawns a side-car task (WalReceiverConnectionPoller).
     // Get its gate guard now as well.
