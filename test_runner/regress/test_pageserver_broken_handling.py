@@ -39,14 +39,12 @@ def test_pageserver_breaks_while_running(neon_simple_env):
                 """
             )
 
-    ps_http.tenant_detach(tid)
+        ps_http.tenant_detach(tid)
 
-    # create a new connection to PS, this will cause errors.
-    with closing(ep.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SET query_timeout = 1s;
+                SET statement_timeout = '1s';
                 """
             )
             with pytest.raises(QueryCanceled):
