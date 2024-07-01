@@ -306,13 +306,13 @@ mod tests {
             let file = VirtualFile::create(pathbuf.as_path(), &ctx).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
-                let (_, res) = wtr.write_blob(blob.clone(), &ctx).await;
+                let (_, res) = wtr.write_blob(blob.clone().slice_full(), &ctx).await;
                 let offs = res?;
                 offsets.push(offs);
             }
             // Write out one page worth of zeros so that we can
             // read again with read_blk
-            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ], &ctx).await;
+            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ].slice_full(), &ctx).await;
             let offs = res?;
             println!("Writing final blob at offs={offs}");
             wtr.flush_buffer(&ctx).await?;

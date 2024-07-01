@@ -1217,9 +1217,9 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all<Buf: IoBuf + Send>(
             &mut self,
-            buf: B,
+            buf: Slice<Buf>,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
             match self {
@@ -1345,7 +1345,9 @@ mod tests {
             &ctx,
         )
         .await?;
-        file_a.write_all(b"foobar".to_vec(), &ctx).await?;
+        file_a
+            .write_all(b"foobar".to_vec().slice_full(), &ctx)
+            .await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string(&ctx).await.unwrap_err();
@@ -1354,7 +1356,10 @@ mod tests {
         let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a.write_all(b"bar".to_vec(), &ctx).await.unwrap_err();
+        let _ = file_a
+            .write_all(b"bar".to_vec().slice_full(), &ctx)
+            .await
+            .unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string(&ctx).await?);
