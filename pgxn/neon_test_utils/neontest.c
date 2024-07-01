@@ -469,9 +469,9 @@ neon_xlogflush(PG_FUNCTION_ARGS)
 		 * The LSN returned by GetXLogInsertRecPtr() is the position where the
 		 * next inserted record would begin. If the last record ended just at
 		 * the page boundary, the next record will begin after the page header
-		 * on the next page, and that's what GetXLogInsertRecPtr().returns,
-		 * but the page header has not been written yet. If we tried to flush
-		 * it, XLogFlush() would throw an error:
+		 * on the next page, but the next page's page header has not been
+		 * written yet. If we tried to flush it, XLogFlush() would throw an
+		 * error:
 		 *
 		 * ERROR : xlog flush request %X/%X is not satisfied --- flushed only to %X/%X
 		 *
