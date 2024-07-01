@@ -4716,7 +4716,7 @@ impl DurationRecorder {
 /// the layer descriptor requires the user to provide the ranges, which should cover all
 /// keys specified in the `data` field.
 #[cfg(test)]
-pub(crate) struct DeltaLayerTestDesc {
+pub struct DeltaLayerTestDesc {
     pub lsn_range: Range<Lsn>,
     pub key_range: Range<Key>,
     pub data: Vec<(Key, Lsn, Value)>,
@@ -4724,6 +4724,7 @@ pub(crate) struct DeltaLayerTestDesc {
 
 #[cfg(test)]
 impl DeltaLayerTestDesc {
+    #[allow(dead_code)]
     pub fn new(lsn_range: Range<Lsn>, key_range: Range<Key>, data: Vec<(Key, Lsn, Value)>) -> Self {
         Self {
             lsn_range,
