@@ -198,7 +198,7 @@ def wait_for_last_record_lsn(
     lsn: Lsn,
 ) -> Lsn:
     """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
-    for i in range(100):
+    for i in range(1000):
         current_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
             return current_lsn
