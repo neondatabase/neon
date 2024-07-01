@@ -257,7 +257,9 @@ needs still?
 
 When the storage controller starts up reset the node scheduling policy
 of all nodes in states `Draining`, `Filling` or `PauseForRestart` to
-`Active`.
+`Active`. The rationale is that when the storage controller restarts,
+we have lost context of what the deployment orchestrator wants. It also
+has the benefit of making things easier to reason about.
 
 #### Pageserver Crash During Drain
 
