@@ -62,10 +62,7 @@ impl RW {
     ///
     /// This includes the blocks that aren't yet flushed to disk by the internal buffered writer.
     /// The last block is zero-padded to [`PAGE_SZ`], so, the returned buffer is always a multiple of [`PAGE_SZ`].
-    pub(super) async fn load_to_vec(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<Vec<u8>, io::Error> {
+    pub(super) async fn load_to_vec(&self, ctx: &RequestContext) -> Result<Vec<u8>, io::Error> {
         // round up to the next PAGE_SZ multiple, required by blob_io
         let size = {
             let s = usize::try_from(self.bytes_written()).unwrap();

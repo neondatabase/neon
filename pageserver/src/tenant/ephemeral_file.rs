@@ -68,10 +68,7 @@ impl EphemeralFile {
     }
 
     /// See [`self::page_caching::RW::load_to_vec`].
-    pub(crate) async fn load_to_vec(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<Vec<u8>, io::Error> {
+    pub(crate) async fn load_to_vec(&self, ctx: &RequestContext) -> Result<Vec<u8>, io::Error> {
         self.rw.load_to_vec(ctx).await
     }
 
