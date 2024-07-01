@@ -28,7 +28,8 @@ use utils::pid_file;
 use metrics::set_build_info_metric;
 use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR,
-    DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
+    DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
+    DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
 use safekeeper::http;
 use safekeeper::wal_service;
@@ -190,6 +191,9 @@ struct Args {
     /// Pending updates to control file will be automatically saved after this interval.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_CONTROL_FILE_SAVE_INTERVAL)]
     control_file_save_interval: Duration,
+    /// Number of allowed concurrent uploads of partial segments to remote storage.
+    #[arg(long, default_value = DEFAULT_PARTIAL_BACKUP_CONCURRENCY)]
+    partial_backup_concurrency: usize,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -343,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
         enable_offload: args.enable_offload,
         delete_offloaded_wal: args.delete_offloaded_wal,
         control_file_save_interval: args.control_file_save_interval,
+        partial_backup_concurrency: args.partial_backup_concurrency,
     };
 
     // initialize sentry if SENTRY_DSN is provided

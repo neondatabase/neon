@@ -3493,7 +3493,6 @@ class Endpoint(PgProtocol, LogUtils):
     ):
         super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
         self.env = env
-        self.running = False
         self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
