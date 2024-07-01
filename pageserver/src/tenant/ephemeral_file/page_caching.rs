@@ -8,6 +8,7 @@ use crate::virtual_file::VirtualFile;
 
 use once_cell::sync::Lazy;
 use std::io::{self, ErrorKind};
+use std::ops::{Deref, Range};
 use tokio_epoll_uring::BoundedBuf;
 use tracing::*;
 
@@ -72,20 +73,20 @@ impl RW {
                 s.checked_add(PAGE_SZ - (s % PAGE_SZ)).unwrap()
             }
         };
-        let buf = Vec::with_capacity(size);
+        let vec = Vec::with_capacity(size);
 
         // read from disk what we've already flushed
         let writer = self.rw.as_writer();
-        let nwritten_blocks = usize::try_from(writer.nwritten_blocks).unwrap();
-        let buf = writer
-            .load_flushed_blocks_into_contiguous_memory(
-                buf.slice(0..nwritten_blocks * PAGE_SZ),
+        let flushed_range = writer.written_range();
+        let mut vec = writer
+            .file
+            .read_exact_at(
+                vec.slice(0..(flushed_range.end - flushed_range.start)),
+                u64::try_from(flushed_range.start).unwrap(),
                 ctx,
             )
-            .await?;
-        let mut vec = buf.into_inner();
-        assert_eq!(vec.len() % PAGE_SZ, 0);
-        assert_eq!(vec.len() / PAGE_SZ, nwritten_blocks);
+            .await?
+            .into_inner();
 
         // copy from in-memory buffer what we haven't flushed yet but would return when accessed via read_blk
         let buffered = self.rw.get_tail_zero_padded();
@@ -182,21 +183,19 @@ impl PreWarmingWriter {
         }
     }
 
-    /// Load all the blocks that we already flushed to disk into `buf`.
-    async fn load_flushed_blocks_into_contiguous_memory<Buf>(
-        &self,
-        buf: tokio_epoll_uring::Slice<Buf>,
-        ctx: &RequestContext,
-    ) -> std::io::Result<tokio_epoll_uring::Slice<Buf>>
-    where
-        Buf: tokio_epoll_uring::IoBufMut + Send,
-    {
-        assert_eq!(buf.bytes_total() % PAGE_SZ, 0);
-        assert_eq!(
-            buf.bytes_total() / PAGE_SZ,
-            usize::try_from(self.nwritten_blocks).unwrap()
-        );
-        self.file.read_exact_at(buf, 0, ctx).await
+    /// Return the byte range within `file` that has been written though `write_all`.
+    ///
+    /// The returned range would be invalidated by another `write_all`. To prevent that, we capture `&_`.
+    fn written_range(&self) -> (impl Deref<Target = Range<usize>> + '_) {
+        let nwritten_blocks = usize::try_from(self.nwritten_blocks).unwrap();
+        struct Wrapper(Range<usize>);
+        impl Deref for Wrapper {
+            type Target = Range<usize>;
+            fn deref(&self) -> &Range<usize> {
+                &self.0
+            }
+        }
+        Wrapper(0..nwritten_blocks * PAGE_SZ)
     }
 }
 
