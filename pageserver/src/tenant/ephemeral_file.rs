@@ -29,7 +29,6 @@ impl EphemeralFile {
         conf: &PageServerConf,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-        prewarm_on_write: page_caching::PrewarmOnWrite,
         ctx: &RequestContext,
     ) -> Result<EphemeralFile, io::Error> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
@@ -55,7 +54,7 @@ impl EphemeralFile {
         Ok(EphemeralFile {
             _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
-            rw: page_caching::RW::new(file, prewarm_on_write),
+            rw: page_caching::RW::new(file, conf.l0_flush.prewarm_on_write()),
         })
     }
 
@@ -162,11 +161,7 @@ mod tests {
     async fn test_ephemeral_blobs() -> Result<(), io::Error> {
         let (conf, tenant_id, timeline_id, ctx) = harness("ephemeral_blobs")?;
 
-        let prewarm_on_write =
-            crate::l0_flush::L0FlushGlobalState::new(crate::l0_flush::L0FlushConfig::default())
-                .prewarm_on_write();
-        let mut file =
-            EphemeralFile::create(conf, tenant_id, timeline_id, prewarm_on_write, &ctx).await?;
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &ctx).await?;
 
         let pos_foo = file.write_blob(b"foo", &ctx).await?;
         assert_eq!(

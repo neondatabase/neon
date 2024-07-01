@@ -33,11 +33,14 @@ impl L0FlushGlobalState {
     pub(crate) fn inner(&self) -> &Arc<Inner> {
         &self.0
     }
+}
 
+impl L0FlushConfig {
     pub(crate) fn prewarm_on_write(&self) -> ephemeral_file::PrewarmPageCacheOnWrite {
-        match &*self.0 {
-            Inner::PageCached => ephemeral_file::PrewarmPageCacheOnWrite::Yes,
-            Inner::Direct { .. } => ephemeral_file::PrewarmPageCacheOnWrite::No,
+        use L0FlushConfig::*;
+        match self {
+            PageCached => ephemeral_file::PrewarmPageCacheOnWrite::Yes,
+            Direct { .. } => ephemeral_file::PrewarmPageCacheOnWrite::No,
         }
     }
 }

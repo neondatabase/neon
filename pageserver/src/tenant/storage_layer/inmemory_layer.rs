@@ -9,7 +9,7 @@ use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
 use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
-use crate::tenant::ephemeral_file::{self, EphemeralFile};
+use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::ValueReconstructResult;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{PageReconstructError, Timeline};
@@ -475,13 +475,11 @@ impl InMemoryLayer {
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
-        prewarm_on_write: ephemeral_file::PrewarmPageCacheOnWrite,
         ctx: &RequestContext,
     ) -> Result<InMemoryLayer> {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
-        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, prewarm_on_write, ctx)
-            .await?;
+        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, ctx).await?;
         let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {
