@@ -4652,8 +4652,10 @@ impl Timeline {
     /// Switch aux file policy and schedule upload to the index part.
     pub(crate) fn do_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
         self.last_aux_file_policy.store(Some(policy));
-        self.remote_client
-            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
+        if self.get_disk_consistent_lsn().is_valid() {
+            self.remote_client
+                .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
+        }
         Ok(())
     }
 }
