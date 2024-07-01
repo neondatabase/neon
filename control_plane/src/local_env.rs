@@ -325,11 +325,16 @@ impl LocalEnv {
         }
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
+    pub fn pg_dir(&self, pg_version: u32, dir_name: &str) -> anyhow::Result<PathBuf> {
+        Ok(self.pg_distrib_dir(pg_version)?.join(dir_name))
     }
+
+    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+        self.pg_dir(pg_version, "bin")
+    }
+
     pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
+        self.pg_dir(pg_version, "lib")
     }
 
     pub fn pageserver_bin(&self) -> PathBuf {

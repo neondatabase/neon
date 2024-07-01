@@ -23,7 +23,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::*;
 use utils::crashsafe::durable_rename;
 
-use crate::metrics::{time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS};
+use crate::metrics::{
+    time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS,
+};
 use crate::state::TimelinePersistentState;
 use crate::wal_backup::{read_object, remote_timeline_path};
 use crate::SafeKeeperConf;
@@ -331,6 +333,10 @@ impl Storage for PhysicalStorage {
     }
 
     async fn initialize_first_segment(&mut self, init_lsn: Lsn) -> Result<()> {
+        let _timer = WAL_STORAGE_OPERATION_SECONDS
+            .with_label_values(&["initialize_first_segment"])
+            .start_timer();
+
         let segno = init_lsn.segment_number(self.wal_seg_size);
         let (mut file, _) = self.open_or_create(segno).await?;
         let major_pg_version = self.pg_version / 10000;
@@ -422,6 +428,10 @@ impl Storage for PhysicalStorage {
     /// Truncate written WAL by removing all WAL segments after the given LSN.
     /// end_pos must point to the end of the WAL record.
     async fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
+        let _timer = WAL_STORAGE_OPERATION_SECONDS
+            .with_label_values(&["truncate_wal"])
+            .start_timer();
+
         // Streaming must not create a hole, so truncate cannot be called on non-written lsn
         if self.write_lsn != Lsn(0) && end_pos > self.write_lsn {
             bail!(
@@ -497,6 +507,10 @@ async fn remove_segments_from_disk(
     wal_seg_size: usize,
     remove_predicate: impl Fn(XLogSegNo) -> bool,
 ) -> Result<()> {
+    let _timer = WAL_STORAGE_OPERATION_SECONDS
+        .with_label_values(&["remove_segments_from_disk"])
+        .start_timer();
+
     let mut n_removed = 0;
     let mut min_removed = u64::MAX;
     let mut max_removed = u64::MIN;

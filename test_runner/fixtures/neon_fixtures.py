@@ -1954,6 +1954,7 @@ class NeonCli(AbstractNeonCli):
         endpoint_id: str,
         tenant_id: Optional[TenantId] = None,
         pageserver_id: Optional[int] = None,
+        safekeepers: Optional[List[int]] = None,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
         args = ["endpoint", "reconfigure", endpoint_id]
@@ -1961,6 +1962,8 @@ class NeonCli(AbstractNeonCli):
             args.extend(["--tenant-id", str(tenant_id)])
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
+        if safekeepers is not None:
+            args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
         return self.raw_cli(args, check_return_code=check_return_code)
 
     def endpoint_stop(
@@ -2759,7 +2762,19 @@ class NeonPageserver(PgProtocol, LogUtils):
         if generation is None:
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         client = self.http_client(auth_token=auth_token)
-        return client.tenant_create(tenant_id, conf, generation=generation)
+
+        conf = conf or {}
+
+        client.tenant_location_conf(
+            tenant_id,
+            {
+                "mode": "AttachedSingle",
+                "generation": generation,
+                "tenant_conf": conf,
+                "secondary_conf": None,
+            },
+        )
+        return tenant_id
 
     def list_layers(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
@@ -3528,7 +3543,6 @@ class Endpoint(PgProtocol, LogUtils):
     ):
         super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
         self.env = env
-        self.running = False
         self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
@@ -3536,6 +3550,7 @@ class Endpoint(PgProtocol, LogUtils):
         self.pg_port = pg_port
         self.http_port = http_port
         self.check_stop_result = check_stop_result
+        # passed to endpoint create and endpoint reconfigure
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
@@ -3604,6 +3619,7 @@ class Endpoint(PgProtocol, LogUtils):
         self,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
+        safekeepers: Optional[List[int]] = None,
         allow_multiple: bool = False,
     ) -> "Endpoint":
         """
@@ -3612,6 +3628,11 @@ class Endpoint(PgProtocol, LogUtils):
         """
 
         assert self.endpoint_id is not None
+
+        # If `safekeepers` is not None, they are remember them as active and use
+        # in the following commands.
+        if safekeepers is not None:
+            self.active_safekeepers = safekeepers
 
         log.info(f"Starting postgres endpoint {self.endpoint_id}")
 
@@ -3676,9 +3697,17 @@ class Endpoint(PgProtocol, LogUtils):
     def is_running(self):
         return self._running._value > 0
 
-    def reconfigure(self, pageserver_id: Optional[int] = None):
+    def reconfigure(
+        self, pageserver_id: Optional[int] = None, safekeepers: Optional[List[int]] = None
+    ):
         assert self.endpoint_id is not None
-        self.env.neon_cli.endpoint_reconfigure(self.endpoint_id, self.tenant_id, pageserver_id)
+        # If `safekeepers` is not None, they are remember them as active and use
+        # in the following commands.
+        if safekeepers is not None:
+            self.active_safekeepers = safekeepers
+        self.env.neon_cli.endpoint_reconfigure(
+            self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
+        )
 
     def respec(self, **kwargs):
         """Update the endpoint.json file used by control_plane."""
@@ -3879,7 +3908,9 @@ class EndpointFactory:
 
         return self
 
-    def new_replica(self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]]):
+    def new_replica(
+        self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]] = None
+    ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
         assert branch_name is not None

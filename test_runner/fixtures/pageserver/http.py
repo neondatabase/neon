@@ -220,34 +220,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(
-        self,
-        new_tenant_id: Union[TenantId, TenantShardId],
-        conf: Optional[Dict[str, Any]] = None,
-        generation: Optional[int] = None,
-    ) -> TenantId:
-        if conf is not None:
-            assert "new_tenant_id" not in conf.keys()
-
-        body: Dict[str, Any] = {
-            "new_tenant_id": str(new_tenant_id),
-            **(conf or {}),
-        }
-
-        if generation is not None:
-            body.update({"generation": generation})
-
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant",
-            json=body,
-        )
-        self.verbose_error(res)
-        if res.status_code == 409:
-            raise Exception(f"could not create tenant: already exists for id {new_tenant_id}")
-        new_tenant_id = res.json()
-        assert isinstance(new_tenant_id, str)
-        return TenantId(new_tenant_id)
-
     def tenant_attach(
         self,
         tenant_id: Union[TenantId, TenantShardId],

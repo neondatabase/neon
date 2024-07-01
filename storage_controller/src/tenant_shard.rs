@@ -908,12 +908,8 @@ impl TenantShard {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf = attached_location_conf(
-                generation,
-                &self.shard,
-                &self.config,
-                !self.intent.secondary.is_empty(),
-            );
+            let wanted_conf =
+                attached_location_conf(generation, &self.shard, &self.config, &self.policy);
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -1099,6 +1095,7 @@ impl TenantShard {
         let mut reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
+            placement_policy: self.policy.clone(),
             generation: self.generation,
             intent: reconciler_intent,
             detach,

@@ -18,6 +18,8 @@
 //! This way control file stores information about all potentially existing
 //! remote partial segments and can clean them up after uploading a newer version.
 
+use std::sync::Arc;
+
 use camino::Utf8PathBuf;
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
@@ -27,13 +29,37 @@ use tracing::{debug, error, info, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
-    metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
+    metrics::{MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
     safekeeper::Term,
     timeline::WalResidentTimeline,
     timeline_manager::StateSnapshot,
     wal_backup::{self, remote_timeline_path},
     SafeKeeperConf,
 };
+
+#[derive(Clone)]
+pub struct RateLimiter {
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl RateLimiter {
+    pub fn new(permits: usize) -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
+        }
+    }
+
+    async fn acquire_owned(&self) -> tokio::sync::OwnedSemaphorePermit {
+        let _timer = MISC_OPERATION_SECONDS
+            .with_label_values(&["partial_permit_acquire"])
+            .start_timer();
+        self.semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore is closed")
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UploadStatus {
@@ -208,6 +234,9 @@ impl PartialBackup {
     /// Upload the latest version of the partial segment and garbage collect older versions.
     #[instrument(name = "upload", skip_all, fields(name = %prepared.name))]
     async fn do_upload(&mut self, prepared: &PartialRemoteSegment) -> anyhow::Result<()> {
+        let _timer = MISC_OPERATION_SECONDS
+            .with_label_values(&["partial_do_upload"])
+            .start_timer();
         info!("starting upload {:?}", prepared);
 
         let state_0 = self.state.clone();
@@ -307,6 +336,7 @@ pub(crate) fn needs_uploading(
 pub async fn main_task(
     tli: WalResidentTimeline,
     conf: SafeKeeperConf,
+    limiter: RateLimiter,
 ) -> Option<PartialRemoteSegment> {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
@@ -410,6 +440,9 @@ pub async fn main_task(
             // likely segno has changed, let's try again in the next iteration
             continue 'outer;
         }
+
+        // limit concurrent uploads
+        let _upload_permit = limiter.acquire_owned().await;
 
         let prepared = backup.prepare_upload().await;
         if let Some(seg) = &uploaded_segment {
